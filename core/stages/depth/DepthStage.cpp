@@ -3,6 +3,8 @@
 #include <algorithm>
 
 #include "convert/DepthConvert.h"
+#include "convert/MvConvert.h"
+#include "convert/Warp.h"
 #include "gpu/D3D12Device.h"
 #include "gpu/GpuFrameCache.h"
 #include "io/VideoDecoder.h"
@@ -53,6 +55,10 @@ void DepthStage::Init(const StageConfig& config, D3D12Device&) {
         stabilizer_ = TemporalStabilizer(options_.stabilizeMetric ? TemporalStabilizer::Mode::ScaleOnly : TemporalStabilizer::Mode::None, options_.stabilizeWindow);
     } else {
         stabilizer_ = TemporalStabilizer(options_.stabilize, options_.stabilizeWindow);
+    }
+    if (!options_.mvDir.empty()) {
+        mvReader_.emplace(PassReader::Open(options_.mvDir));
+        mvReader_->Validate({0, 0, -1, PassKind::MvDlss});
     }
     initialized_ = true;
     stats_ = {};
@@ -112,7 +118,14 @@ void DepthStage::Emit(int64_t index, PassImage depth, Pending& p) {
     if (options_.fillHoles) stats_.holesFilled += static_cast<int64_t>(FillInvalidDepth(depth));
     stabilizer_.Stabilize(depth);
     if (prevDepth_) {
-        const double tae = TemporalAlignmentError(*prevDepth_, depth);
+        double tae = 0.0;
+        if (mvReader_ && mvReader_->HasFrame(index)) {
+            PassImage mv = mvReader_->ReadFrame(index);
+            if (mv.width != depth.width || mv.height != depth.height) mv = ScaleMv(mv, depth.width, depth.height);
+            tae = TemporalAlignmentErrorWarped(*prevDepth_, depth, mv);
+        } else {
+            tae = TemporalAlignmentError(*prevDepth_, depth);
+        }
         stats_.taeSum += tae;
         ++stats_.taeCount;
         Log()->debug("depth frame {}: TAE {:.4f}", index, tae);
@@ -135,6 +148,7 @@ void DepthStage::Emit(int64_t index, PassImage depth, Pending& p) {
             m.depth.zFar = options_.dlss.zFar;
             m.stageParams = estimator_->Describe();
             m.stageParams["stabilize"] = stabilizer_.GetMode() == TemporalStabilizer::Mode::None ? "none" : stabilizer_.GetMode() == TemporalStabilizer::Mode::ScaleOnly ? "scale" : "scale_shift";
+            m.stageParams["tae_mode"] = mvReader_ ? "warped" : "static";
             rawWriter_ = std::make_unique<PassWriter>(RawDir(), m);
             if (options_.writeDlss) {
                 Manifest d = Manifest::ForPass(PassKind::DepthDlss, depth.width, depth.height, options_.format);

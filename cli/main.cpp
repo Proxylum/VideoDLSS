@@ -18,6 +18,7 @@
 #include "stages/passthrough/PassthroughStage.h"
 #include "ml/ModelRegistry.h"
 #include "stages/depth/DepthStage.h"
+#include "stages/flow/FlowStage.h"
 #include "util/Error.h"
 #include "util/Log.h"
 #include "util/Sha256.h"
@@ -159,6 +160,7 @@ struct DepthArgs {
     bool warp = false;
     std::string modelsDir;
     std::string python;
+    std::string mvDir;
 };
 
 int CmdDepth(const DepthArgs& a) {
@@ -188,6 +190,7 @@ int CmdDepth(const DepthArgs& a) {
     o.format = *fmt;
     o.sourceFile = std::filesystem::path(a.input).filename().string();
     o.sourceHash = "sha256:" + Sha256File(a.input);
+    o.mvDir = a.mvDir;
     const int64_t total = a.frames > 0 ? a.frames : info.frameCount;
     o.onFrame = [](int64_t frame, double tae) {
         if (frame % 10 == 0) std::fprintf(stderr, "  frame %lld TAE %.4f\n", static_cast<long long>(frame), tae);
@@ -203,6 +206,70 @@ int CmdDepth(const DepthArgs& a) {
     std::printf("depth_raw:   %s\n", r.rawDir.string().c_str());
     if (!a.noDlss) std::printf("depth_dlss:  %s\n", r.dlssDir.string().c_str());
     std::printf("frames:      %lld\nmean TAE:    %.4f\nms/frame:    %.1f\n", static_cast<long long>(r.stats.frames), r.stats.MeanTae(),
+                r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0);
+    return 0;
+}
+
+// ---- flow -----------------------------------------------------------------------------------
+
+struct FlowArgs {
+    std::string input, output;
+    std::string backend = "ofa";
+    std::string model;
+    std::string hwaccel = "cuda";
+    int maxRes = 720;
+    bool fp32 = false;
+    int64_t frames = -1;
+    bool noDlss = false;
+    std::string target;
+    int dilate = 1;
+    std::string depthDir;
+    std::string perf = "slow";
+    int grid = 1;
+    std::string format = "exr";
+    bool warp = false;
+    std::string modelsDir;
+};
+
+int CmdFlow(const FlowArgs& a) {
+    VideoDecoder::Options dopt;
+    if (a.hwaccel == "cuda") dopt.hwaccel = HwAccel::Cuda;
+    else if (a.hwaccel != "none") Throw("--hwaccel must be none|cuda");
+    VideoDecoder decoder(a.input, dopt);
+    const auto& info = decoder.Info();
+    FlowStageOptions o;
+    o.backend = a.backend;
+    o.estimator.modelId = a.model;
+    o.estimator.maxRes = a.maxRes;
+    o.estimator.fp16 = !a.fp32;
+    o.estimator.modelsDir = a.modelsDir;
+    o.estimator.extra["perf_level"] = a.perf;
+    o.estimator.extra["grid"] = a.grid;
+    o.outputDir = a.output;
+    o.writeDlss = !a.noDlss;
+    ParseSize(a.target, o.targetWidth, o.targetHeight);
+    o.convert.dilateRadius = a.dilate;
+    o.depthDir = a.depthDir;
+    const auto fmt = ParseFileFormat(a.format);
+    if (!fmt || *fmt == FileFormat::Png) Throw("--format must be exr|tiff|npz|raw");
+    o.format = *fmt;
+    o.sourceFile = std::filesystem::path(a.input).filename().string();
+    o.sourceHash = "sha256:" + Sha256File(a.input);
+    const int64_t total = a.frames > 0 ? a.frames : info.frameCount;
+    o.onFrame = [](int64_t frame, double psnr) {
+        if (frame % 10 == 0) std::fprintf(stderr, "  frame %lld warp PSNR %.2f dB\n", static_cast<long long>(frame), psnr);
+    };
+    D3D12Device device({a.warp, false});
+    const auto t0 = std::chrono::steady_clock::now();
+    const FlowRunResult r = RunFlow(decoder, device, o, a.frames, [total](int64_t n) { PrintProgress(n, total); });
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::fprintf(stderr, "\n");
+    Log()->info("flow done: {} frames in {:.1f} s ({:.1f} ms/frame), warp PSNR mean {:.2f} dB, backend {}", r.stats.frames, sec,
+                r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0, r.stats.MeanWarpPsnr(), r.estimator.dump());
+    std::printf("mv_raw:      %s\n", r.rawDir.string().c_str());
+    if (!a.noDlss) std::printf("mv_dlss:     %s\n", r.dlssDir.string().c_str());
+    std::printf("frames:      %lld\npairs:       %lld\nmean |v|:    %.2f px\nwarp PSNR:   %.2f dB (min %.2f)\nms/frame:    %.1f\n", static_cast<long long>(r.stats.frames),
+                static_cast<long long>(r.stats.pairs), r.stats.meanMagnitude, r.stats.MeanWarpPsnr(), r.stats.psnrCount ? r.stats.minWarpPsnr : 0.0,
                 r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0);
     return 0;
 }
@@ -678,6 +745,27 @@ int main(int argc, char** argv) {
     depth->add_flag("--warp", da.warp, "use the WARP software adapter");
     depth->add_option("--models-dir", da.modelsDir, "folder with registry.json (default: auto)");
     depth->add_option("--python", da.python, "python interpreter for the worker backends");
+    depth->add_option("--mv-dir", da.mvDir, "mv_dlss pass folder: TAE with motion compensation");
+
+    FlowArgs fa;
+    auto* flow = app.add_subcommand("flow", "estimate motion vectors (mv_raw forward flow, mv_dlss backward) for a video");
+    flow->add_option("-i,--input", fa.input, "input video file")->required()->check(CLI::ExistingFile);
+    flow->add_option("-o,--output", fa.output, "pass root folder (writes mv_raw/ and mv_dlss/)")->required();
+    flow->add_option("--backend", fa.backend, "ofa | searaft | stub")->default_val("ofa");
+    flow->add_option("--model", fa.model, "registry model id (searaft)");
+    flow->add_option("--hwaccel", fa.hwaccel, "decoder: cuda (NVDEC frames feed OFA directly) | none")->default_val("cuda");
+    flow->add_option("--max-res", fa.maxRes, "searaft: model input cap on the shorter side")->default_val(720);
+    flow->add_flag("--fp32", fa.fp32, "searaft: fp32 engine");
+    flow->add_option("--frames", fa.frames, "process at most N frames")->default_val(-1);
+    flow->add_flag("--no-dlss", fa.noDlss, "do not write mv_dlss");
+    flow->add_option("--target", fa.target, "mv_dlss resolution WxH (default: source)");
+    flow->add_option("--dilate", fa.dilate, "mv_dlss dilation radius at depth edges")->default_val(1);
+    flow->add_option("--depth-dir", fa.depthDir, "depth_raw folder for occlusion handling in mv_dlss");
+    flow->add_option("--perf", fa.perf, "ofa: slow | medium | fast")->default_val("slow");
+    flow->add_option("--grid", fa.grid, "ofa: requested output grid (1, 2, 4)")->default_val(1);
+    flow->add_option("--format", fa.format, "exr | tiff | npz | raw")->default_val("exr");
+    flow->add_flag("--warp", fa.warp, "use the WARP software adapter");
+    flow->add_option("--models-dir", fa.modelsDir, "folder with registry.json (default: auto)");
 
     std::string modelsAction = "list", modelsId, modelsDir;
     auto* models = app.add_subcommand("models", "list or fetch models from models/registry.json");
@@ -699,6 +787,7 @@ int main(int argc, char** argv) {
         if (imp->parsed()) return CmdImport(ia);
         if (conv->parsed()) return CmdConvert(ca);
         if (depth->parsed()) return CmdDepth(da);
+        if (flow->parsed()) return CmdFlow(fa);
         if (models->parsed()) return CmdModels(modelsAction, modelsId, modelsDir);
     } catch (const std::exception& e) {
         Log()->error("{}", e.what());

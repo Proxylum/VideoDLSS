@@ -20,6 +20,8 @@ add_executable(dlssvid_unit_tests
   unit/test_worker.cpp
   unit/test_trt_engine.cpp
   unit/test_model_registry.cpp
+  unit/test_warp.cpp
+  unit/test_ofa.cpp
 )
 target_link_libraries(dlssvid_unit_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 target_compile_definitions(dlssvid_unit_tests PRIVATE
@@ -37,6 +39,9 @@ add_executable(dlssvid_integration_tests
   integration/test_cli_passes.cpp
   integration/test_depth_stage.cpp
   integration/test_cli_depth.cpp
+  integration/test_flow_stage.cpp
+  integration/test_gpu_decode.cpp
+  integration/test_cli_flow.cpp
 )
 target_link_libraries(dlssvid_integration_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 target_compile_definitions(dlssvid_integration_tests PRIVATE

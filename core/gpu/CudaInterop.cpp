@@ -89,6 +89,20 @@ void CudaInterop::Release(ImportedBuffer& buffer) {
     buffer = ImportedBuffer{};
 }
 
+void CudaInterop::CopyNv12(void* devicePtr, size_t capacity, const GpuFrame& frame) {
+    if (!frame.Valid()) Throw("CudaInterop::CopyNv12: invalid GPU frame");
+    const size_t yBytes = static_cast<size_t>(frame.width) * frame.height;
+    const size_t uvBytes = static_cast<size_t>(frame.width) * ((frame.height + 1) / 2);
+    if (capacity < yBytes + uvBytes) Throw("CudaInterop::CopyNv12: destination too small");
+    auto* dst = static_cast<uint8_t*>(devicePtr);
+    CheckCuda(cudaMemcpy2D(dst, frame.width, reinterpret_cast<const void*>(frame.y), frame.pitch, frame.width, frame.height, cudaMemcpyDeviceToDevice),
+              "cudaMemcpy2D(Y)");
+    CheckCuda(cudaMemcpy2D(dst + yBytes, frame.width, reinterpret_cast<const void*>(frame.uv), frame.pitch, frame.width, (frame.height + 1) / 2,
+                           cudaMemcpyDeviceToDevice),
+              "cudaMemcpy2D(UV)");
+    CheckCuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+}
+
 void CudaInterop::CopyToDevice(void* devicePtr, const void* host, size_t size) {
     CheckCuda(cudaMemcpy(devicePtr, host, size, cudaMemcpyHostToDevice), "cudaMemcpy(H2D)");
 }

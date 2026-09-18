@@ -7,6 +7,7 @@
 #include <string>
 
 #include "gpu/D3D12Device.h"
+#include "gpu/GpuFrame.h"
 
 namespace dlssvid {
 
@@ -36,6 +37,10 @@ public:
 
     ImportedBuffer ImportBuffer(ID3D12Resource* sharedBuffer, size_t size);
     void Release(ImportedBuffer& buffer);
+
+    // NVDEC NV12 frame (pitched device memory) -> tightly packed NV12 bytes at `devicePtr`
+    // (Y plane then interleaved UV), device-to-device, no CPU involved.
+    void CopyNv12(void* devicePtr, size_t capacity, const GpuFrame& frame);
 
     // Blocking copies used by stage-0 tests.
     void CopyToDevice(void* devicePtr, const void* host, size_t size);

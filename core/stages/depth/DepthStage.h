@@ -33,6 +33,7 @@ struct DepthStageOptions {
     Rational fps;
     std::string sourceFile, sourceHash;
     bool uploadToGpu = true;
+    std::filesystem::path mvDir;      // mv_dlss pass folder: TAE with motion compensation (stage 3)
     std::function<void(int64_t frame, double tae)> onFrame;
 };
 
@@ -77,6 +78,7 @@ private:
     std::unique_ptr<PassWriter> rawWriter_, dlssWriter_;
     TemporalStabilizer stabilizer_;
     std::optional<PassImage> prevDepth_;
+    std::optional<PassReader> mvReader_;
     Stats stats_;
     bool initialized_ = false;
 };

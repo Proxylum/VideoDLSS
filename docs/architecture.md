@@ -3,7 +3,7 @@
 Полная целевая архитектура — ТЗ §4 (граф стадий, кэш кадров, контракты). Здесь — то, что
 реализовано, и хаки, которые нужно помнить.
 
-## Состояние после этапов 0–2
+## Состояние после этапов 0–3
 
 ```
 VideoDecoder ──CpuFrame(YUV420P)──▶ Pipeline ──▶ VideoEncoder
@@ -67,6 +67,24 @@ CpuFrame(YUV) ─ColorConvert─▶ RGB F32 ─▶ DepthStage (окно N кад
 - `IStage::Finish()` добавлен для оконных стадий (сброс хвоста окна после последнего кадра).
 - Метрика TAE без MV — прокси (|d_t − d_{t−1}| / mean d); warp-версия — этап 3.
 
+### Стадия Motion vectors (этап 3)
+
+```
+NVDEC (CUDA NV12, primary context) ──GpuFrame──▶ FlowStage ──▶ IFlowEstimator
+   │ (CPU-копия только по запросу)                 │  задержка в 1 кадр    ├─ OfaFlowEstimator: cudaMemcpy2D NV12 → буферы nvofapi → S10.5 → float
+   └──CudaInterop::CopyNv12──▶ GpuFrameCache slot  │                      ├─ TrtFlowEstimator (searaft): resize → 2×NCHW → TensorRT → ScaleMv
+      (shared heap, NV12 layout, без CPU)          ▼                      └─ StubFlowEstimator
+                                     mv_raw[t] (forward) ─ForwardFlowToBackwardMv(+depth)─▶ mv_dlss[t+1] ─▶ PassWriter + GpuFrameCache textures
+                                                                            └─ WarpPsnr(prev, cur, mv_dlss) → статистика/манифест
+```
+
+- `FrameContext.gpu` — NVDEC-кадр на устройстве; `Pipeline::ProcessFrame(frame, gpu)`; `RunPipeline`/`RunFlow`
+  передают его при `--hwaccel cuda`. `GpuFrameCache::AttachCuda` создаёт слоты на shared-heap и импортирует их в
+  CUDA, `UploadFromGpuFrame` копирует NV12 device-to-device (readback распаковывает в YUV420P).
+- OFA держит копию предыдущего NV12-кадра в собственной device-памяти (декодер переиспользует свой буфер).
+- Глубина для окклюзий в `mv_dlss` берётся из папки `depth_raw` (`--depth-dir`) или из слота кэша, если DepthStage
+  отработала в том же пайплайне.
+
 ## Хаки и временные решения
 
 | Где | Что | Почему | Когда убираем |
@@ -76,8 +94,9 @@ CpuFrame(YUV) ─ColorConvert─▶ RGB F32 ─▶ DepthStage (окно N кад
 | `PassthroughStage` | round-trip upload → readback каждого кадра | доказательство корректности пути GPU | остаётся как диагностический режим |
 | `MvConvert::InvertFlow` | инверсия flow сплэттингом с округлением до пикселя, дыры — BFS-заполнением | простая детерминированная инверсия без субпиксельного ресемплинга | этап 3: сравнить с backward-warp SEA-RAFT/OFA, при необходимости заменить |
 | `ColorConvert` | хрома 4:2:0 реплицируется (nearest), без интерполяции | детерминизм и обратимость поблочно | этап 3+: конверсия YUV → RGB на GPU с настраиваемым фильтром |
-| `DepthStage` | препроцессинг/апсемпл/guided filter на CPU; кадры для TensorRT копируются host→device | этап 2 проверяет модели и контракты; GPU-путь придёт с CUDA-кадрами | этап 3: NVDEC → CUDA → TensorRT без CPU, апсемпл шейдером |
-| `TemporalAlignmentError` | без warp по MV (статичный прокси) | MV нет до этапа 3 | этап 3 |
+| `DepthStage`, `TrtFlowEstimator` | препроцессинг/апсемпл/guided filter на CPU; входы TensorRT копируются host→device | модели и контракты проверяются на CPU-пути; шейдерной инфраструктуры ещё нет | этап 4–5: препроцессинг compute-шейдером на общем D3D12-девайсе, вход TensorRT из CUDA-буфера |
+| `FlowStage::Process` | NV12-кадр копируется в собственный device-буфер стадии | декодер отдаёт один и тот же буфер на следующем кадре | этап 4+: кольцо NVDEC-кадров в `GpuFrameCache` |
+| `TemporalAlignmentError` | статичный прокси, если `--mv-dir` не задан | обратная совместимость | — (warp-версия есть) |
 
 Хаки в коде помечаются `// HACK:` (ТЗ §8); эмуляция джиттера для DLSS SR и скрытый swapchain FG
 появятся в этапах 5 и 7 и будут описаны здесь.

@@ -59,6 +59,23 @@ if(DLSSVID_WITH_CUDA)
   target_compile_definitions(dlssvid_settings INTERFACE DLSSVID_WITH_CUDA=1)
 endif()
 
+# ---- NVIDIA Optical Flow SDK headers (nvofapi64.dll comes with the driver) ----
+if(DLSSVID_WITH_CUDA)
+  set(NV_OPTICAL_FLOW_SDK_INCLUDE_DIR "" CACHE PATH "Directory with nvOpticalFlowCuda.h (NVIDIA/NVIDIAOpticalFlowSDK checkout)")
+  if(NOT NV_OPTICAL_FLOW_SDK_INCLUDE_DIR)
+    foreach(cand "$ENV{NV_OPTICAL_FLOW_SDK_ROOT}" "$ENV{NV_OPTICAL_FLOW_SDK_ROOT}/include" "${CMAKE_SOURCE_DIR}/third_party/OpticalFlowSDK")
+      if(cand AND EXISTS "${cand}/nvOpticalFlowCuda.h")
+        set(NV_OPTICAL_FLOW_SDK_INCLUDE_DIR "${cand}" CACHE PATH "" FORCE)
+        break()
+      endif()
+    endforeach()
+  endif()
+  if(NOT NV_OPTICAL_FLOW_SDK_INCLUDE_DIR OR NOT EXISTS "${NV_OPTICAL_FLOW_SDK_INCLUDE_DIR}/nvOpticalFlowCuda.h")
+    message(FATAL_ERROR "NVIDIA Optical Flow SDK headers not found: set NV_OPTICAL_FLOW_SDK_ROOT (git clone https://github.com/NVIDIA/NVIDIAOpticalFlowSDK) or build with -DDLSSVID_WITH_CUDA=OFF")
+  endif()
+  message(STATUS "Optical Flow SDK headers: ${NV_OPTICAL_FLOW_SDK_INCLUDE_DIR}")
+endif()
+
 # ---- TensorRT (headers only at build time; DLLs are loaded at runtime, see core/ml/TrtLoader) ----
 option(DLSSVID_WITH_TENSORRT "Build the TensorRT depth/flow backends (needs TensorRT headers)" ON)
 if(DLSSVID_WITH_TENSORRT AND NOT DLSSVID_WITH_CUDA)
