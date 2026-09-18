@@ -1,0 +1,32 @@
+# build
+/build/
+/out/
+/vcpkg_installed/
+CMakeUserPresets.json
+*.user
+.vs/
+.vscode/
+.idea/
+.cache/
+
+# runtime artifacts
+/bin/nvidia/*
+!/bin/nvidia/.gitignore
+!/bin/nvidia/README.md
+/models/cache/
+/tests/data/*
+!/tests/data/README.md
+!/tests/data/fetch.py
+*.trt
+*.engine
+*.onnx
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# misc
+*.log
+Thumbs.db

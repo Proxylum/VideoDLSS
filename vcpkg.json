@@ -1,0 +1,22 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "dlss-video",
+  "version-string": "0.1.0",
+  "description": "Offline DLSS video pipeline (SR / NR / FG) for Windows + NVIDIA RTX",
+  "builtin-baseline": "e6f9e70a29a3e80a1fc510d8503304315447112f",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": ["avcodec", "avformat", "swscale", "swresample", "nvcodec"]
+    },
+    "spdlog",
+    "cli11",
+    "nlohmann-json",
+    "directx-headers",
+    "catch2"
+  ],
+  "overrides": [
+    { "name": "ffmpeg", "version": "7.1.1", "port-version": 6 }
+  ]
+}

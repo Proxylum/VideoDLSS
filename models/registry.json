@@ -1,0 +1,10 @@
+{
+  "$schema_version": 1,
+  "_comment": "Models are downloaded on first use into models/cache/ (git-ignored). Fill in url/sha256/license per model in stage 2-3. No weights are committed.",
+  "models": [
+    { "id": "depth-anything-3", "stage": "depth", "role": "primary", "source": "https://github.com/bytedance-seed/depth-anything-3", "format": "onnx", "url": "", "sha256": "", "license": "" },
+    { "id": "video-depth-anything-l-metric", "stage": "depth", "role": "fallback", "source": "https://github.com/ueoo/Video-Depth-Anything", "format": "onnx", "url": "", "sha256": "", "license": "" },
+    { "id": "icdepth", "stage": "depth", "role": "high-quality", "source": "https://arxiv.org/pdf/2607.01677", "format": "pytorch", "url": "", "sha256": "", "license": "" },
+    { "id": "sea-raft", "stage": "flow", "role": "quality", "source": "https://github.com/princeton-vl/SEA-RAFT", "format": "onnx", "url": "", "sha256": "", "license": "BSD-3-Clause" }
+  ]
+}

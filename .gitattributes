@@ -1,0 +1,13 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=lf
+*.png binary
+*.exr binary
+*.mp4 binary
+*.mkv binary
+*.mov binary
+*.dll binary
+*.pdf binary
