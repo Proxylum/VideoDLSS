@@ -3,7 +3,7 @@
 Полная целевая архитектура — ТЗ §4 (граф стадий, кэш кадров, контракты). Здесь — то, что
 реализовано, и хаки, которые нужно помнить.
 
-## Состояние после этапов 0–5
+## Состояние после этапов 0–6
 
 ```
 VideoDecoder ──CpuFrame(YUV420P)──▶ Pipeline ──▶ VideoEncoder
@@ -137,6 +137,49 @@ IUpscaler: rtxvsr (RTX Video SDK — точка интеграции) | dlss (NG
   появляется во вьюпорте как пасс (A/B в 2x2 и wipe, слои сэмплируются в своём разрешении).
 - Метрики `passes/ImageMetrics` (PSNR Y/RGB, SSIM Y) и `dlssvid compare` — инструмент A/B для этапов 5–7.
 
+### Neural Rendering (этап 6)
+
+```
+NrStage ── цвет: color_sr (папка / слот кэша) или декодированный кадр ─▶ RGBA16F ─▶ Tonemapper (passthrough | aces | reinhard)
+   ▼                                                                                   │
+ proxy (полное разрешение) ──[model-scale ≠ 1: Resampler → work]──▶ INrBackend × passes ─▶ model out (work)
+   ▼                                                                                   │
+ NrCompose::Resolve(original = proxy, model, proxy-work, prev, mv_dlss, mask protect / skin) ─▶ output RGBA16F
+   ▼
+ readback ─▶ color_nr (EXR half / PNG16) + слот кэша + [--video]
+INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминированная правка для тестов, только явно)
+```
+
+- `Tonemapper` (`Tonemap.hlsl`): вход `srgb | linear | pq | hlg`, экспозиция, кривая `passthrough | aces | reinhard`, выход
+  display-referred sRGB [0, 1] — то, что принимает модель (ComfyUI подаёт clamp [0,1]). Для SDR-источников по умолчанию
+  passthrough (точная копия); PQ/HLG ждут 10-битного декодера. CPU-эталон `TonemapReference` — для тестов.
+- `NgxNrBackend` — Feature 18 по образцу ComfyUI-DLSS5-NR (последовательность вызовов) и OptiScaler_DLSSNR (имена параметров):
+  1. диагностика **до** любого вызова: GPU, архитектура (CUDA compute capability, иначе по имени), версия драйвера из UMD-версии
+     DXGI (`32.0.15.9186` → 591.86; порог **616.56**, `--skip-driver-check`), путь + размер + **SHA-256** `nvngx_dlssnr.dll`,
+     путь форвардера — всё в лог и в `NrDiagnostics` (`dlssvid nr --check`, `--json`);
+  2. ядро NGX через общий `gpu/Ngx` (`Init_with_ProjectID`, рефкаунт на процесс; тот же, что у DLSS SR);
+  3. `LoadLibraryEx(nvngx_dlssnr.dll)` + форвардер `nvngx.dll_dlssvid.dll` (см. хаки): `Init_Ext` сниппета с перебором ABI
+     (`info, version` ComfyUI → `version, info` публичный → `version, params` OptiScaler), блок параметров `capability`
+     (OptiScaler) или `alloc` (ComfyUI) с автоповтором;
+  4. все `DLSSNR.*` пишутся перед `CreateFeature(18)` (тюнинг читается при создании) и заново перед каждым `EvaluateFeature`
+     (блок общий): `Enabled`, `Width/Height`, `Hint.Render.Preset`, `Intensity`, `Style`, `Local{Tone,Structure}Strength`,
+     `SkinStructureStrength`, `UseAutoMask`, `UICorrection`, `DepthInverted`, `Reset`, `ScalingRatio`, ресурсы
+     `Color/Output/Backbuffer/Depth/MVec` с субректами, `MVecScaleX/Y`;
+  5. `CreateFeature(18)` в `Init` со scratch-текстурами — результат в лог; `FAIL_FeatureNotSupported` на не-Blackwell →
+     подсказка `dlssvid nr-patch`; `FAIL_PlatformError` → диагностика форвардера.
+  Guides: `depth_dlss` (R32F, reverse-Z → `DepthInverted=1`) и `mv_dlss` (RG32F, пиксели, backward → `MVecScale=1`) субректами в
+  своём разрешении; без MV — «still»-режим (`Reset=1` на каждом кадре, как ComfyUI), с MV — temporal (`Reset` на первом кадре).
+- `NrStage`: цвет из `--color-dir` (по умолчанию `<passes>/color_sr`, если есть), слота кэша (`color_sr`) или декодированного
+  кадра; guides из папок → слот кэша → текстуры; маски `mask_{ui,ignore,face,skin}` (PNG 8-бит, ТЗ §5) → `protect = max(ui,
+  ignore)`, `skin = max(face, skin)`; `--passes 2` — вторая копия бэкенда со своей историей поверх результата первой;
+  `--model-scale` — модель на уменьшенном/увеличенном прокси, `NrCompose` переносит правку на полный кадр. Недоступный
+  бэкенд: CLI — ошибка с инструкцией (код 1); пайплайн (`disableWhenUnavailable`) — стадия отключается с предупреждением,
+  кадры идут дальше без `color_nr` (ТЗ §4).
+- `NrPatch` / `dlssvid nr-patch`: обёртка внешнего dlssnr-patcher (GPLv2 — не вендорится): python, скрипт
+  (`--patcher`, `DLSSNR_PATCHER_ROOT`, `tools/dlssnr-patcher`), CUDA 13.3 (`--cuda-bin`, `CUDA_PATH_V13_3`), SHA-256 входа и
+  результата, `bin/nvidia/nvngx_dlssnr.dll` + сайдкар `*.patch.json` (что и чем пропатчено). GUI: кнопка «Пропатчить DLL…».
+- Стадия `nr` в проекте по умолчанию (после `upscale`); `color_nr` во вьюпорте — A/B в 2x2 и wipe.
+
 ## Хаки и временные решения
 
 | Где | Что | Почему | Когда убираем |
@@ -157,9 +200,15 @@ IUpscaler: rtxvsr (RTX Video SDK — точка интеграции) | dlss (NG
 | `UpscaleStage::Process` | результат читается на CPU (readback) для записи пасса и заново грузится в слот кэша | простота; следующие стадии пока читают пассы с диска | этап 6–7: копия текстуры в слот без CPU, запись EXR в фоне |
 | `NisUpscaler` | масштаб > 2 — два прохода NVScaler (×2, затем остаток) | NIS принимает соотношение 1..2 за проход | — |
 | `VideoEncoder` (превью `--video`) | цветовые теги (matrix/range) не записываются в поток | превью без аудио, для просмотра; финальный мукс — этап 8 `process` | этап 8: теги и аудио |
+| `core/stages/nr/forwarder/` (`nvngx.dll_dlssvid.dll`) | **форвардер**: все вызовы в `nvngx_dlssnr.dll` (`Init_Ext`, `CreateFeature`, `EvaluateFeature`, `ReleaseFeature`) идут из отдельной DLL, в имени которой есть `nvngx.dll`, без tail-call (`volatile`, `noinline`) | модель проверяет модуль по адресу возврата и отвечает `FAIL_PlatformError` любому другому (OptiScaler_DLSSNR, ComfyUI caller shim); proxy-путь через ядро даёт `0xBAD0000B` | когда NVIDIA откроет Feature 18 публичным SDK / Streamline |
+| `NgxNrBackend::Init` | перебор ABI `Init_Ext` сниппета (три порядка аргументов) и двух блоков параметров с автоповтором `CreateFeature(18)` | эталоны расходятся, DLL на машине разработки нет — проверить нельзя | после первого запуска с DLL закрепить сработавший вариант |
+| `NrCompose` (`model-scale ≠ 1`) | **перенос отношением**: `edited = original · clamp(model↑ / proxy↑, 1/maxRatio, maxRatio)` с силой `transfer` | упрощённый resolve OptiScaler (без OkLab и разделения яркость/цвет): модель на уменьшенном прокси дешевле, детали полного разрешения остаются | если модель примет `ScalingRatio` напрямую |
+| `NrCompose` (`--temporal`) | **temporal-фильтр**: смешивание с предыдущим выходом, смещённым по `mv_dlss`, с порогом по разности цвета и весом правки | мерцание пропатченных DLL (ТЗ §4 «известная проблема»); опция, по умолчанию выключена | когда guides уберут мерцание |
+| `StubNrBackend` | детерминированная «правка» (локальный контраст + тон) вместо модели | стадия, resolve, маски, temporal и pass count тестируются на WARP без DLL; в продукте только явно `--backend stub`, без fallback | — (остаётся тестовым бэкендом) |
+| `NrStage::Process` | результат читается на CPU (readback) для записи пасса и заново грузится в слот; guides и маски грузятся с диска каждый кадр | простота; как в `UpscaleStage` | этап 8: слот → слот без CPU |
+| `INrBackend` (драйвер) | версия драйвера NVIDIA из UMD-версии DXGI (`CheckInterfaceSupport`), а не из NVAPI | NVAPI не подключён; формула `(subversion mod 10)·100 + build/100` проверена на 591.86 | при подключении NVAPI |
 
-Хаки в коде помечаются `// HACK:` (ТЗ §8); эмуляция джиттера для DLSS SR и скрытый swapchain FG
-появятся в этапах 5 и 7 и будут описаны здесь.
+Хаки в коде помечаются `// HACK:` (ТЗ §8); скрытый swapchain FG появится в этапе 7 и будет описан здесь.
 
 ## Ошибки и деградация
 - Отсутствие NVIDIA GPU: D3D12 падает на WARP, CUDA interop недоступен, NVENC-кодеки не найдены —

@@ -25,13 +25,16 @@ TEST_CASE("Project::Create fills defaults next to the video", "[viewport][projec
     CHECK(p.sourceVideo == d / "clip.mp4");
     CHECK(p.passesRoot == d / "clip_passes");
     CHECK(p.resultVideo.empty());
-    REQUIRE(p.stages.size() == 3);
+    REQUIRE(p.stages.size() == 4);
     CHECK(p.stages[0].name == "depth");
     CHECK(p.stages[0].params["backend"] == "da3");
     CHECK(p.stages[1].name == "flow");
     CHECK(p.stages[2].name == "upscale");
     CHECK(p.stages[2].params["backend"] == "rtxvsr");
     CHECK(p.stages[2].params["scale"] == 2);
+    CHECK(p.stages[3].name == "nr");
+    CHECK(p.stages[3].params["backend"] == "ngx");
+    CHECK(p.stages[3].params["passes"] == 1);
     CHECK(p.viewport == ViewportState{});
     const Project q = Project::Create(d / "clip.mp4", d / "elsewhere");
     CHECK(q.passesRoot == d / "elsewhere");

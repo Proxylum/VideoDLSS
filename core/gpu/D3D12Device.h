@@ -36,6 +36,9 @@ public:
     bool IsWarp() const { return isWarp_; }
     bool IsNvidia() const { return vendorId_ == 0x10DE; }
     uint64_t DedicatedVideoMemory() const { return dedicatedVideoMemory_; }
+    // DXGI user-mode driver version (IDXGIAdapter::CheckInterfaceSupport): product.version.subversion.build
+    // packed as a LARGE_INTEGER; 0 when unknown (WARP). NVIDIA: 32.0.15.9186 -> driver 591.86 (NvidiaDriverFromUmd).
+    uint64_t UmdDriverVersion() const { return umdVersion_; }
 
     ComPtr<ID3D12Resource> CreateBuffer(uint64_t size, D3D12_HEAP_TYPE heap,
                                         D3D12_RESOURCE_STATES initialState,
@@ -71,6 +74,7 @@ private:
     LUID adapterLuid_{};
     uint32_t vendorId_ = 0;
     uint64_t dedicatedVideoMemory_ = 0;
+    uint64_t umdVersion_ = 0;
     bool isWarp_ = false;
 };
 
