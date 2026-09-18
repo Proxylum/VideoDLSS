@@ -7,7 +7,11 @@
 #include <QElapsedTimer>
 #include <QSignalSpy>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
 #include "AppModel.h"
 #include "TaskQueue.h"
@@ -23,6 +27,24 @@ QApplication& App() {
     static char name[] = "dlssvid_app_tests";
     static char* argv[] = {name, nullptr};
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    // A missing platform plugin makes Qt on Windows show a modal message box (no console) and
+    // abort — an automated run would hang on it. Fall back to the Qt SDK plugin folder the
+    // tests were built against and fail with a message instead of a dialog.
+    QCoreApplication::addLibraryPath(QStringLiteral(DLSSVID_QT_PLUGINS));
+    QString platform = qEnvironmentVariable("QT_QPA_PLATFORM", QStringLiteral("windows"));
+    platform = platform.section(QLatin1Char(':'), 0, 0);
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    const std::filesystem::path exeDir = std::filesystem::path(exe).parent_path();
+    const std::string dll = "q" + platform.toStdString() + ".dll";
+    const std::filesystem::path candidates[] = {exeDir / "platforms" / dll, std::filesystem::path(DLSSVID_QT_PLUGINS) / "platforms" / dll};
+    bool found = false;
+    for (const auto& c : candidates) found = found || std::filesystem::exists(c);
+    if (!found) {
+        std::fprintf(stderr, "dlssvid_app_tests: Qt platform plugin %s not found (looked in %s and %s)\n", dll.c_str(),
+                     candidates[0].parent_path().string().c_str(), candidates[1].parent_path().string().c_str());
+        std::exit(1);
+    }
     static QApplication app(argc, argv);
     return app;
 }
