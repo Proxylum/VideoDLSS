@@ -8,15 +8,35 @@
     {
       "name": "ffmpeg",
       "default-features": false,
-      "features": ["avcodec", "avformat", "swscale", "swresample", "nvcodec"]
+      "features": [
+        "avcodec",
+        "avformat",
+        "swscale",
+        "swresample",
+        "nvcodec"
+      ]
     },
     "spdlog",
     "cli11",
     "nlohmann-json",
     "directx-headers",
-    "catch2"
+    "catch2",
+    "openexr",
+    "libpng",
+    "zlib",
+    {
+      "name": "tiff",
+      "default-features": false,
+      "features": [
+        "zip"
+      ]
+    }
   ],
   "overrides": [
-    { "name": "ffmpeg", "version": "7.1.1", "port-version": 6 }
+    {
+      "name": "ffmpeg",
+      "version": "7.1.1",
+      "port-version": 6
+    }
   ]
 }

@@ -23,6 +23,10 @@ find_package(CLI11 CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(directx-headers CONFIG REQUIRED)
 find_package(FFMPEG REQUIRED) # vcpkg wrapper: FFMPEG_INCLUDE_DIRS / FFMPEG_LIBRARY_DIRS / FFMPEG_LIBRARIES
+find_package(OpenEXR CONFIG REQUIRED)
+find_package(PNG REQUIRED)
+find_package(TIFF REQUIRED)
+find_package(ZLIB REQUIRED)
 
 add_library(ffmpeg_libs INTERFACE)
 target_include_directories(ffmpeg_libs INTERFACE ${FFMPEG_INCLUDE_DIRS})

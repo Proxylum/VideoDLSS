@@ -34,6 +34,8 @@ struct VideoStreamInfo {
     int64_t durationUs = 0;  // container duration in microseconds; 0 if unknown
     std::string codecName;
     std::string pixelFormat;  // source pixel format name
+    int colorSpace = 2;       // AVColorSpace (2 = unspecified)
+    int colorRange = 0;       // AVColorRange (0 = unspecified, 1 = limited/MPEG, 2 = full/JPEG)
     bool hasAudio = false;
     std::string audioCodecName;
 };
