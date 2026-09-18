@@ -1,5 +1,7 @@
 #include "TestClips.h"
 
+#include <functional>
+
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -49,6 +51,10 @@ CpuFrame SyntheticFrame(int64_t index, uint32_t width, uint32_t height) {
 }
 
 std::filesystem::path WriteClip(const std::filesystem::path& path, const ClipSpec& spec) {
+    return WriteClipWith(path, spec, [&](int64_t i) { return SyntheticFrame(i, spec.width, spec.height); });
+}
+
+std::filesystem::path WriteClipWith(const std::filesystem::path& path, const ClipSpec& spec, const std::function<CpuFrame(int64_t)>& frameFn) {
     std::filesystem::create_directories(path.parent_path());
     const std::string url = path.string();
 
@@ -108,7 +114,7 @@ std::filesystem::path WriteClip(const std::filesystem::path& path, const ClipSpe
     };
 
     for (int i = 0; i < spec.frames; ++i) {
-        const CpuFrame src = SyntheticFrame(i, spec.width, spec.height);
+        const CpuFrame src = frameFn(i);
         av_frame_unref(frame);
         frame->format = AV_PIX_FMT_YUV420P;
         frame->width = vctx->width;

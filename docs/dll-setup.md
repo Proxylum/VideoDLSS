@@ -34,13 +34,20 @@ Apache-2.0; VDA-Large — CC-BY-NC-4.0 (только исследования). 
 
 | Файл | Откуда | Для чего |
 |---|---|---|
-| `nvngx_dlss.dll` | DLSS SDK `lib/Windows_x86_64/rel/` | DLSS Super Resolution (этап 5) |
+| `nvngx_dlss.dll` | DLSS SDK `lib/Windows_x86_64/rel/` (сборка копирует её в `build/<preset>/bin/nvidia/`, если задан `DLSS_SDK_ROOT`) | DLSS Super Resolution (этап 5): `dlssvid upscale --backend dlss` |
 | `nvngx_dlssg.dll`, `sl.*.dll` | Streamline | Frame Generation (этап 7) |
 | `nvngx_dlssnr.dll` | из драйвера/игры с DLSS 5 (официально только RTX 50) | Neural Rendering (этап 6) |
 | `nvngx_dlssnr.dll` (пропатченная) | результат `dlssnr-patcher` над вашей копией | NR на RTX 20/30/40 |
 
-Приложение ищет DLL в `bin/nvidia/` рядом с exe (переопределяется `DLSSVID_NVIDIA_DLL_DIR`). При
-отсутствии DLL соответствующая стадия отключается с сообщением; приложение не падает.
+Приложение ищет DLL в `bin/nvidia/` рядом с exe (переопределяется `DLSSVID_NVIDIA_DLL_DIR` или `--dll-dir`). При
+отсутствии DLL соответствующая стадия отключается с сообщением; приложение не падает: `upscale` переходит на
+NIS (`--no-fallback` — ошибка вместо перехода). NGX пишет свой лог в `%LOCALAPPDATA%\dlssvid\ngx\`.
+
+## RTX Video SDK 1.1 (этап 5, бэкенд `rtxvsr`)
+
+Скачивается с https://developer.nvidia.com/rtx-video-sdk под аккаунтом NVIDIA; путь — `RTX_VIDEO_SDK_ROOT`.
+Интеграция ещё не выполнена (нет SDK на машине разработки, TASK-0011): интерфейс `IUpscaler` и точка
+`RtxVsrUpscaler` готовы, без SDK стадия сообщает инструкцию и использует NIS.
 
 ## Neural Rendering на RTX 40 (и 20/30)
 

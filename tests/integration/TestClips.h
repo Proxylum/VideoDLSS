@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <vector>
 
 #include "pipeline/Frame.h"
@@ -25,6 +26,8 @@ struct ClipSpec {
 
 // Writes a lossless (ffv1 + optional pcm audio) clip with SyntheticFrame(i) as frame i.
 std::filesystem::path WriteClip(const std::filesystem::path& path, const ClipSpec& spec);
+// Same with caller-supplied frames (YUV420P, spec.width x spec.height).
+std::filesystem::path WriteClipWith(const std::filesystem::path& path, const ClipSpec& spec, const std::function<CpuFrame(int64_t)>& frame);
 
 // Decodes every frame of a file with plain FFmpeg (software) into memory.
 std::vector<CpuFrame> DecodeAll(const std::filesystem::path& path);

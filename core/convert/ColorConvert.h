@@ -30,6 +30,10 @@ PassImage Yuv420pToRgba16f(const CpuFrame& frame, const ColorInfo& info);
 
 // Any colour image (u8/u16/f16/f32, 1..4 channels) -> RGBA16F with integer types scaled to [0,1].
 PassImage ToRgba16f(const PassImage& img);
+
+// Inverse of Yuv420pToRgb: display-referred RGB (float [0,1], integers scaled) -> tightly packed
+// 8-bit YUV420P (BT.601/709, limited/full range), chroma = mean of each 2x2 block, rounded to nearest.
+void RgbToYuv420p(const PassImage& rgb, const ColorInfo& info, CpuFrame& out);
 // True when the CPU supports the F16C float <-> half instructions (used by the converters above).
 bool HasF16C();
 

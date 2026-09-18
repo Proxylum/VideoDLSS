@@ -24,6 +24,23 @@ dlssvid_compile_shader(${CMAKE_CURRENT_SOURCE_DIR}/viewport/shaders/Composite.hl
 dlssvid_compile_shader(${CMAKE_CURRENT_SOURCE_DIR}/viewport/shaders/Composite.hlsl PSMain ps_6_0 g_CompositePS Composite_ps.h)
 dlssvid_compile_shader(${CMAKE_CURRENT_SOURCE_DIR}/viewport/shaders/Arrows.hlsl VSMain vs_6_0 g_ArrowsVS Arrows_vs.h)
 dlssvid_compile_shader(${CMAKE_CURRENT_SOURCE_DIR}/viewport/shaders/Arrows.hlsl PSMain ps_6_0 g_ArrowsPS Arrows_ps.h)
+# Same, with an output sub-folder and extra DXC arguments (defines, include paths).
+function(dlssvid_compile_shader_ex hlsl entry profile var subdir out_name)
+  set(out ${DLSSVID_SHADER_GEN_DIR}/${subdir}/${out_name})
+  add_custom_command(
+    OUTPUT ${out}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${DLSSVID_SHADER_GEN_DIR}/${subdir}
+    COMMAND ${DIRECTX_DXC_TOOL} -nologo -T ${profile} -E ${entry} -O3 -Qstrip_debug -Qstrip_reflect -Fh ${out} -Vn ${var} ${ARGN} ${hlsl}
+    DEPENDS ${hlsl} ${CMAKE_SOURCE_DIR}/third_party/nis/NIS_Scaler.h
+    COMMENT "DXC ${profile} ${hlsl}:${entry} ${ARGN}"
+    VERBATIM)
+  set(DLSSVID_SHADER_HEADERS ${DLSSVID_SHADER_HEADERS} ${out} PARENT_SCOPE)
+endfunction()
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/upscale/shaders/Resample.hlsl CSMain cs_6_0 g_ResampleCS stages/upscale/shaders Resample_cs.h)
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/upscale/shaders/Nis.hlsl main cs_6_0 g_NisScaleCS stages/upscale/shaders Nis_scale_cs.h
+  -D NIS_SCALER=1 -I ${CMAKE_SOURCE_DIR}/third_party/nis)
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/upscale/shaders/Nis.hlsl main cs_6_0 g_NisSharpenCS stages/upscale/shaders Nis_sharpen_cs.h
+  -D NIS_SCALER=0 -I ${CMAKE_SOURCE_DIR}/third_party/nis)
 
 add_library(dlssvid_core STATIC
   util/Log.h util/Log.cpp
@@ -60,6 +77,15 @@ add_library(dlssvid_core STATIC
   viewport/ViewportRenderer.h viewport/ViewportRenderer.cpp
   viewport/FrameStore.h viewport/FrameStore.cpp
   viewport/Project.h viewport/Project.cpp
+  gpu/ComputeKernel.h gpu/ComputeKernel.cpp
+  passes/ImageMetrics.h passes/ImageMetrics.cpp
+  stages/upscale/IUpscaler.h stages/upscale/IUpscaler.cpp
+  stages/upscale/Jitter.h
+  stages/upscale/BicubicUpscaler.h stages/upscale/BicubicUpscaler.cpp
+  stages/upscale/NisUpscaler.h stages/upscale/NisUpscaler.cpp
+  stages/upscale/DlssUpscaler.h stages/upscale/DlssUpscaler.cpp
+  stages/upscale/RtxVsrUpscaler.h stages/upscale/RtxVsrUpscaler.cpp
+  stages/upscale/UpscaleStage.h stages/upscale/UpscaleStage.cpp
   ${DLSSVID_SHADER_HEADERS}
   ml/ModelRegistry.h ml/ModelRegistry.cpp
   stages/depth/IDepthEstimator.h
@@ -101,3 +127,10 @@ target_link_libraries(dlssvid_core
     ZLIB::ZLIB
     d3d12 dxgi dxguid bcrypt winhttp
 )
+
+# ---- stage 5: NVIDIA Image Scaling (vendored, MIT) and the DLSS SDK (NGX) ----
+target_include_directories(dlssvid_core PUBLIC ${CMAKE_SOURCE_DIR}/third_party/nis)
+if(DLSSVID_WITH_DLSS)
+  target_include_directories(dlssvid_core PUBLIC ${DLSS_SDK_ROOT}/include)
+  target_link_libraries(dlssvid_core PUBLIC ${DLSSVID_NGX_LIB})
+endif()

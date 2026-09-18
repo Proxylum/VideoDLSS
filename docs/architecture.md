@@ -3,7 +3,7 @@
 Полная целевая архитектура — ТЗ §4 (граф стадий, кэш кадров, контракты). Здесь — то, что
 реализовано, и хаки, которые нужно помнить.
 
-## Состояние после этапов 0–4
+## Состояние после этапов 0–5
 
 ```
 VideoDecoder ──CpuFrame(YUV420P)──▶ Pipeline ──▶ VideoEncoder
@@ -112,6 +112,31 @@ AppModel (Qt) ── ViewportWindow / панели ── TaskQueue (dlssvid <st
 - Проект хранит относительные пути (переносим вместе с папкой), состояние вьюпорта и конфиги стадий;
   панель проекта запускает `dlssvid depth|flow` с параметрами из JSON стадии.
 
+
+### Апскейл (этап 5)
+
+```
+UpscaleStage ── YUV420P ─▶ Yuv420pToRgba16f ─▶ input RGBA16F ─┬─▶ [Resampler: сдвиг −j]  (только dlss)
+                                                              ▼
+   depth_dlss / mv_dlss (слот кэша или папки пассов) ─▶ IUpscaler::Evaluate(cmdlist) ─▶ output RGBA16F (UAV)
+                                                              ▼
+                                      readback ─▶ color_sr (EXR half / PNG16) + слот кэша + [--video через RgbToYuv420p]
+IUpscaler: rtxvsr (RTX Video SDK — точка интеграции) | dlss (NGX) | nis (NVScaler / NVSharpen) | bicubic (Catmull-Rom)
+```
+
+- `ComputeKernel` — общий compute-помощник (root CBV + таблицы SRV/UAV + статические сэмплеры, кольца
+  дескрипторов и констант); на нём `Resampler` (`Resample.hlsl`) и NIS (`Nis.hlsl` + `third_party/nis`).
+- DLSS через NGX: `Init_with_ProjectID` (engine CUSTOM, DLL из `bin/nvidia/`, лог NGX → spdlog debug),
+  проверка `SuperSampling.Available` с версией драйвера, `GET_OPTIMAL_SETTINGS` (режим по масштабу:
+  ×1 DLAA, ≤1.55 Quality, ≤1.85 Balanced, ≤2.25 Performance, иначе Ultra Performance; вход должен попадать в
+  диапазон render-размеров режима), флаги `DepthInverted` (reverse-Z `depth_dlss`) и `MVLowRes` (когда `mv_dlss`
+  в разрешении входа), LDR-режим (вход display-referred 0..1), пресет через `DLSS.Hint.Render.Preset.*`,
+  `InReset` на первом кадре. Без `depth_dlss`/`mv_dlss` — константная глубина и нулевые MV с предупреждением.
+- Цель: `ResolveUpscaleTarget` — масштаб или явный размер, чётные стороны, пропорции, потолок 3840×2160 (v1).
+- Стадия в пайплайне и в CLI один код (`RunUpscale`); в GUI стадия `upscale` запускается из панели проекта, `color_sr`
+  появляется во вьюпорте как пасс (A/B в 2x2 и wipe, слои сэмплируются в своём разрешении).
+- Метрики `passes/ImageMetrics` (PSNR Y/RGB, SSIM Y) и `dlssvid compare` — инструмент A/B для этапов 5–7.
+
 ## Хаки и временные решения
 
 | Где | Что | Почему | Когда убираем |
@@ -127,6 +152,11 @@ AppModel (Qt) ── ViewportWindow / панели ── TaskQueue (dlssvid <st
 | `FrameStore::LoadVideo` | видео для вьюпорта декодируется на CPU и конвертируется в RGBA16F (`Yuv420pToRgba16f`, F16C) перед upload | NVDEC-кольцо и YUV→RGB на GPU появятся вместе с GPU-препроцессингом этапа 5; CPU-путь укладывается в ≥ 30 fps на 1080p | этап 5: NVDEC → CUDA → D3D12-текстура, конверсия compute-шейдером |
 | `ViewportRenderer::RenderInto` | каждый кадр — `ExecuteAndWait` (синхронный submit) | простота; composite 0.2–2.5 мс, узкое место — загрузка кадров | этап 5+: fence-ринг и несколько кадров в полёте |
 | `ViewportWindow` | подписи ячеек и пробник — виджеты Qt рядом с вьюпортом, в PNG-скриншот их вписывает `QPainter` | Qt не рисует поверх дочернего нативного окна со swapchain | — (по плану этапа 4) |
+| `UpscaleStage` + `DlssUpscaler` | **эмуляция джиттера** (ТЗ §3): кадр видео пересемплируется Catmull-Rom со сдвигом −j (Halton(2,3), фаз = 8·(target/render)²), содержимое смещается на +j, DLSS получает `InJitterOffset = +j`; MV не джиттерятся (`MVJittered = 0`) | DLSS SR рассчитан на джиттерный рендер, у видео джиттера нет; знак выбран по PSNR на синтетическом эталоне (+1.7 дБ к прогону без джиттера, `--jitter-sign`) | остаётся как режим сравнения; RTX VSR — основной путь |
+| `RtxVsrUpscaler` | заглушка: `Available()` объясняет, что нужен RTX Video SDK 1.1, стадия деградирует в `nis` | SDK за аккаунтом NVIDIA (TASK-0011) | этап 5b: интеграция за `RTX_VIDEO_SDK_ROOT` |
+| `UpscaleStage::Process` | результат читается на CPU (readback) для записи пасса и заново грузится в слот кэша | простота; следующие стадии пока читают пассы с диска | этап 6–7: копия текстуры в слот без CPU, запись EXR в фоне |
+| `NisUpscaler` | масштаб > 2 — два прохода NVScaler (×2, затем остаток) | NIS принимает соотношение 1..2 за проход | — |
+| `VideoEncoder` (превью `--video`) | цветовые теги (matrix/range) не записываются в поток | превью без аудио, для просмотра; финальный мукс — этап 8 `process` | этап 8: теги и аудио |
 
 Хаки в коде помечаются `// HACK:` (ТЗ §8); эмуляция джиттера для DLSS SR и скрытый swapchain FG
 появятся в этапах 5 и 7 и будут описаны здесь.

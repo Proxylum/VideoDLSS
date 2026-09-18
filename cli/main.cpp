@@ -3,6 +3,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include "UpscaleCommands.h"
 #include "ViewportCommands.h"
 
 #include <chrono>
@@ -771,6 +772,8 @@ int main(int argc, char** argv) {
 
     cli::ViewportCommands viewportCommands;  // project init|show, render (stage 4)
     viewportCommands.Register(app);
+    cli::UpscaleCommands upscaleCommands;  // upscale, compare (stage 5)
+    upscaleCommands.Register(app);
 
     std::string modelsAction = "list", modelsId, modelsDir;
     auto* models = app.add_subcommand("models", "list or fetch models from models/registry.json");
@@ -795,6 +798,7 @@ int main(int argc, char** argv) {
         if (flow->parsed()) return CmdFlow(fa);
         if (models->parsed()) return CmdModels(modelsAction, modelsId, modelsDir);
         if (const int rc = viewportCommands.Dispatch(); rc >= 0) return rc;
+        if (const int rc = upscaleCommands.Dispatch(); rc >= 0) return rc;
     } catch (const std::exception& e) {
         Log()->error("{}", e.what());
         return 1;
