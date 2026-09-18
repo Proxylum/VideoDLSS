@@ -31,6 +31,8 @@ public:
     virtual std::string_view Name() const = 0;
     virtual void Init(const StageConfig& config, D3D12Device& device) = 0;
     virtual void Process(FrameContext& ctx) = 0;
+    // Called once after the last frame: windowed stages flush their tail here.
+    virtual void Finish() {}
     virtual void Shutdown() = 0;
 };
 

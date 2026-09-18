@@ -20,6 +20,7 @@ CMakeUserPresets.json
 *.trt
 *.engine
 *.onnx
+!/tests/data/tiny.onnx
 
 # python
 __pycache__/

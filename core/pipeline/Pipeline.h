@@ -31,6 +31,7 @@ public:
 
     void Init();
     void ProcessFrame(CpuFrame& frame);
+    void Finish();  // after the last frame, before Shutdown
     void Shutdown();
 
     D3D12Device& Device() { return device_; }

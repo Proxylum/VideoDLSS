@@ -1,10 +1,201 @@
 {
   "$schema_version": 1,
-  "_comment": "Models are downloaded on first use into models/cache/ (git-ignored). Fill in url/sha256/license per model in stage 2-3. No weights are committed.",
+  "_comment": "Weights are fetched on first use into models/cache/ (git-ignored) by models/export scripts (HuggingFace) and exported to ONNX for the exact input geometry; TensorRT engines are cached next to them. No weights are committed. `params` are read by core/stages/depth/TrtDepthEstimator and depth_worker/worker.py.",
   "models": [
-    { "id": "depth-anything-3", "stage": "depth", "role": "primary", "source": "https://github.com/bytedance-seed/depth-anything-3", "format": "onnx", "url": "", "sha256": "", "license": "" },
-    { "id": "video-depth-anything-l-metric", "stage": "depth", "role": "fallback", "source": "https://github.com/ueoo/Video-Depth-Anything", "format": "onnx", "url": "", "sha256": "", "license": "" },
-    { "id": "icdepth", "stage": "depth", "role": "high-quality", "source": "https://arxiv.org/pdf/2607.01677", "format": "pytorch", "url": "", "sha256": "", "license": "" },
-    { "id": "sea-raft", "stage": "flow", "role": "quality", "source": "https://github.com/princeton-vl/SEA-RAFT", "format": "onnx", "url": "", "sha256": "", "license": "BSD-3-Clause" }
+    {
+      "id": "da3metric-large",
+      "stage": "depth",
+      "role": "primary",
+      "source": "https://github.com/ByteDance-Seed/Depth-Anything-3",
+      "hf": "depth-anything/DA3METRIC-LARGE",
+      "format": "onnx",
+      "url": "",
+      "sha256": "",
+      "license": "Apache-2.0",
+      "params": {
+        "family": "da3",
+        "metric": true,
+        "output": "depth",
+        "input_size": 518,
+        "window": 1,
+        "overlap": 0,
+        "input_name": "image",
+        "output_name": "depth",
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ],
+        "sky_output_name": "sky",
+        "sky_threshold": 0.3,
+        "sky_quantile": 0.99
+      }
+    },
+    {
+      "id": "da3mono-large",
+      "stage": "depth",
+      "role": "relative",
+      "source": "https://github.com/ByteDance-Seed/Depth-Anything-3",
+      "hf": "depth-anything/DA3MONO-LARGE",
+      "format": "onnx",
+      "url": "",
+      "sha256": "",
+      "license": "Apache-2.0",
+      "params": {
+        "family": "da3",
+        "metric": false,
+        "output": "depth",
+        "input_size": 518,
+        "window": 1,
+        "overlap": 0,
+        "input_name": "image",
+        "output_name": "depth",
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ],
+        "sky_output_name": "sky",
+        "sky_threshold": 0.3,
+        "sky_quantile": 0.99
+      }
+    },
+    {
+      "id": "metric-vda-small",
+      "stage": "depth",
+      "role": "fallback",
+      "source": "https://github.com/DepthAnything/Video-Depth-Anything",
+      "hf": "depth-anything/Metric-Video-Depth-Anything-Small",
+      "hf_file": "metric_video_depth_anything_vits.pth",
+      "format": "onnx",
+      "url": "",
+      "sha256": "",
+      "license": "Apache-2.0",
+      "params": {
+        "family": "vda",
+        "encoder": "vits",
+        "metric": true,
+        "output": "depth",
+        "input_size": 518,
+        "window": 32,
+        "overlap": 8,
+        "input_name": "image",
+        "output_name": "depth",
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      }
+    },
+    {
+      "id": "vda-small",
+      "stage": "depth",
+      "role": "fallback-relative",
+      "source": "https://github.com/DepthAnything/Video-Depth-Anything",
+      "hf": "depth-anything/Video-Depth-Anything-Small",
+      "hf_file": "video_depth_anything_vits.pth",
+      "format": "onnx",
+      "url": "",
+      "sha256": "",
+      "license": "Apache-2.0",
+      "params": {
+        "family": "vda",
+        "encoder": "vits",
+        "metric": false,
+        "output": "disparity",
+        "input_size": 518,
+        "window": 32,
+        "overlap": 8,
+        "input_name": "image",
+        "output_name": "depth",
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      }
+    },
+    {
+      "id": "metric-vda-large",
+      "stage": "depth",
+      "role": "quality (non-commercial licence, ~24 GB VRAM at batch 32)",
+      "source": "https://github.com/DepthAnything/Video-Depth-Anything",
+      "hf": "depth-anything/Metric-Video-Depth-Anything-Large",
+      "hf_file": "metric_video_depth_anything_vitl.pth",
+      "format": "onnx",
+      "url": "",
+      "sha256": "",
+      "license": "CC-BY-NC-4.0",
+      "params": {
+        "family": "vda",
+        "encoder": "vitl",
+        "metric": true,
+        "output": "depth",
+        "input_size": 518,
+        "window": 32,
+        "overlap": 8,
+        "input_name": "image",
+        "output_name": "depth",
+        "mean": [
+          0.485,
+          0.456,
+          0.406
+        ],
+        "std": [
+          0.229,
+          0.224,
+          0.225
+        ]
+      }
+    },
+    {
+      "id": "icdepth",
+      "stage": "depth",
+      "role": "high-quality (unavailable: no public code or weights as of 2026-09-18, arXiv 2607.01677)",
+      "source": "https://arxiv.org/pdf/2607.01677",
+      "format": "pytorch",
+      "url": "",
+      "sha256": "",
+      "license": "",
+      "params": {
+        "family": "icdepth",
+        "metric": false,
+        "window": 16,
+        "overlap": 4,
+        "available": false
+      }
+    },
+    {
+      "id": "sea-raft",
+      "stage": "flow",
+      "role": "quality",
+      "source": "https://github.com/princeton-vl/SEA-RAFT",
+      "format": "onnx",
+      "url": "",
+      "sha256": "",
+      "license": "BSD-3-Clause",
+      "params": {}
+    }
   ]
 }

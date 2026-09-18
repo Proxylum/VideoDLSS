@@ -3,7 +3,7 @@
 Полная целевая архитектура — ТЗ §4 (граф стадий, кэш кадров, контракты). Здесь — то, что
 реализовано, и хаки, которые нужно помнить.
 
-## Состояние после этапов 0–1
+## Состояние после этапов 0–2
 
 ```
 VideoDecoder ──CpuFrame(YUV420P)──▶ Pipeline ──▶ VideoEncoder
@@ -48,6 +48,25 @@ convert/: DepthConvert (raw ↔ reverse-Z), MvConvert (InvertFlow, dilation, sca
 - `Manifest` — единственный источник геометрии для бинарных дампов и канонических имён каналов;
   `PassReader::Validate` формулирует несовпадения (разрешение, число кадров, пропуски) одним сообщением.
 
+### Стадия Depth (этап 2)
+
+```
+CpuFrame(YUV) ─ColorConvert─▶ RGB F32 ─▶ DepthStage (окно N кадров, overlap) ─▶ IDepthEstimator
+                                                                                   ├─ TrtDepthEstimator (da3, vda): resize→NCHW→TensorRT FP16→disparity/depth→guided upsample
+                                                                                   ├─ WorkerDepthEstimator (worker:da3|vda|icdepth|stub): python depth_worker, .npz через scratch
+                                                                                   └─ StubDepthEstimator (тесты)
+                                                            ▼
+                             FillInvalidDepth → TemporalStabilizer (scale/shift, окно 8) → TAE → PassWriter(depth_raw, depth_dlss) + GpuFrameCache slot texture R32F
+```
+
+- TensorRT грузится в рантайме (`ml/TrtLoader`): C-точки входа заголовков (`createInferRuntime_INTERNAL` …)
+  определены у нас и форвардят в `nvinfer_10.dll`; import-библиотеки не нужны, без DLL бэкенды `da3`/`vda`
+  выдают понятную ошибку, остальное работает.
+- ONNX под конкретную геометрию (`<model>_<T>x<H>x<W>.onnx`) экспортируется при первом обращении скриптом
+  из venv; engine кэшируется по хэшу ONNX + GPU + версия TensorRT + fp16.
+- `IStage::Finish()` добавлен для оконных стадий (сброс хвоста окна после последнего кадра).
+- Метрика TAE без MV — прокси (|d_t − d_{t−1}| / mean d); warp-версия — этап 3.
+
 ## Хаки и временные решения
 
 | Где | Что | Почему | Когда убираем |
@@ -56,7 +75,9 @@ convert/: DepthConvert (raw ↔ reverse-Z), MvConvert (InvertFlow, dilation, sca
 | `VideoDecoder::ConvertFrame` | не-8-бит-4:2:0 источники → swscale → yuv420p (lossy) | стадии работают в 8-бит 4:2:0 до появления GPU-конверсии | этап 2: RGBA16F на GPU |
 | `PassthroughStage` | round-trip upload → readback каждого кадра | доказательство корректности пути GPU | остаётся как диагностический режим |
 | `MvConvert::InvertFlow` | инверсия flow сплэттингом с округлением до пикселя, дыры — BFS-заполнением | простая детерминированная инверсия без субпиксельного ресемплинга | этап 3: сравнить с backward-warp SEA-RAFT/OFA, при необходимости заменить |
-| `ColorConvert` | хрома 4:2:0 реплицируется (nearest), без интерполяции | детерминизм и обратимость поблочно | этап 2: конверсия YUV → RGB на GPU с настраиваемым фильтром |
+| `ColorConvert` | хрома 4:2:0 реплицируется (nearest), без интерполяции | детерминизм и обратимость поблочно | этап 3+: конверсия YUV → RGB на GPU с настраиваемым фильтром |
+| `DepthStage` | препроцессинг/апсемпл/guided filter на CPU; кадры для TensorRT копируются host→device | этап 2 проверяет модели и контракты; GPU-путь придёт с CUDA-кадрами | этап 3: NVDEC → CUDA → TensorRT без CPU, апсемпл шейдером |
+| `TemporalAlignmentError` | без warp по MV (статичный прокси) | MV нет до этапа 3 | этап 3 |
 
 Хаки в коде помечаются `// HACK:` (ТЗ §8); эмуляция джиттера для DLSS SR и скрытый swapchain FG
 появятся в этапах 5 и 7 и будут описаны здесь.

@@ -3,6 +3,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include <chrono>
 #include <cstdio>
 #include <string>
 
@@ -15,12 +16,17 @@
 #include "passes/PassSequence.h"
 #include "pipeline/Pipeline.h"
 #include "stages/passthrough/PassthroughStage.h"
+#include "ml/ModelRegistry.h"
+#include "stages/depth/DepthStage.h"
 #include "util/Error.h"
 #include "util/Log.h"
 #include "util/Sha256.h"
 
 #ifdef DLSSVID_WITH_CUDA
 #include "gpu/CudaInterop.h"
+#endif
+#ifdef DLSSVID_WITH_TENSORRT
+#include "ml/TrtLoader.h"
 #endif
 
 using namespace dlssvid;
@@ -124,7 +130,106 @@ int CmdInfo(const std::string& input, bool warp) {
     for (const char* name : {"h264_nvenc", "hevc_nvenc", "av1_nvenc", "ffv1"}) {
         std::printf("encoder:     %-10s %s\n", name, VideoEncoder::EncoderAvailable(name) ? "yes" : "no");
     }
+#ifdef DLSSVID_WITH_TENSORRT
+    std::string trtReason;
+    if (trt::Available(&trtReason)) std::printf("tensorrt:    %s (%s)\n", trt::LibraryVersion().c_str(), trt::LibraryDirectory().string().c_str());
+    else std::printf("tensorrt:    unavailable (%s)\n", trtReason.c_str());
+#else
+    std::printf("tensorrt:    not built\n");
+#endif
     return 0;
+}
+
+// ---- depth ----------------------------------------------------------------------------------
+
+struct DepthArgs {
+    std::string input, output;
+    std::string backend = "da3";
+    std::string model;
+    int inputSize = 518;
+    int maxRes = 1080;
+    bool fp32 = false;
+    int64_t frames = -1;
+    bool noDlss = false;
+    float zNear = 0.1f, zFar = 1000.f;
+    std::string stabilize = "auto";  // auto | none | scale | scale_shift
+    int stabilizeWindow = 8;
+    bool noFill = false;
+    std::string format = "exr";
+    bool warp = false;
+    std::string modelsDir;
+    std::string python;
+};
+
+int CmdDepth(const DepthArgs& a) {
+    VideoDecoder decoder(a.input);
+    const auto& info = decoder.Info();
+    DepthStageOptions o;
+    o.backend = a.backend;
+    o.estimator.modelId = a.model;
+    o.estimator.inputSize = a.inputSize;
+    o.estimator.maxInputRes = a.maxRes;
+    o.estimator.fp16 = !a.fp32;
+    o.estimator.modelsDir = a.modelsDir;
+    if (!a.python.empty()) o.estimator.extra["python"] = a.python;
+    o.outputDir = a.output;
+    o.writeDlss = !a.noDlss;
+    o.dlss.zNear = a.zNear;
+    o.dlss.zFar = a.zFar;
+    if (a.stabilize == "none") o.stabilize = TemporalStabilizer::Mode::None;
+    else if (a.stabilize == "scale") o.stabilize = TemporalStabilizer::Mode::ScaleOnly;
+    else if (a.stabilize == "scale_shift" || a.stabilize == "auto") o.stabilize = TemporalStabilizer::Mode::ScaleShift;
+    else Throw("--stabilize must be auto|none|scale|scale_shift");
+    o.stabilizeMetric = a.stabilize == "scale" || a.stabilize == "scale_shift";
+    o.stabilizeWindow = a.stabilizeWindow;
+    o.fillHoles = !a.noFill;
+    const auto fmt = ParseFileFormat(a.format);
+    if (!fmt || *fmt == FileFormat::Png) Throw("--format must be exr|tiff|npz|raw");
+    o.format = *fmt;
+    o.sourceFile = std::filesystem::path(a.input).filename().string();
+    o.sourceHash = "sha256:" + Sha256File(a.input);
+    const int64_t total = a.frames > 0 ? a.frames : info.frameCount;
+    o.onFrame = [](int64_t frame, double tae) {
+        if (frame % 10 == 0) std::fprintf(stderr, "  frame %lld TAE %.4f\n", static_cast<long long>(frame), tae);
+    };
+
+    D3D12Device device({a.warp, false});
+    const auto t0 = std::chrono::steady_clock::now();
+    const DepthRunResult r = RunDepth(decoder, device, o, a.frames, [total](int64_t n) { PrintProgress(n, total); });
+    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    std::fprintf(stderr, "\n");
+    Log()->info("depth done: {} frames in {:.1f} s ({:.1f} ms/frame), mean TAE {:.4f}, backend {}", r.stats.frames, sec,
+                r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0, r.stats.MeanTae(), r.estimator.dump());
+    std::printf("depth_raw:   %s\n", r.rawDir.string().c_str());
+    if (!a.noDlss) std::printf("depth_dlss:  %s\n", r.dlssDir.string().c_str());
+    std::printf("frames:      %lld\nmean TAE:    %.4f\nms/frame:    %.1f\n", static_cast<long long>(r.stats.frames), r.stats.MeanTae(),
+                r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0);
+    return 0;
+}
+
+// ---- models ---------------------------------------------------------------------------------
+
+int CmdModels(const std::string& action, const std::string& id, const std::string& modelsDir) {
+    const auto registryPath = modelsDir.empty() ? ModelRegistry::DefaultRegistryPath() : std::filesystem::path(modelsDir) / "registry.json";
+    const ModelRegistry reg = ModelRegistry::Load(registryPath);
+    if (action == "list") {
+        std::printf("registry:    %s\ncache:       %s\n", registryPath.string().c_str(), reg.CacheDir().string().c_str());
+        for (const auto& e : reg.Entries()) {
+            std::printf("%-20s %-6s %-10s %-14s %s%s\n", e.id.c_str(), e.stage.c_str(), e.format.c_str(), e.license.c_str(), e.role.c_str(),
+                        reg.IsCached(e) ? "  [cached]" : "");
+        }
+        return 0;
+    }
+    if (action == "fetch") {
+        const ModelEntry& e = reg.Get(id);
+        const auto p = reg.Fetch(e, [](uint64_t done, uint64_t total) {
+            if (total) std::fprintf(stderr, "\r%llu / %llu MiB", static_cast<unsigned long long>(done >> 20), static_cast<unsigned long long>(total >> 20));
+        });
+        std::fprintf(stderr, "\n");
+        std::printf("%s -> %s\n", e.id.c_str(), p.string().c_str());
+        return 0;
+    }
+    Throw("models: action must be list|fetch");
 }
 
 // ---- process --------------------------------------------------------------------------------
@@ -553,6 +658,33 @@ int main(int argc, char** argv) {
     conv->add_option("-o,--output", ca.output, "output folder")->required();
     conv->add_option("--to", ca.to, "depth_dlss | depth_raw | mv_dlss | mv_raw")->required();
 
+    DepthArgs da;
+    auto* depth = app.add_subcommand("depth", "estimate depth_raw / depth_dlss passes for a video");
+    depth->add_option("-i,--input", da.input, "input video file")->required()->check(CLI::ExistingFile);
+    depth->add_option("-o,--output", da.output, "pass root folder (writes depth_raw/ and depth_dlss/)")->required();
+    depth->add_option("--backend", da.backend, "da3 | vda | worker | worker:da3 | worker:vda | worker:icdepth | stub")->default_val("da3");
+    depth->add_option("--model", da.model, "registry model id (default per backend)");
+    depth->add_option("--input-size", da.inputSize, "model input on the shorter side (multiple of 14)")->default_val(518);
+    depth->add_option("--max-res", da.maxRes, "downscale frames above this shorter side before the model")->default_val(1080);
+    depth->add_flag("--fp32", da.fp32, "build/run the model in fp32");
+    depth->add_option("--frames", da.frames, "process at most N frames")->default_val(-1);
+    depth->add_flag("--no-dlss", da.noDlss, "do not write depth_dlss");
+    depth->add_option("--near", da.zNear, "near plane for depth_dlss (metres)")->default_val(0.1f);
+    depth->add_option("--far", da.zFar, "far plane for depth_dlss (metres)")->default_val(1000.f);
+    depth->add_option("--stabilize", da.stabilize, "temporal scale/shift: auto | none | scale | scale_shift")->default_val("auto");
+    depth->add_option("--stabilize-window", da.stabilizeWindow, "frames in the alignment window")->default_val(8);
+    depth->add_flag("--no-fill", da.noFill, "keep invalid depth samples instead of filling them");
+    depth->add_option("--format", da.format, "exr | tiff | npz | raw")->default_val("exr");
+    depth->add_flag("--warp", da.warp, "use the WARP software adapter");
+    depth->add_option("--models-dir", da.modelsDir, "folder with registry.json (default: auto)");
+    depth->add_option("--python", da.python, "python interpreter for the worker backends");
+
+    std::string modelsAction = "list", modelsId, modelsDir;
+    auto* models = app.add_subcommand("models", "list or fetch models from models/registry.json");
+    models->add_option("action", modelsAction, "list | fetch")->default_val("list");
+    models->add_option("id", modelsId, "model id for fetch");
+    models->add_option("--models-dir", modelsDir, "folder with registry.json (default: auto)");
+
     try {
         app.parse(argc, argv);
     } catch (const CLI::ParseError& e) {
@@ -566,6 +698,8 @@ int main(int argc, char** argv) {
         if (exp->parsed()) return CmdExport(ea);
         if (imp->parsed()) return CmdImport(ia);
         if (conv->parsed()) return CmdConvert(ca);
+        if (depth->parsed()) return CmdDepth(da);
+        if (models->parsed()) return CmdModels(modelsAction, modelsId, modelsDir);
     } catch (const std::exception& e) {
         Log()->error("{}", e.what());
         return 1;

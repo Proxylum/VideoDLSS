@@ -36,6 +36,11 @@ void Pipeline::ProcessFrame(CpuFrame& frame) {
     for (auto& e : stages_) e.stage->Process(ctx);
 }
 
+void Pipeline::Finish() {
+    if (!initialized_) return;
+    for (auto& e : stages_) e.stage->Finish();
+}
+
 void Pipeline::Shutdown() {
     for (auto it = stages_.rbegin(); it != stages_.rend(); ++it) it->stage->Shutdown();
     initialized_ = false;
@@ -61,6 +66,7 @@ RunStats RunPipeline(Pipeline& pipeline, VideoDecoder& decoder, VideoEncoder& en
         ++stats.framesOut;
         if (progress) progress(stats.framesOut);
     }
+    pipeline.Finish();
     encoder.Close();
 
     stats.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
