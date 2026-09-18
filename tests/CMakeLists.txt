@@ -62,7 +62,9 @@ catch_discover_tests(dlssvid_integration_tests TEST_PREFIX "integration." DISCOV
 if(DLSSVID_BUILD_APP)
   add_executable(dlssvid_app_tests app/test_app_model.cpp)
   target_link_libraries(dlssvid_app_tests PRIVATE dlssvid_app Catch2::Catch2WithMain Qt6::Test)
-  target_compile_definitions(dlssvid_app_tests PRIVATE DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp")
+  target_compile_definitions(dlssvid_app_tests PRIVATE
+    DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
+    DLSSVID_QT_PLUGINS="${DLSSVID_QT_BIN}/../plugins")
   dlssvid_deploy_qt(dlssvid_app_tests)
   # windeployqt deploys only the windows platform plugin: copy the offscreen one next to the executable
   add_custom_command(TARGET dlssvid_app_tests POST_BUILD
@@ -72,4 +74,11 @@ if(DLSSVID_BUILD_APP)
   # (a single ENVIRONMENT entry: catch_discover_tests splits multi-value properties)
   catch_discover_tests(dlssvid_app_tests TEST_PREFIX "app." DISCOVERY_MODE PRE_TEST
     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+  # Regression: a platform plugin that cannot be found must fail fast with a message. Without the
+  # check in the tests' QApplication setup Qt shows a modal message box (no console) and aborts,
+  # which hung automated runs until someone clicked it (stage 4).
+  add_test(NAME app.platform_plugin_missing_fails_fast COMMAND dlssvid_app_tests "TaskQueue*")
+  set_tests_properties(app.platform_plugin_missing_fails_fast PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=nonexistent" TIMEOUT 60
+    PASS_REGULAR_EXPRESSION "platform plugin qnonexistent.dll not found")
 endif()
