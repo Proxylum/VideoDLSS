@@ -5,9 +5,13 @@ Offline DLSS video pipeline for Windows + NVIDIA RTX: a video file goes through
 Rendering → DLSS Frame Generation → encode`, every intermediate **pass** (depth, motion
 vectors, masks, colour stages) can be exported, imported and inspected in a viewport.
 
-Current stage: **5 — upscale** (see [docs/plans/05-upscale.md](docs/plans/05-upscale.md); earlier:
+Current stage: **6 — neural rendering** (see [docs/plans/06-nr.md](docs/plans/06-nr.md); earlier:
 [00-skeleton](docs/plans/00-skeleton.md), [01-passes](docs/plans/01-passes.md), [02-depth](docs/plans/02-depth.md),
-[03-motion-vectors](docs/plans/03-motion-vectors.md), [04-viewport](docs/plans/04-viewport.md)). `dlssvid upscale`
+[03-motion-vectors](docs/plans/03-motion-vectors.md), [04-viewport](docs/plans/04-viewport.md),
+[05-upscale](docs/plans/05-upscale.md)). `dlssvid nr` runs DLSS 5 Neural Rendering (NGX Feature 18 through the
+user-supplied `nvngx_dlssnr.dll`, patched for RTX 20/30/40 with `dlssvid nr-patch` / the GUI button) over `color_sr`
+with depth / motion-vector guides and masks into `color_nr`, after a tonemap step; `dlssvid nr --check` prints the
+GPU / driver / DLL / CreateFeature(18) diagnostics ([docs/dll-setup.md](docs/dll-setup.md)). Stage 5: `dlssvid upscale`
 produces the `color_sr` pass through one `IUpscaler` interface: DLSS Super Resolution over NGX (with the jitter
 emulation of ТЗ §3), NVIDIA Image Scaling (always available, WARP-capable), a bicubic baseline, and the RTX VSR
 integration point (needs the RTX Video SDK). `dlssvid compare` measures PSNR/SSIM for the A/B of
@@ -112,10 +116,24 @@ dlssvid upscale -i input.mp4 -o passes --backend dlss --video sr.mp4 --codec hev
 dlssvid compare --ref reference.mp4 --test passes\color_sr --json ab.json              :: PSNR Y/RGB + SSIM per frame
 ```
 
+Neural Rendering (stage 6): `color_nr` from `color_sr` (or the video) with `depth_dlss` / `mv_dlss` guides and
+`mask_ui` / `mask_ignore` / `mask_face` / `mask_skin` pass folders found under the pass root; the model runs through
+`bin\nvidia\nvngx_dlssnr.dll` (RTX 50: official; RTX 20/30/40: your copy patched with `nr-patch`).
+
+```bat
+dlssvid nr --check                                                                    :: GPU, driver (>= 616.56), DLL + SHA-256, CreateFeature(18)
+dlssvid nr-patch --input C:\dlls\nvngx_dlssnr.dll --patcher D:\SDK\dlssnr-patcher --cuda-bin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
+dlssvid nr -i input.mp4 -o passes                                                     :: color_sr + guides + masks under passes\ are picked up
+dlssvid nr -i input.mp4 -o passes --intensity 1.2 --style cinematic --passes 2 --model-scale 0.75 --temporal 0.4
+dlssvid nr -i input.mp4 -o passes --no-guides --video nr.mp4                          :: A/B without depth / MV, plus a preview video
+dlssvid nr -i input.mp4 -o passes --backend stub --warp                               :: deterministic stand-in (tests, any GPU)
+```
+
 GUI keys: `1`…`9` source, `Ctrl+1/2/3` single / overlay / grid, wheel = zoom to cursor (25–800 %), middle drag = pan,
 `F` fit, `Ctrl+0` 1:1, `W` wipe (left drag moves it), click a 2x2 cell = expand, `Space` play, `,`/`.` step,
 `Ctrl+Shift+S` PNG screenshot with cell labels, `Ctrl+S` save project. Stages are started from the project panel
-(`dlssvid depth|flow` as a task with progress) and their passes appear in the viewport when finished.
+(`dlssvid depth|flow|upscale|nr` as a task with progress) and their passes appear in the viewport when finished; the
+`nr` stage has a «Пропатчить DLL…» button that runs `dlssvid nr-patch` over your `nvngx_dlssnr.dll`.
 
 ## Layout
 
@@ -128,8 +146,10 @@ core/       gpu/ (D3D12, CUDA interop, frame cache) · io/ (decode, encode) · p
             stages/flow (IFlowEstimator, OfaFlowEstimator via nvofapi, TrtFlowEstimator for SEA-RAFT, FlowStage) · convert/Warp (warp-PSNR, warped TAE)
             viewport/ (ViewportState, ViewportRenderer + shaders/, FrameStore, Project)
             stages/upscale (IUpscaler, DlssUpscaler — NGX, NisUpscaler, BicubicUpscaler / Resampler, RtxVsrUpscaler stub, Jitter, UpscaleStage)
-            gpu/ComputeKernel (compute PSO + descriptor rings) · passes/ImageMetrics (PSNR, SSIM)
-cli/        dlssvid (+ ViewportCommands: project, render; UpscaleCommands: upscale, compare)
+            gpu/ComputeKernel (compute PSO + descriptor rings) · passes/ImageMetrics (PSNR, SSIM) · gpu/Ngx (NGX core, shared by DLSS SR and NR)
+            stages/tonemap (Tonemapper: passthrough / ACES / Reinhard, sRGB / linear / PQ / HLG in)
+            stages/nr (INrBackend, NgxNrBackend — NGX Feature 18 + forwarder/ nvngx.dll_dlssvid.dll, StubNrBackend, NrCompose — resolve / masks / temporal, NrStage, NrPatch)
+cli/        dlssvid (+ ViewportCommands: project, render; UpscaleCommands: upscale, compare; NrCommands: nr, nr-patch)
 app/        dlssvid-gui — Qt 6.8 Widgets shell (AppModel, ViewportWindow, panels, TaskQueue)
 tests/      unit/ (Catch2, WARP-capable) · integration/ (synthetic clips, CLI as a process) · app/ (Qt offscreen) · golden/ (stage 8)
 docs/       architecture.md · conventions.md · dll-setup.md · benchmarks.md · plans/

@@ -76,6 +76,8 @@ void D3D12Device::PickAdapter(const Options& options, ComPtr<IDXGIFactory6>& fac
         vendorId_ = d.VendorId;
         dedicatedVideoMemory_ = d.DedicatedVideoMemory;
         isWarp_ = (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0;
+        LARGE_INTEGER umd{};
+        umdVersion_ = SUCCEEDED(a->CheckInterfaceSupport(__uuidof(IDXGIDevice), &umd)) ? static_cast<uint64_t>(umd.QuadPart) : 0;
     };
 
     if (!options.useWarp) {

@@ -27,6 +27,8 @@ add_executable(dlssvid_unit_tests
   unit/test_frame_store.cpp
   unit/test_project.cpp
   unit/test_upscale.cpp
+  unit/test_tonemap.cpp
+  unit/test_nr.cpp
 )
 target_link_libraries(dlssvid_unit_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 target_compile_definitions(dlssvid_unit_tests PRIVATE
@@ -51,6 +53,8 @@ add_executable(dlssvid_integration_tests
   integration/test_viewport_sources.cpp
   integration/test_upscale_stage.cpp
   integration/test_cli_upscale.cpp
+  integration/test_nr_stage.cpp
+  integration/test_cli_nr.cpp
 )
 target_link_libraries(dlssvid_integration_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 target_compile_definitions(dlssvid_integration_tests PRIVATE

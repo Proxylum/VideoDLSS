@@ -19,6 +19,7 @@ public slots:
 
 private:
     void runStage(int index);
+    void patchDll();  // nr stage: dlssnr-patcher over the user's nvngx_dlssnr.dll (`dlssvid nr-patch`)
     AppModel& model_;
     TaskQueue& tasks_;
     QTreeWidget* tree_;

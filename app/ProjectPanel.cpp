@@ -1,6 +1,10 @@
 #include "ProjectPanel.h"
 
 #include <QCheckBox>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLineEdit>
@@ -87,6 +91,12 @@ void ProjectPanel::refresh() {
         connect(run, &QPushButton::clicked, this, [this, i] { runStage(static_cast<int>(i)); });
         h->addWidget(params, 1);
         h->addWidget(run);
+        if (st.name == "nr") {
+            auto* patch = new QPushButton(tr("Пропатчить DLL…"), row);
+            patch->setToolTip(tr("Пропатчить вашу nvngx_dlssnr.dll для RTX 20/30/40 (dlssnr-patcher, CUDA Toolkit 13.3) и положить результат в bin/nvidia/"));
+            connect(patch, &QPushButton::clicked, this, &ProjectPanel::patchDll);
+            h->addWidget(patch);
+        }
         tree_->setItemWidget(item, 2, row);
     }
     tree_->expandAll();
@@ -108,6 +118,29 @@ void ProjectPanel::runStage(int index) {
         }
     }
     tasks_.enqueue(QString::fromStdString(st.name), model_.cliPath(), args);
+}
+
+void ProjectPanel::patchDll() {
+    const QString dll = QFileDialog::getOpenFileName(this, tr("Оригинальная nvngx_dlssnr.dll"), QString(), tr("nvngx_dlssnr.dll (nvngx_dlssnr.dll);;DLL (*.dll)"));
+    if (dll.isEmpty()) return;
+    QStringList args{"nr-patch", "--input", dll};
+    // the CLI finds the patcher through DLSSNR_PATCHER_ROOT or tools/dlssnr-patcher near the executable; otherwise ask
+    bool patcherKnown = !qEnvironmentVariableIsEmpty("DLSSNR_PATCHER_ROOT");
+    QDir dir(QCoreApplication::applicationDirPath());
+    for (int up = 0; up < 4 && !patcherKnown; ++up) {
+        patcherKnown = QFileInfo::exists(dir.filePath("tools/dlssnr-patcher/dlssnr_patcher.py"));
+        if (!dir.cdUp()) break;
+    }
+    if (!patcherKnown) {
+        const QString patcher = QFileDialog::getExistingDirectory(this, tr("Папка dlssnr-patcher (git clone https://github.com/dev-camo/dlssnr-patcher)"));
+        if (patcher.isEmpty()) return;
+        args << "--patcher" << patcher;
+    }
+    if (qEnvironmentVariableIsEmpty("CUDA_PATH_V13_3")) {
+        const QString cuda = QFileDialog::getExistingDirectory(this, tr("Папка bin CUDA Toolkit 13.3 (ptxas, fatbinary, cuobjdump); Отмена — искать в PATH"));
+        if (!cuda.isEmpty()) args << "--cuda-bin" << cuda;
+    }
+    tasks_.enqueue(tr("nr-patch"), model_.cliPath(), args);
 }
 
 }  // namespace dlssvid

@@ -41,6 +41,10 @@ dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/upscale/shaders/Nis
   -D NIS_SCALER=1 -I ${CMAKE_SOURCE_DIR}/third_party/nis)
 dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/upscale/shaders/Nis.hlsl main cs_6_0 g_NisSharpenCS stages/upscale/shaders Nis_sharpen_cs.h
   -D NIS_SCALER=0 -I ${CMAKE_SOURCE_DIR}/third_party/nis)
+# stage 6: tonemap, the stub model and the NR resolve
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/tonemap/shaders/Tonemap.hlsl CSMain cs_6_0 g_TonemapCS stages/tonemap/shaders Tonemap_cs.h)
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/StubNr.hlsl CSMain cs_6_0 g_StubNrCS stages/nr/shaders StubNr_cs.h)
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/NrCompose.hlsl CSMain cs_6_0 g_NrComposeCS stages/nr/shaders NrCompose_cs.h)
 
 add_library(dlssvid_core STATIC
   util/Log.h util/Log.cpp
@@ -86,6 +90,14 @@ add_library(dlssvid_core STATIC
   stages/upscale/DlssUpscaler.h stages/upscale/DlssUpscaler.cpp
   stages/upscale/RtxVsrUpscaler.h stages/upscale/RtxVsrUpscaler.cpp
   stages/upscale/UpscaleStage.h stages/upscale/UpscaleStage.cpp
+  gpu/Ngx.h gpu/Ngx.cpp
+  stages/tonemap/Tonemapper.h stages/tonemap/Tonemapper.cpp
+  stages/nr/INrBackend.h stages/nr/INrBackend.cpp
+  stages/nr/NgxNrBackend.h stages/nr/NgxNrBackend.cpp
+  stages/nr/StubNrBackend.h stages/nr/StubNrBackend.cpp
+  stages/nr/NrCompose.h stages/nr/NrCompose.cpp
+  stages/nr/NrStage.h stages/nr/NrStage.cpp
+  stages/nr/NrPatch.h stages/nr/NrPatch.cpp
   ${DLSSVID_SHADER_HEADERS}
   ml/ModelRegistry.h ml/ModelRegistry.cpp
   stages/depth/IDepthEstimator.h
@@ -127,6 +139,12 @@ target_link_libraries(dlssvid_core
     ZLIB::ZLIB
     d3d12 dxgi dxguid bcrypt winhttp
 )
+
+# ---- stage 6: the caller module the Neural Rendering snippet accepts (nvngx.dll_dlssvid.dll, docs/architecture.md) ----
+add_library(dlssvid_nr_forwarder SHARED stages/nr/forwarder/Forwarder.cpp)
+set_target_properties(dlssvid_nr_forwarder PROPERTIES OUTPUT_NAME "nvngx.dll_dlssvid" PREFIX "" SUFFIX ".dll")
+target_compile_definitions(dlssvid_nr_forwarder PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+add_dependencies(dlssvid_core dlssvid_nr_forwarder)
 
 # ---- stage 5: NVIDIA Image Scaling (vendored, MIT) and the DLSS SDK (NGX) ----
 target_include_directories(dlssvid_core PUBLIC ${CMAKE_SOURCE_DIR}/third_party/nis)

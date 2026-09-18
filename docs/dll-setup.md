@@ -18,6 +18,8 @@
 | `VDA_REPO` | checkout `DepthAnything/Video-Depth-Anything` (код VDA не является pip-пакетом; по умолчанию `D:\SDK\models\Video-Depth-Anything`) | 2 |
 | `HF_TOKEN` | необязательно: токен HuggingFace для быстрой загрузки весов | 2 |
 | `QT_ROOT` / `CMAKE_PREFIX_PATH` | Qt 6.8 msvc2022_64 | 4 |
+| `DLSSNR_PATCHER_ROOT` | клон [dev-camo/dlssnr-patcher](https://github.com/dev-camo/dlssnr-patcher) (`dlssnr_patcher.py`; или `--patcher`, или `tools/dlssnr-patcher` рядом с exe) | 6 |
+| `CUDA_PATH_V13_3` | CUDA Toolkit 13.3 (`bin/ptxas`, `fatbinary`, `cuobjdump` для патчера; или `--cuda-bin`) — отдельно от CUDA 12.4 сборки | 6 |
 
 Пример раскладки на машине разработки: `D:\SDK\DLSS`, `D:\SDK\Streamline`, `D:\SDK\OpticalFlowSDK`,
 `D:\SDK\Qt\6.8.3\msvc2022_64`, `D:\SDK\dlssnr-patcher`, `D:\SDK\TensorRT` (заголовки v10.16),
@@ -37,7 +39,8 @@ Apache-2.0; VDA-Large — CC-BY-NC-4.0 (только исследования). 
 | `nvngx_dlss.dll` | DLSS SDK `lib/Windows_x86_64/rel/` (сборка копирует её в `build/<preset>/bin/nvidia/`, если задан `DLSS_SDK_ROOT`) | DLSS Super Resolution (этап 5): `dlssvid upscale --backend dlss` |
 | `nvngx_dlssg.dll`, `sl.*.dll` | Streamline | Frame Generation (этап 7) |
 | `nvngx_dlssnr.dll` | из драйвера/игры с DLSS 5 (официально только RTX 50) | Neural Rendering (этап 6) |
-| `nvngx_dlssnr.dll` (пропатченная) | результат `dlssnr-patcher` над вашей копией | NR на RTX 20/30/40 |
+| `nvngx_dlssnr.dll` (пропатченная) | результат `dlssnr-patcher` над вашей копией (`dlssvid nr-patch`; рядом сайдкар `nvngx_dlssnr.dll.patch.json`) | NR на RTX 20/30/40 |
+| `nvngx.dll_dlssvid.dll` | собирается с проектом (цель `dlssvid_nr_forwarder`), лежит в `bin/` рядом с exe | форвардер: модуль, из которого вызывается `nvngx_dlssnr.dll` (этап 6) |
 
 Приложение ищет DLL в `bin/nvidia/` рядом с exe (переопределяется `DLSSVID_NVIDIA_DLL_DIR` или `--dll-dir`). При
 отсутствии DLL соответствующая стадия отключается с сообщением; приложение не падает: `upscale` переходит на
@@ -49,16 +52,45 @@ NIS (`--no-fallback` — ошибка вместо перехода). NGX пиш
 Интеграция ещё не выполнена (нет SDK на машине разработки, TASK-0011): интерфейс `IUpscaler` и точка
 `RtxVsrUpscaler` готовы, без SDK стадия сообщает инструкцию и использует NIS.
 
-## Neural Rendering на RTX 40 (и 20/30)
+## Neural Rendering (этап 6): `nvngx_dlssnr.dll`, форвардер, патч для RTX 20/30/40
 
-1. Драйвер ≥ **616.56**. Проверка при старте стадии NR.
-2. Скопируйте оригинальную `nvngx_dlssnr.dll` в безопасное место.
-3. Патч на вашей машине: `python D:\SDK\dlssnr-patcher\dlssnr_patcher.py --ada "C:\path\to\nvngx_dlssnr.dll"`
-   (кнопка «Пропатчить DLL» в GUI делает то же). Патчеру нужны `ptxas`, `fatbinary`, `cuobjdump`
-   из **CUDA Toolkit 13.3** (`--cuda-bin <путь к bin>`); это отдельная установка от CUDA 12.4, с которой собирается проект.
-4. Результат кладётся в `bin/nvidia/nvngx_dlssnr.dll`. Стадия NR логирует SHA-256 загруженной DLL.
-5. Патченная DLL не подписана: антивирус может её блокировать — добавьте исключение для `bin/nvidia/`.
-   Не используйте её с античит-защищёнными программами.
-6. Проверенные пары «SHA-256 DLL + версия драйвера» будут перечислены здесь по мере тестов (этап 6).
+Стадия `nr` использует NGX Feature 18 из `nvngx_dlssnr.dll`. Приложение **не распространяет** DLL: официальная лежит в
+драйвере / играх с DLSS 5 и работает только на RTX 50 (Blackwell); на Ada и старше она отвечает
+`0xBAD00001 FAIL_FeatureNotSupported`, и пользователь патчит **свою** копию.
+
+1. Драйвер ≥ **616.56**: стадия читает версию из DXGI (`dlssvid nr --check` печатает её) и отказывает на более старом
+   (`--skip-driver-check` — попробовать всё равно).
+2. Положите `nvngx_dlssnr.dll` в `bin/nvidia/` рядом с exe (или задайте `DLSSVID_NVIDIA_DLL_DIR` / `--dll-dir`). RTX 50 —
+   на этом всё; RTX 20/30/40 — шаг 3.
+3. Патч на вашей машине (dlssnr-patcher, GPLv2, внешний инструмент; нужны `ptxas`, `fatbinary`, `cuobjdump` из
+   **CUDA Toolkit 13.3** — отдельная установка от CUDA 12.4, с которой собирается проект):
+
+   ```bat
+   git clone https://github.com/dev-camo/dlssnr-patcher D:\SDK\dlssnr-patcher
+   dlssvid nr-patch --input C:\dlls\nvngx_dlssnr.dll --patcher D:\SDK\dlssnr-patcher --cuda-bin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
+   ```
+
+   Результат — `bin/nvidia/nvngx_dlssnr.dll` и сайдкар `nvngx_dlssnr.dll.patch.json` (SHA-256 входа и результата,
+   команда, дата). `--arch ada|ampere|turing|blackwell|all` (по умолчанию все четыре, как у патчера), `--dry-run` — только
+   проверка. Кнопка **«Пропатчить DLL…»** в панели проекта GUI делает то же (спрашивает DLL и, если переменные окружения
+   не заданы, папки патчера и CUDA).
+4. Проверка: `dlssvid nr --check` — GPU и архитектура, драйвер, путь / размер / SHA-256 DLL, форвардер, результаты `Init_Ext`
+   сниппета и `CreateFeature(18)`, подсказка при ошибке; `--json file` — то же в JSON. Те же строки стадия пишет в лог при
+   каждом запуске (ТЗ §4).
+5. Форвардер `nvngx.dll_dlssvid.dll` собирается с проектом и должен лежать рядом с exe: модель принимает вызовы только из
+   модуля с `nvngx.dll` в имени (`FAIL_PlatformError` иначе) — см. `docs/architecture.md`, «Хаки».
+6. Патченная DLL **не подписана**: антивирус (Defender, сторонние) может поместить её в карантин или блокировать
+   `LoadLibrary` (стадия сообщает код Win32). Добавьте исключение для папки `bin/nvidia/` (Defender: Безопасность Windows →
+   Защита от вирусов и угроз → Управление настройками → Исключения). Не используйте пропатченную DLL с программами под
+   античит-защитой. Новый драйвер может сломать патч — тогда повторите шаг 3 с DLL из нового драйвера.
+7. Без DLL / на неподходящем GPU стадия `nr` в CLI завершается с инструкцией (код 1), в пайплайне и GUI отключается с
+   сообщением — приложение не падает (ТЗ §4). Известная проблема патченных DLL — мерцание: guides `depth_dlss`/`mv_dlss`
+   обязательны, `--temporal` — опциональный фильтр (`docs/benchmarks.md`).
+8. Проверенные пары «SHA-256 DLL + версия драйвера» (заполняется по мере тестов; на машине разработки на 2026-09-19 DLL
+   и драйвер ≥ 616.56 отсутствуют — TASK-0011):
+
+   | DLL (SHA-256) | Версия DLL | Драйвер | GPU | Результат |
+   |---|---|---|---|---|
+   | — | — | — | — | — |
 
 Готовые патченные DLL (HuggingFace, Discord) в продукт не включаются — только ориентир для тестов.
