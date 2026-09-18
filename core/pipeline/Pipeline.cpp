@@ -30,9 +30,9 @@ void Pipeline::Init() {
     initialized_ = true;
 }
 
-void Pipeline::ProcessFrame(CpuFrame& frame) {
+void Pipeline::ProcessFrame(CpuFrame& frame, const GpuFrame* gpu) {
     if (!initialized_) Throw("Pipeline::ProcessFrame before Init");
-    FrameContext ctx{frame, device_, *cache_};
+    FrameContext ctx{frame, device_, *cache_, gpu};
     for (auto& e : stages_) e.stage->Process(ctx);
 }
 
@@ -58,10 +58,12 @@ RunStats RunPipeline(Pipeline& pipeline, VideoDecoder& decoder, VideoEncoder& en
     encoder.Open();
 
     CpuFrame frame;
+    GpuFrame gpu;
+    const bool wantGpu = decoder.UsingHwAccel();
     while (maxFrames < 0 || stats.framesIn < maxFrames) {
-        if (!decoder.NextFrame(frame)) break;
+        if (!decoder.NextFrame(frame, wantGpu ? &gpu : nullptr, true)) break;
         ++stats.framesIn;
-        pipeline.ProcessFrame(frame);
+        pipeline.ProcessFrame(frame, wantGpu && gpu.Valid() ? &gpu : nullptr);
         encoder.WriteFrame(frame);
         ++stats.framesOut;
         if (progress) progress(stats.framesOut);

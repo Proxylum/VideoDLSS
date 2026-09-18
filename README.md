@@ -5,11 +5,13 @@ Offline DLSS video pipeline for Windows + NVIDIA RTX: a video file goes through
 Rendering → DLSS Frame Generation → encode`, every intermediate **pass** (depth, motion
 vectors, masks, colour stages) can be exported, imported and inspected in a viewport.
 
-Current stage: **2 — depth** (see [docs/plans/02-depth.md](docs/plans/02-depth.md); earlier: [00-skeleton](docs/plans/00-skeleton.md), [01-passes](docs/plans/01-passes.md)).
-`dlssvid depth` estimates `depth_raw` / `depth_dlss` with Depth Anything 3 (metric / mono) or Video Depth Anything
-through TensorRT FP16, or through the PyTorch reference worker; temporal scale/shift stabilisation, edge-aware
-upsampling, TAE metric. Stage 1 gave passes as file sequences + `manifest.json` (EXR / PNG16 / TIFF / NPZ / raw),
-export presets and the raw ↔ DLSS conventions ([docs/conventions.md](docs/conventions.md)).
+Current stage: **3 — motion vectors** (see [docs/plans/03-motion-vectors.md](docs/plans/03-motion-vectors.md); earlier:
+[00-skeleton](docs/plans/00-skeleton.md), [01-passes](docs/plans/01-passes.md), [02-depth](docs/plans/02-depth.md)).
+`dlssvid flow` estimates `mv_raw` (forward flow) with the NVIDIA Optical Flow Accelerator fed straight from NVDEC
+frames, or with SEA-RAFT through TensorRT, converts to `mv_dlss` (backward, occlusions resolved with depth) and
+reports the warp-PSNR test; `dlssvid depth` (stage 2) gives `depth_raw` / `depth_dlss` with Depth Anything 3 or Video
+Depth Anything through TensorRT or the PyTorch worker, now with motion-compensated TAE (`--mv-dir`). Stage 1 gave
+passes as file sequences + `manifest.json` and the raw ↔ DLSS conventions ([docs/conventions.md](docs/conventions.md)).
 
 ## Requirements
 
@@ -23,6 +25,7 @@ export presets and the raw ↔ DLSS conventions ([docs/conventions.md](docs/conv
 | NVIDIA driver | ≥ 616.56 for NR (stage 6); any recent driver for stage 0 | |
 | Python | 3.12 | `models/export/.venv` with PyTorch cu126 + `tensorrt-cu12` (see [models/export/README.md](models/export/README.md)); used by `depth_worker` and by the ONNX export the TensorRT backend triggers on first use |
 | TensorRT | 10.16 headers (`TENSORRT_ROOT`, e.g. a checkout of NVIDIA/TensorRT tag v10.16) | DLLs come from the `tensorrt-cu12` pip package in the venv and are loaded at runtime — no import libraries |
+| Optical Flow SDK | headers (`NV_OPTICAL_FLOW_SDK_ROOT`, a checkout of NVIDIA/NVIDIAOpticalFlowSDK) | `nvofapi64.dll` ships with the driver (API 5.0 on 591.86); the public headers are API 2.0 and stay compatible |
 
 NVIDIA SDKs (DLSS/NGX, Streamline, RTX Video, Optical Flow) and Qt are needed from stage 4
 onwards — see [docs/dll-setup.md](docs/dll-setup.md). No NVIDIA binaries or model weights are
@@ -63,6 +66,9 @@ dlssvid convert -i passes\mv_raw -o passes\mv_dlss --to mv_dlss --target 3840x21
 dlssvid depth   -i input.mp4 -o passes --backend da3                     :: DA3METRIC-LARGE via TensorRT -> depth_raw + depth_dlss
 dlssvid depth   -i input.mp4 -o passes --backend vda --model metric-vda-small
 dlssvid depth   -i input.mp4 -o passes --backend worker:da3              :: PyTorch reference path (depth_worker)
+dlssvid flow    -i input.mp4 -o passes --backend ofa                     :: NVDEC -> OFA, mv_raw + mv_dlss, warp PSNR
+dlssvid flow    -i input.mp4 -o passes --backend searaft --depth-dir passes\depth_raw --target 3840x2160
+dlssvid depth   -i input.mp4 -o passes --backend da3 --mv-dir passes\mv_dlss   :: TAE with motion compensation
 dlssvid models  list
 ```
 
@@ -74,6 +80,7 @@ core/       gpu/ (D3D12, CUDA interop, frame cache) · io/ (decode, encode) · p
             convert/ (depth raw ↔ reverse-Z, mv forward ↔ backward, YUV → RGB)
             ml/ (TrtLoader: runtime-loaded TensorRT, TrtEngine, ModelRegistry) · util/ (Subprocess, Sha256, Half)
             stages/passthrough · stages/depth (IDepthEstimator, DA3/VDA via TensorRT, worker client, pre/post-processing, DepthStage)
+            stages/flow (IFlowEstimator, OfaFlowEstimator via nvofapi, TrtFlowEstimator for SEA-RAFT, FlowStage) · convert/Warp (warp-PSNR, warped TAE)
 cli/        dlssvid
 tests/      unit/ (Catch2, WARP-capable) · integration/ (synthetic clips, CLI as a process) · golden/ (stage 8)
 docs/       architecture.md · conventions.md · dll-setup.md · plans/

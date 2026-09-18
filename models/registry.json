@@ -187,15 +187,52 @@
       }
     },
     {
-      "id": "sea-raft",
+      "id": "sea-raft-spring-m",
       "stage": "flow",
       "role": "quality",
       "source": "https://github.com/princeton-vl/SEA-RAFT",
+      "hf": "Yarimasune/SEA-RAFT",
+      "hf_file": "Tartan-C-T-TSKH-spring540x960-M.pth",
       "format": "onnx",
       "url": "",
       "sha256": "",
-      "license": "BSD-3-Clause",
-      "params": {}
+      "license": "BSD-3-Clause (code; weights mirrored on HF without an explicit licence — confirm before commercial use)",
+      "params": {
+        "family": "searaft",
+        "config": "spring-M.json",
+        "iters": 4,
+        "input_names": [
+          "image1",
+          "image2"
+        ],
+        "output_name": "flow",
+        "input_scale": 255.0,
+        "multiple": 8
+      }
+    },
+    {
+      "id": "sea-raft-spring-s",
+      "stage": "flow",
+      "role": "fast",
+      "source": "https://github.com/princeton-vl/SEA-RAFT",
+      "hf": "Yarimasune/SEA-RAFT",
+      "hf_file": "Tartan-C-T-TSKH-spring540x960-S.pth",
+      "format": "onnx",
+      "url": "",
+      "sha256": "",
+      "license": "BSD-3-Clause (code; weights mirrored on HF without an explicit licence — confirm before commercial use)",
+      "params": {
+        "family": "searaft",
+        "config": "spring-S.json",
+        "iters": 4,
+        "input_names": [
+          "image1",
+          "image2"
+        ],
+        "output_name": "flow",
+        "input_scale": 255.0,
+        "multiple": 8
+      }
     }
   ]
 }

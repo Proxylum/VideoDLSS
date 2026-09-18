@@ -2,19 +2,72 @@
 
 #include "util/Error.h"
 
+#ifdef DLSSVID_WITH_CUDA
+#include "gpu/CudaInterop.h"
+#endif
+
 namespace dlssvid {
 
 GpuFrameCache::GpuFrameCache(D3D12Device& device, uint32_t slots) : device_(device), slots_(slots == 0 ? 1 : slots) {}
+
+GpuFrameCache::~GpuFrameCache() {
+    for (Slot& s : slots_) ReleaseCuda(s);
+}
+
+void GpuFrameCache::ReleaseCuda(Slot& slot) {
+#ifdef DLSSVID_WITH_CUDA
+    if (cuda_ && (slot.cudaPtr || slot.cudaMemory)) {
+        CudaInterop::ImportedBuffer b;
+        b.devicePtr = slot.cudaPtr;
+        b.memory = static_cast<cudaExternalMemory_t>(slot.cudaMemory);
+        b.size = slot.desc.ByteSize();
+        cuda_->Release(b);
+    }
+#endif
+    slot.cudaPtr = nullptr;
+    slot.cudaMemory = nullptr;
+}
+
+void GpuFrameCache::AttachCuda(CudaInterop* cuda) {
+    for (Slot& s : slots_) {
+        ReleaseCuda(s);
+        s.buffer.Reset();  // re-created on a shared heap at the next Acquire
+    }
+    cuda_ = cuda;
+}
 
 GpuFrameCache::Slot& GpuFrameCache::Acquire(int64_t frameIndex, const FrameDesc& desc) {
     if (frameIndex < 0) Throw("GpuFrameCache::Acquire: negative frame index");
     Slot& slot = slots_[static_cast<size_t>(frameIndex % slots_.size())];
     if (!slot.buffer || slot.desc != desc) {
+        ReleaseCuda(slot);
         slot.desc = desc;
-        slot.buffer = device_.CreateBuffer(desc.ByteSize(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
+        slot.buffer = device_.CreateBuffer(desc.ByteSize(), D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_FLAG_NONE,
+                                           cuda_ ? D3D12_HEAP_FLAG_SHARED : D3D12_HEAP_FLAG_NONE);
+#ifdef DLSSVID_WITH_CUDA
+        if (cuda_) {
+            CudaInterop::ImportedBuffer b = cuda_->ImportBuffer(slot.buffer.Get(), desc.ByteSize());
+            slot.cudaPtr = b.devicePtr;
+            slot.cudaMemory = b.memory;
+        }
+#endif
     }
     slot.frameIndex = frameIndex;
+    slot.layout = Layout::Yuv420p;
     return slot;
+}
+
+void GpuFrameCache::UploadFromGpuFrame(Slot& slot, const GpuFrame& frame) {
+#ifdef DLSSVID_WITH_CUDA
+    if (!cuda_ || !slot.cudaPtr) Throw("GpuFrameCache::UploadFromGpuFrame: CUDA not attached");
+    if (frame.width != slot.desc.width || frame.height != slot.desc.height) Throw("GpuFrameCache::UploadFromGpuFrame: size mismatch");
+    cuda_->CopyNv12(slot.cudaPtr, slot.desc.ByteSize(), frame);
+    slot.layout = Layout::Nv12;
+#else
+    (void)slot;
+    (void)frame;
+    Throw("GpuFrameCache::UploadFromGpuFrame: built without CUDA");
+#endif
 }
 
 GpuFrameCache::Slot* GpuFrameCache::Find(int64_t frameIndex) {
@@ -26,11 +79,18 @@ GpuFrameCache::Slot* GpuFrameCache::Find(int64_t frameIndex) {
 void GpuFrameCache::Upload(Slot& slot, const CpuFrame& frame) {
     if (slot.desc != frame.desc) Throw("GpuFrameCache::Upload: frame/slot format mismatch");
     device_.UploadBuffer(slot.buffer.Get(), frame.data.data(), frame.data.size());
+    slot.layout = Layout::Yuv420p;
 }
 
 void GpuFrameCache::Download(const Slot& slot, CpuFrame& frame) {
     frame.Allocate(slot.desc);
-    frame.data = device_.ReadbackBuffer(slot.buffer.Get(), slot.desc.ByteSize());
+    std::vector<uint8_t> bytes = device_.ReadbackBuffer(slot.buffer.Get(), slot.desc.ByteSize());
+    if (slot.layout == Layout::Nv12) {
+        const uint32_t w = slot.desc.width, h = slot.desc.height;
+        Nv12ToYuv420p(bytes.data(), static_cast<int>(w), bytes.data() + static_cast<size_t>(w) * h, static_cast<int>(w), w, h, frame);
+    } else {
+        frame.data = std::move(bytes);
+    }
 }
 
 namespace {

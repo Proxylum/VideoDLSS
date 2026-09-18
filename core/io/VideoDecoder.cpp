@@ -4,6 +4,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_cuda.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
@@ -44,7 +45,9 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     codec_->pkt_timebase = vs->time_base;
 
     if (options.hwaccel == HwAccel::Cuda) {
-        const int err = av_hwdevice_ctx_create(&hwDevice_, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0);
+        // Primary CUDA context: device pointers are then usable from cudart, TensorRT and the
+        // Optical Flow API in this process without context juggling.
+        const int err = av_hwdevice_ctx_create(&hwDevice_, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, AV_CUDA_USE_PRIMARY_CONTEXT);
         if (err < 0) {
             Log()->warn("CUDA hwaccel unavailable ({}), decoding in software", AvErrorToString(err));
             hwDevice_ = nullptr;
@@ -58,8 +61,9 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
 
     frame_ = av_frame_alloc();
     swFrame_ = av_frame_alloc();
+    hwKeep_ = av_frame_alloc();
     packet_ = av_packet_alloc();
-    if (!frame_ || !swFrame_ || !packet_) Throw("av_frame_alloc/av_packet_alloc failed");
+    if (!frame_ || !swFrame_ || !hwKeep_ || !packet_) Throw("av_frame_alloc/av_packet_alloc failed");
 
     info_.width = static_cast<uint32_t>(codec_->width);
     info_.height = static_cast<uint32_t>(codec_->height);
@@ -88,6 +92,7 @@ VideoDecoder::~VideoDecoder() {
     if (sws_) sws_freeContext(sws_);
     av_packet_free(&packet_);
     av_frame_free(&swFrame_);
+    av_frame_free(&hwKeep_);
     av_frame_free(&frame_);
     avcodec_free_context(&codec_);
     av_buffer_unref(&hwDevice_);
@@ -104,10 +109,12 @@ Rational VideoDecoder::AudioTimeBase() const {
     return Rational{tb.num, tb.den};
 }
 
-bool VideoDecoder::NextFrame(CpuFrame& out) {
+bool VideoDecoder::NextFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
+    if (!cpu && !gpu) Throw("VideoDecoder::NextFrame: cpu=false needs a GpuFrame output");
+    if (gpu) *gpu = GpuFrame{};
     if (drained_) return false;
     for (;;) {
-        if (ReceiveFrame(out)) return true;
+        if (ReceiveFrame(out, gpu, cpu)) return true;
         if (drained_) return false;
         if (eofSent_) {
             drained_ = true;
@@ -130,7 +137,7 @@ bool VideoDecoder::NextFrame(CpuFrame& out) {
     }
 }
 
-bool VideoDecoder::ReceiveFrame(CpuFrame& out) {
+bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     const int err = avcodec_receive_frame(codec_, frame_);
     if (err == AVERROR(EAGAIN)) return false;
     if (err == AVERROR_EOF) {
@@ -139,17 +146,38 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out) {
     }
     CheckAv(err, "avcodec_receive_frame");
 
+    const int64_t index = nextIndex_++;
+    const int64_t pts = frame_->best_effort_timestamp != AV_NOPTS_VALUE ? frame_->best_effort_timestamp : frame_->pts;
     AVFrame* src = frame_;
     if (frame_->format == AV_PIX_FMT_CUDA) {
+        if (gpu) {
+            // Keep a reference so the device memory stays valid until the next frame.
+            av_frame_unref(hwKeep_);
+            CheckAv(av_frame_ref(hwKeep_, frame_), "av_frame_ref");
+            const auto* hwFrames = reinterpret_cast<const AVHWFramesContext*>(hwKeep_->hw_frames_ctx->data);
+            if (hwFrames->sw_format != AV_PIX_FMT_NV12) Throw("NVDEC frame is not NV12 (" + std::string(av_get_pix_fmt_name(hwFrames->sw_format)) + ")");
+            gpu->width = static_cast<uint32_t>(hwKeep_->width);
+            gpu->height = static_cast<uint32_t>(hwKeep_->height);
+            gpu->y = reinterpret_cast<uintptr_t>(hwKeep_->data[0]);
+            gpu->uv = reinterpret_cast<uintptr_t>(hwKeep_->data[1]);
+            gpu->pitch = static_cast<size_t>(hwKeep_->linesize[0]);
+            gpu->index = index;
+        }
+        if (!cpu) {
+            out.desc = FrameDesc{static_cast<uint32_t>(frame_->width), static_cast<uint32_t>(frame_->height), PixelFormat::Yuv420p};
+            out.data.clear();
+            out.index = index;
+            out.pts = pts;
+            av_frame_unref(frame_);
+            return true;
+        }
         av_frame_unref(swFrame_);
         CheckAv(av_hwframe_transfer_data(swFrame_, frame_, 0), "av_hwframe_transfer_data");
-        swFrame_->best_effort_timestamp = frame_->best_effort_timestamp;
-        swFrame_->pts = frame_->pts;
         src = swFrame_;
     }
     ConvertFrame(src, out);
-    out.index = nextIndex_++;
-    out.pts = src->best_effort_timestamp != AV_NOPTS_VALUE ? src->best_effort_timestamp : src->pts;
+    out.index = index;
+    out.pts = pts;
     av_frame_unref(frame_);
     return true;
 }

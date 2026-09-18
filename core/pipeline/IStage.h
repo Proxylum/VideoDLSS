@@ -4,6 +4,7 @@
 #include <string>
 #include <string_view>
 
+#include "gpu/GpuFrame.h"
 #include "pipeline/Frame.h"
 
 namespace dlssvid {
@@ -23,6 +24,7 @@ struct FrameContext {
     CpuFrame& frame;
     D3D12Device& device;
     GpuFrameCache& cache;
+    const GpuFrame* gpu = nullptr;  // NVDEC frame still on the device (nullptr when decoded on the CPU)
 };
 
 class IStage {

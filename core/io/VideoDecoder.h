@@ -5,6 +5,7 @@
 #include <functional>
 #include <string>
 
+#include "gpu/GpuFrame.h"
 #include "pipeline/Frame.h"
 
 struct AVFormatContext;
@@ -41,8 +42,9 @@ struct VideoStreamInfo {
 };
 
 // FFmpeg demuxer + video decoder producing tightly packed YUV420P CpuFrames.
-// With HwAccel::Cuda the stream is decoded by NVDEC and downloaded (NV12 -> YUV420P,
-// bit-exact). Audio packets are handed to the sink untouched for stream copy.
+// With HwAccel::Cuda the stream is decoded by NVDEC; the NV12 frame stays in CUDA memory
+// (primary context) and is exposed as a GpuFrame, and the CPU copy is made only when asked
+// for (bit-exact NV12 -> YUV420P). Audio packets are handed to the sink untouched for stream copy.
 class VideoDecoder {
 public:
     struct Options {
@@ -65,10 +67,13 @@ public:
     void SetAudioPacketSink(AudioPacketSink sink) { audioSink_ = std::move(sink); }
 
     // Next decoded frame in presentation order. Returns false at end of stream.
-    bool NextFrame(CpuFrame& out);
+    // `gpu` (optional): filled with the on-device NV12 frame when decoding with NVDEC; it is
+    // valid until the next NextFrame() call. `cpu = false` skips the device->host copy (the
+    // CpuFrame then only carries index/pts/desc) — only allowed when gpu is requested.
+    bool NextFrame(CpuFrame& out, GpuFrame* gpu = nullptr, bool cpu = true);
 
 private:
-    bool ReceiveFrame(CpuFrame& out);
+    bool ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu);
     void ConvertFrame(AVFrame* frame, CpuFrame& out);
 
     AVFormatContext* fmt_ = nullptr;
@@ -76,6 +81,7 @@ private:
     AVBufferRef* hwDevice_ = nullptr;
     AVFrame* frame_ = nullptr;
     AVFrame* swFrame_ = nullptr;
+    AVFrame* hwKeep_ = nullptr;  // last CUDA frame kept alive for GpuFrame
     AVPacket* packet_ = nullptr;
     SwsContext* sws_ = nullptr;
     int videoStream_ = -1;

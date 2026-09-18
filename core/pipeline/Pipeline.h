@@ -30,7 +30,7 @@ public:
     size_t StageCount() const { return stages_.size(); }
 
     void Init();
-    void ProcessFrame(CpuFrame& frame);
+    void ProcessFrame(CpuFrame& frame, const GpuFrame* gpu = nullptr);
     void Finish();  // after the last frame, before Shutdown
     void Shutdown();
 
