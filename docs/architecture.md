@@ -3,7 +3,7 @@
 Полная целевая архитектура — ТЗ §4 (граф стадий, кэш кадров, контракты). Здесь — то, что
 реализовано, и хаки, которые нужно помнить.
 
-## Состояние после этапа 0
+## Состояние после этапов 0–1
 
 ```
 VideoDecoder ──CpuFrame(YUV420P)──▶ Pipeline ──▶ VideoEncoder
@@ -27,6 +27,27 @@ VideoDecoder ──CpuFrame(YUV420P)──▶ Pipeline ──▶ VideoEncoder
   `D3D12_HEAP_FLAG_SHARED`. Синхронизация пока блокирующая (`cudaDeviceSynchronize` + fence);
   внешние семафоры (`cudaImportExternalSemaphore` ↔ `ID3D12Fence`) — этап 2.
 
+### Слой пассов (этап 1)
+
+```
+PassImage (CPU, interleaved, u8/u16/f16/f32)        core/passes/PassImage.h
+   │  PassKind: color_source, depth_raw, depth_dlss, mv_raw, mv_dlss, mask, color_sr/nr/fg, result
+   ▼
+PassFile  ──▶ formats/ExrIO · PngIO · TiffIO · NpzIO · RawIO   (диспетчер по расширению)
+   ▼
+PassWriter / PassReader  (папка = файлы <pass>_%06d.<ext> + manifest.json)   core/passes/PassSequence.h
+   ▼
+ExportPass / ExportLayeredExr / presets (nuke, comfyui, rawdlss)
+convert/: DepthConvert (raw ↔ reverse-Z), MvConvert (InvertFlow, dilation, scale), ColorConvert (YUV → RGB)
+```
+
+- Пассы живут на CPU (`PassImage`) и на диске; GPU-текстуры пассов добавляются в слот
+  `GpuFrameCache` вместе с первой считающей стадией (этап 2). Дисковый кэш пассов (ТЗ §4) — это
+  те же папки `PassWriter`/`PassReader` в каталоге проекта.
+- Все формулы — `docs/conventions.md`; они реализованы один раз в `core/convert/` и не дублируются в стадиях.
+- `Manifest` — единственный источник геометрии для бинарных дампов и канонических имён каналов;
+  `PassReader::Validate` формулирует несовпадения (разрешение, число кадров, пропуски) одним сообщением.
+
 ## Хаки и временные решения
 
 | Где | Что | Почему | Когда убираем |
@@ -34,6 +55,8 @@ VideoDecoder ──CpuFrame(YUV420P)──▶ Pipeline ──▶ VideoEncoder
 | `VideoDecoder::ReceiveFrame` | NVDEC-кадры скачиваются на CPU (`av_hwframe_transfer_data`) | этап 0 проверяет bit-exact путь, а не производительность | этап 2: NVDEC → CUDA → D3D12 без CPU |
 | `VideoDecoder::ConvertFrame` | не-8-бит-4:2:0 источники → swscale → yuv420p (lossy) | стадии работают в 8-бит 4:2:0 до появления GPU-конверсии | этап 2: RGBA16F на GPU |
 | `PassthroughStage` | round-trip upload → readback каждого кадра | доказательство корректности пути GPU | остаётся как диагностический режим |
+| `MvConvert::InvertFlow` | инверсия flow сплэттингом с округлением до пикселя, дыры — BFS-заполнением | простая детерминированная инверсия без субпиксельного ресемплинга | этап 3: сравнить с backward-warp SEA-RAFT/OFA, при необходимости заменить |
+| `ColorConvert` | хрома 4:2:0 реплицируется (nearest), без интерполяции | детерминизм и обратимость поблочно | этап 2: конверсия YUV → RGB на GPU с настраиваемым фильтром |
 
 Хаки в коде помечаются `// HACK:` (ТЗ §8); эмуляция джиттера для DLSS SR и скрытый swapchain FG
 появятся в этапах 5 и 7 и будут описаны здесь.

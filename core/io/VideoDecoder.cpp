@@ -71,6 +71,8 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     info_.codecName = decoder->name;
     const char* pixName = av_get_pix_fmt_name(static_cast<AVPixelFormat>(vs->codecpar->format));
     info_.pixelFormat = pixName ? pixName : "unknown";
+    info_.colorSpace = static_cast<int>(vs->codecpar->color_space);
+    info_.colorRange = static_cast<int>(vs->codecpar->color_range);
     info_.hasAudio = audioStream_ >= 0;
     if (info_.hasAudio) {
         const AVCodecDescriptor* d = avcodec_descriptor_get(fmt_->streams[audioStream_]->codecpar->codec_id);
