@@ -11,6 +11,8 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# No C++20 modules: skip the per-TU dependency scan (restat step that let a header change slip through in stage 4).
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
@@ -101,8 +103,37 @@ if(DLSSVID_WITH_TENSORRT)
   endif()
 endif()
 
+# ---- Qt GUI (optional) ----
+option(DLSSVID_BUILD_APP "Build the Qt 6 GUI (dlssvid-gui)" ON)
+if(DLSSVID_BUILD_APP)
+  if(DEFINED ENV{QT_ROOT} AND NOT "$ENV{QT_ROOT}" STREQUAL "")
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{QT_ROOT}")
+  endif()
+  find_package(Qt6 6.5 COMPONENTS Widgets Test QUIET)
+  if(NOT Qt6_FOUND)
+    message(WARNING "Qt6 Widgets not found (set QT_ROOT or CMAKE_PREFIX_PATH): building without the GUI")
+    set(DLSSVID_BUILD_APP OFF)
+  else()
+    message(STATUS "Qt ${Qt6_VERSION}: ${Qt6_DIR}")
+    get_target_property(_qmake Qt6::qmake IMPORTED_LOCATION)
+    get_filename_component(DLSSVID_QT_BIN "${_qmake}" DIRECTORY)
+    find_program(DLSSVID_WINDEPLOYQT windeployqt HINTS "${DLSSVID_QT_BIN}")
+    # Copies the Qt runtime (platform plugin, DLLs) next to a target so it runs from the build tree.
+    function(dlssvid_deploy_qt target)
+      if(DLSSVID_WINDEPLOYQT)
+        add_custom_command(TARGET ${target} POST_BUILD
+          COMMAND "${DLSSVID_WINDEPLOYQT}" --no-translations --no-compiler-runtime --no-system-d3d-compiler --no-opengl-sw "$<TARGET_FILE:${target}>"
+          COMMENT "windeployqt ${target}" VERBATIM)
+      endif()
+    endfunction()
+  endif()
+endif()
+
 add_subdirectory(core)
 add_subdirectory(cli)
+if(DLSSVID_BUILD_APP)
+  add_subdirectory(app)
+endif()
 
 if(DLSSVID_BUILD_TESTS)
   enable_testing()

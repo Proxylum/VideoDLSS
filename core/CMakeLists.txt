@@ -1,3 +1,30 @@
+# ---- HLSL -> embedded bytecode headers (DXC, SM 6.0 so WARP can run the tests) ----
+find_package(directx-dxc CONFIG QUIET)
+if(NOT DIRECTX_DXC_TOOL)
+  find_program(DIRECTX_DXC_TOOL dxc.exe HINTS "$ENV{WindowsSdkVerBinPath}x64" "$ENV{WindowsSdkBinPath}$ENV{WindowsSDKVersion}x64")
+endif()
+if(NOT DIRECTX_DXC_TOOL)
+  message(FATAL_ERROR "dxc.exe not found: install the vcpkg port directx-dxc or a Windows SDK with DXC")
+endif()
+message(STATUS "DXC: ${DIRECTX_DXC_TOOL}")
+set(DLSSVID_SHADER_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
+set(DLSSVID_SHADER_HEADERS "")
+function(dlssvid_compile_shader hlsl entry profile var out_name)
+  set(out ${DLSSVID_SHADER_GEN_DIR}/viewport/shaders/${out_name})
+  add_custom_command(
+    OUTPUT ${out}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${DLSSVID_SHADER_GEN_DIR}/viewport/shaders
+    COMMAND ${DIRECTX_DXC_TOOL} -nologo -T ${profile} -E ${entry} -O3 -Qstrip_debug -Qstrip_reflect -Fh ${out} -Vn ${var} ${hlsl}
+    DEPENDS ${hlsl}
+    COMMENT "DXC ${profile} ${hlsl}:${entry}"
+    VERBATIM)
+  set(DLSSVID_SHADER_HEADERS ${DLSSVID_SHADER_HEADERS} ${out} PARENT_SCOPE)
+endfunction()
+dlssvid_compile_shader(${CMAKE_CURRENT_SOURCE_DIR}/viewport/shaders/Composite.hlsl VSMain vs_6_0 g_CompositeVS Composite_vs.h)
+dlssvid_compile_shader(${CMAKE_CURRENT_SOURCE_DIR}/viewport/shaders/Composite.hlsl PSMain ps_6_0 g_CompositePS Composite_ps.h)
+dlssvid_compile_shader(${CMAKE_CURRENT_SOURCE_DIR}/viewport/shaders/Arrows.hlsl VSMain vs_6_0 g_ArrowsVS Arrows_vs.h)
+dlssvid_compile_shader(${CMAKE_CURRENT_SOURCE_DIR}/viewport/shaders/Arrows.hlsl PSMain ps_6_0 g_ArrowsPS Arrows_ps.h)
+
 add_library(dlssvid_core STATIC
   util/Log.h util/Log.cpp
   util/Error.h util/Error.cpp
@@ -29,6 +56,11 @@ add_library(dlssvid_core STATIC
   stages/flow/IFlowEstimator.h
   stages/flow/StubFlowEstimator.h stages/flow/StubFlowEstimator.cpp
   stages/flow/FlowStage.h stages/flow/FlowStage.cpp
+  viewport/ViewportState.h viewport/ViewportState.cpp
+  viewport/ViewportRenderer.h viewport/ViewportRenderer.cpp
+  viewport/FrameStore.h viewport/FrameStore.cpp
+  viewport/Project.h viewport/Project.cpp
+  ${DLSSVID_SHADER_HEADERS}
   ml/ModelRegistry.h ml/ModelRegistry.cpp
   stages/depth/IDepthEstimator.h
   stages/depth/DepthPreprocess.h stages/depth/DepthPreprocess.cpp
@@ -54,7 +86,7 @@ if(DLSSVID_WITH_TENSORRT)
   target_include_directories(dlssvid_core PUBLIC ${TENSORRT_INCLUDE_DIR})
 endif()
 
-target_include_directories(dlssvid_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(dlssvid_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} PRIVATE ${DLSSVID_SHADER_GEN_DIR})
 target_link_libraries(dlssvid_core
   PUBLIC
     dlssvid_settings

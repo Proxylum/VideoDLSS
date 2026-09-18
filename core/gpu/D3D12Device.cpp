@@ -233,4 +233,36 @@ std::vector<uint8_t> D3D12Device::ReadbackTexture2D(ID3D12Resource* src, size_t&
     return out;
 }
 
+std::vector<uint8_t> D3D12Device::ReadbackTexel(ID3D12Resource* src, uint32_t x, uint32_t y, size_t& bytesPerTexelOut) {
+    D3D12_RESOURCE_DESC desc = src->GetDesc();
+    // Footprint of a 1x1 texture of the same format gives the texel size and the padded row.
+    D3D12_RESOURCE_DESC one = desc;
+    one.Width = 1;
+    one.Height = 1;
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    UINT rows = 0;
+    UINT64 rowSize = 0, total = 0;
+    device_->GetCopyableFootprints(&one, 0, 1, 0, &fp, &rows, &rowSize, &total);
+    bytesPerTexelOut = static_cast<size_t>(rowSize);
+    ComPtr<ID3D12Resource> staging = CreateBuffer(std::max<UINT64>(total, 256), D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
+    ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) {
+        const auto toSrc = CD3DX12_RESOURCE_BARRIER::Transition(src, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cl->ResourceBarrier(1, &toSrc);
+        const CD3DX12_TEXTURE_COPY_LOCATION dstLoc(staging.Get(), fp);
+        const CD3DX12_TEXTURE_COPY_LOCATION srcLoc(src, 0);
+        const D3D12_BOX box{x, y, 0, x + 1, y + 1, 1};
+        cl->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &box);
+        const auto toCommon = CD3DX12_RESOURCE_BARRIER::Transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+        cl->ResourceBarrier(1, &toCommon);
+    });
+    std::vector<uint8_t> out(bytesPerTexelOut);
+    void* mapped = nullptr;
+    const CD3DX12_RANGE readRange(0, static_cast<SIZE_T>(total));
+    CheckHr(staging->Map(0, &readRange, &mapped), "Map(readback texel)");
+    std::memcpy(out.data(), static_cast<const uint8_t*>(mapped) + fp.Offset, out.size());
+    const CD3DX12_RANGE noWrite(0, 0);
+    staging->Unmap(0, &noWrite);
+    return out;
+}
+
 }  // namespace dlssvid

@@ -50,6 +50,8 @@ public:
     void UploadTexture2D(ID3D12Resource* dst, const uint8_t* data, size_t srcRowPitch);
     // Returns tightly packed rows (rowPitchOut = bytes per row in the returned vector).
     std::vector<uint8_t> ReadbackTexture2D(ID3D12Resource* src, size_t& rowPitchOut);
+    // One texel of a 2D texture (pixel probe): bytes of the texel in the texture's format.
+    std::vector<uint8_t> ReadbackTexel(ID3D12Resource* src, uint32_t x, uint32_t y, size_t& bytesPerTexelOut);
 
     void ExecuteAndWait(const std::function<void(ID3D12GraphicsCommandList*)>& record);
     void WaitIdle();

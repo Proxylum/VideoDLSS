@@ -30,7 +30,8 @@
       "features": [
         "zip"
       ]
-    }
+    },
+    "directx-dxc"
   ],
   "overrides": [
     {

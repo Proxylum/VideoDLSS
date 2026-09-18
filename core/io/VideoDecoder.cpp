@@ -10,6 +10,8 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#include <cmath>
+
 #include "util/Error.h"
 #include "util/Log.h"
 
@@ -57,6 +59,11 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
         }
     }
 
+    if (!hwDevice_) {
+        // software decoding: frame + slice threads, count chosen by libavcodec (viewport scrubbing at 1080p)
+        codec_->thread_count = 0;
+        codec_->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    }
     CheckAv(avcodec_open2(codec_, decoder, nullptr), "avcodec_open2");
 
     frame_ = av_frame_alloc();
@@ -110,7 +117,6 @@ Rational VideoDecoder::AudioTimeBase() const {
 }
 
 bool VideoDecoder::NextFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
-    if (!cpu && !gpu) Throw("VideoDecoder::NextFrame: cpu=false needs a GpuFrame output");
     if (gpu) *gpu = GpuFrame{};
     if (drained_) return false;
     for (;;) {
@@ -146,8 +152,10 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     }
     CheckAv(err, "avcodec_receive_frame");
 
-    const int64_t index = nextIndex_++;
     const int64_t pts = frame_->best_effort_timestamp != AV_NOPTS_VALUE ? frame_->best_effort_timestamp : frame_->pts;
+    int64_t index = nextIndex_;
+    if (seeked_ && pts != AV_NOPTS_VALUE) index = IndexFromPts(pts);
+    nextIndex_ = index + 1;
     AVFrame* src = frame_;
     if (frame_->format == AV_PIX_FMT_CUDA) {
         if (gpu) {
@@ -174,6 +182,14 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         av_frame_unref(swFrame_);
         CheckAv(av_hwframe_transfer_data(swFrame_, frame_, 0), "av_hwframe_transfer_data");
         src = swFrame_;
+    }
+    if (!cpu) {  // software frame skipped by the caller (seeking): no conversion
+        out.desc = FrameDesc{static_cast<uint32_t>(src->width), static_cast<uint32_t>(src->height), PixelFormat::Yuv420p};
+        out.data.clear();
+        out.index = index;
+        out.pts = pts;
+        av_frame_unref(frame_);
+        return true;
     }
     ConvertFrame(src, out);
     out.index = index;
@@ -213,6 +229,74 @@ void VideoDecoder::ConvertFrame(AVFrame* f, CpuFrame& out) {
     const int dstPitch[3] = {static_cast<int>(out.desc.PlaneWidth(0)), static_cast<int>(out.desc.PlaneWidth(1)),
                              static_cast<int>(out.desc.PlaneWidth(2))};
     sws_scale(sws_, f->data, f->linesize, 0, f->height, dst, dstPitch);
+}
+
+int64_t VideoDecoder::IndexFromPts(int64_t pts) const {
+    if (info_.frameRate.num <= 0 || info_.timeBase.num <= 0) return nextIndex_;
+    const int64_t start = fmt_->streams[videoStream_]->start_time != AV_NOPTS_VALUE ? fmt_->streams[videoStream_]->start_time : 0;
+    const double seconds = static_cast<double>(pts - start) * info_.timeBase.num / info_.timeBase.den;
+    return static_cast<int64_t>(std::llround(seconds * info_.frameRate.num / info_.frameRate.den));
+}
+
+bool VideoDecoder::DiscardFrames(int64_t upTo) {
+    CpuFrame tmp;
+    while (nextIndex_ < upTo) {
+        if (!NextFrame(tmp, nullptr, false)) return false;
+    }
+    return nextIndex_ == upTo;
+}
+
+bool VideoDecoder::SeekToKeyframeBefore(int64_t index) {
+    if (index < 0) return false;
+    if (info_.frameCount > 0 && index >= info_.frameCount) return false;
+    if (info_.frameRate.num <= 0 || info_.timeBase.num <= 0) return false;
+    const int64_t start = fmt_->streams[videoStream_]->start_time != AV_NOPTS_VALUE ? fmt_->streams[videoStream_]->start_time : 0;
+    const AVRational fps{info_.frameRate.num, info_.frameRate.den};
+    const AVRational tb{info_.timeBase.num, info_.timeBase.den};
+    const int64_t target = start + av_rescale_q(index, av_inv_q(fps), tb);
+    if (av_seek_frame(fmt_, videoStream_, target, AVSEEK_FLAG_BACKWARD) < 0) return false;
+    avcodec_flush_buffers(codec_);
+    eofSent_ = false;
+    drained_ = false;
+    seeked_ = true;
+    nextIndex_ = 0;  // replaced by the pts-derived index of the first decoded frame
+    return true;
+}
+
+bool VideoDecoder::SeekToFrame(int64_t index) {
+    if (index < 0) return false;
+    if (info_.frameCount > 0 && index >= info_.frameCount) return false;
+    if (!drained_ && index == nextIndex_) return true;
+    if (!drained_ && index > nextIndex_ && index - nextIndex_ <= 48) return DiscardFrames(index);
+
+    const int64_t start = fmt_->streams[videoStream_]->start_time != AV_NOPTS_VALUE ? fmt_->streams[videoStream_]->start_time : 0;
+    const AVRational fps{info_.frameRate.num, info_.frameRate.den};
+    const AVRational tb{info_.timeBase.num, info_.timeBase.den};
+    auto seekTo = [&](int64_t frameIndex) {
+        const int64_t target = start + av_rescale_q(std::max<int64_t>(frameIndex, 0), av_inv_q(fps), tb);
+        if (av_seek_frame(fmt_, videoStream_, target, AVSEEK_FLAG_BACKWARD) < 0) return false;
+        avcodec_flush_buffers(codec_);
+        eofSent_ = false;
+        drained_ = false;
+        seeked_ = true;
+        nextIndex_ = 0;  // replaced by the pts-derived index of the first decoded frame
+        return true;
+    };
+    // Land on the keyframe at or before the frame preceding `index`, then walk forward.
+    if (!seekTo(index > 0 ? index - 1 : 0)) return false;
+    if (index == 0) return true;
+    CpuFrame tmp;
+    for (;;) {
+        if (!NextFrame(tmp, nullptr, false)) return false;
+        if (tmp.index + 1 == index) return true;  // next NextFrame() yields `index`
+        if (tmp.index >= index) {                  // the demuxer landed late: walk from the start
+            if (av_seek_frame(fmt_, videoStream_, start, AVSEEK_FLAG_BACKWARD) < 0) return false;
+            avcodec_flush_buffers(codec_);
+            eofSent_ = drained_ = false;
+            nextIndex_ = 0;
+            return DiscardFrames(index);
+        }
+    }
 }
 
 }  // namespace dlssvid

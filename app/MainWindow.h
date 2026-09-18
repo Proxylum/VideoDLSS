@@ -1,0 +1,45 @@
+#pragma once
+
+#include <QLabel>
+#include <QMainWindow>
+#include <array>
+
+#include "AppModel.h"
+
+namespace dlssvid {
+
+class ViewportWindow;
+class TimelineWidget;
+class ProjectPanel;
+class InspectorPanel;
+class LogPanel;
+class TaskQueue;
+
+class MainWindow : public QMainWindow {
+    Q_OBJECT
+public:
+    explicit MainWindow(bool warp, QWidget* parent = nullptr);
+    void openPath(const QString& path);
+
+protected:
+    void closeEvent(QCloseEvent*) override;
+
+private:
+    void buildMenus();
+    void updateCellLabels();
+    void saveScreenshot();
+    void selectSource(int hotkey);  // 1..9
+
+    AppModel model_;
+    ViewportWindow* viewport_;
+    QWidget* viewportContainer_;
+    TimelineWidget* timeline_;
+    ProjectPanel* projectPanel_;
+    InspectorPanel* inspector_;
+    LogPanel* log_;
+    TaskQueue* tasks_;
+    std::array<QLabel*, 4> cellLabels_{};
+    QLabel* zoomLabel_;
+};
+
+}  // namespace dlssvid
