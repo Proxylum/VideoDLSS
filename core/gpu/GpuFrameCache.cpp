@@ -1,5 +1,7 @@
 #include "gpu/GpuFrameCache.h"
 
+#include "convert/ColorConvert.h"
+
 #include "util/Error.h"
 
 #ifdef DLSSVID_WITH_CUDA
@@ -122,6 +124,11 @@ void GpuFrameCache::UploadPass(Slot& slot, const std::string& name, const PassIm
     pt.channels = img.channels;
     pt.type = img.type;
     // Repack into the texture layout (pad to 4 channels for colour, convert sample type).
+    if (lay.format == DXGI_FORMAT_R16G16B16A16_FLOAT) {  // colour: vectorised conversion
+        const PassImage rgba = (img.type == PixelType::F16 && img.channels.size() == 4) ? img : ToRgba16f(img);
+        device_.UploadTexture2D(pt.texture.Get(), rgba.data.data(), rgba.RowBytes());
+        return;
+    }
     PassImage staged;
     std::vector<std::string> ch(lay.channels);
     for (size_t c = 0; c < lay.channels; ++c) ch[c] = c < img.channels.size() ? img.channels[c] : (c == 3 ? "A" : "pad");

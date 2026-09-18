@@ -24,7 +24,8 @@ std::filesystem::path Abs(const std::string& s, const std::filesystem::path& bas
 }  // namespace
 
 std::vector<StageEntry> Project::DefaultStages() {
-    return {StageEntry{"depth", true, {{"backend", "da3"}}}, StageEntry{"flow", true, {{"backend", "ofa"}}}};
+    return {StageEntry{"depth", true, {{"backend", "da3"}}}, StageEntry{"flow", true, {{"backend", "ofa"}}},
+            StageEntry{"upscale", true, {{"backend", "rtxvsr"}, {"scale", 2}}}};
 }
 
 Project Project::Create(const std::filesystem::path& sourceVideo, const std::filesystem::path& passesRoot) {

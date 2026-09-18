@@ -133,6 +133,49 @@ PassImage Yuv420pToRgba16f(const CpuFrame& frame, const ColorInfo& info) {
     return out;
 }
 
+void RgbToYuv420p(const PassImage& rgb, const ColorInfo& info, CpuFrame& out) {
+    if (rgb.channels.size() < 3) Throw("RgbToYuv420p: needs an RGB image");
+    const uint32_t w = rgb.width, h = rgb.height;
+    out.Allocate(FrameDesc{w, h, PixelFormat::Yuv420p});
+    const bool full = info.range == ColorRange::Full;
+    const float kr = info.matrix == ColorMatrix::Bt709 ? 0.2126f : 0.299f;
+    const float kb = info.matrix == ColorMatrix::Bt709 ? 0.0722f : 0.114f;
+    const float kg = 1.f - kr - kb;
+    const float scale = rgb.type == PixelType::U8 ? 1.f / 255.f : rgb.type == PixelType::U16 ? 1.f / 65535.f : 1.f;
+    const float yScale = full ? 255.f : 219.f, yOff = full ? 0.f : 16.f, cScale = full ? 255.f : 224.f;
+    uint8_t* Y = out.Plane(0);
+    uint8_t* U = out.Plane(1);
+    uint8_t* V = out.Plane(2);
+    const size_t cw = out.desc.PlaneWidth(1), ch = out.desc.PlaneHeight(1);
+    std::vector<float> cb(static_cast<size_t>(w) * h), cr(static_cast<size_t>(w) * h);
+    auto q = [](float v) { return static_cast<uint8_t>(std::clamp(std::lround(v), 0L, 255L)); };
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x) {
+            const float r = std::clamp(rgb.Get(x, y, 0) * scale, 0.f, 1.f);
+            const float g = std::clamp(rgb.Get(x, y, 1) * scale, 0.f, 1.f);
+            const float b = std::clamp(rgb.Get(x, y, 2) * scale, 0.f, 1.f);
+            const float yy = kr * r + kg * g + kb * b;
+            Y[static_cast<size_t>(y) * w + x] = q(yOff + yScale * yy);
+            cb[static_cast<size_t>(y) * w + x] = (b - yy) / (2.f * (1.f - kb));
+            cr[static_cast<size_t>(y) * w + x] = (r - yy) / (2.f * (1.f - kr));
+        }
+    for (size_t cy = 0; cy < ch; ++cy)
+        for (size_t cx = 0; cx < cw; ++cx) {
+            float sb = 0.f, sr = 0.f;
+            int n = 0;
+            for (uint32_t dy = 0; dy < 2; ++dy)
+                for (uint32_t dx = 0; dx < 2; ++dx) {
+                    const uint32_t x = std::min<uint32_t>(static_cast<uint32_t>(cx * 2 + dx), w - 1);
+                    const uint32_t y = std::min<uint32_t>(static_cast<uint32_t>(cy * 2 + dy), h - 1);
+                    sb += cb[static_cast<size_t>(y) * w + x];
+                    sr += cr[static_cast<size_t>(y) * w + x];
+                    ++n;
+                }
+            U[cy * cw + cx] = q(128.f + cScale * sb / static_cast<float>(n));
+            V[cy * cw + cx] = q(128.f + cScale * sr / static_cast<float>(n));
+        }
+}
+
 PassImage ToRgba16f(const PassImage& img) {
     const uint32_t w = img.width, h = img.height;
     const size_t nc = std::max<size_t>(1, img.channels.size());

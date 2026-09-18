@@ -5,9 +5,13 @@ Offline DLSS video pipeline for Windows + NVIDIA RTX: a video file goes through
 Rendering → DLSS Frame Generation → encode`, every intermediate **pass** (depth, motion
 vectors, masks, colour stages) can be exported, imported and inspected in a viewport.
 
-Current stage: **4 — viewport** (see [docs/plans/04-viewport.md](docs/plans/04-viewport.md); earlier:
+Current stage: **5 — upscale** (see [docs/plans/05-upscale.md](docs/plans/05-upscale.md); earlier:
 [00-skeleton](docs/plans/00-skeleton.md), [01-passes](docs/plans/01-passes.md), [02-depth](docs/plans/02-depth.md),
-[03-motion-vectors](docs/plans/03-motion-vectors.md)). `dlssvid-gui` is a Qt 6.8 shell around a D3D12 viewport
+[03-motion-vectors](docs/plans/03-motion-vectors.md), [04-viewport](docs/plans/04-viewport.md)). `dlssvid upscale`
+produces the `color_sr` pass through one `IUpscaler` interface: DLSS Super Resolution over NGX (with the jitter
+emulation of ТЗ §3), NVIDIA Image Scaling (always available, WARP-capable), a bicubic baseline, and the RTX VSR
+integration point (needs the RTX Video SDK). `dlssvid compare` measures PSNR/SSIM for the A/B of
+[docs/benchmarks.md](docs/benchmarks.md). Stage 4: `dlssvid-gui` is a Qt 6.8 shell around a D3D12 viewport
 that shows the source video and every pass folder in single / overlay / 2x2 modes with colour maps, motion-vector
 and mask displays, a wipe, a pixel probe and a timeline; the viewport state lives in a project file
 (`*.dlssvid.json`) and everything the GUI shows can be rendered from the CLI (`dlssvid render`).
@@ -32,6 +36,8 @@ passes as file sequences + `manifest.json` and the raw ↔ DLSS conventions ([do
 | Optical Flow SDK | headers (`NV_OPTICAL_FLOW_SDK_ROOT`, a checkout of NVIDIA/NVIDIAOpticalFlowSDK) | `nvofapi64.dll` ships with the driver (API 5.0 on 591.86); the public headers are API 2.0 and stay compatible |
 | Qt | 6.8 (msvc2022_64), `QT_ROOT` = `.../Qt/6.8.x/msvc2022_64` | GUI only (`DLSSVID_BUILD_APP`, default ON; skipped with a warning when Qt is not found). `windeployqt` copies the runtime next to the executables |
 | DXC | vcpkg `directx-dxc` (automatic) | the viewport shaders are compiled at build time into headers (SM 6.0, runs on WARP) |
+| DLSS SDK | clone of [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) (`DLSS_SDK_ROOT`): NGX headers, `nvsdk_ngx_d.lib`, `nvngx_dlss.dll` | stage 5 `--backend dlss`; optional (`DLSSVID_WITH_DLSS`). `nvngx_dlss.dll` goes to `bin/nvidia/` next to the executables (the build copies it from the SDK for development) |
+| RTX Video SDK | 1.1 (`RTX_VIDEO_SDK_ROOT`, NVIDIA developer account) | stage 5 `--backend rtxvsr`; not integrated yet — the stage falls back to NIS with an instruction |
 
 NVIDIA SDKs (DLSS/NGX, Streamline, RTX Video, Optical Flow) and Qt are needed from stage 4
 onwards — see [docs/dll-setup.md](docs/dll-setup.md). No NVIDIA binaries or model weights are
@@ -94,6 +100,18 @@ dlssvid render -i input.mp4 --passes passes --bench 60                         :
 dlssvid render --project p.json --frame 10 --source depth_raw --save-state -o x.png   :: write the state back into the project
 ```
 
+Upscale (stage 5): `color_sr` at x1.5 / x2 / x3 (output capped at 3840x2160), depth/MV guides from pass folders or
+from the same pipeline, jitter emulation for DLSS.
+
+```bat
+dlssvid upscale -i input.mp4 -o passes --backend nis --scale 2                         :: NVIDIA Image Scaling (any GPU, WARP)
+dlssvid upscale -i input.mp4 -o passes --backend dlss --scale 2 --depth-dir passes\depth_dlss --mv-dir passes\mv_dlss --preset K
+dlssvid upscale -i input.mp4 -o passes --backend rtxvsr --scale 2                      :: RTX VSR when the SDK is present, else nis + instruction
+dlssvid upscale -i input.mp4 -o passes --backend nis --artifact-reduction-only         :: no scaling (NVSharpen / VSR artifact reduction)
+dlssvid upscale -i input.mp4 -o passes --backend dlss --video sr.mp4 --codec hevc_nvenc  :: plus a preview video (no audio)
+dlssvid compare --ref reference.mp4 --test passes\color_sr --json ab.json              :: PSNR Y/RGB + SSIM per frame
+```
+
 GUI keys: `1`…`9` source, `Ctrl+1/2/3` single / overlay / grid, wheel = zoom to cursor (25–800 %), middle drag = pan,
 `F` fit, `Ctrl+0` 1:1, `W` wipe (left drag moves it), click a 2x2 cell = expand, `Space` play, `,`/`.` step,
 `Ctrl+Shift+S` PNG screenshot with cell labels, `Ctrl+S` save project. Stages are started from the project panel
@@ -109,10 +127,13 @@ core/       gpu/ (D3D12, CUDA interop, frame cache) · io/ (decode, encode) · p
             stages/passthrough · stages/depth (IDepthEstimator, DA3/VDA via TensorRT, worker client, pre/post-processing, DepthStage)
             stages/flow (IFlowEstimator, OfaFlowEstimator via nvofapi, TrtFlowEstimator for SEA-RAFT, FlowStage) · convert/Warp (warp-PSNR, warped TAE)
             viewport/ (ViewportState, ViewportRenderer + shaders/, FrameStore, Project)
-cli/        dlssvid (+ ViewportCommands: project, render)
+            stages/upscale (IUpscaler, DlssUpscaler — NGX, NisUpscaler, BicubicUpscaler / Resampler, RtxVsrUpscaler stub, Jitter, UpscaleStage)
+            gpu/ComputeKernel (compute PSO + descriptor rings) · passes/ImageMetrics (PSNR, SSIM)
+cli/        dlssvid (+ ViewportCommands: project, render; UpscaleCommands: upscale, compare)
 app/        dlssvid-gui — Qt 6.8 Widgets shell (AppModel, ViewportWindow, panels, TaskQueue)
 tests/      unit/ (Catch2, WARP-capable) · integration/ (synthetic clips, CLI as a process) · app/ (Qt offscreen) · golden/ (stage 8)
-docs/       architecture.md · conventions.md · dll-setup.md · plans/
+docs/       architecture.md · conventions.md · dll-setup.md · benchmarks.md · plans/
+third_party/nis/  NVIDIA Image Scaling 1.0.3 (MIT, vendored headers)
 models/     registry.json (models, URLs, hashes, licences) · export/ (ONNX export scripts)
 depth_worker/ worker.py — PyTorch reference backends (da3, vda), icdepth placeholder, stub for tests
 models/     registry.json · export/ (fetch.py, export_da3.py, export_vda.py, loaders) · cache/ (weights, ONNX, engines; git-ignored)
