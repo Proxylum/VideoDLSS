@@ -72,8 +72,22 @@ public:
     // CpuFrame then only carries index/pts/desc) — only allowed when gpu is requested.
     bool NextFrame(CpuFrame& out, GpuFrame* gpu = nullptr, bool cpu = true);
 
+    // Random access: positions the decoder so that the next NextFrame() returns `index`
+    // (assumes a constant frame rate for the pts <-> index mapping). Decoding forward from
+    // the current position is used when the target is close ahead. Returns false when the
+    // frame does not exist.
+    bool SeekToFrame(int64_t index);
+    int64_t NextIndex() const { return nextIndex_; }
+    bool Drained() const { return drained_; }
+    // Positions the demuxer at the keyframe at or before frame `index` and resets the decoder;
+    // the caller walks forward with NextFrame() (frames carry their pts-derived index).
+    // Returns false when the frame does not exist.
+    bool SeekToKeyframeBefore(int64_t index);
+
 private:
     bool ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu);
+    int64_t IndexFromPts(int64_t pts) const;
+    bool DiscardFrames(int64_t upTo);  // decode and drop frames until nextIndex_ == upTo
     void ConvertFrame(AVFrame* frame, CpuFrame& out);
 
     AVFormatContext* fmt_ = nullptr;
@@ -90,6 +104,7 @@ private:
     bool eofSent_ = false;
     bool drained_ = false;
     bool warnedConversion_ = false;
+    bool seeked_ = false;  // indices come from pts after a seek
     VideoStreamInfo info_;
     AudioPacketSink audioSink_;
 };

@@ -3,7 +3,7 @@
 Полная целевая архитектура — ТЗ §4 (граф стадий, кэш кадров, контракты). Здесь — то, что
 реализовано, и хаки, которые нужно помнить.
 
-## Состояние после этапов 0–3
+## Состояние после этапов 0–4
 
 ```
 VideoDecoder ──CpuFrame(YUV420P)──▶ Pipeline ──▶ VideoEncoder
@@ -85,6 +85,33 @@ NVDEC (CUDA NV12, primary context) ──GpuFrame──▶ FlowStage ──▶ I
 - Глубина для окклюзий в `mv_dlss` берётся из папки `depth_raw` (`--depth-dir`) или из слота кэша, если DepthStage
   отработала в том же пайплайне.
 
+
+### Вьюпорт (этап 4)
+
+```
+FrameStore (GPU-кэш кадров)                    ViewportRenderer (один composite-шейдер)
+  ├─ loader-потоки (2–4): пассы через PassReader,   ├─ Composite.hlsl: до 5 слоёв, colormaps, MV HSV/magnitude,
+  │  видео через VideoDecoder (один декодер на       │  маски fill/contour, blend normal/difference/multiply/screen,
+  │  источник, seek к ключевому кадру + проход        │  wipe, checkerboard вне кадра; 2x2 = 4 draw с viewport/scissor
+  │  вперёд, кадры «по пути» из окна префетча        ├─ Arrows.hlsl: инстансированные линии, VS читает MV-текстуру
+  │  сохраняются) → RGBA16F / R32F / RG32F / R8      ├─ swapchain (QWindow) или offscreen RGBA8 (PNG, CLI, тесты)
+  ├─ Update() на render-потоке: upload ≤ N/кадр,      └─ ReadTexel: 1×1 readback для пробника
+  │  LRU-вытеснение по бюджету VRAM вне окна ±prefetch
+  └─ статусы Missing / Queued / Ready
+ViewportState (JSON в проекте) ── Project (*.dlssvid.json: source, passes, result, stages, viewport)
+AppModel (Qt) ── ViewportWindow / панели ── TaskQueue (dlssvid <stage> как процесс, прогресс из "N/M frames")
+```
+
+- Один и тот же путь для GUI и CLI: `dlssvid render` собирает `ViewportState` из проекта и опций, ждёт
+  `FrameStore::WaitForCurrent()` и рендерит offscreen; GUI рендерит в swapchain по таймеру 16 мс и
+  подхватывает кадры по мере готовности (`FrameStore::Update()`).
+- Видео в кэше — CPU-декод (FFmpeg, frame/slice-потоки) → `Yuv420pToRgba16f` (F16C) → upload. На 1080p
+  (RTX 4070 Ti SUPER, Ryzen 7 7700X): холодный скраббинг одного источника 12 мс/кадр (82 fps), сетка 2x2
+  из четырёх 1080p-источников 27 мс/кадр (37 fps), тёплый (кадры в кэше) < 1 мс, случайные прыжки по
+  H.264 с GOP 250 — 40 мс (seek + декод от ключевого кадра); composite сам по себе 0.2–2.5 мс.
+- Проект хранит относительные пути (переносим вместе с папкой), состояние вьюпорта и конфиги стадий;
+  панель проекта запускает `dlssvid depth|flow` с параметрами из JSON стадии.
+
 ## Хаки и временные решения
 
 | Где | Что | Почему | Когда убираем |
@@ -97,6 +124,9 @@ NVDEC (CUDA NV12, primary context) ──GpuFrame──▶ FlowStage ──▶ I
 | `DepthStage`, `TrtFlowEstimator` | препроцессинг/апсемпл/guided filter на CPU; входы TensorRT копируются host→device | модели и контракты проверяются на CPU-пути; шейдерной инфраструктуры ещё нет | этап 4–5: препроцессинг compute-шейдером на общем D3D12-девайсе, вход TensorRT из CUDA-буфера |
 | `FlowStage::Process` | NV12-кадр копируется в собственный device-буфер стадии | декодер отдаёт один и тот же буфер на следующем кадре | этап 4+: кольцо NVDEC-кадров в `GpuFrameCache` |
 | `TemporalAlignmentError` | статичный прокси, если `--mv-dir` не задан | обратная совместимость | — (warp-версия есть) |
+| `FrameStore::LoadVideo` | видео для вьюпорта декодируется на CPU и конвертируется в RGBA16F (`Yuv420pToRgba16f`, F16C) перед upload | NVDEC-кольцо и YUV→RGB на GPU появятся вместе с GPU-препроцессингом этапа 5; CPU-путь укладывается в ≥ 30 fps на 1080p | этап 5: NVDEC → CUDA → D3D12-текстура, конверсия compute-шейдером |
+| `ViewportRenderer::RenderInto` | каждый кадр — `ExecuteAndWait` (синхронный submit) | простота; composite 0.2–2.5 мс, узкое место — загрузка кадров | этап 5+: fence-ринг и несколько кадров в полёте |
+| `ViewportWindow` | подписи ячеек и пробник — виджеты Qt рядом с вьюпортом, в PNG-скриншот их вписывает `QPainter` | Qt не рисует поверх дочернего нативного окна со swapchain | — (по плану этапа 4) |
 
 Хаки в коде помечаются `// HACK:` (ТЗ §8); эмуляция джиттера для DLSS SR и скрытый swapchain FG
 появятся в этапах 5 и 7 и будут описаны здесь.

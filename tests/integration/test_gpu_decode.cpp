@@ -90,7 +90,8 @@ TEST_CASE("GPU frames from NVDEC match the CPU decode and reach D3D12 without a 
     CHECK(gpuOnly.data.empty());
     CHECK(gpuOnly.index == 0);
     CHECK(gpu.Valid());
-    CHECK_THROWS(hw2.NextFrame(gpuOnly, nullptr, false));
+    CHECK(hw2.NextFrame(gpuOnly, nullptr, false));  // skip a frame without any copy
+    CHECK(gpuOnly.index == 1);
 }
 
 #else

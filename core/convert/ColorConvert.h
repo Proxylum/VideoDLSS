@@ -24,4 +24,13 @@ std::string_view ToString(ColorRange r);
 // U16 output = round(v * 65535).
 PassImage Yuv420pToRgb(const CpuFrame& frame, const ColorInfo& info, PixelType outType = PixelType::F16);
 
+// Same conversion straight into the viewport's RGBA16F texture layout (alpha = 1). Bit-identical to
+// Yuv420pToRgb(frame, info, PixelType::F16) plus alpha; uses F16C when the CPU has it.
+PassImage Yuv420pToRgba16f(const CpuFrame& frame, const ColorInfo& info);
+
+// Any colour image (u8/u16/f16/f32, 1..4 channels) -> RGBA16F with integer types scaled to [0,1].
+PassImage ToRgba16f(const PassImage& img);
+// True when the CPU supports the F16C float <-> half instructions (used by the converters above).
+bool HasF16C();
+
 }  // namespace dlssvid

@@ -3,6 +3,8 @@
 
 #include <CLI/CLI.hpp>
 
+#include "ViewportCommands.h"
+
 #include <chrono>
 #include <cstdio>
 #include <string>
@@ -767,6 +769,9 @@ int main(int argc, char** argv) {
     flow->add_flag("--warp", fa.warp, "use the WARP software adapter");
     flow->add_option("--models-dir", fa.modelsDir, "folder with registry.json (default: auto)");
 
+    cli::ViewportCommands viewportCommands;  // project init|show, render (stage 4)
+    viewportCommands.Register(app);
+
     std::string modelsAction = "list", modelsId, modelsDir;
     auto* models = app.add_subcommand("models", "list or fetch models from models/registry.json");
     models->add_option("action", modelsAction, "list | fetch")->default_val("list");
@@ -789,6 +794,7 @@ int main(int argc, char** argv) {
         if (depth->parsed()) return CmdDepth(da);
         if (flow->parsed()) return CmdFlow(fa);
         if (models->parsed()) return CmdModels(modelsAction, modelsId, modelsDir);
+        if (const int rc = viewportCommands.Dispatch(); rc >= 0) return rc;
     } catch (const std::exception& e) {
         Log()->error("{}", e.what());
         return 1;

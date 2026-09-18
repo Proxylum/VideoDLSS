@@ -14,6 +14,7 @@
         "CUDAToolkit_ROOT": "$env{CUDA_PATH_V12_4}",
         "TENSORRT_INCLUDE_DIR": "$env{TENSORRT_ROOT}/include",
         "NV_OPTICAL_FLOW_SDK_INCLUDE_DIR": "$env{NV_OPTICAL_FLOW_SDK_ROOT}",
+        "CMAKE_PREFIX_PATH": "$env{QT_ROOT}",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       },
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
