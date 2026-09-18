@@ -12,6 +12,7 @@
         "VCPKG_TARGET_TRIPLET": "x64-windows",
         "VCPKG_HOST_TRIPLET": "x64-windows",
         "CUDAToolkit_ROOT": "$env{CUDA_PATH_V12_4}",
+        "TENSORRT_INCLUDE_DIR": "$env{TENSORRT_ROOT}/include",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
       },
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }

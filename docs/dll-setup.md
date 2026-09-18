@@ -13,11 +13,22 @@
 | `STREAMLINE_ROOT` | клон [NVIDIAGameWorks/Streamline](https://github.com/NVIDIAGameWorks/Streamline) | 7 |
 | `RTX_VIDEO_SDK_ROOT` | RTX Video SDK 1.1 (developer.nvidia.com, требует аккаунт) | 5 |
 | `NV_OPTICAL_FLOW_SDK_ROOT` | клон [NVIDIA/NVIDIAOpticalFlowSDK](https://github.com/NVIDIA/NVIDIAOpticalFlowSDK) (заголовки) | 3 |
-| `TENSORRT_ROOT` | TensorRT 10.x (заголовки из OSS-репозитория NVIDIA/TensorRT + библиотеки из pip `tensorrt-cu12-libs` или zip с developer.nvidia.com) | 2 |
+| `TENSORRT_ROOT` | заголовки TensorRT 10.16: checkout `NVIDIA/TensorRT` тега `v10.16` (`include/`) или SDK zip. DLL (`nvinfer_10.dll`, `nvonnxparser_10.dll`) берутся в рантайме из `models/export/.venv/Lib/site-packages/tensorrt_libs` (pip `tensorrt-cu12==10.16.1.11`), либо из `DLSSVID_TENSORRT_DIR` / `TENSORRT_ROOT/lib` | 2 |
+| `DLSSVID_PYTHON` | интерпретатор для `depth_worker` и ONNX-экспорта (по умолчанию `models/export/.venv/Scripts/python.exe`) | 2 |
+| `VDA_REPO` | checkout `DepthAnything/Video-Depth-Anything` (код VDA не является pip-пакетом; по умолчанию `D:\SDK\models\Video-Depth-Anything`) | 2 |
+| `HF_TOKEN` | необязательно: токен HuggingFace для быстрой загрузки весов | 2 |
 | `QT_ROOT` / `CMAKE_PREFIX_PATH` | Qt 6.8 msvc2022_64 | 4 |
 
 Пример раскладки на машине разработки: `D:\SDK\DLSS`, `D:\SDK\Streamline`, `D:\SDK\OpticalFlowSDK`,
-`D:\SDK\Qt\6.8.3\msvc2022_64`, `D:\SDK\dlssnr-patcher`.
+`D:\SDK\Qt\6.8.3\msvc2022_64`, `D:\SDK\dlssnr-patcher`, `D:\SDK\TensorRT` (заголовки v10.16),
+`D:\SDK\models\Depth-Anything-3`, `D:\SDK\models\Video-Depth-Anything`.
+
+## Модели глубины (этап 2)
+
+Веса не входят в репозиторий: `models/registry.json` перечисляет id, источник на HuggingFace и лицензию;
+`models/export/fetch.py` (или первый запуск `dlssvid depth`) скачивает их в `models/cache/`, экспортирует ONNX под
+геометрию входа и собирает TensorRT-engine (`*.engine`, кэш рядом). Лицензии: DA3 metric/mono и VDA-Small —
+Apache-2.0; VDA-Large — CC-BY-NC-4.0 (только исследования). ICDepth — публичного кода нет (2026-09-18).
 
 ## DLL в `bin/nvidia/`
 

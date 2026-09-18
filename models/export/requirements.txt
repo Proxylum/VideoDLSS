@@ -1,0 +1,16 @@
+# Shared environment for models/export (ONNX export) and depth_worker (PyTorch reference path).
+# Install with a CUDA build of torch:
+#   python -m venv .venv && .venv\Scripts\pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+#   .venv\Scripts\pip install -r requirements.txt
+tensorrt-cu12==10.16.1.11
+onnx>=1.17
+onnxruntime-gpu>=1.20
+onnxscript
+huggingface_hub>=0.30
+safetensors
+numpy
+pillow
+opencv-python-headless
+einops
+timm
+pytest
