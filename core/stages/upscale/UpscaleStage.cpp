@@ -250,7 +250,7 @@ void UpscaleStage::Shutdown() {
     initialized_ = false;
 }
 
-UpscaleRunResult RunUpscale(VideoDecoder& decoder, D3D12Device& device, UpscaleStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress) {
+UpscaleRunResult RunUpscale(VideoDecoder& decoder, D3D12Device& device, UpscaleStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params) {
     const auto& info = decoder.Info();
     options.color = ColorInfoFromStream(info);
     options.fps = info.frameRate;
@@ -258,7 +258,10 @@ UpscaleRunResult RunUpscale(VideoDecoder& decoder, D3D12Device& device, UpscaleS
     Pipeline pipeline(device, 4);
     auto stage = std::make_unique<UpscaleStage>(options);
     UpscaleStage* raw = stage.get();
-    pipeline.AddStage(std::move(stage));
+    StageConfig cfg;
+    cfg.name = "upscale";
+    cfg.params = params;
+    pipeline.AddStage(std::move(stage), cfg);
     pipeline.Init();
     CpuFrame frame;
     int64_t n = 0;

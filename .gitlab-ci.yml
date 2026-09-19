@@ -1,0 +1,37 @@
+# GitLab CI on a self-hosted Windows runner with an NVIDIA RTX GPU (shell executor, tags: windows, rtx).
+# Runner setup, environment variables and the NVIDIA DLLs the runner needs: docs/ci.md.
+stages: [build, package]
+
+default:
+  tags: [windows, rtx]
+
+variables:
+  GIT_DEPTH: "50"
+  DLSSVID_PRESET: release
+
+build-test:
+  stage: build
+  script:
+    - cmd /c scripts\ci-build.cmd
+  artifacts:
+    when: always
+    paths:
+      - build/release/test-report.xml
+      - build/release/Testing/Temporary/LastTest.log
+    reports:
+      junit: build/release/test-report.xml
+    expire_in: 1 week
+
+package:
+  stage: package
+  needs: [build-test]
+  script:
+    - cmd /c scripts\package.cmd
+  artifacts:
+    paths:
+      - build/release/dlss-video-*.zip
+      - build/release/dlss-video-*.exe
+    expire_in: 1 month
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_TAG

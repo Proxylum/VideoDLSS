@@ -1,0 +1,48 @@
+{
+  "channels": [
+    "R",
+    "G",
+    "B"
+  ],
+  "colorspace": "srgb",
+  "convention": "raw",
+  "depth": {
+    "far": 1000.0,
+    "max": 0.0,
+    "min": 0.0,
+    "near": 0.10000000149011612,
+    "relative": false,
+    "units": "meters"
+  },
+  "file_pattern": "color_nr_%06d.exr",
+  "format": "exr",
+  "fps": {
+    "den": 1,
+    "num": 0
+  },
+  "frame_count": 1,
+  "frame_range": {
+    "first": 0,
+    "last": 0
+  },
+  "height": 108,
+  "model": {
+    "name": "",
+    "version": ""
+  },
+  "mv": {
+    "direction": "forward",
+    "ref_height": 0,
+    "ref_width": 0,
+    "y_up": false
+  },
+  "pass": "color_nr",
+  "pixel_type": "f16",
+  "schema_version": 1,
+  "source": {
+    "file": "",
+    "hash": ""
+  },
+  "stage_params": {},
+  "width": 192
+}

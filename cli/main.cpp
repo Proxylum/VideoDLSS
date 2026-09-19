@@ -4,6 +4,7 @@
 #include <CLI/CLI.hpp>
 
 #include "FgCommands.h"
+#include "ProcessCommands.h"
 #include "NrCommands.h"
 #include "UpscaleCommands.h"
 #include "ViewportCommands.h"
@@ -20,7 +21,6 @@
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
 #include "pipeline/Pipeline.h"
-#include "stages/passthrough/PassthroughStage.h"
 #include "ml/ModelRegistry.h"
 #include "stages/depth/DepthStage.h"
 #include "stages/flow/FlowStage.h"
@@ -302,61 +302,6 @@ int CmdModels(const std::string& action, const std::string& id, const std::strin
         return 0;
     }
     Throw("models: action must be list|fetch");
-}
-
-// ---- process --------------------------------------------------------------------------------
-
-struct ProcessArgs {
-    std::string input;
-    std::string output;
-    bool passthrough = false;
-    std::string codec = "h264_nvenc";
-    std::vector<std::string> codecOptions;  // key=value
-    std::string hwaccel = "none";
-    int64_t frames = -1;
-    bool warp = false;
-    bool noGpuRoundTrip = false;
-};
-
-int CmdProcess(const ProcessArgs& a) {
-    if (!a.passthrough) {
-        Log()->error("only --passthrough is implemented so far (SR/NR/FG stages arrive in stages 5-7)");
-        return 2;
-    }
-    VideoDecoder::Options dopt;
-    if (a.hwaccel == "cuda") dopt.hwaccel = HwAccel::Cuda;
-    else if (a.hwaccel != "none") Throw("--hwaccel must be none|cuda");
-
-    VideoDecoder decoder(a.input, dopt);
-    const auto& info = decoder.Info();
-
-    VideoEncoder::Options eopt;
-    eopt.codec = a.codec;
-    eopt.frameRate = info.frameRate;
-    eopt.timeBase = info.timeBase;
-    for (const auto& kv : a.codecOptions) {
-        const auto eq = kv.find('=');
-        if (eq == std::string::npos) Throw("--codec-opt expects key=value, got: " + kv);
-        eopt.codecOptions[kv.substr(0, eq)] = kv.substr(eq + 1);
-    }
-    VideoEncoder encoder(a.output, FrameDesc{info.width, info.height, PixelFormat::Yuv420p}, eopt);
-
-    D3D12Device device({a.warp, false});
-    Pipeline pipeline(device, 4);
-    StageConfig cfg;
-    cfg.name = "passthrough";
-    cfg.params["gpu_roundtrip"] = !a.noGpuRoundTrip;
-    pipeline.AddStage(std::make_unique<PassthroughStage>(), cfg);
-    pipeline.Init();
-
-    const int64_t total = a.frames > 0 ? a.frames : info.frameCount;
-    const RunStats stats = RunPipeline(pipeline, decoder, encoder, [total](int64_t n) { PrintProgress(n, total); }, a.frames);
-    std::fprintf(stderr, "\n");
-    pipeline.Shutdown();
-
-    Log()->info("done: {} frames in {:.2f} s ({:.1f} fps)", stats.framesOut, stats.seconds,
-                stats.seconds > 0 ? stats.framesOut / stats.seconds : 0.0);
-    return 0;
 }
 
 // ---- export ---------------------------------------------------------------------------------
@@ -685,17 +630,8 @@ int main(int argc, char** argv) {
     info->add_option("input", infoInput, "input video file")->required()->check(CLI::ExistingFile);
     info->add_flag("--warp", infoWarp, "use the WARP software adapter");
 
-    ProcessArgs pa;
-    auto* process = app.add_subcommand("process", "run the pipeline on a video file");
-    process->add_option("-i,--input", pa.input, "input video file")->required()->check(CLI::ExistingFile);
-    process->add_option("-o,--output", pa.output, "output video file (container by extension)")->required();
-    process->add_flag("--passthrough", pa.passthrough, "decode -> GPU -> encode without processing");
-    process->add_option("--codec", pa.codec, "video encoder: h264_nvenc | hevc_nvenc | av1_nvenc | ffv1")->default_val("h264_nvenc");
-    process->add_option("--codec-opt", pa.codecOptions, "encoder private option key=value (repeatable)");
-    process->add_option("--hwaccel", pa.hwaccel, "decoder hardware acceleration: none | cuda")->default_val("none");
-    process->add_option("--frames", pa.frames, "process at most N frames")->default_val(-1);
-    process->add_flag("--warp", pa.warp, "use the WARP software adapter");
-    process->add_flag("--no-gpu-roundtrip", pa.noGpuRoundTrip, "skip the GPU upload/readback in passthrough");
+    cli::ProcessCommands processCommands;  // process (the whole pipeline), bench (stage 8)
+    processCommands.Register(app);
 
     ExportArgs ea;
     auto* exp = app.add_subcommand("export", "export a pass as a file sequence + manifest.json");
@@ -796,7 +732,7 @@ int main(int argc, char** argv) {
 
     try {
         if (info->parsed()) return CmdInfo(infoInput, infoWarp);
-        if (process->parsed()) return CmdProcess(pa);
+        if (const int rc = processCommands.Dispatch(); rc >= 0) return rc;
         if (exp->parsed()) return CmdExport(ea);
         if (imp->parsed()) return CmdImport(ia);
         if (conv->parsed()) return CmdConvert(ca);

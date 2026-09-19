@@ -99,7 +99,26 @@ void ProjectPanel::refresh() {
         }
         tree_->setItemWidget(item, 2, row);
     }
+    resultItem_ = new QTreeWidgetItem(tree_, {tr("Результат"), p.resultVideo.empty() ? tr("не задан") : QString::fromStdWString(p.resultVideo.filename().wstring()), ""});
+    auto* processButton = new QPushButton(tr("Обработать → result"), tree_);
+    processButton->setToolTip(tr("Сохранить проект и прогнать весь пайплайн (dlssvid process --project): готовые пассы переиспользуются, результат — видео с аудио"));
+    processButton->setEnabled(!p.sourceVideo.empty());
+    connect(processButton, &QPushButton::clicked, this, &ProjectPanel::processAll);
+    tree_->setItemWidget(resultItem_, 2, processButton);
     tree_->expandAll();
+}
+
+void ProjectPanel::processAll() {
+    Project& p = model_.project();
+    if (p.sourceVideo.empty()) return;
+    if (p.resultVideo.empty()) p.resultVideo = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + "_result.mp4");
+    if (p.file.empty()) {
+        const auto file = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + ".dlssvid.json");
+        if (!model_.saveProjectAs(QString::fromStdWString(file.wstring()))) return;
+    } else if (!model_.saveProject()) {
+        return;
+    }
+    tasks_.enqueue(tr("process"), model_.cliPath(), {"process", "--project", QString::fromStdWString(model_.project().file.wstring()), "--disable-unavailable"});
 }
 
 void ProjectPanel::runStage(int index) {

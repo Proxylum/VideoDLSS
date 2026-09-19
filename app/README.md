@@ -11,7 +11,7 @@
 | `AppModel` | project + viewport state + FrameStore + playback timer; the panels only talk to it |
 | `ViewportWindow` | `QWindow` with its own DXGI swapchain on the pipeline's device: zoom/pan, wipe drag, probe, cell click |
 | `TimelineWidget` | scrubber, frame number, play/pause, ±1 |
-| `ProjectPanel` | source, passes with status, stages with enable/params and «Запустить» (CLI via `TaskQueue`); the `nr` stage adds «Пропатчить DLL…» — picks your `nvngx_dlssnr.dll` (and the patcher / CUDA 13.3 folders when `DLSSNR_PATCHER_ROOT` / `CUDA_PATH_V13_3` are unset) and queues `dlssvid nr-patch` (stage 6) |
+| `ProjectPanel` | source, passes with status, stages with enable/params and «Запустить» (CLI via `TaskQueue`); «Обработать → result» saves the project and runs `dlssvid process --project` (stage 8); the `nr` stage adds «Пропатчить DLL…» — picks your `nvngx_dlssnr.dll` (and the patcher / CUDA 13.3 folders when `DLSSNR_PATCHER_ROOT` / `CUDA_PATH_V13_3` are unset) and queues `dlssvid nr-patch` (stage 6) |
 | `InspectorPanel` | layer stack and display settings, wipe, grid cell sources, pixel probe |
 | `TaskQueue` | sequential `dlssvid <stage>` processes with progress parsed from `N/M frames` |
 | `LogPanel` | spdlog sink |

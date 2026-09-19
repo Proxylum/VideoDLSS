@@ -5,10 +5,14 @@ Offline DLSS video pipeline for Windows + NVIDIA RTX: a video file goes through
 Rendering → DLSS Frame Generation → encode`, every intermediate **pass** (depth, motion
 vectors, masks, colour stages) can be exported, imported and inspected in a viewport.
 
-Current stage: **7 — frame generation** (see [docs/plans/07-fg.md](docs/plans/07-fg.md); earlier:
+Current stage: **8 — release** (see [docs/plans/08-release.md](docs/plans/08-release.md); earlier:
 [00-skeleton](docs/plans/00-skeleton.md), [01-passes](docs/plans/01-passes.md), [02-depth](docs/plans/02-depth.md),
 [03-motion-vectors](docs/plans/03-motion-vectors.md), [04-viewport](docs/plans/04-viewport.md),
-[05-upscale](docs/plans/05-upscale.md), [06-nr](docs/plans/06-nr.md)). `dlssvid fg` doubles (x2..x4) the frame rate into
+[05-upscale](docs/plans/05-upscale.md), [06-nr](docs/plans/06-nr.md), [07-fg](docs/plans/07-fg.md)). `dlssvid process` runs the
+whole pipeline over the pass cache (depth → flow → upscale → nr → fg, complete passes are reused) and encodes the result
+with the source audio; `dlssvid bench` prints ms/frame per stage; golden tests (`dlssvid_golden_tests`) check the pipeline
+against stored reference frames, also on an installed copy; the package is built with CPack ([docs/release.md](docs/release.md)),
+CI runs on a self-hosted RTX runner ([docs/ci.md](docs/ci.md)). Stage 7: `dlssvid fg` doubles (x2..x4) the frame rate into
 `color_fg`: DLSS Frame Generation through the NGX API of the DLSS SDK (no swapchain, no Streamline — the current frame,
 `depth_dlss` and `mv_dlss` go in as textures, the interpolated frame comes out), RIFE 4.9 through TensorRT as the
 baseline, and a naive blend; the generated frames are scored against ground truth (a half-rate clip) in
@@ -146,6 +150,18 @@ dlssvid fg -i input.mp4 -o passes --backend blend --warp                        
 dlssvid compare --ref full_rate.mp4 --test passes\color_fg --start 1 --step 2         :: generated frames only, against the dropped originals
 ```
 
+The whole pipeline (stage 8): stages run one after another over the pass cache, a complete pass is reused, the last
+colour pass is encoded with the audio copied from the source. Stage parameters are the project's JSON keys.
+
+```bat
+dlssvid process -i input.mp4 -o result.mp4                                            :: depth -> flow -> upscale x2 -> nr -> fg x2 -> encode (+ audio)
+dlssvid process --project clip.dlssvid.json                                           :: the stages and parameters the GUI saved (button «Обработать → result»)
+dlssvid process -i input.mp4 -o result.mp4 --stages upscale,fg --scale 1.5 --multiplier 2 --param fg.backend=rife
+dlssvid process -i input.mp4 -o result.mp4 --no-skip-existing --disable-unavailable   :: recompute everything; skip nr / fg without a DLL
+dlssvid bench -i input.mp4 --frames 30 --json bench.json                              :: ms/frame per stage (ТЗ §9)
+dlssvid process -i input.mp4 -o out.mp4 --passthrough --codec ffv1                    :: stage 0: decode -> GPU -> encode
+```
+
 GUI keys: `1`…`9` source, `Ctrl+1/2/3` single / overlay / grid, wheel = zoom to cursor (25–800 %), middle drag = pan,
 `F` fit, `Ctrl+0` 1:1, `W` wipe (left drag moves it), click a 2x2 cell = expand, `Space` play, `,`/`.` step,
 `Ctrl+Shift+S` PNG screenshot with cell labels, `Ctrl+S` save project. Stages are started from the project panel
@@ -164,13 +180,15 @@ core/       gpu/ (D3D12, CUDA interop, frame cache) · io/ (decode, encode) · p
             viewport/ (ViewportState, ViewportRenderer + shaders/, FrameStore, Project)
             stages/upscale (IUpscaler, DlssUpscaler — NGX, NisUpscaler, BicubicUpscaler / Resampler, RtxVsrUpscaler stub, Jitter, UpscaleStage)
             gpu/ComputeKernel (compute PSO + descriptor rings) · passes/ImageMetrics (PSNR, SSIM) · gpu/Ngx (NGX core, shared by DLSS SR and NR)
+            pipeline/ProcessRunner (the whole pipeline over the pass cache + encode with audio; `process`, `bench`)
             stages/tonemap (Tonemapper: passthrough / ACES / Reinhard, sRGB / linear / PQ / HLG in)
             stages/nr (INrBackend, NgxNrBackend — NGX Feature 18 + forwarder/ nvngx.dll_dlssvid.dll, StubNrBackend, NrCompose — resolve / masks / temporal, NrStage, NrPatch)
             stages/fg (IFrameGenerator, DlssgFrameGenerator — NGX Frame Generation, RifeFrameGenerator — TensorRT, BlendFrameGenerator, FgStage)
-cli/        dlssvid (+ ViewportCommands: project, render; UpscaleCommands: upscale, compare; NrCommands: nr, nr-patch; FgCommands: fg)
+cli/        dlssvid (+ ViewportCommands: project, render; UpscaleCommands: upscale, compare; NrCommands: nr, nr-patch; FgCommands: fg; ProcessCommands: process, bench)
 app/        dlssvid-gui — Qt 6.8 Widgets shell (AppModel, ViewportWindow, panels, TaskQueue)
-tests/      unit/ (Catch2, WARP-capable) · integration/ (synthetic clips, CLI as a process) · app/ (Qt offscreen) · golden/ (stage 8)
-docs/       architecture.md · conventions.md · dll-setup.md · benchmarks.md · plans/
+tests/      unit/ (Catch2, WARP-capable) · integration/ (synthetic clips, CLI as a process) · app/ (Qt offscreen) · golden/ (the pipeline vs stored references, also for an installed copy) · check_ninja_deps.cmake (build hygiene)
+docs/       architecture.md · conventions.md · dll-setup.md · benchmarks.md · release.md · ci.md · plans/
+scripts/    ci-build.cmd (configure, build, tests), package.cmd (CPack ZIP / NSIS)
 third_party/nis/  NVIDIA Image Scaling 1.0.3 (MIT, vendored headers)
 models/     registry.json (models, URLs, hashes, licences) · export/ (ONNX export scripts)
 depth_worker/ worker.py — PyTorch reference backends (da3, vda), icdepth placeholder, stub for tests

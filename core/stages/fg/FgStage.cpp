@@ -270,14 +270,17 @@ void FgStage::Shutdown() {
     setup_ = false;
 }
 
-FgRunResult RunFg(VideoDecoder& decoder, D3D12Device& device, FgStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress) {
+FgRunResult RunFg(VideoDecoder& decoder, D3D12Device& device, FgStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params) {
     const auto& info = decoder.Info();
     options.color = ColorInfoFromStream(info);
     options.fps = info.frameRate;
     Pipeline pipeline(device, 4);
     auto stage = std::make_unique<FgStage>(options);
     FgStage* raw = stage.get();
-    pipeline.AddStage(std::move(stage));
+    StageConfig cfg;
+    cfg.name = "fg";
+    cfg.params = params;
+    pipeline.AddStage(std::move(stage), cfg);
     pipeline.Init();
     CpuFrame frame;
     int64_t n = 0;
