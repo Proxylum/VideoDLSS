@@ -55,9 +55,9 @@ TEST_CASE("dlssvid process --frames limits the run", "[integration][cli]") {
     CHECK(DecodeAll(out).size() == 4);
 }
 
-TEST_CASE("dlssvid process without --passthrough is rejected in stage 0", "[integration][cli]") {
+TEST_CASE("dlssvid process rejects an unknown stage (the full pipeline arrived in stage 8)", "[integration][cli]") {
     ClipSpec spec;
     spec.frames = 2;
     const auto in = WriteClip(TempDir() / "cli_reject_in.mkv", spec);
-    CHECK(Run("process --codec ffv1 -i \"" + in.string() + "\" -o \"" + (TempDir() / "cli_reject_out.mkv").string() + "\"") != 0);
+    CHECK(Run("process --codec ffv1 --warp --stages bogus -i \"" + in.string() + "\" -o \"" + (TempDir() / "cli_reject_out.mkv").string() + "\"") != 0);
 }

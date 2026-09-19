@@ -1,0 +1,37 @@
+{
+  "_comment": "Golden expectations for tests/golden/test_golden.cpp: a deterministic synthetic clip through the CLI with the deterministic backends on WARP; reference frames in ref/<pass>_<idx>/ (DLSSVID_GOLDEN_UPDATE=1 rewrites them).",
+  "clip": { "width": 96, "height": 54, "frames": 6, "fps": 24, "audio": true },
+  "stages": [
+    "depth.backend=stub",
+    "flow.backend=stub",
+    "upscale.backend=nis",
+    "upscale.scale=2",
+    "nr.backend=stub",
+    "nr.intensity=1.5",
+    "fg.backend=blend",
+    "fg.multiplier=2"
+  ],
+  "passes": {
+    "depth_raw": { "frames": 6, "width": 96, "height": 54 },
+    "depth_dlss": { "frames": 6, "width": 96, "height": 54 },
+    "mv_raw": { "frames": 6, "width": 96, "height": 54 },
+    "mv_dlss": { "frames": 6, "width": 96, "height": 54 },
+    "color_sr": { "frames": 6, "width": 192, "height": 108 },
+    "color_nr": { "frames": 6, "width": 192, "height": 108 },
+    "color_fg": { "frames": 11, "width": 192, "height": 108, "fps": 48.0 }
+  },
+  "result": { "frames": 11, "fps": 48.0, "audio": true },
+  "reference_frames": [
+    ["color_sr", 3],
+    ["color_nr", 3],
+    ["color_fg", 6],
+    ["color_fg", 7],
+    ["depth_dlss", 2],
+    ["mv_dlss", 2]
+  ],
+  "psnr_min_db": 45.0,
+  "guide_max_abs": 0.0001,
+  "gpu": {
+    "clip": { "width": 1280, "height": 720, "frames": 4 }
+  }
+}

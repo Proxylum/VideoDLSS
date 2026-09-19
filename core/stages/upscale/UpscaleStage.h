@@ -96,6 +96,7 @@ struct UpscaleRunResult {
     nlohmann::json upscaler;
 };
 UpscaleRunResult RunUpscale(VideoDecoder& decoder, D3D12Device& device, UpscaleStageOptions options, int64_t maxFrames = -1,
-                            const std::function<void(int64_t)>& progress = {});
+                            const std::function<void(int64_t)>& progress = {},
+           const nlohmann::json& params = nlohmann::json::object());
 
 }  // namespace dlssvid

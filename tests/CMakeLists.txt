@@ -58,6 +58,8 @@ add_executable(dlssvid_integration_tests
   integration/test_cli_nr.cpp
   integration/test_fg_stage.cpp
   integration/test_cli_fg.cpp
+  integration/test_process.cpp
+  integration/test_cli_process.cpp
 )
 target_link_libraries(dlssvid_integration_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 target_compile_definitions(dlssvid_integration_tests PRIVATE
@@ -93,4 +95,22 @@ if(DLSSVID_BUILD_APP)
   set_tests_properties(app.platform_plugin_missing_fails_fast PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=nonexistent" TIMEOUT 60
     PASS_REGULAR_EXPRESSION "platform plugin qnonexistent.dll not found")
+endif()
+
+# ---- Golden tests (stage 8): the whole pipeline through the CLI against stored reference frames; runs against
+# the build tree or, with DLSSVID_CLI / DLSSVID_GOLDEN_DIR, against an installed copy (docs/release.md) ----
+add_executable(dlssvid_golden_tests golden/test_golden.cpp integration/TestClips.h integration/TestClips.cpp)
+target_include_directories(dlssvid_golden_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/integration)
+target_link_libraries(dlssvid_golden_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
+target_compile_definitions(dlssvid_golden_tests PRIVATE
+  DLSSVID_CLI_PATH="$<TARGET_FILE:dlssvid>"
+  DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
+  DLSSVID_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden")
+add_dependencies(dlssvid_golden_tests dlssvid)
+catch_discover_tests(dlssvid_golden_tests TEST_PREFIX "golden." DISCOVERY_MODE PRE_TEST PROPERTIES LABELS golden)
+
+# ---- build hygiene: ninja must have recorded header dependencies for every C++ object (stale-object incident) ----
+if(CMAKE_GENERATOR MATCHES "Ninja")
+  add_test(NAME build.ninja_header_deps
+    COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DNINJA=${CMAKE_MAKE_PROGRAM} -P ${CMAKE_SOURCE_DIR}/tests/check_ninja_deps.cmake)
 endif()

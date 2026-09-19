@@ -11,9 +11,24 @@ endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-# No C++20 modules: skip the per-TU dependency scan (restat step that let a header change slip through in stage 4).
+# No C++20 modules: skip the per-TU dependency scan (kept off; the stage-4 stale-object incident turned out to be the localized /showIncludes prefix, see below).
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Header dependency tracking with Ninja + MSVC relies on the /showIncludes prefix CMake detects at configure time and
+# writes into rules.ninja as UTF-8. A localized compiler (Russian Visual Studio, no English language pack) prints that
+# prefix in the console code page (866), the bytes never match, ninja records NO header dependencies for the object
+# (`ninja -t deps` shows "#deps 0") and objects silently survive header changes (incident: stages 4 and 8; the
+# stage-4 guess "module scan" below was wrong). Cure: build with the console at code page 65001 (scripts/*.cmd and the
+# scratch helper do `chcp 65001`) or install the English language pack (then VSLANG=1033 from the presets makes the
+# prefix ASCII). tests/check_ninja_deps.cmake (ctest build.ninja_header_deps) fails when any object lacks dependencies.
+if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja" AND DEFINED CMAKE_CXX_CL_SHOWINCLUDES_PREFIX)
+  string(REGEX MATCH "[^\t -~]" DLSSVID_NONASCII_PREFIX "${CMAKE_CXX_CL_SHOWINCLUDES_PREFIX}")
+  if(DLSSVID_NONASCII_PREFIX)
+    message(WARNING "MSVC /showIncludes prefix is localized: build with the console at code page 65001 (chcp 65001, as scripts/ci-build.cmd does) "
+      "or install the English language pack for Visual Studio; otherwise ninja tracks no header dependencies (ctest build.ninja_header_deps).")
+  endif()
+endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 option(DLSSVID_BUILD_TESTS "Build unit and integration tests" ON)
@@ -161,3 +176,37 @@ if(DLSSVID_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
+# ---- stage 8: install layout and the package (docs/release.md) ------------------------------------------------
+# Everything the executables need already sits in build/<preset>/bin (vcpkg DLLs, windeployqt output, DXC);
+# NVIDIA binaries are never packaged (bin/nvidia keeps only its README, docs/dll-setup.md says what to add).
+install(DIRECTORY ${CMAKE_BINARY_DIR}/bin/ DESTINATION bin USE_SOURCE_PERMISSIONS
+  PATTERN "*.pdb" EXCLUDE PATTERN "*.ilk" EXCLUDE PATTERN "*_tests.exe" EXCLUDE
+  REGEX "nvidia/nvngx.*\\.dll$" EXCLUDE)
+if(TARGET dlssvid_golden_tests)
+  install(TARGETS dlssvid_golden_tests RUNTIME DESTINATION bin)
+  install(DIRECTORY tests/golden/ DESTINATION tests/golden PATTERN "*.cpp" EXCLUDE)
+endif()
+install(FILES bin/nvidia/README.md DESTINATION bin/nvidia)
+install(FILES models/registry.json DESTINATION models)
+install(DIRECTORY models/export/ DESTINATION models/export PATTERN ".venv" EXCLUDE PATTERN "__pycache__" EXCLUDE)
+install(DIRECTORY depth_worker/ DESTINATION depth_worker PATTERN ".venv" EXCLUDE PATTERN "__pycache__" EXCLUDE)
+install(DIRECTORY docs/ DESTINATION docs)
+install(FILES README.md DESTINATION .)
+
+set(CPACK_PACKAGE_NAME "dlss-video")
+set(CPACK_PACKAGE_VENDOR "VideoDLSS")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_FILE_NAME "dlss-video-${PROJECT_VERSION}-win64")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "dlss-video")
+set(CPACK_GENERATOR "ZIP")
+find_program(DLSSVID_MAKENSIS makensis)
+if(DLSSVID_MAKENSIS)
+  list(APPEND CPACK_GENERATOR "NSIS")
+  set(CPACK_NSIS_DISPLAY_NAME "dlss-video ${PROJECT_VERSION}")
+  set(CPACK_NSIS_MODIFY_PATH ON)
+  set(CPACK_NSIS_EXECUTABLES_DIRECTORY "bin")
+  set(CPACK_PACKAGE_EXECUTABLES "dlssvid-gui;dlss-video")
+endif()
+include(CPack)

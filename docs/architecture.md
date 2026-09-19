@@ -3,7 +3,7 @@
 Полная целевая архитектура — ТЗ §4 (граф стадий, кэш кадров, контракты). Здесь — то, что
 реализовано, и хаки, которые нужно помнить.
 
-## Состояние после этапов 0–7
+## Состояние после этапов 0–8
 
 ```
 VideoDecoder ──CpuFrame(YUV420P)──▶ Pipeline ──▶ VideoEncoder
@@ -211,6 +211,41 @@ IFrameGenerator: dlssg (NGX Feature 11, DLSS SDK) | rife (RIFE 4.x, TensorRT) | 
 - `dlssvid compare --start 1 --step 2` — только сгенерированные кадры против выброшенных оригиналов (ground truth,
   `docs/benchmarks.md`).
 
+### Полный пайплайн, пакет и golden-тесты (этап 8)
+
+```
+dlssvid process ── ProcessRunner::RunProcess ── depth ─▶ flow ─▶ upscale ─▶ nr ─▶ fg  (RunDepth/RunFlow/RunUpscale/RunNr/RunFg над <passes>/)
+                                             │   пасс полный (manifest.frameCount ≥ нужного) ─▶ reused
+                                             ▼
+                          EncodePassToVideo(color_fg › color_nr › color_sr) + аудио источника ─▶ result
+```
+
+- Стадии запускаются по очереди над дисковым кэшем пассов (ТЗ §4): каждая читает пассы предыдущих (`depth_dlss`,
+  `mv_dlss`, `color_sr`, `color_nr`, `mask_*`) из корня, пишет свой; полный пасс переиспользуется (`--no-skip-existing`
+  пересчитывает), недоступные `nr`/`fg` — ошибка или `--disable-unavailable` (стадия пропускается с причиной, отчёт).
+  Параметры стадий — те же JSON-ключи, что в файле проекта и в GUI: `RunUpscale/RunNr/RunFg` получают их через
+  `StageConfig` (`ApplyParams`), depth/flow — маппинг в раннере (`depth.model`, `flow.perf`, …); `--param stage.key=value`
+  и алиасы `--scale`, `--multiplier`, `--<stage>-backend`.
+- `EncodePassToVideo`: кадры пасса с его fps; источник декодируется параллельно только ради аудио-пакетов
+  (`SetAudioPacketSink` → `WriteAudioPacket`), `mult = round(passFps / sourceFps)` кадров пасса на кадр источника —
+  видео и аудио пишутся вперемежку. Без цветовых стадий — passthrough (этап 0).
+- `dlssvid bench` — тот же `RunProcess` во временный корень без переиспользования, отчёт мс/кадр по стадиям + GPU /
+  архитектура / драйвер (JSON) — `docs/benchmarks.md`.
+- GUI: кнопка «Обработать → result» (`ProjectPanel::processAll`) сохраняет проект и ставит `dlssvid process --project`
+  в `TaskQueue`; `result` затем появляется как источник вьюпорта.
+- Golden-тесты (`tests/golden/`): детерминированный прогон на WARP (стабы + NIS + blend) сверяется с эталонными кадрами
+  и ожиданиями (`expected.json`, `ref/`), плюс `[gpu]` прогон реальных бэкендов; `DLSSVID_CLI`/`DLSSVID_GOLDEN_DIR`
+  направляют тест на установленную копию (`docs/release.md`).
+- Пакет: `install()` копирует `build/<preset>/bin` (без `*.pdb`, тестов и **без `bin/nvidia/*.dll`**), реестр и скрипты
+  моделей, `depth_worker`, документацию и golden-данные; CPack ZIP всегда, NSIS при наличии `makensis`; CI — `.gitlab-ci.yml`
+  + `scripts/ci-build.cmd` (`docs/ci.md`).
+- **Гигиена сборки (инцидент этапов 4 и 8):** ninja берёт зависимости от заголовков из строк `/showIncludes`, сверяя их с
+  `msvc_deps_prefix`, который CMake записал при configure. У локализованного MSVC (русская VS без английского языкового
+  пакета) байты префикса и вывода компилятора совпадают не во всех окружениях (кодовые страницы консоли), и объект
+  получает «#deps 0» — он молча переживает правку заголовка. Ctest `build.ninja_header_deps`
+  (`tests/check_ninja_deps.cmake`) проверяет после сборки, что у каждого объекта с проектными включениями есть
+  зависимости; пресеты задают `VSLANG=1033` (действует после установки английского пакета); CI собирает с нуля.
+
 ## Хаки и временные решения
 
 | Где | Что | Почему | Когда убираем |
@@ -243,6 +278,8 @@ IFrameGenerator: dlssg (NGX Feature 11, DLSS SDK) | rife (RIFE 4.x, TensorRT) | 
 | `FgStage` / `IFrameGenerator::Generate` | каждый сгенерированный кадр читается на CPU (readback / TensorRT host) и пишется в пасс; `color_fg` не кладётся в слот кэша | у `color_fg` больше кадров, чем у источника (нет соответствия «один слот — один индекс») | этап 8: `process` с потоковой записью |
 | `RifeFrameGenerator` | вход паддится до кратного 32 (replicate), движок под паддингованный размер | RIFE 4.x работает на кратных 32 | — |
 | `FgStage --crash-after` | скрытый флаг: `TerminateProcess(0xC0000005)` после N кадров | воспроизводимое «падение воркера» для теста изоляции (ТЗ §9) | остаётся тестовым |
+| `EncodePassToVideo` | источник декодируется целиком ради аудио-пакетов | у `VideoDecoder` нет режима «только аудио»; декодирование дёшево по сравнению со стадиями | этап 8b: демукс аудио без декодирования видео |
+| `ProcessRunner` | стадии выполняются последовательно через дисковый кэш пассов, а не одним потоковым пайплайном | дисковый кэш нужен по ТЗ §4, и каждая стадия уже умеет читать пассы; потоковый режим потребовал бы убрать CPU-readback | — |
 
 Хаки в коде помечаются `// HACK:` (ТЗ §8). Скрытый swapchain для FG не понадобился (прямой NGX-API, см. этап 7).
 

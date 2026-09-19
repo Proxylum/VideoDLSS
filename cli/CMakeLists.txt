@@ -1,4 +1,4 @@
-add_executable(dlssvid main.cpp ViewportCommands.h ViewportCommands.cpp UpscaleCommands.h UpscaleCommands.cpp NrCommands.h NrCommands.cpp FgCommands.h FgCommands.cpp)
+add_executable(dlssvid main.cpp ViewportCommands.h ViewportCommands.cpp UpscaleCommands.h UpscaleCommands.cpp NrCommands.h NrCommands.cpp FgCommands.h FgCommands.cpp ProcessCommands.h ProcessCommands.cpp)
 target_link_libraries(dlssvid PRIVATE dlssvid_core CLI11::CLI11)
 set_target_properties(dlssvid PROPERTIES OUTPUT_NAME dlssvid)
 

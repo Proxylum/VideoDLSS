@@ -433,7 +433,7 @@ void NrStage::Shutdown() {
     setup_ = false;
 }
 
-NrRunResult RunNr(VideoDecoder& decoder, D3D12Device& device, NrStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress) {
+NrRunResult RunNr(VideoDecoder& decoder, D3D12Device& device, NrStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params) {
     const auto& info = decoder.Info();
     options.color = ColorInfoFromStream(info);
     options.fps = info.frameRate;
@@ -441,7 +441,10 @@ NrRunResult RunNr(VideoDecoder& decoder, D3D12Device& device, NrStageOptions opt
     Pipeline pipeline(device, 4);
     auto stage = std::make_unique<NrStage>(options);
     NrStage* raw = stage.get();
-    pipeline.AddStage(std::move(stage));
+    StageConfig cfg;
+    cfg.name = "nr";
+    cfg.params = params;
+    pipeline.AddStage(std::move(stage), cfg);
     pipeline.Init();
     CpuFrame frame;
     int64_t n = 0;

@@ -19,6 +19,7 @@ public slots:
 
 private:
     void runStage(int index);
+    void processAll();  // save the project and run `dlssvid process --project` (the whole pipeline -> result)
     void patchDll();  // nr stage: dlssnr-patcher over the user's nvngx_dlssnr.dll (`dlssvid nr-patch`)
     AppModel& model_;
     TaskQueue& tasks_;
@@ -26,6 +27,7 @@ private:
     QTreeWidgetItem* sourceItem_ = nullptr;
     QTreeWidgetItem* passesItem_ = nullptr;
     QTreeWidgetItem* stagesItem_ = nullptr;
+    QTreeWidgetItem* resultItem_ = nullptr;
 };
 
 }  // namespace dlssvid
