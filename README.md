@@ -11,7 +11,8 @@ Current stage: **6 — neural rendering** (see [docs/plans/06-nr.md](docs/plans/
 [05-upscale](docs/plans/05-upscale.md)). `dlssvid nr` runs DLSS 5 Neural Rendering (NGX Feature 18 through the
 user-supplied `nvngx_dlssnr.dll`, patched for RTX 20/30/40 with `dlssvid nr-patch` / the GUI button) over `color_sr`
 with depth / motion-vector guides and masks into `color_nr`, after a tonemap step; `dlssvid nr --check` prints the
-GPU / driver / DLL / CreateFeature(18) diagnostics ([docs/dll-setup.md](docs/dll-setup.md)). Stage 5: `dlssvid upscale`
+GPU / driver / DLL / CreateFeature(18) diagnostics ([docs/dll-setup.md](docs/dll-setup.md)); verified on an RTX 4070 Ti SUPER
+(driver 616.92, patched DLL): ~16 ms per 1440p frame on the GPU ([docs/benchmarks.md](docs/benchmarks.md)). Stage 5: `dlssvid upscale`
 produces the `color_sr` pass through one `IUpscaler` interface: DLSS Super Resolution over NGX (with the jitter
 emulation of ТЗ §3), NVIDIA Image Scaling (always available, WARP-capable), a bicubic baseline, and the RTX VSR
 integration point (needs the RTX Video SDK). `dlssvid compare` measures PSNR/SSIM for the A/B of
