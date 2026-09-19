@@ -3,7 +3,7 @@
 Полная целевая архитектура — ТЗ §4 (граф стадий, кэш кадров, контракты). Здесь — то, что
 реализовано, и хаки, которые нужно помнить.
 
-## Состояние после этапов 0–6
+## Состояние после этапов 0–7
 
 ```
 VideoDecoder ──CpuFrame(YUV420P)──▶ Pipeline ──▶ VideoEncoder
@@ -180,6 +180,37 @@ INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминир�
   результата, `bin/nvidia/nvngx_dlssnr.dll` + сайдкар `*.patch.json` (что и чем пропатчено). GUI: кнопка «Пропатчить DLL…».
 - Стадия `nr` в проекте по умолчанию (после `upscale`); `color_nr` во вьюпорте — A/B в 2x2 и wipe.
 
+### Frame Generation (этап 7)
+
+```
+FgStage ── цвет: color_nr / color_sr (папка или слот) или декодированный кадр ─▶ RGB F16 (CPU) + RGBA16F (GPU, ping-pong prev/cur)
+   ▼
+ IFrameGenerator::Generate(prev, cur, depth_dlss, mv_dlss, reset) ─▶ multiplier − 1 кадров (RGB F16, CPU)
+   ▼
+ color_fg: real i → i·mult, generated → i·mult + k; манифест fps × mult; [--video с fps × mult]
+IFrameGenerator: dlssg (NGX Feature 11, DLSS SDK) | rife (RIFE 4.x, TensorRT) | blend (lerp, CPU)
+```
+
+- **Решение: DLSS-G через NGX, а не Streamline.** ТЗ §4 планировало Streamline со скрытым swapchain и отдельный
+  процесс `fg_worker`, потому что Streamline генерирует кадры только в перехваченном `Present`. DLSS SDK 310.9
+  документирует прямой путь (`nvsdk_ngx_helpers_dlssg_d3d.h`, «DLSS-FG Programming Guide»): `NGX_D3D12_CREATE_DLSSG`
+  (размер, формат backbuffer, `RenderWidth/Height` = размер guides) и `NGX_D3D12_EVALUATE_DLSSG` с `Backbuffer`
+  (текущий кадр), `Depth`, `MVecs` (пиксели в разрешении MV, «от текущего к предыдущему» — наш `mv_dlss` со
+  `mvecScale = 1`), выход `OutputInterpolated` — кадр между **предыдущим** backbuffer (его хранит рантайм) и текущим;
+  `multiFrameCount/Index` — evaluate вызывается `mult − 1` раз на пару. Ни swapchain, ни хуков, ни бинарников Streamline
+  (в клоне с GitHub их и нет). Изоляция для GUI осталась процессной: панель проекта запускает `dlssvid fg` через
+  `TaskQueue`, падение процесса — `taskFinished(false)` (тест с `--crash-after`).
+- `DlssgFrameGenerator`: capability check (`FrameGeneration.Available`, `MultiFrameCountMax`, версия драйвера из блока),
+  создание с `rgba16f`, при отказе — `rgba8` через compute-конверсию; guides через субректы в своём разрешении, без них —
+  константная глубина / нулевые MV с предупреждением; первый кадр — `reset`, его выход отбрасывается (рантайм
+  «запоминает» кадр). Лог как у SR/NR (GPU, DLL + SHA-256, результат создания).
+- `RifeFrameGenerator`: реестр моделей → ONNX (`models/cache/`) → `TrtEngine` с профилем фиксированной формы
+  (`Options::shapes`, min = opt = max, форма в ключе кэша) под размер, паддингованный до кратного 32; NCHW RGB [0,1],
+  `timestep = k/mult` → ×2/×3/×4 одной моделью; выход обрезается.
+- `BlendFrameGenerator`: `lerp(prev, cur, k/mult)` — наивный baseline и детерминированный бэкенд для тестов на WARP.
+- `dlssvid compare --start 1 --step 2` — только сгенерированные кадры против выброшенных оригиналов (ground truth,
+  `docs/benchmarks.md`).
+
 ## Хаки и временные решения
 
 | Где | Что | Почему | Когда убираем |
@@ -207,8 +238,13 @@ INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминир�
 | `StubNrBackend` | детерминированная «правка» (локальный контраст + тон) вместо модели | стадия, resolve, маски, temporal и pass count тестируются на WARP без DLL; в продукте только явно `--backend stub`, без fallback | — (остаётся тестовым бэкендом) |
 | `NrStage::Process` | результат читается на CPU (readback) для записи пасса и заново грузится в слот; guides и маски грузятся с диска каждый кадр | простота; как в `UpscaleStage` | этап 8: слот → слот без CPU |
 | `INrBackend` (драйвер) | версия драйвера NVIDIA из UMD-версии DXGI (`CheckInterfaceSupport`), а не из NVAPI | NVAPI не подключён; формула `(subversion mod 10)·100 + build/100` проверена на 591.86 | при подключении NVAPI |
+| `DlssgFrameGenerator` (камера) | **синтетические константы камеры** для DLSS-G: перспектива FOV 60°, near 0.1 / far 1000 (`BuildFgCamera`), `clipToPrevClip = prevClipToClip = I`, `cameraMotionIncluded = 1`, `menuDetectionEnabled = 0`, `motionVectorsInvalidValue = FLT_MAX` | у видео нет камеры; всё движение — в `mv_dlss`, как у DLSS5-Feeder для игр без DLSS | если модель заметно выиграет от оценки движения камеры (этап 8: оценка из MV) |
+| `DlssgFrameGenerator` (backbuffer) | цвет подаётся как `R16G16B16A16_FLOAT` с `ColorBuffersHDR = 0`; при `FAIL_UnsupportedFormat` — копия в `R8G8B8A8_UNORM` через `Resampler` | руководство описывает display-ready SDR/HDR10; RGBA16F [0,1] приняты на Ada | — |
+| `FgStage` / `IFrameGenerator::Generate` | каждый сгенерированный кадр читается на CPU (readback / TensorRT host) и пишется в пасс; `color_fg` не кладётся в слот кэша | у `color_fg` больше кадров, чем у источника (нет соответствия «один слот — один индекс») | этап 8: `process` с потоковой записью |
+| `RifeFrameGenerator` | вход паддится до кратного 32 (replicate), движок под паддингованный размер | RIFE 4.x работает на кратных 32 | — |
+| `FgStage --crash-after` | скрытый флаг: `TerminateProcess(0xC0000005)` после N кадров | воспроизводимое «падение воркера» для теста изоляции (ТЗ §9) | остаётся тестовым |
 
-Хаки в коде помечаются `// HACK:` (ТЗ §8); скрытый swapchain FG появится в этапе 7 и будет описан здесь.
+Хаки в коде помечаются `// HACK:` (ТЗ §8). Скрытый swapchain для FG не понадобился (прямой NGX-API, см. этап 7).
 
 ## Ошибки и деградация
 - Отсутствие NVIDIA GPU: D3D12 падает на WARP, CUDA interop недоступен, NVENC-кодеки не найдены —

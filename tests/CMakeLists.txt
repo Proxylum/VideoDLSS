@@ -29,6 +29,7 @@ add_executable(dlssvid_unit_tests
   unit/test_upscale.cpp
   unit/test_tonemap.cpp
   unit/test_nr.cpp
+  unit/test_fg.cpp
 )
 target_link_libraries(dlssvid_unit_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 target_compile_definitions(dlssvid_unit_tests PRIVATE
@@ -55,6 +56,8 @@ add_executable(dlssvid_integration_tests
   integration/test_cli_upscale.cpp
   integration/test_nr_stage.cpp
   integration/test_cli_nr.cpp
+  integration/test_fg_stage.cpp
+  integration/test_cli_fg.cpp
 )
 target_link_libraries(dlssvid_integration_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 target_compile_definitions(dlssvid_integration_tests PRIVATE
@@ -71,7 +74,9 @@ if(DLSSVID_BUILD_APP)
   target_link_libraries(dlssvid_app_tests PRIVATE dlssvid_app Catch2::Catch2WithMain Qt6::Test)
   target_compile_definitions(dlssvid_app_tests PRIVATE
     DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
-    DLSSVID_QT_PLUGINS="${DLSSVID_QT_BIN}/../plugins")
+    DLSSVID_QT_PLUGINS="${DLSSVID_QT_BIN}/../plugins"
+    DLSSVID_CLI_PATH="$<TARGET_FILE:dlssvid>")
+  add_dependencies(dlssvid_app_tests dlssvid)
   dlssvid_deploy_qt(dlssvid_app_tests)
   # windeployqt deploys only the windows platform plugin: copy the offscreen one next to the executable
   add_custom_command(TARGET dlssvid_app_tests POST_BUILD

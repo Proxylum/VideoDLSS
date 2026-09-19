@@ -98,6 +98,11 @@ add_library(dlssvid_core STATIC
   stages/nr/NrCompose.h stages/nr/NrCompose.cpp
   stages/nr/NrStage.h stages/nr/NrStage.cpp
   stages/nr/NrPatch.h stages/nr/NrPatch.cpp
+  stages/fg/IFrameGenerator.h stages/fg/IFrameGenerator.cpp
+  stages/fg/BlendFrameGenerator.h stages/fg/BlendFrameGenerator.cpp
+  stages/fg/DlssgFrameGenerator.h stages/fg/DlssgFrameGenerator.cpp
+  stages/fg/RifeFrameGenerator.h stages/fg/RifeFrameGenerator.cpp
+  stages/fg/FgStage.h stages/fg/FgStage.cpp
   ${DLSSVID_SHADER_HEADERS}
   ml/ModelRegistry.h ml/ModelRegistry.cpp
   stages/depth/IDepthEstimator.h

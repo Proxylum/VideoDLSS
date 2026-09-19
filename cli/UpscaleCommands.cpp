@@ -138,13 +138,15 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
     nlohmann::json frames = nlohmann::json::array();
     double psnrY = 0, psnrRgb = 0, ssim = 0, minPsnr = std::numeric_limits<double>::infinity(), minSsim = 1.0;
     int64_t n = 0;
+    if (a.step < 1) Throw("compare: --step must be >= 1");
     for (int64_t i = 0; a.frames < 0 || i < a.frames; ++i) {
         PassImage r, t;
-        if (!ref.Next(i, r)) break;
-        if (!test.Next(i + a.offset, t)) break;
+        const int64_t ri = a.start + i * a.step;
+        if (!ref.Next(ri, r)) break;
+        if (!test.Next(ri + a.offset, t)) break;
         const ImageMetrics m = CompareImages(r, t);
-        if (!a.quiet) std::printf("frame %6lld  PSNR Y %7.3f dB  PSNR RGB %7.3f dB  SSIM %.4f\n", static_cast<long long>(i), m.psnrY, m.psnrRgb, m.ssimY);
-        frames.push_back({{"frame", i}, {"psnr_y", m.psnrY}, {"psnr_rgb", m.psnrRgb}, {"ssim_y", m.ssimY}});
+        if (!a.quiet) std::printf("frame %6lld  PSNR Y %7.3f dB  PSNR RGB %7.3f dB  SSIM %.4f\n", static_cast<long long>(ri), m.psnrY, m.psnrRgb, m.ssimY);
+        frames.push_back({{"frame", ri}, {"psnr_y", m.psnrY}, {"psnr_rgb", m.psnrRgb}, {"ssim_y", m.ssimY}});
         psnrY += std::isfinite(m.psnrY) ? m.psnrY : 100.0;
         psnrRgb += std::isfinite(m.psnrRgb) ? m.psnrRgb : 100.0;
         ssim += m.ssimY;
@@ -198,6 +200,8 @@ void UpscaleCommands::Register(CLI::App& app) {
     compare_->add_option("--test", ca_.test, "video or pass folder under test")->required();
     compare_->add_option("--frames", ca_.frames, "compare at most N frames")->default_val(-1);
     compare_->add_option("--offset", ca_.offset, "test frame index offset")->default_val(0);
+    compare_->add_option("--start", ca_.start, "first reference frame index")->default_val(0);
+    compare_->add_option("--step", ca_.step, "frame stride (e.g. --start 1 --step 2 = only the generated frames of an x2 color_fg)")->default_val(1);
     compare_->add_option("--json", ca_.json, "write per-frame metrics to this JSON file");
     compare_->add_flag("-q,--quiet", ca_.quiet, "summary only");
 }

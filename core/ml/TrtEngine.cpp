@@ -104,7 +104,12 @@ TrtEngine::~TrtEngine() = default;
 std::filesystem::path TrtEngine::CachePathFor(const std::filesystem::path& onnx, const Options& options) {
     const std::filesystem::path dir = options.cacheDir.empty() ? onnx.parent_path() : options.cacheDir;
     const std::string hash = Sha256File(onnx).substr(0, 16);
-    std::string name = onnx.stem().string() + "." + hash + "." + GpuKey() + ".trt" + trt::LibraryVersion() + (options.fp16 ? ".fp16" : ".fp32") + ".engine";
+    std::string name = onnx.stem().string() + "." + hash + "." + GpuKey() + ".trt" + trt::LibraryVersion() + (options.fp16 ? ".fp16" : ".fp32");
+    for (const auto& [input, dims] : options.shapes) {
+        name += "." + input;
+        for (size_t d = 0; d < dims.size(); ++d) name += (d ? "x" : "_") + std::to_string(dims[d]);
+    }
+    name += ".engine";
     return dir / name;
 }
 
@@ -140,6 +145,33 @@ std::unique_ptr<TrtEngine> TrtEngine::FromOnnx(const std::filesystem::path& onnx
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, options.workspaceBytes);
     if (options.fp16 && builder->platformHasFastFp16()) config->setFlag(nvinfer1::BuilderFlag::kFP16);
 
+    // Dynamic inputs: one optimization profile with the fixed shape the caller asked for (min = opt = max).
+    bool needProfile = false;
+    for (int i = 0; i < network->getNbInputs(); ++i) {
+        nvinfer1::ITensor* t = network->getInput(i);
+        const nvinfer1::Dims dims = t->getDimensions();
+        bool dynamic = false;
+        for (int d = 0; d < dims.nbDims; ++d) dynamic = dynamic || dims.d[d] < 0;
+        if (!dynamic) continue;
+        needProfile = true;
+        if (options.shapes.find(t->getName()) == options.shapes.end())
+            Throw("input '" + std::string(t->getName()) + "' of " + onnxStr + " has a dynamic shape: pass its fixed shape in TrtEngine::Options::shapes");
+    }
+    if (needProfile) {
+        nvinfer1::IOptimizationProfile* profile = builder->createOptimizationProfile();
+        for (int i = 0; i < network->getNbInputs(); ++i) {
+            nvinfer1::ITensor* t = network->getInput(i);
+            const auto it = options.shapes.find(t->getName());
+            if (it == options.shapes.end()) continue;
+            nvinfer1::Dims dims{};
+            dims.nbDims = static_cast<int32_t>(it->second.size());
+            for (int d = 0; d < dims.nbDims; ++d) dims.d[d] = it->second[static_cast<size_t>(d)];
+            for (const auto sel : {nvinfer1::OptProfileSelector::kMIN, nvinfer1::OptProfileSelector::kOPT, nvinfer1::OptProfileSelector::kMAX})
+                if (!profile->setDimensions(t->getName(), sel, dims)) Throw("setDimensions failed for input '" + std::string(t->getName()) + "'");
+        }
+        if (config->addOptimizationProfile(profile) < 0) Throw("addOptimizationProfile failed");
+    }
+
     std::unique_ptr<nvinfer1::IHostMemory> plan(builder->buildSerializedNetwork(*network, *config));
     if (!plan) Throw("buildSerializedNetwork failed for " + onnxStr);
     std::filesystem::create_directories(cache.parent_path());
@@ -171,15 +203,26 @@ std::unique_ptr<TrtEngine> TrtEngine::FromEngineFile(const std::filesystem::path
 
     const int n = im.engine->getNbIOTensors();
     im.deviceBuffers.assign(static_cast<size_t>(n), nullptr);
+    // engines built with a profile: the inputs take the profile's (single) shape, the outputs follow from it
+    for (int i = 0; i < n; ++i) {
+        const char* name = im.engine->getIOTensorName(i);
+        if (im.engine->getTensorIOMode(name) != nvinfer1::TensorIOMode::kINPUT) continue;
+        const nvinfer1::Dims dims = im.engine->getTensorShape(name);
+        bool dynamic = false;
+        for (int d = 0; d < dims.nbDims; ++d) dynamic = dynamic || dims.d[d] < 0;
+        if (!dynamic) continue;
+        const nvinfer1::Dims fixed = im.engine->getProfileShape(name, 0, nvinfer1::OptProfileSelector::kOPT);
+        if (!im.context->setInputShape(name, fixed)) Throw(std::string("setInputShape failed for '") + name + "'");
+    }
     for (int i = 0; i < n; ++i) {
         const char* name = im.engine->getIOTensorName(i);
         Binding b;
         b.name = name;
         b.isInput = im.engine->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT;
-        const nvinfer1::Dims dims = im.engine->getTensorShape(name);
+        const nvinfer1::Dims dims = im.context->getTensorShape(name);
         b.elements = 1;
         for (int d = 0; d < dims.nbDims; ++d) {
-            if (dims.d[d] < 0) Throw("dynamic shape on tensor '" + b.name + "' is not supported (export with fixed shapes)");
+            if (dims.d[d] < 0) Throw("dynamic shape on tensor '" + b.name + "' could not be resolved (export with fixed shapes or pass TrtEngine::Options::shapes)");
             b.shape.push_back(dims.d[d]);
             b.elements *= static_cast<size_t>(dims.d[d]);
         }

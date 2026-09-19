@@ -5,10 +5,14 @@ Offline DLSS video pipeline for Windows + NVIDIA RTX: a video file goes through
 Rendering → DLSS Frame Generation → encode`, every intermediate **pass** (depth, motion
 vectors, masks, colour stages) can be exported, imported and inspected in a viewport.
 
-Current stage: **6 — neural rendering** (see [docs/plans/06-nr.md](docs/plans/06-nr.md); earlier:
+Current stage: **7 — frame generation** (see [docs/plans/07-fg.md](docs/plans/07-fg.md); earlier:
 [00-skeleton](docs/plans/00-skeleton.md), [01-passes](docs/plans/01-passes.md), [02-depth](docs/plans/02-depth.md),
 [03-motion-vectors](docs/plans/03-motion-vectors.md), [04-viewport](docs/plans/04-viewport.md),
-[05-upscale](docs/plans/05-upscale.md)). `dlssvid nr` runs DLSS 5 Neural Rendering (NGX Feature 18 through the
+[05-upscale](docs/plans/05-upscale.md), [06-nr](docs/plans/06-nr.md)). `dlssvid fg` doubles (x2..x4) the frame rate into
+`color_fg`: DLSS Frame Generation through the NGX API of the DLSS SDK (no swapchain, no Streamline — the current frame,
+`depth_dlss` and `mv_dlss` go in as textures, the interpolated frame comes out), RIFE 4.9 through TensorRT as the
+baseline, and a naive blend; the generated frames are scored against ground truth (a half-rate clip) in
+[docs/benchmarks.md](docs/benchmarks.md). Stage 6: `dlssvid nr` runs DLSS 5 Neural Rendering (NGX Feature 18 through the
 user-supplied `nvngx_dlssnr.dll`, patched for RTX 20/30/40 with `dlssvid nr-patch` / the GUI button) over `color_sr`
 with depth / motion-vector guides and masks into `color_nr`, after a tonemap step; `dlssvid nr --check` prints the
 GPU / driver / DLL / CreateFeature(18) diagnostics ([docs/dll-setup.md](docs/dll-setup.md)); verified on an RTX 4070 Ti SUPER
@@ -130,6 +134,18 @@ dlssvid nr -i input.mp4 -o passes --no-guides --video nr.mp4                    
 dlssvid nr -i input.mp4 -o passes --backend stub --warp                               :: deterministic stand-in (tests, any GPU)
 ```
 
+Frame Generation (stage 7): `color_fg` with `multiplier` x frames (real frame i at index i * multiplier), fps x multiplier;
+colour from `color_nr` / `color_sr` / the video, guides from `depth_dlss` / `mv_dlss` under the pass root.
+
+```bat
+dlssvid fg --check                                                                    :: FrameGeneration.Available, MultiFrameCountMax, CreateFeature
+dlssvid fg -i input.mp4 -o passes                                                     :: DLSS Frame Generation x2 (RTX 40+), nvngx_dlssg.dll in bin\nvidia
+dlssvid fg -i input.mp4 -o passes --multiplier 3 --video fg.mp4                       :: x3 where Multi Frame Generation is available, plus a preview at 3x fps
+dlssvid fg -i input.mp4 -o passes --backend rife --model rife49                       :: RIFE 4.9 through TensorRT (ONNX from the model registry)
+dlssvid fg -i input.mp4 -o passes --backend blend --warp                              :: naive blend baseline (any GPU)
+dlssvid compare --ref full_rate.mp4 --test passes\color_fg --start 1 --step 2         :: generated frames only, against the dropped originals
+```
+
 GUI keys: `1`…`9` source, `Ctrl+1/2/3` single / overlay / grid, wheel = zoom to cursor (25–800 %), middle drag = pan,
 `F` fit, `Ctrl+0` 1:1, `W` wipe (left drag moves it), click a 2x2 cell = expand, `Space` play, `,`/`.` step,
 `Ctrl+Shift+S` PNG screenshot with cell labels, `Ctrl+S` save project. Stages are started from the project panel
@@ -150,7 +166,8 @@ core/       gpu/ (D3D12, CUDA interop, frame cache) · io/ (decode, encode) · p
             gpu/ComputeKernel (compute PSO + descriptor rings) · passes/ImageMetrics (PSNR, SSIM) · gpu/Ngx (NGX core, shared by DLSS SR and NR)
             stages/tonemap (Tonemapper: passthrough / ACES / Reinhard, sRGB / linear / PQ / HLG in)
             stages/nr (INrBackend, NgxNrBackend — NGX Feature 18 + forwarder/ nvngx.dll_dlssvid.dll, StubNrBackend, NrCompose — resolve / masks / temporal, NrStage, NrPatch)
-cli/        dlssvid (+ ViewportCommands: project, render; UpscaleCommands: upscale, compare; NrCommands: nr, nr-patch)
+            stages/fg (IFrameGenerator, DlssgFrameGenerator — NGX Frame Generation, RifeFrameGenerator — TensorRT, BlendFrameGenerator, FgStage)
+cli/        dlssvid (+ ViewportCommands: project, render; UpscaleCommands: upscale, compare; NrCommands: nr, nr-patch; FgCommands: fg)
 app/        dlssvid-gui — Qt 6.8 Widgets shell (AppModel, ViewportWindow, panels, TaskQueue)
 tests/      unit/ (Catch2, WARP-capable) · integration/ (synthetic clips, CLI as a process) · app/ (Qt offscreen) · golden/ (stage 8)
 docs/       architecture.md · conventions.md · dll-setup.md · benchmarks.md · plans/
@@ -158,7 +175,7 @@ third_party/nis/  NVIDIA Image Scaling 1.0.3 (MIT, vendored headers)
 models/     registry.json (models, URLs, hashes, licences) · export/ (ONNX export scripts)
 depth_worker/ worker.py — PyTorch reference backends (da3, vda), icdepth placeholder, stub for tests
 models/     registry.json · export/ (fetch.py, export_da3.py, export_vda.py, loaders) · cache/ (weights, ONNX, engines; git-ignored)
-fg_worker/  placeholder until stage 7
+fg_worker/  README only: why there is no worker executable (DLSS-G runs through NGX inside `dlssvid fg`)
 bin/nvidia/ user-supplied NVIDIA DLLs (git-ignored)
 ```
 

@@ -233,6 +233,78 @@
         "input_scale": 255.0,
         "multiple": 8
       }
+    },
+    {
+      "id": "rife49",
+      "stage": "fg",
+      "role": "primary",
+      "source": "https://github.com/hzwer/Practical-RIFE",
+      "hf": "yuvraj108c/rife-onnx",
+      "format": "onnx",
+      "url": "https://huggingface.co/yuvraj108c/rife-onnx/resolve/main/rife49_ensemble_True_scale_1_sim.onnx",
+      "sha256": "",
+      "license": "MIT (RIFE, hzwer/Practical-RIFE); ONNX export by yuvraj108c (ComfyUI-Rife-Tensorrt) — baseline for the FG A/B only",
+      "params": {
+        "family": "rife",
+        "version": "4.9",
+        "multiple": 32,
+        "inputs": [
+          "img0",
+          "img1",
+          "timestep"
+        ],
+        "output": "output",
+        "ensemble": true,
+        "scale": 1
+      }
+    },
+    {
+      "id": "rife48",
+      "stage": "fg",
+      "role": "alternative",
+      "source": "https://github.com/hzwer/Practical-RIFE",
+      "hf": "yuvraj108c/rife-onnx",
+      "format": "onnx",
+      "url": "https://huggingface.co/yuvraj108c/rife-onnx/resolve/main/rife48_ensemble_True_scale_1_sim.onnx",
+      "sha256": "",
+      "license": "MIT (RIFE, hzwer/Practical-RIFE); ONNX export by yuvraj108c (ComfyUI-Rife-Tensorrt) — baseline for the FG A/B only",
+      "params": {
+        "family": "rife",
+        "version": "4.8",
+        "multiple": 32,
+        "inputs": [
+          "img0",
+          "img1",
+          "timestep"
+        ],
+        "output": "output",
+        "ensemble": true,
+        "scale": 1
+      }
+    },
+    {
+      "id": "rife47",
+      "stage": "fg",
+      "role": "alternative",
+      "source": "https://github.com/hzwer/Practical-RIFE",
+      "hf": "yuvraj108c/rife-onnx",
+      "format": "onnx",
+      "url": "https://huggingface.co/yuvraj108c/rife-onnx/resolve/main/rife47_ensemble_True_scale_1_sim.onnx",
+      "sha256": "",
+      "license": "MIT (RIFE, hzwer/Practical-RIFE); ONNX export by yuvraj108c (ComfyUI-Rife-Tensorrt) — baseline for the FG A/B only",
+      "params": {
+        "family": "rife",
+        "version": "4.7",
+        "multiple": 32,
+        "inputs": [
+          "img0",
+          "img1",
+          "timestep"
+        ],
+        "output": "output",
+        "ensemble": true,
+        "scale": 1
+      }
     }
   ]
 }
