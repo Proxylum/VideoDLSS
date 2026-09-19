@@ -3,6 +3,7 @@
 
 #include <CLI/CLI.hpp>
 
+#include "FgCommands.h"
 #include "NrCommands.h"
 #include "UpscaleCommands.h"
 #include "ViewportCommands.h"
@@ -777,6 +778,8 @@ int main(int argc, char** argv) {
     upscaleCommands.Register(app);
     cli::NrCommands nrCommands;  // nr, nr-patch (stage 6)
     nrCommands.Register(app);
+    cli::FgCommands fgCommands;  // fg (stage 7)
+    fgCommands.Register(app);
 
     std::string modelsAction = "list", modelsId, modelsDir;
     auto* models = app.add_subcommand("models", "list or fetch models from models/registry.json");
@@ -803,6 +806,7 @@ int main(int argc, char** argv) {
         if (const int rc = viewportCommands.Dispatch(); rc >= 0) return rc;
         if (const int rc = upscaleCommands.Dispatch(); rc >= 0) return rc;
         if (const int rc = nrCommands.Dispatch(); rc >= 0) return rc;
+        if (const int rc = fgCommands.Dispatch(); rc >= 0) return rc;
     } catch (const std::exception& e) {
         Log()->error("{}", e.what());
         return 1;

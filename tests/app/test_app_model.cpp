@@ -146,3 +146,20 @@ TEST_CASE("TaskQueue runs commands one after another and parses progress", "[app
     for (int i = 0; i < output.count(); ++i) sawHello = sawHello || output[i][1].toString().contains("hello");
     CHECK(sawHello);
 }
+
+TEST_CASE("TaskQueue survives a crashing stage process and runs the next task", "[app][tasks]") {
+    App();
+    TaskQueue queue;
+    QSignalSpy finished(&queue, &TaskQueue::taskFinished);
+    // `dlssvid fg --crash-after 0` terminates itself with an access-violation status before touching any input:
+    // the stage process dies the way a runtime fault would, the queue reports it and moves on (ТЗ §9).
+    const int crash = queue.enqueue("crash", DLSSVID_CLI_PATH, {"fg", "--crash-after", "0"});
+    const int next = queue.enqueue("next", "cmd", {"/c", "echo", "alive"});
+    Pump([&] { return finished.count() >= 2; }, 30000);
+    REQUIRE(finished.count() == 2);
+    CHECK(finished[0][0].toInt() == crash);
+    CHECK(!finished[0][1].toBool());
+    CHECK(finished[1][0].toInt() == next);
+    CHECK(finished[1][1].toBool());
+    CHECK(!queue.busy());
+}

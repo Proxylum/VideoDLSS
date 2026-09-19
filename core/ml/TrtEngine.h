@@ -2,13 +2,14 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace dlssvid {
 
-// TensorRT 10 engine: built from ONNX (FP16, fixed shapes) with an on-disk cache, executed
+// TensorRT 10 engine: built from ONNX (FP16, fixed shapes or one fixed-shape profile) with an on-disk cache, executed
 // synchronously on CUDA device buffers owned by the engine. One instance = one model.
 class TrtEngine {
 public:
@@ -17,6 +18,9 @@ public:
         size_t workspaceBytes = size_t{2} << 30;  // 2 GiB
         std::filesystem::path cacheDir;           // engine cache; empty = next to the ONNX file
         bool verbose = false;
+        // Dynamic ONNX inputs (dims < 0) get one optimization profile with these fixed shapes (min = opt = max);
+        // the shapes are part of the engine cache key. Static inputs may be listed too (ignored).
+        std::map<std::string, std::vector<int64_t>> shapes;
     };
 
     struct Binding {

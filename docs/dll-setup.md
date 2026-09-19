@@ -10,7 +10,7 @@
 | `VCPKG_ROOT` | корень vcpkg | 0 |
 | `CUDA_PATH_V12_4` | CUDA Toolkit 12.4 (ставится инсталлятором CUDA) | 0 (interop), 2 (TensorRT) |
 | `DLSS_SDK_ROOT` | клон [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) (NGX headers + `nvngx_dlss*.dll`) | 5 |
-| `STREAMLINE_ROOT` | клон [NVIDIAGameWorks/Streamline](https://github.com/NVIDIAGameWorks/Streamline) | 7 |
+| `STREAMLINE_ROOT` | клон [NVIDIAGameWorks/Streamline](https://github.com/NVIDIAGameWorks/Streamline) — **не нужен**: FG идёт через NGX-API DLSS SDK (`docs/plans/07-fg.md`) | — |
 | `RTX_VIDEO_SDK_ROOT` | RTX Video SDK 1.1 (developer.nvidia.com, требует аккаунт) | 5 |
 | `NV_OPTICAL_FLOW_SDK_ROOT` | клон [NVIDIA/NVIDIAOpticalFlowSDK](https://github.com/NVIDIA/NVIDIAOpticalFlowSDK) (заголовки) | 3 |
 | `TENSORRT_ROOT` | заголовки TensorRT 10.16: checkout `NVIDIA/TensorRT` тега `v10.16` (`include/`) или SDK zip. DLL (`nvinfer_10.dll`, `nvonnxparser_10.dll`) берутся в рантайме из `models/export/.venv/Lib/site-packages/tensorrt_libs` (pip `tensorrt-cu12==10.16.1.11`), либо из `DLSSVID_TENSORRT_DIR` / `TENSORRT_ROOT/lib` | 2 |
@@ -37,7 +37,7 @@ Apache-2.0; VDA-Large — CC-BY-NC-4.0 (только исследования). 
 | Файл | Откуда | Для чего |
 |---|---|---|
 | `nvngx_dlss.dll` | DLSS SDK `lib/Windows_x86_64/rel/` (сборка копирует её в `build/<preset>/bin/nvidia/`, если задан `DLSS_SDK_ROOT`) | DLSS Super Resolution (этап 5): `dlssvid upscale --backend dlss` |
-| `nvngx_dlssg.dll`, `sl.*.dll` | Streamline | Frame Generation (этап 7) |
+| `nvngx_dlssg.dll` | DLSS SDK `lib/Windows_x86_64/rel/` (сборка копирует её в `bin/nvidia/` при `DLSS_SDK_ROOT`; в драйвере есть своя копия) | DLSS Frame Generation (этап 7) через NGX — без Streamline и `sl.*.dll` |
 | `nvngx_dlssnr.dll` | из драйвера/игры с DLSS 5 (официально только RTX 50) | Neural Rendering (этап 6) |
 | `nvngx_dlssnr.dll` (пропатченная) | результат `dlssnr-patcher` над вашей копией (`dlssvid nr-patch`; рядом сайдкар `nvngx_dlssnr.dll.patch.json`) | NR на RTX 20/30/40 |
 | `nvngx.dll_dlssvid.dll` | собирается с проектом (цель `dlssvid_nr_forwarder`), лежит в `bin/` рядом с exe | форвардер: модуль, из которого вызывается `nvngx_dlssnr.dll` (этап 6) |
@@ -93,3 +93,19 @@ NIS (`--no-fallback` — ошибка вместо перехода). NGX пиш
    | `8270b350cd82de5ce89806872cdd6b6a9249b80836b91bbeb3573470744cc206` (165 840 496 байт) | 310.8.0.0, Ada-патч сообщества (HuggingFace Bandukids/DLSS-Runtimes — только для тестов, в продукт не входит) | 616.92 | RTX 4070 Ti SUPER (Ada, sm_89) | 2026-09-19: `Init_Ext` ABI 0 (ComfyUI), capability-блок, `CreateFeature(18)` Success; 30 кадров 1440p с guides, 15.9 мс/кадр GPU; `EvaluateFeature` стабилен |
 
 Готовые патченные DLL (HuggingFace, Discord) в продукт не включаются — только ориентир для тестов.
+
+## Frame Generation (этап 7): `nvngx_dlssg.dll` через NGX
+
+DLSS SDK 310.9 содержит прямой NGX-API Frame Generation (`NVSDK_NGX_Feature_FrameGeneration`, «DLSS-FG Programming
+Guide» в `doc/`), поэтому Streamline, скрытый swapchain и отдельный воркер не нужны (`fg_worker/README.md`).
+
+1. `nvngx_dlssg.dll` — из DLSS SDK (`lib/Windows_x86_64/rel/`); сборка копирует её в `bin/nvidia/` рядом с
+   `nvngx_dlss.dll`, когда задан `DLSS_SDK_ROOT`. Драйвер поставляет свою копию, но стадия требует файл в `bin/nvidia/`
+   (или `DLSSVID_NVIDIA_DLL_DIR` / `--dll-dir`), как и для DLSS SR.
+2. GPU: RTX 40 (Ada) и новее; ×3/×4 (Multi Frame Generation) — по `DLSSG.MultiFrameCountMax` из capability-блока (на
+   Ada = 1 → только ×2; на RTX 50 до 3 → ×4). Без поддержки стадия печатает инструкцию и советует `--backend rife`.
+3. Проверка: `dlssvid fg --check` — GPU, драйвер, DLL + SHA-256, `FrameGeneration.Available`, `MultiFrameCountMax`,
+   результат `CreateFeature` и формат backbuffer (`rgba16f`, при отказе — `rgba8`).
+4. Baseline RIFE (`--backend rife`): ONNX `yuvraj108c/rife-onnx` (RIFE 4.9/4.8/4.7, MIT) скачивается реестром моделей в
+   `models/cache/` при первом запуске (21 МБ), TensorRT-движок под размер кадра собирается один раз (1–3 мин) и
+   кэшируется рядом; нужны TensorRT (`TENSORRT_ROOT`) и CUDA.

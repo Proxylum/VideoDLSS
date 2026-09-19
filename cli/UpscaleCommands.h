@@ -34,7 +34,9 @@ public:
     struct CompareArgs {
         std::string ref, test;
         int64_t frames = -1;
-        int64_t offset = 0;      // test frame index offset relative to the reference
+        int64_t offset = 0;
+        int64_t start = 0;  // first reference frame
+        int64_t step = 1;   // frame stride (1 = every frame; 2 with --start 1 = the generated frames of an x2 color_fg)      // test frame index offset relative to the reference
         std::string json;        // per-frame results
         bool quiet = false;
     };

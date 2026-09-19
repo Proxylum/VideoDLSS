@@ -107,3 +107,37 @@ GPU — только композит/апскейл. Depth/MV не подава
 (5) `EvaluateFeature` на драйвере 616.92 не падает — предупреждение DLSS5-Feeder про 616.64+ для нашего пути вызова не
 подтвердилось. (6) `Init_Ext` сниппета принял первый вариант ABI (порядок ComfyUI), `CreateFeature(18)` — capability-блок с
 первой попытки; `mv_dlss` в RG32F принят.
+
+## Frame Generation (этап 7)
+
+### Методика (ТЗ §8: сравнение с RIFE как baseline)
+
+У FG есть **ground truth**: исходный клип прореживается вдвое (чётные кадры, fps/2), стадия удваивает частоту, и
+сгенерированные кадры сравниваются с выброшенными оригиналами:
+
+1. `ffmpeg -i in.mp4 -vf "select=not(mod(n,2)),setpts=N/(15*TB)" -r 15 in_half.mp4` (30 fps → 15 fps, 90 → 45 кадров).
+2. Guides для прореженного клипа заново: `dlssvid depth --backend da3`, `dlssvid flow --backend ofa` (MV между кадрами
+   2i−2 и 2i).
+3. `dlssvid fg -i in_half.mp4 -o passes --backend dlssg | rife | blend --multiplier 2` → `color_fg` (89 кадров, 30 fps).
+4. `dlssvid compare --ref in.mp4 --test passes/color_fg --start 1 --step 2` — только сгенерированные кадры (нечётные
+   индексы `color_fg` ↔ нечётные кадры оригинала); без `--start/--step` — все 89 кадров (реальные совпадают с оригиналом).
+5. Стоимость — `ms/frame (backend)` из вывода `dlssvid fg`: DLSS-G — evaluate + readback, RIFE — TensorRT + копии,
+   blend — CPU.
+
+### Результаты (2026-09-19, RTX 4070 Ti SUPER — Ada, драйвер 616.92, DLSS SDK 310.9.1 `nvngx_dlssg.dll` sha256 ff6e90eb…70b82, TensorRT 10.16)
+
+Smoke-клип testsrc2 1280×720 (движущиеся элементы + статичные полосы), 44 сгенерированных кадра:
+
+| Бэкенд | Guides | PSNR Y сгенерированных к оригиналу, дБ (min) | SSIM Y (min) | PSNR Y всех 89 кадров | мс/кадр (backend) | мс/кадр (wall, с EXR) |
+|---|---|---|---|---|---|---|
+| dlssg (DLSS Frame Generation, ×2, rgba16f) | depth_dlss + mv_dlss (OFA) | **34.25** (31.77) | **0.976** (0.972) | 58.13 | **8.4** | 138 |
+| rife (RIFE 4.9, TensorRT fp16, ×2) | — | 33.59 (32.05) | 0.972 (0.963) | 57.81 | 63.6–75.6 | 130 (движок из кэша) |
+| rife (×3 через `timestep` 1/3, 2/3) | — | — | — | — | 89.1 (два evaluate) | 175 |
+| blend (lerp соседей, ×2) | — | 26.79 (25.71) | 0.953 (0.947) | 54.44 | 49.6 (CPU) | 109 |
+
+Выводы. (1) DLSS-G через прямой NGX-API работает на Ada offscreen: `FrameGeneration.Available = 1`, backbuffer
+`R16G16B16A16_FLOAT` принят, `MultiFrameCountMax = 1` — на RTX 40 только ×2 (Multi Frame Generation — RTX 50); ×3/×4 на Ada
+даёт RIFE через `timestep`. (2) DLSS-G с guides лучше RIFE по PSNR/SSIM и в ~9 раз быстрее на кадр; оба далеко впереди
+смешивания (+7 дБ). (3) Синтетическая камера (статичная, движение в MV) достаточна для этого клипа; артефакты на реальных
+сценах с движением камеры — проверить после TASK-0010. (4) Первый запуск RIFE собирает TensorRT-движок под размер кадра
+(~2.5 мин на 720p), дальше он берётся из кэша `models/cache/`.
