@@ -44,7 +44,9 @@ Apache-2.0; VDA-Large — CC-BY-NC-4.0 (только исследования). 
 | `nvngx_dlssnr.dll` (пропатченная) | результат `dlssnr-patcher` над вашей копией (`dlssvid nr-patch`; рядом сайдкар `nvngx_dlssnr.dll.patch.json`) | NR на RTX 20/30/40 |
 | `nvngx.dll_dlssvid.dll` | собирается с проектом (цель `dlssvid_nr_forwarder`), лежит в `bin/` рядом с exe | форвардер: модуль, из которого вызывается `nvngx_dlssnr.dll` (этап 6) |
 
-Приложение ищет DLL в `bin/nvidia/` рядом с exe (переопределяется `DLSSVID_NVIDIA_DLL_DIR` или `--dll-dir`). При
+Приложение ищет DLL в `bin/nvidia/` рядом с exe (переопределяется `DLSSVID_NVIDIA_DLL_DIR` или `--dll-dir`). Свои DLL
+(например, `nvngx_dlssnr.dll`) кладите в `bin/nvidia/` **дерева исходников** (git-ignored): сборка копирует оттуда все
+`*.dll` в `build/<preset>/bin/nvidia/`, поэтому чистая пересборка их не теряет (с 2026-09-20). При
 отсутствии DLL соответствующая стадия отключается с сообщением; приложение не падает: `upscale` переходит на
 NIS (`--no-fallback` — ошибка вместо перехода). NGX пишет свой лог в `%LOCALAPPDATA%\dlssvid\ngx\`.
 
