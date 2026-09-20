@@ -193,6 +193,7 @@ third_party/nis/  NVIDIA Image Scaling 1.0.3 (MIT, vendored headers)
 models/     registry.json (models, URLs, hashes, licences) · export/ (ONNX export scripts)
 depth_worker/ worker.py — PyTorch reference backends (da3, vda), icdepth placeholder, stub for tests
 models/     registry.json · export/ (fetch.py, export_da3.py, export_vda.py, loaders) · cache/ (weights, ONNX, engines; git-ignored)
+tests/data/ fetch.py (the 5 acceptance clips from open sources, sha256-checked; cache/ and clips/ are git-ignored) · bench_clips.py (measurements on them) · README.md (licences)
 fg_worker/  README only: why there is no worker executable (DLSS-G runs through NGX inside `dlssvid fg`)
 bin/nvidia/ user-supplied NVIDIA DLLs (git-ignored)
 ```
