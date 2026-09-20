@@ -14,3 +14,12 @@ if(DLSSVID_WITH_DLSS AND EXISTS "${DLSS_SDK_ROOT}/lib/Windows_x86_64/rel/nvngx_d
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${DLSS_SDK_ROOT}/lib/Windows_x86_64/rel/nvngx_dlssg.dll" "$<TARGET_FILE_DIR:dlssvid>/nvidia/nvngx_dlssg.dll"
     VERBATIM)
 endif()
+# User-supplied NVIDIA DLLs (nvngx_dlssnr.dll and patched builds, docs/dll-setup.md) live in the source bin/nvidia/
+# (git-ignored); copy them too, so a clean build tree does not silently lose them (the NR GPU tests would SKIP).
+file(GLOB DLSSVID_USER_NVIDIA_DLLS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/bin/nvidia/*.dll")
+foreach(dll IN LISTS DLSSVID_USER_NVIDIA_DLLS)
+  get_filename_component(dll_name "${dll}" NAME)
+  add_custom_command(TARGET dlssvid POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${dll}" "$<TARGET_FILE_DIR:dlssvid>/nvidia/${dll_name}"
+    VERBATIM)
+endforeach()
