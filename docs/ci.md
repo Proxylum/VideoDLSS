@@ -41,14 +41,15 @@ Git на машине раннера должен уметь длинные пу
 D:\GitLab-Runner\gitlab-runner.exe run --config D:\GitLab-Runner\config.toml --working-directory D:\GitLab-Runner
 ```
 
-(запущен скрыто через `Start-Process -WindowStyle Hidden`, логи — `D:\GitLab-Runner\runner.err.log`). После
-перезагрузки его нужно запустить снова той же командой или один раз сделать автозапуск — на выбор:
+Автозапуск — задача планировщика `GitLab Runner (video-dlss)` (при входе пользователя, без ограничения времени
+выполнения, одна копия): она запускает `D:\GitLab-Runner\start-runner.ps1`, который стартует раннер скрытым процессом
+(`Start-Process -WindowStyle Hidden`, логи — `D:\GitLab-Runner\runner.err.log`) и не запускает вторую копию, если
+раннер уже работает. Тот же скрипт можно запустить вручную:
+`powershell -ExecutionPolicy Bypass -File D:\GitLab-Runner\start-runner.ps1`. Служба (`gitlab-runner install`) не
+использована: нужны права администратора, а служба от `LocalSystem` не увидела бы кэш vcpkg и venv пользователя.
 
-- задача планировщика на вход пользователя (без пароля, работает только при входе):
-  `schtasks /Create /TN "GitLab Runner (video-dlss)" /SC ONLOGON /RL LIMITED /TR "\"D:\GitLab-Runner\gitlab-runner.exe\" run --config D:\GitLab-Runner\config.toml --working-directory D:\GitLab-Runner"`;
-- служба от имени пользователя (из консоли администратора; служба от `LocalSystem` не увидит кэш vcpkg и venv):
-  `gitlab-runner.exe install --user <домен\пользователь> --password <пароль> --config D:\GitLab-Runner\config.toml`,
-  затем `gitlab-runner.exe start`.
+Полное удаление раннера с машины (задача, процесс, регистрация в GitLab, файлы) описано в рабочем пространстве
+агента: `Output/gitlab-runner-removal.md`.
 
 Проверка: `D:\GitLab-Runner\gitlab-runner.exe verify --config D:\GitLab-Runner\config.toml`; в GitLab —
 Settings → CI/CD → Runners (зелёная точка «online»).
