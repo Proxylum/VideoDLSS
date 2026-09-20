@@ -15,7 +15,7 @@ namespace dlssvid {
 // One interface for every upscaler (ТЗ §3): RTX VSR (default), DLSS SR, NIS and the naive bicubic
 // baseline. The stage prepares D3D12 textures; backends only record work into a command list.
 struct UpscalerConfig {
-    std::string backend;  // rtxvsr | dlss | nis | bicubic
+    std::string backend;  // dlss | nis | bicubic | rtxvsr
     uint32_t inputWidth = 0, inputHeight = 0;
     uint32_t outputWidth = 0, outputHeight = 0;
     float sharpness = 0.5f;               // nis: 0..1 (NVScaler slider); dlss: unused (sharpening is deprecated in NGX)

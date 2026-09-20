@@ -21,6 +21,6 @@ cmake --preset %DLSSVID_PRESET% || exit /b 1
 echo === build
 cmake --build --preset %DLSSVID_PRESET% -- -k 0 || exit /b 1
 echo === tests
-ctest --preset %DLSSVID_PRESET% --output-junit test-report.xml || exit /b 1
+ctest --preset %DLSSVID_PRESET% --output-on-failure --output-junit test-report.xml || exit /b 1
 echo === done
 endlocal

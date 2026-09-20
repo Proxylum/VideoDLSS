@@ -25,7 +25,7 @@ std::filesystem::path Abs(const std::string& s, const std::filesystem::path& bas
 
 std::vector<StageEntry> Project::DefaultStages() {
     return {StageEntry{"depth", true, {{"backend", "da3"}}}, StageEntry{"flow", true, {{"backend", "ofa"}}},
-            StageEntry{"upscale", true, {{"backend", "rtxvsr"}, {"scale", 2}}},
+            StageEntry{"upscale", true, {{"backend", "dlss"}, {"scale", 2}}},
             StageEntry{"nr", true, {{"backend", "ngx"}, {"intensity", 1.0}, {"passes", 1}}},
             StageEntry{"fg", true, {{"backend", "dlssg"}, {"multiplier", 2}}}};
 }

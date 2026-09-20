@@ -174,10 +174,10 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
 }  // namespace
 
 void UpscaleCommands::Register(CLI::App& app) {
-    upscale_ = app.add_subcommand("upscale", "upscale a video into the color_sr pass (rtxvsr | dlss | nis | bicubic)");
+    upscale_ = app.add_subcommand("upscale", "upscale a video into the color_sr pass (dlss | nis | bicubic | rtxvsr)");
     upscale_->add_option("-i,--input", ua_.input, "input video file")->required()->check(CLI::ExistingFile);
     upscale_->add_option("-o,--output", ua_.output, "pass root folder (writes color_sr/)")->required();
-    upscale_->add_option("--backend", ua_.backend, "rtxvsr (default; RTX Video SDK) | dlss (NGX, jitter emulation) | nis | bicubic")->default_val("rtxvsr");
+    upscale_->add_option("--backend", ua_.backend, "dlss (default; NGX, jitter emulation) | nis | bicubic | rtxvsr (optional: RTX Video SDK)")->default_val("rtxvsr");
     upscale_->add_option("--scale", ua_.scale, "scale factor: 1.5 | 2 | 3 (output capped at 3840x2160)")->default_val(2.0);
     upscale_->add_option("--target", ua_.target, "explicit output size WxH (instead of --scale)");
     upscale_->add_option("--depth-dir", ua_.depthDir, "depth_dlss pass folder (dlss)");

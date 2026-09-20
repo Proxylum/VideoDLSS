@@ -13,7 +13,7 @@
 | `CUDA_PATH_V12_4` | CUDA Toolkit 12.4 (ставится инсталлятором CUDA) | 0 (interop), 2 (TensorRT) |
 | `DLSS_SDK_ROOT` | клон [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) (NGX headers + `nvngx_dlss*.dll`) | 5 |
 | `STREAMLINE_ROOT` | клон [NVIDIAGameWorks/Streamline](https://github.com/NVIDIAGameWorks/Streamline) — **не нужен**: FG идёт через NGX-API DLSS SDK (`docs/plans/07-fg.md`) | — |
-| `RTX_VIDEO_SDK_ROOT` | RTX Video SDK 1.1 (developer.nvidia.com, требует аккаунт) | 5 |
+| `RTX_VIDEO_SDK_ROOT` | RTX Video SDK 1.1 (developer.nvidia.com, требует аккаунт) — необязательно: бэкенд `rtxvsr` не основной | 5 |
 | `NV_OPTICAL_FLOW_SDK_ROOT` | клон [NVIDIA/NVIDIAOpticalFlowSDK](https://github.com/NVIDIA/NVIDIAOpticalFlowSDK) (заголовки) | 3 |
 | `TENSORRT_ROOT` | заголовки TensorRT 10.16: checkout `NVIDIA/TensorRT` тега `v10.16` (`include/`) или SDK zip. DLL (`nvinfer_10.dll`, `nvonnxparser_10.dll`) берутся в рантайме из `models/export/.venv/Lib/site-packages/tensorrt_libs` (pip `tensorrt-cu12==10.16.1.11`), либо из `DLSSVID_TENSORRT_DIR` / `TENSORRT_ROOT/lib` | 2 |
 | `DLSSVID_PYTHON` | интерпретатор для `depth_worker` и ONNX-экспорта (по умолчанию `models/export/.venv/Scripts/python.exe`) | 2 |
@@ -48,11 +48,12 @@ Apache-2.0; VDA-Large — CC-BY-NC-4.0 (только исследования). 
 отсутствии DLL соответствующая стадия отключается с сообщением; приложение не падает: `upscale` переходит на
 NIS (`--no-fallback` — ошибка вместо перехода). NGX пишет свой лог в `%LOCALAPPDATA%\dlssvid\ngx\`.
 
-## RTX Video SDK 1.1 (этап 5, бэкенд `rtxvsr`)
+## RTX Video SDK 1.1 (бэкенд `rtxvsr`, необязательно)
 
-Скачивается с https://developer.nvidia.com/rtx-video-sdk под аккаунтом NVIDIA; путь — `RTX_VIDEO_SDK_ROOT`.
-Интеграция ещё не выполнена (нет SDK на машине разработки, TASK-0011): интерфейс `IUpscaler` и точка
-`RtxVsrUpscaler` готовы, без SDK стадия сообщает инструкцию и использует NIS.
+Скачивается с https://developer.nvidia.com/rtx-video-sdk под аккаунтом NVIDIA Developer; путь — `RTX_VIDEO_SDK_ROOT`.
+Аккаунта нет, поэтому с 2026-09-20 RTX VSR не является основным бэкендом: по умолчанию апскейл делает DLSS SR (`dlss`),
+без DLL/GPU — NIS. Интерфейс `IUpscaler` и точка `RtxVsrUpscaler` сохранены; без SDK `--backend rtxvsr` сообщает
+инструкцию и использует NIS.
 
 ## Neural Rendering (этап 6): `nvngx_dlssnr.dll`, форвардер, патч для RTX 20/30/40
 

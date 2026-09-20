@@ -98,7 +98,9 @@ TEST_CASE("FrameStore loads the current frame, reports statuses and prefetches",
     CHECK(tex["depth_raw"].minValue == 50.f);  // frame 5: values 50..57
     CHECK(tex["depth_raw"].maxValue == 57.f);
     CHECK(tex["mask"].kind == TextureKind::Mask);
-    CHECK(store.Textures(6).empty() == (store.GetStatus(6, "depth_raw") != FrameStore::Status::Ready));
+    CHECK(store.Textures(42).empty());  // nothing loadable there
+    // NB: `Textures(6).empty() == (GetStatus(6) != Ready)` is not a valid check here — the prefetch thread can
+    // finish frame 6 between the two calls (flaky in CI, 2026-09-20); frame 6 is verified after the prefetch wait.
 
     // prefetch window: frames 3..7 of both sources become resident
     REQUIRE(WaitUntil([&] {
@@ -107,6 +109,8 @@ TEST_CASE("FrameStore loads the current frame, reports statuses and prefetches",
     }));
     CHECK(store.GetStatus(3, "depth_raw") == FrameStore::Status::Ready);
     CHECK(store.GetStatus(7, "mask") == FrameStore::Status::Ready);
+    CHECK(store.GetStatus(6, "depth_raw") == FrameStore::Status::Ready);
+    CHECK(!store.Textures(6).empty());  // prefetched frames have their textures
     CHECK(store.GetStatus(8, "depth_raw") == FrameStore::Status::Queued);  // loadable, outside the window
     CHECK(store.ResidentCount() == 10);
     CHECK(store.ResidentBytes() == 5 * (8 * 4 * 4 + 8 * 4));

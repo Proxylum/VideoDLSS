@@ -6,7 +6,7 @@
 
 namespace dlssvid::cli {
 
-// `dlssvid upscale` (stage 5: color_sr through rtxvsr | dlss | nis | bicubic) and `dlssvid compare`
+// `dlssvid upscale` (stage 5: color_sr through dlss | nis | bicubic | rtxvsr) and `dlssvid compare`
 // (PSNR / SSIM between two videos or pass folders — the A/B tool of docs/benchmarks.md).
 class UpscaleCommands {
 public:
@@ -15,7 +15,7 @@ public:
 
     struct UpscaleArgs {
         std::string input, output;
-        std::string backend = "rtxvsr";
+        std::string backend = "dlss";
         double scale = 2.0;
         std::string target;       // WxH
         std::string depthDir, mvDir;
