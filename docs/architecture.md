@@ -121,7 +121,7 @@ UpscaleStage ── YUV420P ─▶ Yuv420pToRgba16f ─▶ input RGBA16F ─┬�
    depth_dlss / mv_dlss (слот кэша или папки пассов) ─▶ IUpscaler::Evaluate(cmdlist) ─▶ output RGBA16F (UAV)
                                                               ▼
                                       readback ─▶ color_sr (EXR half / PNG16) + слот кэша + [--video через RgbToYuv420p]
-IUpscaler: rtxvsr (RTX Video SDK — точка интеграции) | dlss (NGX) | nis (NVScaler / NVSharpen) | bicubic (Catmull-Rom)
+IUpscaler: dlss (NGX, по умолчанию) | nis (NVScaler / NVSharpen, fallback) | bicubic (Catmull-Rom) | rtxvsr (опционально: RTX Video SDK, не основной с 2026-09-20)
 ```
 
 - `ComputeKernel` — общий compute-помощник (root CBV + таблицы SRV/UAV + статические сэмплеры, кольца
@@ -262,7 +262,7 @@ dlssvid process ── ProcessRunner::RunProcess ── depth ─▶ flow ─▶
 | `ViewportRenderer::RenderInto` | каждый кадр — `ExecuteAndWait` (синхронный submit) | простота; composite 0.2–2.5 мс, узкое место — загрузка кадров | этап 5+: fence-ринг и несколько кадров в полёте |
 | `ViewportWindow` | подписи ячеек и пробник — виджеты Qt рядом с вьюпортом, в PNG-скриншот их вписывает `QPainter` | Qt не рисует поверх дочернего нативного окна со swapchain | — (по плану этапа 4) |
 | `UpscaleStage` + `DlssUpscaler` | **эмуляция джиттера** (ТЗ §3): кадр видео пересемплируется Catmull-Rom со сдвигом −j (Halton(2,3), фаз = 8·(target/render)²), содержимое смещается на +j, DLSS получает `InJitterOffset = +j`; MV не джиттерятся (`MVJittered = 0`) | DLSS SR рассчитан на джиттерный рендер, у видео джиттера нет; знак выбран по PSNR на синтетическом эталоне (+1.7 дБ к прогону без джиттера, `--jitter-sign`) | остаётся как режим сравнения; RTX VSR — основной путь |
-| `RtxVsrUpscaler` | заглушка: `Available()` объясняет, что нужен RTX Video SDK 1.1, стадия деградирует в `nis` | SDK за аккаунтом NVIDIA (TASK-0011) | этап 5b: интеграция за `RTX_VIDEO_SDK_ROOT` |
+| `RtxVsrUpscaler` | заглушка: `Available()` объясняет, что нужен RTX Video SDK 1.1, стадия деградирует в `nis` | SDK только под аккаунтом NVIDIA Developer, которого нет — RTX VSR снят как основной бэкенд (DECISION 2026-09-20), по умолчанию `dlss` | интеграция за `RTX_VIDEO_SDK_ROOT`, если SDK появится |
 | `UpscaleStage::Process` | результат читается на CPU (readback) для записи пасса и заново грузится в слот кэша | простота; следующие стадии пока читают пассы с диска | этап 6–7: копия текстуры в слот без CPU, запись EXR в фоне |
 | `NisUpscaler` | масштаб > 2 — два прохода NVScaler (×2, затем остаток) | NIS принимает соотношение 1..2 за проход | — |
 | `VideoEncoder` (превью `--video`) | цветовые теги (matrix/range) не записываются в поток | превью без аудио, для просмотра; финальный мукс — этап 8 `process` | этап 8: теги и аудио |

@@ -1,7 +1,7 @@
 # dlss-video
 
 Offline DLSS video pipeline for Windows + NVIDIA RTX: a video file goes through
-`decode → depth / motion vectors → upscale (RTX VSR / DLSS SR) → tonemap → DLSS 5 Neural
+`decode → depth / motion vectors → upscale (DLSS SR; NIS / bicubic; RTX VSR optional) → tonemap → DLSS 5 Neural
 Rendering → DLSS Frame Generation → encode`, every intermediate **pass** (depth, motion
 vectors, masks, colour stages) can be exported, imported and inspected in a viewport.
 
@@ -22,8 +22,9 @@ with depth / motion-vector guides and masks into `color_nr`, after a tonemap ste
 GPU / driver / DLL / CreateFeature(18) diagnostics ([docs/dll-setup.md](docs/dll-setup.md)); verified on an RTX 4070 Ti SUPER
 (driver 616.92, patched DLL): ~16 ms per 1440p frame on the GPU ([docs/benchmarks.md](docs/benchmarks.md)). Stage 5: `dlssvid upscale`
 produces the `color_sr` pass through one `IUpscaler` interface: DLSS Super Resolution over NGX (with the jitter
-emulation of ТЗ §3), NVIDIA Image Scaling (always available, WARP-capable), a bicubic baseline, and the RTX VSR
-integration point (needs the RTX Video SDK). `dlssvid compare` measures PSNR/SSIM for the A/B of
+emulation of ТЗ §3) as the default, NVIDIA Image Scaling (always available, WARP-capable, the fallback), a bicubic
+baseline, and an optional RTX VSR integration point (needs the RTX Video SDK; dropped as the primary backend on
+2026-09-20 — no NVIDIA developer account). `dlssvid compare` measures PSNR/SSIM for the A/B of
 [docs/benchmarks.md](docs/benchmarks.md). Stage 4: `dlssvid-gui` is a Qt 6.8 shell around a D3D12 viewport
 that shows the source video and every pass folder in single / overlay / 2x2 modes with colour maps, motion-vector
 and mask displays, a wipe, a pixel probe and a timeline; the viewport state lives in a project file
@@ -50,7 +51,7 @@ passes as file sequences + `manifest.json` and the raw ↔ DLSS conventions ([do
 | Qt | 6.8 (msvc2022_64), `QT_ROOT` = `.../Qt/6.8.x/msvc2022_64` | GUI only (`DLSSVID_BUILD_APP`, default ON; skipped with a warning when Qt is not found). `windeployqt` copies the runtime next to the executables |
 | DXC | vcpkg `directx-dxc` (automatic) | the viewport shaders are compiled at build time into headers (SM 6.0, runs on WARP) |
 | DLSS SDK | clone of [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) (`DLSS_SDK_ROOT`): NGX headers, `nvsdk_ngx_d.lib`, `nvngx_dlss.dll` | stage 5 `--backend dlss`; optional (`DLSSVID_WITH_DLSS`). `nvngx_dlss.dll` goes to `bin/nvidia/` next to the executables (the build copies it from the SDK for development) |
-| RTX Video SDK | 1.1 (`RTX_VIDEO_SDK_ROOT`, NVIDIA developer account) | stage 5 `--backend rtxvsr`; not integrated yet — the stage falls back to NIS with an instruction |
+| RTX Video SDK | 1.1 (`RTX_VIDEO_SDK_ROOT`, NVIDIA developer account) | optional `--backend rtxvsr` only; not integrated (no account) — the stage falls back to NIS with an instruction |
 
 NVIDIA SDKs (DLSS/NGX, Streamline, RTX Video, Optical Flow) and Qt are needed from stage 4
 onwards — see [docs/dll-setup.md](docs/dll-setup.md). No NVIDIA binaries or model weights are
@@ -119,7 +120,7 @@ from the same pipeline, jitter emulation for DLSS.
 ```bat
 dlssvid upscale -i input.mp4 -o passes --backend nis --scale 2                         :: NVIDIA Image Scaling (any GPU, WARP)
 dlssvid upscale -i input.mp4 -o passes --backend dlss --scale 2 --depth-dir passes\depth_dlss --mv-dir passes\mv_dlss --preset K
-dlssvid upscale -i input.mp4 -o passes --backend rtxvsr --scale 2                      :: RTX VSR when the SDK is present, else nis + instruction
+dlssvid upscale -i input.mp4 -o passes --scale 2                                       :: DLSS SR (default); --backend nis | bicubic | rtxvsr (optional SDK)
 dlssvid upscale -i input.mp4 -o passes --backend nis --artifact-reduction-only         :: no scaling (NVSharpen / VSR artifact reduction)
 dlssvid upscale -i input.mp4 -o passes --backend dlss --video sr.mp4 --codec hevc_nvenc  :: plus a preview video (no audio)
 dlssvid compare --ref reference.mp4 --test passes\color_sr --json ab.json              :: PSNR Y/RGB + SSIM per frame

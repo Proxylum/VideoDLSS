@@ -30,7 +30,7 @@ TEST_CASE("Project::Create fills defaults next to the video", "[viewport][projec
     CHECK(p.stages[0].params["backend"] == "da3");
     CHECK(p.stages[1].name == "flow");
     CHECK(p.stages[2].name == "upscale");
-    CHECK(p.stages[2].params["backend"] == "rtxvsr");
+    CHECK(p.stages[2].params["backend"] == "dlss");
     CHECK(p.stages[2].params["scale"] == 2);
     CHECK(p.stages[3].name == "nr");
     CHECK(p.stages[3].params["backend"] == "ngx");

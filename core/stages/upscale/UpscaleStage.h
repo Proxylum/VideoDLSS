@@ -21,7 +21,7 @@ namespace dlssvid {
 // depth and flow stages run in the same pipeline, or from pass folders. Writes the pass folder,
 // uploads the result into the cache slot and can encode a preview video.
 struct UpscaleStageOptions {
-    std::string backend = "rtxvsr";        // rtxvsr | dlss | nis | bicubic
+    std::string backend = "dlss";          // dlss (default) | nis | bicubic | rtxvsr (optional, RTX Video SDK)
     bool allowFallback = true;             // backend unavailable -> nis with a warning (ТЗ §4: a missing SDK must not crash)
     double scale = 2.0;                    // x1.5 / x2 / x3
     uint32_t targetWidth = 0, targetHeight = 0;  // explicit target instead of `scale`

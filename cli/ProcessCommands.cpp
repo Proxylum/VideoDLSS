@@ -166,7 +166,7 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_option("--param", pa_.params, "stage parameter stage.key=value (repeatable), e.g. nr.intensity=1.2, fg.backend=rife");
     process_->add_option("--depth-backend,--depth_backend", pa_.depthBackend, "da3 | vda | worker | stub");
     process_->add_option("--flow-backend,--flow_backend", pa_.flowBackend, "ofa | searaft | stub");
-    process_->add_option("--upscale-backend,--upscale_backend", pa_.upscaleBackend, "rtxvsr | dlss | nis | bicubic");
+    process_->add_option("--upscale-backend,--upscale_backend", pa_.upscaleBackend, "dlss | nis | bicubic | rtxvsr");
     process_->add_option("--nr-backend,--nr_backend", pa_.nrBackend, "ngx | stub");
     process_->add_option("--fg-backend,--fg_backend", pa_.fgBackend, "dlssg | rife | blend");
     process_->add_option("--scale", pa_.scale, "upscale factor 1.5 | 2 | 3");

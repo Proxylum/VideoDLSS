@@ -15,7 +15,7 @@
 
 namespace dlssvid {
 
-std::vector<std::string> UpscalerBackends() { return {"rtxvsr", "dlss", "nis", "bicubic"}; }
+std::vector<std::string> UpscalerBackends() { return {"dlss", "nis", "bicubic", "rtxvsr"}; }
 
 std::vector<std::filesystem::path> NvidiaDllSearchPaths(const std::filesystem::path& override) {
     std::vector<std::filesystem::path> out;
