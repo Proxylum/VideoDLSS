@@ -8,6 +8,10 @@ default:
 variables:
   GIT_DEPTH: "50"
   DLSSVID_PRESET: release
+  # vcpkg build trees under build/ exceed MAX_PATH: without this `git clean -ffdx` between jobs fails on Windows
+  GIT_CONFIG_COUNT: "1"
+  GIT_CONFIG_KEY_0: core.longPaths
+  GIT_CONFIG_VALUE_0: "true"
 
 build-test:
   stage: build

@@ -25,7 +25,9 @@ scripts\package.cmd      :: сборка и cpack --preset release -> build\rele
 | `DLSSVID_PYTHON` | `...\models\export\.venv\Scripts\python.exe` | воркеры/экспорт, если тесту всё же понадобится Python |
 | `DLSSVID_TENSORRT_DIR` | `...\models\export\.venv\Lib\site-packages\tensorrt_libs` | рантайм TensorRT (`nvinfer_10.dll` и др.): в `TENSORRT_ROOT` только заголовки, DLL ставит `pip install tensorrt-cu12` в venv — без этой переменной первый прогон упал на golden-тесте с реальными бэкендами («backend 'da3' needs models/export/.venv») |
 
-Каталог сборки — `D:\GitLab-Runner\builds\<runner>\0\ai\video-dlss`: клон с `GIT_DEPTH=50`, перед каждым job
+Git на машине раннера должен уметь длинные пути (`git config --global core.longPaths true` — сделано; `.gitlab-ci.yml`
+дополнительно задаёт то же через `GIT_CONFIG_KEY_0/VALUE_0`): деревья сборки vcpkg длиннее MAX_PATH, и без этого
+`git clean` между job падает. Каталог сборки — `D:\GitLab-Runner\builds\<runner>\0\ai\video-dlss`: клон с `GIT_DEPTH=50`, перед каждым job
 `git clean -ffdx` (значение `GIT_CLEAN_FLAGS` по умолчанию) удаляет и игнорируемые файлы, то есть `build/` —
 каждый job собирает проект с нуля (vcpkg восстанавливает пакеты из бинарного кэша пользователя). Это намеренно:
 чистая сборка ловит устаревшие объекты и пропущенные зависимости.
