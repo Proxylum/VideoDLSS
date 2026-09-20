@@ -8,6 +8,11 @@
 #ifdef DLSSVID_WITH_TENSORRT
 #include "ml/TrtEngine.h"
 #include "ml/TrtLoader.h"
+
+#include <windows.h>
+
+#include <algorithm>
+#include <cstdlib>
 #endif
 
 using namespace dlssvid;
@@ -56,6 +61,25 @@ TEST_CASE("TensorRT builds, caches and runs the tiny ONNX model", "[trt][gpu]") 
     CHECK(again->EnginePath() == cache);
     CHECK_THROWS(TrtEngine::FromOnnx("nope.onnx", opt));
     CHECK(!trt::LibraryVersion().empty());
+}
+
+TEST_CASE("TensorRT loader searches bin/tensorrt next to the executable", "[trt]") {
+    const auto dirs = trt::SearchDirectories();
+    wchar_t buf[MAX_PATH];
+    REQUIRE(GetModuleFileNameW(nullptr, buf, MAX_PATH) > 0);
+    const auto bundled = std::filesystem::path(buf).parent_path() / "tensorrt";
+    const auto it = std::find(dirs.begin(), dirs.end(), bundled);
+    REQUIRE(it != dirs.end());
+    // only the environment overrides (DLSSVID_TENSORRT_DIR, TENSORRT_ROOT[/lib]) may come before the bundled directory —
+    // CI points DLSSVID_TENSORRT_DIR at a venv tensorrt_libs, so the check is by origin, not by folder name
+    const auto isEnvOverride = [](const std::filesystem::path& p) {
+        for (const char* var : {"DLSSVID_TENSORRT_DIR", "TENSORRT_ROOT"})
+            if (const char* e = std::getenv(var); e && *e && (p == std::filesystem::path(e) || p == std::filesystem::path(e) / "lib")) return true;
+        return false;
+    };
+    for (auto j = dirs.begin(); j != it; ++j) CHECK(isEnvOverride(*j));
+    // the venv fallbacks derived from the executable location come after it
+    CHECK(std::any_of(it, dirs.end(), [](const std::filesystem::path& p) { return p.filename() == "tensorrt_libs"; }));
 }
 
 #else

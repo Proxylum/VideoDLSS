@@ -45,8 +45,10 @@ std::vector<std::filesystem::path> Candidates() {
         out.emplace_back(std::filesystem::path(e) / "lib");
         out.emplace_back(e);
     }
-    // venv next to the executable or in a source checkout (build/<preset>/bin -> project root)
+    // bundled with the full package: bin/tensorrt next to the executable (docs/release.md)
     const auto exe = ExeDir();
+    if (!exe.empty()) out.push_back(exe / "tensorrt");
+    // venv next to the executable or in a source checkout (build/<preset>/bin -> project root)
     for (const auto& base : {exe, exe.parent_path(), exe.parent_path().parent_path(), exe.parent_path().parent_path().parent_path()}) {
         if (base.empty()) continue;
         out.push_back(base / "models" / "export" / ".venv" / "Lib" / "site-packages" / "tensorrt_libs");
@@ -89,6 +91,7 @@ void EnsureLoaded() {
     }
     if (!s.infer || !s.onnx) {
         s.error = "TensorRT DLLs (nvinfer_10.dll, nvonnxparser_10.dll) not found: set TENSORRT_ROOT or DLSSVID_TENSORRT_DIR, "
+                  "put them into bin\\tensorrt next to the executable (the full package does), "
                   "or `pip install tensorrt-cu12` into models/export/.venv";
         if (s.infer) FreeLibrary(s.infer);
         if (s.onnx) FreeLibrary(s.onnx);
@@ -125,6 +128,8 @@ void SetLibraryDirectory(const std::filesystem::path& dir) {
 }
 
 std::string LibraryVersion();
+
+std::vector<std::filesystem::path> SearchDirectories() { return Candidates(); }
 
 }  // namespace dlssvid::trt
 

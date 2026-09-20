@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace dlssvid::trt {
 
@@ -10,7 +11,8 @@ namespace dlssvid::trt {
 // C entry points the public headers call (createInferRuntime_INTERNAL, ...) are defined in
 // TrtLoader.cpp and forward to the DLLs.
 //
-// Search order for the DLL directory: DLSSVID_TENSORRT_DIR, TENSORRT_ROOT(/lib), the venv
+// Search order for the DLL directory: DLSSVID_TENSORRT_DIR, TENSORRT_ROOT(/lib), `tensorrt/` next
+// to the executable (the full package bundles the runtime there, docs/release.md), the venv
 // `models/export/.venv/Lib/site-packages/tensorrt_libs` next to the executable / project,
 // then the normal loader search path.
 
@@ -22,5 +24,7 @@ bool Available(std::string* reason = nullptr);
 void SetLibraryDirectory(const std::filesystem::path& dir);
 // "10.16.1" as reported by the loaded library, empty if unavailable.
 std::string LibraryVersion();
+// The directories that are tried, in order (without the final PATH fallback); for diagnostics and tests.
+std::vector<std::filesystem::path> SearchDirectories();
 
 }  // namespace dlssvid::trt

@@ -189,7 +189,7 @@ cli/        dlssvid (+ ViewportCommands: project, render; UpscaleCommands: upsca
 app/        dlssvid-gui — Qt 6.8 Widgets shell (AppModel, ViewportWindow, panels, TaskQueue)
 tests/      unit/ (Catch2, WARP-capable) · integration/ (synthetic clips, CLI as a process) · app/ (Qt offscreen) · golden/ (the pipeline vs stored references, also for an installed copy) · check_ninja_deps.cmake (build hygiene)
 docs/       architecture.md · conventions.md · dll-setup.md · benchmarks.md · release.md · ci.md · plans/
-scripts/    ci-build.cmd (configure, build, tests), package.cmd (CPack ZIP / NSIS)
+scripts/    ci-build.cmd (configure, build, tests), package.cmd (CPack ZIP / NSIS; `package.cmd full` bundles the TensorRT runtime, cudart and the ONNX models)
 third_party/nis/  NVIDIA Image Scaling 1.0.3 (MIT, vendored headers)
 models/     registry.json (models, URLs, hashes, licences) · export/ (ONNX export scripts)
 depth_worker/ worker.py — PyTorch reference backends (da3, vda), icdepth placeholder, stub for tests
