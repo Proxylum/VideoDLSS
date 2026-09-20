@@ -8,6 +8,10 @@
 #ifdef DLSSVID_WITH_TENSORRT
 #include "ml/TrtEngine.h"
 #include "ml/TrtLoader.h"
+
+#include <windows.h>
+
+#include <algorithm>
 #endif
 
 using namespace dlssvid;
@@ -56,6 +60,18 @@ TEST_CASE("TensorRT builds, caches and runs the tiny ONNX model", "[trt][gpu]") 
     CHECK(again->EnginePath() == cache);
     CHECK_THROWS(TrtEngine::FromOnnx("nope.onnx", opt));
     CHECK(!trt::LibraryVersion().empty());
+}
+
+TEST_CASE("TensorRT loader searches bin/tensorrt next to the executable", "[trt]") {
+    const auto dirs = trt::SearchDirectories();
+    wchar_t buf[MAX_PATH];
+    REQUIRE(GetModuleFileNameW(nullptr, buf, MAX_PATH) > 0);
+    const auto bundled = std::filesystem::path(buf).parent_path() / "tensorrt";
+    const auto it = std::find(dirs.begin(), dirs.end(), bundled);
+    REQUIRE(it != dirs.end());
+    // environment overrides come first, the venv fallbacks after the bundled directory
+    for (auto j = dirs.begin(); j != it; ++j) CHECK(j->filename() != "tensorrt_libs");
+    CHECK(std::any_of(it, dirs.end(), [](const std::filesystem::path& p) { return p.filename() == "tensorrt_libs"; }));
 }
 
 #else
