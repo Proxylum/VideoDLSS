@@ -17,6 +17,7 @@ CMakeUserPresets.json
 /tests/data/*
 !/tests/data/README.md
 !/tests/data/fetch.py
+!/tests/data/bench_clips.py
 *.trt
 *.engine
 *.onnx
