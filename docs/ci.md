@@ -9,27 +9,58 @@ scripts\ci-build.cmd     :: то же, что делает раннер: cmake -
 scripts\package.cmd      :: сборка и cpack --preset release -> build\release\dlss-video-<версия>-win64.zip
 ```
 
-## Раннер (действие пользователя)
+## Раннер
 
-Раннер должен стоять на Windows-машине с RTX-видеокартой и тем же окружением, что у разработчика
-(`docs/dll-setup.md`): Visual Studio 2022+ с C++ и Windows SDK, CMake ≥ 3.28, Ninja, vcpkg, CUDA 12.4, TensorRT 10.16,
-Qt 6.8, клоны SDK и переменные окружения `VCPKG_ROOT`, `CUDA_PATH_V12_4`, `TENSORRT_ROOT`, `NV_OPTICAL_FLOW_SDK_ROOT`,
-`QT_ROOT`, `DLSS_SDK_ROOT`, `DLSSVID_PYTHON` (venv с torch/onnx для экспорта моделей), `HF_TOKEN` (необязательно).
-Переменные задаются **системно** (раннер работает как служба) или в конфиге раннера (`[[runners]] environment = [...]`).
+Раннер стоит на машине разработчика (RTX 4070 Ti SUPER) в `D:\GitLab-Runner` и зарегистрирован в проекте
+`ai/video-dlss` как project runner #11 с тегами `windows`, `rtx` (shell executor, Windows PowerShell 5.1).
+Всё, что ему нужно, задано в `D:\GitLab-Runner\config.toml` (`[[runners]] environment = [...]`), потому что в
+системном окружении этих переменных нет:
 
-1. Установить [gitlab-runner](https://docs.gitlab.com/runner/install/windows.html) (`gitlab-runner.exe install`,
-   `gitlab-runner.exe start`; служба должна работать от пользователя с доступом к GPU — не `LocalSystem`).
-2. В проекте `ai/video-dlss` на git.krem.digital: Settings → CI/CD → Runners → New project runner, теги `windows`,
-   `rtx`, получить токен регистрации.
-3. `gitlab-runner.exe register --url https://git.krem.digital --token <токен> --executor shell --shell pwsh
-   --tag-list windows,rtx --description "rtx-4070-ti-super"` (или `--shell powershell`).
-4. На машине раннера положить в `DLSSVID_NVIDIA_DLL_DIR` (переменная окружения службы) `nvngx_dlss.dll`,
-   `nvngx_dlssg.dll` (из DLSS SDK — их копирует и сборка) и свою `nvngx_dlssnr.dll` — иначе GPU-тесты NR будут
-   SKIP, а не красными.
-5. Первый прогон скачивает веса моделей и собирает TensorRT-движки (`models/cache/` остаётся в рабочем каталоге
-   раннера между сборками — `GIT_CLEAN_FLAGS` по умолчанию не трогает игнорируемые файлы).
+| Переменная | Значение | Зачем |
+|---|---|---|
+| `VSLANG` | `1033` | английские сообщения MSVC → ninja видит зависимости от заголовков (инцидент этапа 8) |
+| `VCPKG_ROOT`, `TENSORRT_ROOT`, `NV_OPTICAL_FLOW_SDK_ROOT`, `QT_ROOT`, `DLSS_SDK_ROOT` | `C:\vcpkg`, `D:\SDK\...` | configure (`docs/dll-setup.md`) |
+| `DLSSVID_NVIDIA_DLL_DIR` | `...\dlss-video\build\release\bin\nvidia` дерева разработчика | `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `nvngx_dlssnr.dll` — иначе GPU-тесты SR/FG/NR были бы SKIP |
+| `DLSSVID_MODELS_DIR` | `...\dlss-video\models` дерева разработчика | `registry.json` + `cache/` с весами, ONNX и TensorRT-движками — CI не качает модели и не собирает движки заново |
+| `DLSSVID_PYTHON` | `...\models\export\.venv\Scripts\python.exe` | воркеры/экспорт, если тесту всё же понадобится Python |
+| `DLSSVID_TENSORRT_DIR` | `...\models\export\.venv\Lib\site-packages\tensorrt_libs` | рантайм TensorRT (`nvinfer_10.dll` и др.): в `TENSORRT_ROOT` только заголовки, DLL ставит `pip install tensorrt-cu12` в venv — без этой переменной первый прогон упал на golden-тесте с реальными бэкендами («backend 'da3' needs models/export/.venv») |
 
-Пока раннер не зарегистрирован, состояние CI проверяется локальным запуском `scripts\ci-build.cmd` (те же шаги).
+Каталог сборки — `D:\GitLab-Runner\builds\<runner>\0\ai\video-dlss`: клон с `GIT_DEPTH=50`, перед каждым job
+`git clean -ffdx` (значение `GIT_CLEAN_FLAGS` по умолчанию) удаляет и игнорируемые файлы, то есть `build/` —
+каждый job собирает проект с нуля (vcpkg восстанавливает пакеты из бинарного кэша пользователя). Это намеренно:
+чистая сборка ловит устаревшие объекты и пропущенные зависимости.
+
+### Как он запущен и как перезапустить
+
+Служба Windows требует прав администратора (`gitlab-runner install`), поэтому раннер работает как обычный процесс
+в сессии пользователя — так у него есть и GPU, и окружение пользователя (бинарный кэш vcpkg):
+
+```bat
+D:\GitLab-Runner\gitlab-runner.exe run --config D:\GitLab-Runner\config.toml --working-directory D:\GitLab-Runner
+```
+
+(запущен скрыто через `Start-Process -WindowStyle Hidden`, логи — `D:\GitLab-Runner\runner.err.log`). После
+перезагрузки его нужно запустить снова той же командой или один раз сделать автозапуск — на выбор:
+
+- задача планировщика на вход пользователя (без пароля, работает только при входе):
+  `schtasks /Create /TN "GitLab Runner (video-dlss)" /SC ONLOGON /RL LIMITED /TR "\"D:\GitLab-Runner\gitlab-runner.exe\" run --config D:\GitLab-Runner\config.toml --working-directory D:\GitLab-Runner"`;
+- служба от имени пользователя (из консоли администратора; служба от `LocalSystem` не увидит кэш vcpkg и venv):
+  `gitlab-runner.exe install --user <домен\пользователь> --password <пароль> --config D:\GitLab-Runner\config.toml`,
+  затем `gitlab-runner.exe start`.
+
+Проверка: `D:\GitLab-Runner\gitlab-runner.exe verify --config D:\GitLab-Runner\config.toml`; в GitLab —
+Settings → CI/CD → Runners (зелёная точка «online»).
+
+### Как зарегистрировать заново (другая машина, отозванный токен)
+
+1. Токен раннера: Settings → CI/CD → Runners → New project runner (теги `windows`, `rtx`) — или через API с
+   personal access token со scope `api`: `POST /api/v4/user/runners` с `runner_type=project_type`,
+   `project_id=153`, `tag_list=windows,rtx`, `locked=true` (ответ содержит `token`).
+2. `gitlab-runner.exe register --non-interactive --url https://git.krem.digital --token <glrt-…> --executor shell
+   --shell powershell --builds-dir D:\GitLab-Runner\builds --cache-dir D:\GitLab-Runner\cache --config D:\GitLab-Runner\config.toml`.
+3. Добавить в `config.toml` строку `environment = [...]` из таблицы выше (пути под свою машину) и запустить.
+
+Пока раннер не работает, состояние CI проверяется локальным запуском `scripts\ci-build.cmd` (те же шаги).
 
 ## Что считается зелёным
 
