@@ -12,6 +12,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <cstdlib>
 #endif
 
 using namespace dlssvid;
@@ -69,8 +70,15 @@ TEST_CASE("TensorRT loader searches bin/tensorrt next to the executable", "[trt]
     const auto bundled = std::filesystem::path(buf).parent_path() / "tensorrt";
     const auto it = std::find(dirs.begin(), dirs.end(), bundled);
     REQUIRE(it != dirs.end());
-    // environment overrides come first, the venv fallbacks after the bundled directory
-    for (auto j = dirs.begin(); j != it; ++j) CHECK(j->filename() != "tensorrt_libs");
+    // only the environment overrides (DLSSVID_TENSORRT_DIR, TENSORRT_ROOT[/lib]) may come before the bundled directory —
+    // CI points DLSSVID_TENSORRT_DIR at a venv tensorrt_libs, so the check is by origin, not by folder name
+    const auto isEnvOverride = [](const std::filesystem::path& p) {
+        for (const char* var : {"DLSSVID_TENSORRT_DIR", "TENSORRT_ROOT"})
+            if (const char* e = std::getenv(var); e && *e && (p == std::filesystem::path(e) || p == std::filesystem::path(e) / "lib")) return true;
+        return false;
+    };
+    for (auto j = dirs.begin(); j != it; ++j) CHECK(isEnvOverride(*j));
+    // the venv fallbacks derived from the executable location come after it
     CHECK(std::any_of(it, dirs.end(), [](const std::filesystem::path& p) { return p.filename() == "tensorrt_libs"; }));
 }
 
