@@ -2,6 +2,7 @@
 
 #include <QCheckBox>
 #include <QComboBox>
+#include <QGroupBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
 #include <QListWidget>
@@ -25,6 +26,7 @@ public:
 public slots:
     void refresh();
     void showProbe(int cell, float imageX, float imageY, bool inside);
+    void setEngineerMode(bool on);  // the layer stack and the sections are the engineer's; the probe stays
 
 private:
     void applyLayer();
@@ -34,6 +36,7 @@ private:
     ViewportWindow& viewport_;
     bool updating_ = false;
 
+    std::array<QGroupBox*, 4> sections_{};
     QComboBox* mode_;
     QListWidget* layers_;
     QComboBox* source_;

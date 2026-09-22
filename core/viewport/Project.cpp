@@ -103,6 +103,7 @@ std::vector<ViewportSource> Project::Sources() const {
         for (const auto& e : out) dup = dup || e.name == p.name;
         if (!dup) out.push_back(std::move(p));
     }
+    for (auto& v : FrameStore::DiscoverPassVersions(passesRoot)) out.push_back(std::move(v));  // previous versions: "<pass>@<id>"
     return out;
 }
 

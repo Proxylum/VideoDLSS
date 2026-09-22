@@ -62,7 +62,7 @@ TEST_CASE("ViewportState layer stack helpers", "[viewport][state]") {
     CHECK(s.layers.size() == 5);
     CHECK(s.selectedLayer == 4);
     CHECK(s.AddOverlayLayer("x") == nullptr);
-    CHECK(s.layers[1].opacity == 0.5f);
+    CHECK(s.layers[1].opacity == 1.f);  // a full layer (stage 9): comparisons wipe, they do not blend
     CHECK(s.layers[1].display == DisplayMode::Turbo);
     CHECK(!s.AnySolo());
     s.layers[3].solo = true;
@@ -172,4 +172,59 @@ TEST_CASE("ViewportState reads the frame of pre-stage-9 projects and formats tim
     CHECK(FormatTimecode(65.5) == "01:05.50");
     CHECK(FormatTimecode(3600.0) == "1:00:00.00");
     CHECK(FormatTimecode(-1.0) == "00:00.00");
+}
+
+TEST_CASE("ViewportState compares in one action and names previous versions as sources", "[viewport][state]") {
+    CHECK(SplitSourceVersion("color_nr@20260922-140200_3f2a9c1d") == std::pair<std::string, std::string>{"color_nr", "20260922-140200_3f2a9c1d"});
+    CHECK(SplitSourceVersion("color_nr") == std::pair<std::string, std::string>{"color_nr", ""});
+    CHECK(VersionSourceName("color_nr", "20260922-140200_3f2a9c1d") == "color_nr@20260922-140200_3f2a9c1d");
+    CHECK(VersionSourceName("color_nr", "") == "color_nr");
+    CHECK(LayerState::DefaultDisplayFor("depth_raw@20260922-140200_3f2a9c1d") == DisplayMode::Turbo);  // a version shows like its pass
+    CHECK(LayerState::DefaultDisplayFor("color_nr@x") == DisplayMode::Color);
+
+    ViewportState s;
+    CHECK(!s.CompareConfigured());
+    CHECK(s.CompareSide(true) == nullptr);
+    s.SetCompare("source", "result");
+    CHECK(s.mode == ViewMode::Overlay);
+    REQUIRE(s.layers.size() == 2);
+    CHECK(s.layers[0].source == "source");
+    CHECK(s.layers[1].source == "result");
+    CHECK(s.layers[1].opacity == 1.f);
+    CHECK(s.wipe.enabled);
+    CHECK(s.wipe.vertical);
+    CHECK(s.wipe.position == 0.5f);
+    CHECK(s.wipe.layerA == 0);
+    CHECK(s.wipe.layerB == 1);
+    CHECK(s.selectedLayer == 1);
+    CHECK(s.CompareConfigured());
+    CHECK(s.CompareSide(false)->source == "source");
+    CHECK(s.CompareSide(true)->source == "result");
+    s.wipe.enabled = false;
+    CHECK(!s.CompareConfigured());
+    s.wipe.enabled = true;
+    s.layers[1].source = "source";  // the same source on both sides is not a comparison
+    CHECK(!s.CompareConfigured());
+    s.layers[1].source = "color_nr@20260922-140200_3f2a9c1d";  // a previous version is
+    CHECK(s.CompareConfigured());
+    CHECK(s.NeededSources() == std::vector<std::string>{"source", "color_nr@20260922-140200_3f2a9c1d"});
+    const nlohmann::json j = s.ToJson();
+    CHECK(j["layers"][1]["source"] == "color_nr@20260922-140200_3f2a9c1d");
+    CHECK(ViewportState::FromJson(j) == s);
+
+    s.SetAfterOnly("depth_raw");
+    CHECK(s.mode == ViewMode::Single);
+    REQUIRE(s.layers.size() == 1);
+    CHECK(s.layers[0].source == "depth_raw");
+    CHECK(s.layers[0].display == DisplayMode::Turbo);
+    CHECK(s.layers[0].opacity == 1.f);
+    CHECK(!s.wipe.enabled);
+    CHECK(s.selectedLayer == 0);
+    CHECK(!s.CompareConfigured());
+
+    CHECK(s.NextUnusedSource({"source", "depth_raw", "mv_raw"}) == "source");
+    s.AddOverlayLayer("source");
+    CHECK(s.NextUnusedSource({"source", "depth_raw", "mv_raw"}) == "mv_raw");
+    CHECK(s.NextUnusedSource({"source", "depth_raw"}) == "depth_raw");  // everything used: the last one
+    CHECK(s.NextUnusedSource({}) == "source");
 }

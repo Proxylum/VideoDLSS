@@ -16,8 +16,12 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <QSettings>
+
 #include "AppModel.h"
+#include "SourceNames.h"
 #include "TaskQueue.h"
+#include "pipeline/PassVersions.h"
 #include "passes/PassSequence.h"
 #include "viewport/Project.h"
 
@@ -49,6 +53,8 @@ QApplication& App() {
         std::exit(1);
     }
     static QApplication app(argc, argv);
+    QCoreApplication::setOrganizationName("dlssvid-tests");  // QSettings of the tests, not the user's
+    QCoreApplication::setApplicationName("dlssvid-tests");
     return app;
 }
 
@@ -236,4 +242,108 @@ TEST_CASE("AppModel time axis: 24 and 48 fps sources, steps by the base layer, t
     CHECK(model.timelineFrame() == 10);  // the last color_fg frame; the timeline itself runs to 11 (0.25 s of color_sr)
     REQUIRE(model.saveProject());
     CHECK(std::abs(Project::Load(d / "proj.dlssvid.json").viewport.time - 10.0 / 48.0) < 1e-9);  // saved as a time
+}
+
+TEST_CASE("AppModel compares in one action: views, presets, chips with versions, engineer mode", "[app][model][gpu]") {
+    App();
+    QSettings().clear();
+    const auto d = Dir("compare");
+    WritePassFps(d / "passes" / "color_sr", PassKind::ColorSr, 4, 24);
+    WritePassFps(d / "passes" / "color_nr", PassKind::ColorNr, 4, 24);
+    const auto old = RetirePassVersion(d / "passes", "color_nr");
+    REQUIRE(old);
+    WritePassFps(d / "passes" / "color_nr", PassKind::ColorNr, 4, 24);
+    WritePassFps(d / "passes" / "depth_dlss", PassKind::DepthDlss, 4, 24);
+    Project p = Project::Create(d / "missing.mp4", d / "passes");
+    p.Save(d / "proj.dlssvid.json");
+
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    CHECK(model.compareView() == AppModel::CompareView::AfterOnly);
+    CHECK(model.beforeSource() == "color_sr");  // no source video: the first colour pass
+    CHECK(model.afterSource() == "color_nr");
+
+    // W sets up «before | after», then toggles the wipe of the configured comparison
+    model.toggleWipe();
+    CHECK(model.compareView() == AppModel::CompareView::BeforeAfter);
+    REQUIRE(model.state().layers.size() == 2);
+    CHECK(model.state().layers[0].source == "color_sr");
+    CHECK(model.state().layers[1].source == "color_nr");
+    CHECK(model.state().wipe.position == 0.5f);
+    CHECK(model.state().selectedLayer == 1);
+    model.toggleWipe();
+    CHECK(!model.state().wipe.enabled);
+    CHECK(model.compareView() == AppModel::CompareView::AfterOnly);
+    model.toggleWipe();
+    CHECK(model.state().wipe.enabled);
+    CHECK(model.compareView() == AppModel::CompareView::BeforeAfter);
+
+    // a chip changes the «after» side; in the single view it is the view itself; from the grid it returns to a single view
+    model.showSource("depth_dlss");
+    CHECK(model.state().layers[1].source == "depth_dlss");
+    CHECK(model.state().layers[1].display == DisplayMode::Turbo);
+    CHECK(model.state().layers[0].source == "color_sr");
+    model.setCompareView(AppModel::CompareView::AfterOnly);
+    CHECK(model.state().mode == ViewMode::Single);
+    REQUIRE(model.state().layers.size() == 1);
+    CHECK(model.state().layers[0].source == "depth_dlss");  // what the «after» side showed
+    model.showSource("color_nr");
+    CHECK(model.state().layers[0].source == "color_nr");
+    model.setCompareView(AppModel::CompareView::Grid);
+    CHECK(model.compareView() == AppModel::CompareView::Grid);
+    model.showSource("color_sr");
+    CHECK(model.compareView() == AppModel::CompareView::AfterOnly);
+    CHECK(model.state().layers[0].source == "color_sr");
+    model.setCompareView(AppModel::CompareView::BeforeAfter);  // the shown source equals the before side: the after side is the default
+    CHECK(model.state().layers[0].source == "color_sr");
+    CHECK(model.state().layers[1].source == "color_nr");
+
+    // presets
+    QSignalSpy messages(&model, &AppModel::message);
+    CHECK(model.applyPreset(AppModel::ComparePreset::SrVsNr));
+    CHECK(model.state().layers[0].source == "color_sr");
+    CHECK(model.state().layers[1].source == "color_nr");
+    CHECK(!model.applyPreset(AppModel::ComparePreset::SourceVsDepth));  // no source video here
+    CHECK(messages.count() == 1);
+    CHECK(model.applyPreset(AppModel::ComparePreset::BeforeAfter));
+
+    // chips: one per current source in pipeline order, the previous color_nr version in its menu
+    const auto chips = model.chips();
+    REQUIRE(chips.size() == 3);
+    CHECK(chips[0].source == "depth_dlss");
+    CHECK(chips[1].source == "color_sr");
+    CHECK(chips[2].source == "color_nr");
+    CHECK(chips[2].label == QString::fromUtf8("Улучшение"));
+    CHECK(chips[1].label == QString::fromUtf8("Апскейл"));
+    CHECK(chips[0].versions.empty());
+    REQUIRE(chips[2].versions.size() == 1);
+    const std::string versionName = chips[2].versions[0].name;
+    CHECK(versionName == "color_nr@" + *old);
+    CHECK(chips[2].tooltip.contains("color_nr"));
+    CHECK(HumanSourceName(versionName).startsWith(QString::fromUtf8("Улучшение · ")));
+    CHECK(VersionLabel("20260922-140200_3f2a9c1d") == QString::fromUtf8("22.09 14:02 · 3f2a9c1d"));
+    CHECK(SourceRank("source") < SourceRank("depth_raw"));
+    CHECK(SourceRank("color_fg") < SourceRank("result"));
+    CHECK(SourceRank("mask_face") > SourceRank("result"));
+    // a previous version on the «after» side, saved and loaded back
+    model.showSource(versionName);
+    CHECK(model.state().layers[1].source == versionName);
+    CHECK(model.compareView() == AppModel::CompareView::BeforeAfter);
+    model.store().WaitForCurrent();
+    CHECK(model.frameStateOf(versionName) == FrameState::Ready);
+    REQUIRE(model.saveProject());
+    CHECK(Project::Load(d / "proj.dlssvid.json").viewport.layers[1].source == versionName);
+
+    // the engineer mode is remembered
+    QSignalSpy engineer(&model, &AppModel::engineerModeChanged);
+    CHECK(!model.engineerMode());
+    model.setEngineerMode(true);
+    model.setEngineerMode(true);
+    CHECK(engineer.count() == 1);
+    {
+        AppModel other(true);
+        CHECK(other.engineerMode());
+    }
+    model.setEngineerMode(false);
+    CHECK(!AppModel(true).engineerMode());
 }

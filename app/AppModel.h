@@ -54,6 +54,20 @@ public:
     FrameStates frameStates() const;
     FrameState frameStateOf(const std::string& source) const;
 
+    // ---- comparison in one action (stage 9, MR C) ----
+    enum class CompareView { BeforeAfter, AfterOnly, Grid };
+    enum class ComparePreset { BeforeAfter, SrVsNr, SourceVsDepth };
+    struct Chip {
+        std::string source;                    // the current version of a pass, "source" or "result"
+        QString label, tooltip;                // human name; the technical side
+        std::vector<ViewportSource> versions;  // previous versions of the pass (the chip's menu)
+    };
+    CompareView compareView() const;   // derived from the state: a configured wipe, a grid, or a single view
+    std::string beforeSource() const;  // "source" when present, else the first colour pass
+    std::string afterSource() const;   // "result", else the last colour pass, different from the before side when it can
+    std::vector<Chip> chips() const;   // one per current source in pipeline order, versions attached
+    bool engineerMode() const { return engineerMode_; }
+
 public slots:
     void openVideo(const QString& file);
     void openProject(const QString& file);
@@ -68,6 +82,11 @@ public slots:
     bool playing() const { return playTimer_.isActive(); }
     void setMode(ViewMode mode);
     void setSingleSource(const QString& name);
+    void setCompareView(CompareView view);
+    bool applyPreset(ComparePreset preset);      // false (with a message) when a source it needs is absent
+    void showSource(const std::string& source);  // a chip: the «after» side of a comparison, else the single view
+    void toggleWipe();                            // W: sets up «before | after» when no comparison is configured
+    void setEngineerMode(bool on);                // remembered in QSettings
     void notifyStateChanged();   // after direct edits of state()
     void notifyFramesUpdated();  // the frame store uploaded something (the viewport's poll)
 
@@ -80,10 +99,12 @@ signals:
     void framesUpdated();
     void playingChanged(bool playing);
     void message(const QString& text);
+    void engineerModeChanged(bool on);
 
 private:
     void onPlayTick();
     void requestFrames();
+    bool hasSource(const std::string& name) const;
 
     std::unique_ptr<D3D12Device> device_;
     std::unique_ptr<FrameStore> store_;
@@ -91,6 +112,7 @@ private:
     QTimer playTimer_;
     Rational timelineFps_{0, 1};  // {0,1}: the base source's rate
     double playStep_ = 1.0 / 24.0;
+    bool engineerMode_ = false;
 };
 
 }  // namespace dlssvid

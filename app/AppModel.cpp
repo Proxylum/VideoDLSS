@@ -3,9 +3,11 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileInfo>
+#include <QSettings>
 #include <algorithm>
 #include <cmath>
 
+#include "SourceNames.h"
 #include "util/Log.h"
 
 namespace dlssvid {
@@ -15,6 +17,7 @@ AppModel::AppModel(bool warp, QObject* parent) : QObject(parent) {
     store_ = std::make_unique<FrameStore>(*device_);
     playTimer_.setTimerType(Qt::PreciseTimer);
     connect(&playTimer_, &QTimer::timeout, this, &AppModel::onPlayTick);
+    engineerMode_ = QSettings().value("view/engineerMode", false).toBool();
 }
 
 AppModel::~AppModel() = default;
@@ -201,5 +204,132 @@ void AppModel::notifyStateChanged() {
 }
 
 void AppModel::notifyFramesUpdated() { emit framesUpdated(); }
+
+// ---- comparison in one action ----------------------------------------------------------------------
+
+bool AppModel::hasSource(const std::string& name) const { return store_->FindSource(name) != nullptr; }
+
+AppModel::CompareView AppModel::compareView() const {
+    const ViewportState& st = state();
+    if (st.mode == ViewMode::Grid) return CompareView::Grid;
+    if (st.CompareConfigured()) return CompareView::BeforeAfter;
+    return CompareView::AfterOnly;
+}
+
+std::string AppModel::beforeSource() const {
+    for (const char* n : {"source", "color_sr", "color_nr", "color_fg", "result"})
+        if (hasSource(n)) return n;
+    return store_->Sources().empty() ? std::string("source") : store_->Sources().front().name;
+}
+
+std::string AppModel::afterSource() const {
+    const std::string before = beforeSource();
+    for (const char* n : {"result", "color_fg", "color_nr", "color_sr"})
+        if (hasSource(n) && n != before) return n;
+    return before;
+}
+
+std::vector<AppModel::Chip> AppModel::chips() const {
+    std::vector<Chip> out;
+    for (const auto& s : store_->Sources()) {
+        if (!s.version.empty()) continue;
+        Chip c;
+        c.source = s.name;
+        c.label = HumanSourceName(s.name);
+        c.tooltip = SourceTooltip(s);
+        if (!s.pass.empty())
+            for (const auto& v : store_->Sources())
+                if (!v.version.empty() && v.pass == s.pass) c.versions.push_back(v);
+        out.push_back(std::move(c));
+    }
+    std::stable_sort(out.begin(), out.end(), [](const Chip& a, const Chip& b) {
+        const int ra = SourceRank(a.source), rb = SourceRank(b.source);
+        return ra != rb ? ra < rb : a.source < b.source;
+    });
+    return out;
+}
+
+void AppModel::setCompareView(CompareView view) {
+    ViewportState& st = state();
+    switch (view) {
+        case CompareView::BeforeAfter: {
+            const std::string before = beforeSource();
+            std::string after = afterSource();
+            // keep what the single view shows (when it exists) as the «after» side
+            if (st.mode == ViewMode::Single && !st.layers.empty() && st.layers[0].source != before && hasSource(st.layers[0].source)) after = st.layers[0].source;
+            st.SetCompare(before, after);
+            break;
+        }
+        case CompareView::AfterOnly: {
+            const LayerState* side = st.CompareSide(true);
+            st.SetAfterOnly(side ? side->source : (st.layers.empty() ? afterSource() : st.layers[0].source));
+            break;
+        }
+        case CompareView::Grid: st.mode = ViewMode::Grid; break;
+    }
+    notifyStateChanged();
+}
+
+bool AppModel::applyPreset(ComparePreset preset) {
+    std::string a, b;
+    switch (preset) {
+        case ComparePreset::BeforeAfter:
+            a = beforeSource();
+            b = afterSource();
+            break;
+        case ComparePreset::SrVsNr:
+            a = "color_sr";
+            b = "color_nr";
+            break;
+        case ComparePreset::SourceVsDepth:
+            a = "source";
+            b = hasSource("depth_dlss") ? "depth_dlss" : "depth_raw";
+            break;
+    }
+    if (!hasSource(a) || !hasSource(b) || a == b) {
+        emit message(tr("Для сравнения нужны %1 и %2").arg(HumanSourceName(a), HumanSourceName(b)));
+        return false;
+    }
+    state().SetCompare(a, b);
+    notifyStateChanged();
+    return true;
+}
+
+void AppModel::showSource(const std::string& source) {
+    ViewportState& st = state();
+    if (compareView() == CompareView::BeforeAfter) {
+        LayerState& b = st.layers[static_cast<size_t>(st.wipe.layerB)];
+        if (b.source != source) {
+            b.source = source;
+            b.display = LayerState::DefaultDisplayFor(source);
+            b.autoRange = true;
+        }
+        st.selectedLayer = st.wipe.layerB;
+    } else {
+        st.SetAfterOnly(source);
+    }
+    notifyStateChanged();
+}
+
+void AppModel::toggleWipe() {
+    ViewportState& st = state();
+    if (st.mode == ViewMode::Overlay) {
+        ViewportState probe = st;  // would the wipe compare two different sources?
+        probe.wipe.enabled = true;
+        if (probe.CompareConfigured()) {
+            st.wipe.enabled = !st.wipe.enabled;
+            notifyStateChanged();
+            return;
+        }
+    }
+    setCompareView(CompareView::BeforeAfter);
+}
+
+void AppModel::setEngineerMode(bool on) {
+    if (on == engineerMode_) return;
+    engineerMode_ = on;
+    QSettings().setValue("view/engineerMode", on);
+    emit engineerModeChanged(on);
+}
 
 }  // namespace dlssvid

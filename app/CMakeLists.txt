@@ -3,6 +3,8 @@ qt_standard_project_setup()
 # UI library (linked by the executable and by tests/app).
 qt_add_library(dlssvid_app STATIC
   AppModel.h AppModel.cpp
+  SourceNames.h SourceNames.cpp
+  CompareBar.h CompareBar.cpp
   ViewportWindow.h ViewportWindow.cpp
   TimelineWidget.h TimelineWidget.cpp
   ProjectPanel.h ProjectPanel.cpp

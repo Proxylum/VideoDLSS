@@ -9,7 +9,10 @@
 
 #include "gpu/D3D12Device.h"
 #include "passes/PassSequence.h"
+#include "pipeline/PassVersions.h"
 #include "viewport/FrameStore.h"
+#include "viewport/Project.h"
+#include "viewport/ViewportState.h"
 
 using namespace dlssvid;
 using Catch::Approx;
@@ -211,4 +214,62 @@ TEST_CASE("FrameStore keeps 24 and 48 fps sources in step over the whole clip (r
     CHECK(store.GetStatus(6, "color_sr") == FrameStore::Status::Missing);
     CHECK(store.StatusAt(0.25, "color_sr") == FrameStore::Status::Missing);  // past the end
     CHECK(store.TexturesAt(0.25).empty());
+}
+
+TEST_CASE("FrameStore discovers previous pass versions as sources named pass@id (stage 9)", "[viewport][store]") {
+    const auto root = Root("versions");
+    WritePass(root / "color_nr", PassKind::ColorNr, 8, 4, 0, 3, FileFormat::Png, 24);
+    const auto id = RetirePassVersion(root, "color_nr");
+    REQUIRE(id);
+    WritePass(root / "color_nr", PassKind::ColorNr, 8, 4, 0, 3, FileFormat::Png, 24);
+    WritePass(root / "depth_raw", PassKind::DepthRaw, 8, 4, 0, 3);
+    const auto current = FrameStore::DiscoverPasses(root);
+    REQUIRE(current.size() == 2);
+    CHECK(current[0].name == "color_nr");
+    CHECK(current[0].pass == "color_nr");
+    CHECK(current[0].version.empty());
+    const auto versions = FrameStore::DiscoverPassVersions(root);
+    REQUIRE(versions.size() == 1);
+    CHECK(versions[0].name == "color_nr@" + *id);
+    CHECK(versions[0].pass == "color_nr");
+    CHECK(versions[0].version == *id);
+    CHECK(versions[0].kind == TextureKind::Color);
+    CHECK(versions[0].lastFrame == 3);
+    CHECK(versions[0].fps.num == 24);
+    CHECK(versions[0].path == root / "color_nr.v" / *id);
+    CHECK(SplitSourceVersion(versions[0].name).second == *id);
+    CHECK(FrameStore::DiscoverPassVersions(root / "nope").empty());
+    // the project lists them after the current passes, so the viewport can compare versions with the wipe
+    const auto sources = Project::Create(root / "missing.mp4", root).Sources();
+    REQUIRE(sources.size() == 3);
+    CHECK(sources[2].name == versions[0].name);
+    D3D12Device dev({true, false});
+    FrameStore store(dev);
+    store.SetSources(sources);
+    REQUIRE(store.FindSource(versions[0].name) != nullptr);
+    CHECK(store.SourceFps(versions[0].name).num == 24);
+}
+
+// Incident 2026-09-22 (CI, MR C pipeline): a unit test process stayed alive after its checks had passed — the main
+// thread in ~FrameStore joining a loader that slept in cv_.wait() forever. `stop_` was set without the mutex, so a
+// loader between its predicate check and the wait missed the notification (a lost wakeup). The window is a few
+// instructions wide; this stress guard drives shutdown thousands of times with idle and with busy loaders and must
+// finish (ctest kills it otherwise).
+TEST_CASE("FrameStore shuts down reliably with idle and busy loaders (regression: lost wakeup on stop)", "[viewport][store][gpu][regression]") {
+    const auto root = Root("shutdown");
+    WritePass(root / "depth_raw", PassKind::DepthRaw, 8, 4, 0, 9);
+    D3D12Device dev({true, false});
+    FrameStore::Options opt;
+    opt.loaderThreads = 4;
+    for (int i = 0; i < 400; ++i) {
+        FrameStore store(dev, opt);  // idle loaders: created, then stopped at once
+    }
+    const auto sources = FrameStore::DiscoverPasses(root);
+    for (int i = 0; i < 100; ++i) {
+        FrameStore store(dev, opt);  // busy loaders: stopped with work queued or in flight
+        store.SetSources(sources);
+        store.SetCurrentFrame(i % 10, {"depth_raw"});
+        if (i % 3 == 0) store.Update();
+    }
+    CHECK(true);
 }

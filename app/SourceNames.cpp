@@ -1,0 +1,67 @@
+#include "SourceNames.h"
+
+#include <QCoreApplication>
+
+#include "viewport/FrameStore.h"
+#include "viewport/ViewportState.h"
+
+namespace dlssvid {
+
+namespace {
+
+QString Tr(const char* s) { return QCoreApplication::translate("SourceNames", s); }
+
+QString BaseName(const std::string& pass) {
+    if (pass == "source") return Tr("Исходник");
+    if (pass == "result") return Tr("Результат");
+    if (pass == "depth_raw") return Tr("Глубина");
+    if (pass == "depth_dlss") return Tr("Глубина (DLSS)");
+    if (pass == "mv_raw") return Tr("Векторы");
+    if (pass == "mv_dlss") return Tr("Векторы (DLSS)");
+    if (pass == "color_sr") return Tr("Апскейл");
+    if (pass == "color_nr") return Tr("Улучшение");
+    if (pass == "color_fg") return Tr("Генерация");
+    if (pass.rfind("mask_", 0) == 0) return Tr("Маска %1").arg(QString::fromStdString(pass.substr(5)));
+    return QString::fromStdString(pass);
+}
+
+}  // namespace
+
+QString VersionLabel(const std::string& id) {
+    // "YYYYMMDD-HHMMSS_fp8" (PassVersions.h) -> "DD.MM HH:MM · fp8"
+    if (id.size() >= 15 && id[8] == '-') {
+        const QString q = QString::fromStdString(id);
+        QString label = q.mid(6, 2) + "." + q.mid(4, 2) + " " + q.mid(9, 2) + ":" + q.mid(11, 2);
+        const int us = q.indexOf('_');
+        if (us >= 0 && us + 1 < q.size()) label += " · " + q.mid(us + 1);
+        return label;
+    }
+    return QString::fromStdString(id);
+}
+
+QString HumanSourceName(const std::string& source) {
+    const auto [pass, version] = SplitSourceVersion(source);
+    const QString base = BaseName(pass);
+    return version.empty() ? base : base + " · " + VersionLabel(version);
+}
+
+QString SourceTooltip(const ViewportSource& s) {
+    QString t = QString::fromStdString(s.name);
+    if (s.width && s.height) t += QString("  %1x%2").arg(s.width).arg(s.height);
+    if (s.lastFrame >= 0) t += Tr("  %1 кадров").arg(s.lastFrame - s.firstFrame + 1);
+    if (s.fps.num > 0) t += QString("  %1 fps").arg(QString::number(s.fps.ToDouble(), 'g', 5));
+    if (s.manifest && s.manifest->paramsCanonical.is_object() && !s.manifest->paramsCanonical.empty())
+        t += "\n" + QString::fromStdString(s.manifest->paramsCanonical.dump());
+    if (s.manifest && !s.manifest->created.empty()) t += "\n" + QString::fromStdString(s.manifest->created);
+    return t;
+}
+
+int SourceRank(const std::string& source) {
+    const std::string pass = SplitSourceVersion(source).first;
+    static const char* order[] = {"source", "depth_raw", "depth_dlss", "mv_raw", "mv_dlss", "color_sr", "color_nr", "color_fg", "result"};
+    for (int i = 0; i < 9; ++i)
+        if (pass == order[i]) return i;
+    return 9;
+}
+
+}  // namespace dlssvid

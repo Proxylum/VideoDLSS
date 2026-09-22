@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dlssvid {
@@ -85,11 +86,22 @@ struct ViewportState {
     LayerState* AddOverlayLayer(const std::string& source);  // nullptr when the stack is full
     void RemoveLayer(int index);
     bool AnySolo() const;
+    // ---- comparison in one action (stage 9, MR C) ----
+    void SetCompare(const std::string& before, const std::string& after);  // two full layers + a vertical wipe at 50 %
+    void SetAfterOnly(const std::string& after);                            // a single full view
+    bool CompareConfigured() const;   // overlay, wipe on, two different sources on its sides
+    const LayerState* CompareSide(bool after) const;  // the wipe's before (A) / after (B) layer; nullptr when not configured
+    std::string NextUnusedSource(const std::vector<std::string>& available) const;  // for a new layer
     // Projects before stage 9 stored a frame index: converts it at the base rate once the sources are known.
     void ResolveLegacyFrame(double baseFps);
     // Sources the current mode displays (layers or grid cells), without duplicates - for prefetch.
     std::vector<std::string> NeededSources() const;
 };
+
+// Previous versions of a pass (PassVersions.h) are sources named "<pass>@<version id>":
+// SplitSourceVersion("color_nr@20260922-140200_3f2a9c1d") -> {"color_nr", "20260922-140200_3f2a9c1d"}.
+std::pair<std::string, std::string> SplitSourceVersion(const std::string& source);
+std::string VersionSourceName(const std::string& pass, const std::string& version);
 
 // "MM:SS.hh" (hours in front from 1 h): the timeline's timecode.
 std::string FormatTimecode(double seconds);

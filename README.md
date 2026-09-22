@@ -178,7 +178,12 @@ GUI keys: `1`…`9` source, `Ctrl+1/2/3` single / overlay / grid, wheel = zoom t
 `F` fit, `Ctrl+0` 1:1, `W` wipe (left drag moves it), click a 2x2 cell = expand, `Space` play, `,`/`.` step,
 `Ctrl+Shift+S` PNG screenshot with cell labels, `Ctrl+S` save project. The timeline runs in seconds (stage 9): a 24 fps
 source and a 48 fps FG result stay in step, `,`/`.` step by the base layer's frame, the rate switch next to the timecode
-picks what the slider counts, and a cell whose frame is missing or still loading shows a plate and says so in its label. Stages are started from the project panel
+picks what the slider counts, and a cell whose frame is missing or still loading shows a plate and says so in its label.
+Comparison is one action (stage 9): the bar above the viewport switches «До | После» (a wipe between the source and the
+result, `W`), «Только после» and «Сетка 2×2»; one chip per source with its human name («Исходник», «Глубина», «Апскейл»,
+«Улучшение», «Генерация», «Результат»; technical names in tooltips) picks the «after» side, chips with a history open a
+menu of previous versions (`<pass>@<id>`, also valid in `render --layers`); presets «Апскейл ↔ Улучшение» and
+«Исходник ↔ Глубина» live in the «Вид» menu; «Инженерный режим» (`Ctrl+E`) reveals the layer stack and the inspector. Stages are started from the project panel
 (`dlssvid depth|flow|upscale|nr` as a task with progress) and their passes appear in the viewport when finished; the
 `nr` stage has a «Пропатчить DLL…» button that runs `dlssvid nr-patch` over your `nvngx_dlssnr.dll`.
 
