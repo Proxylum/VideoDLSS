@@ -23,6 +23,7 @@
 
 #include "AppModel.h"
 #include "SourceNames.h"
+#include "ProcessingPanel.h"
 #include "TaskQueue.h"
 #include "TestClips.h"
 #include "util/Subprocess.h"
@@ -538,4 +539,160 @@ TEST_CASE("AppModel remembers recents and dialog folders, tracks unsaved changes
     CHECK(model.lastDir("video") == QFileInfo(Q(clip)).absolutePath());
     model.rememberDir("video", QString());
     CHECK(model.lastDir("video") == QFileInfo(Q(clip)).absolutePath());
+}
+
+TEST_CASE("TaskQueue cancels the running task, drops a queued one and keeps the order of events", "[app][tasks]") {
+    App();
+    TaskQueue queue;
+    QStringList events;
+    QObject::connect(&queue, &TaskQueue::taskStarted, [&](int id) { events << QString("start %1").arg(id); });
+    QObject::connect(&queue, &TaskQueue::taskFinished, [&](int id, bool ok) { events << QString("finish %1 %2").arg(id).arg(ok ? "ok" : "fail"); });
+    int progressOfLong = 0;
+    // ping waits ~60 s between its echoes: the run that gets cancelled, a follow-up, and one dropped before it starts
+    const int longTask = queue.enqueue("long", "ping", {"-n", "60", "127.0.0.1"});
+    const int next = queue.enqueue("next", "cmd", {"/c", "echo", "alive"});
+    const int dropped = queue.enqueue("dropped", "cmd", {"/c", "echo", "never"});
+    QObject::connect(&queue, &TaskQueue::taskProgress, [&](int id, const TaskQueue::Progress&) { progressOfLong += id == longTask; });
+    REQUIRE(queue.busy());
+    CHECK(queue.currentId() == longTask);
+    QElapsedTimer clock;
+    clock.start();
+    Pump([] { return false; }, 300);
+    CHECK(queue.elapsed(longTask) >= 0.25);
+    queue.cancel(dropped);
+    CHECK(queue.cancelled(dropped));
+    CHECK(queue.finished(dropped));
+    CHECK(!queue.succeeded(dropped));
+    CHECK(queue.busy());  // the running task is untouched by dropping a queued one
+    queue.cancel(longTask);
+    Pump([&] { return queue.finished(next); }, 20000);
+    REQUIRE(queue.finished(next));
+    CHECK(clock.elapsed() < 15000);  // the ping did not run its minute
+    CHECK(queue.cancelled(longTask));
+    CHECK(!queue.succeeded(longTask));
+    CHECK(queue.succeeded(next));
+    CHECK(!queue.cancelled(next));
+    CHECK(!queue.busy());
+    // the long task started first; the dropped one finished at once; the cancelled one finished before the next started
+    const QStringList expected{QString("start %1").arg(longTask), QString("finish %1 fail").arg(dropped), QString("finish %1 fail").arg(longTask),
+                               QString("start %1").arg(next), QString("finish %1 ok").arg(next)};
+    CHECK(events == expected);
+    CHECK(progressOfLong >= 1);  // the final progress of the cancelled task was published
+    const TaskQueue::Progress p = queue.progress(longTask);
+    CHECK(p.stages.empty());
+    CHECK(p.eta == -1.0);
+    CHECK(p.elapsed >= 0.25);
+    CHECK(queue.progress(next).fraction == 1.0);
+    CHECK(queue.progress(dropped).elapsed == 0.0);
+}
+
+TEST_CASE("TaskQueue counts reused stages at once and takes the time left from the plan and the measured rate", "[app][tasks]") {
+    App();
+    TaskQueue queue;
+    std::vector<TaskQueue::Progress> seen;
+    QObject::connect(&queue, &TaskQueue::taskProgress, [&](int, const TaskQueue::Progress& p) { seen.push_back(p); });
+    const std::vector<TaskQueue::StagePlan> plan{{"depth", "Глубина", 8.0, false}, {"flow", "Векторы движения", 0.0, true}, {"upscale", "Апскейл ×2", 20.0, false}};
+    // the "stage" reports two frames about a second apart (ping -n 2 waits ~1 s), says it is done the way the runner
+    // does, then the next stage starts
+    const int id = queue.enqueue("Обработка", "cmd",
+                                 {"/c", "echo", "depth:", "1/4", "frames", "&", "ping", "-n", "2", "127.0.0.1", ">nul", "&", "echo", "depth:", "3/4", "frames", "&",
+                                  "echo", "process:", "depth", "done", "-", "3", "frames", "in", "1.0", "s", "&", "echo", "upscale:", "1/8", "frames"},
+                                 plan);
+    REQUIRE(!seen.empty());
+    // before any output: the reused stage is done, the rest is the plan
+    CHECK(seen[0].stagesTotal == 3);
+    CHECK(seen[0].stagesDone == 1);
+    CHECK(seen[0].fraction == Approx(1.0 / 3));
+    CHECK(seen[0].eta == Approx(28.0));
+    CHECK(seen[0].stages[1].state == "reused");
+    Pump([&] { return queue.finished(id); }, 20000);
+    REQUIRE(queue.succeeded(id));
+    auto snapshot = [&](const QString& stage, int done) -> const TaskQueue::Progress* {
+        for (const auto& p : seen)
+            if (p.stage == stage && p.done == done) return &p;
+        return nullptr;
+    };
+    // the first frame line: the running stage still uses the estimate (8 s × 3/4) plus the queued stage
+    const TaskQueue::Progress* first = snapshot("depth", 1);
+    REQUIRE(first);
+    CHECK(first->total == 4);
+    CHECK(first->fraction == Approx((1.0 + 0.25) / 3));
+    CHECK(first->eta == Approx(26.0));
+    CHECK(first->stages[0].state == "running");
+    CHECK(first->stages[0].percent == 25);
+    // two frames measured in ~1 s: the stage's own rate (≈ 0.5 s for the last frame) replaces the estimate (2 s)
+    const TaskQueue::Progress* measured = snapshot("depth", 3);
+    REQUIRE(measured);
+    CHECK(measured->fraction == Approx((1.0 + 0.75) / 3));
+    CHECK(measured->eta >= 20.0);
+    CHECK(measured->eta < 21.6);
+    // the runner's "done" line: the stage's time is what it printed, nothing runs, the queued estimate remains
+    const TaskQueue::Progress* next = snapshot("upscale", 1);
+    REQUIRE(next);
+    CHECK(next->stages[0].state == "done");
+    CHECK(next->stages[0].seconds == Approx(1.0));
+    CHECK(next->stagesDone == 2);
+    CHECK(next->stages[2].state == "running");
+    CHECK(next->stages[2].percent == 12);
+    CHECK(next->eta == Approx(20.0 * 7 / 8));
+    CHECK(next->fraction == Approx((2.0 + 0.12) / 3));  // the percent is an integer: 1/8 -> 12
+    // the process exited 0: everything is done
+    const TaskQueue::Progress last = queue.progress(id);
+    CHECK(last.stagesDone == 3);
+    CHECK(last.fraction == 1.0);
+    CHECK(last.eta == 0.0);
+    CHECK(last.stages[2].state == "done");
+    CHECK(last.elapsed >= 0.9);
+}
+
+TEST_CASE("ProcessingPanel shows the stages, the time, the log tail and offers the result or the way back", "[app][tasks]") {
+    App();
+    TaskQueue queue;
+    ProcessingPanel panel(queue);
+    QSignalSpy result(&panel, &ProcessingPanel::showResultRequested);
+    QSignalSpy back(&panel, &ProcessingPanel::backRequested);
+    const std::vector<TaskQueue::StagePlan> plan{{"depth", "Глубина", 8.0, false}, {"flow", "Векторы движения", 0.0, true}, {"encode", "Кодирование", 4.0, false}};
+    const int id = queue.enqueue("Обработка", "cmd", {"/c", "echo", "depth:", "2/4", "frames", "&", "echo", "[2026-09-22", "10:00:00.000]", "[info]", "hello", "from", "the", "stage"}, plan);
+    panel.watch(id, "face.mp4 → face_result.mp4");
+    CHECK(panel.headline().startsWith("Обработка"));
+    Pump([&] { return queue.finished(id); }, 20000);
+    REQUIRE(queue.succeeded(id));
+    CHECK(panel.headline().startsWith("Готово за"));
+    const QStringList lines = panel.stageLines();
+    REQUIRE(lines.size() == 3);
+    CHECK(lines[0].startsWith("Глубина · готово"));
+    CHECK(lines[1] == "Векторы движения · переиспользуется · —");
+    CHECK(lines[2].startsWith("Кодирование · готово"));
+    CHECK(panel.logTail().contains("[info] hello from the stage"));
+    CHECK(!panel.logTail().contains("2026-09-22"));  // the timestamp is stripped from the tail
+    auto* showResult = panel.findChild<QPushButton*>("showResult");
+    auto* cancel = panel.findChild<QPushButton*>("cancel");
+    auto* backButton = panel.findChild<QPushButton*>("back");
+    REQUIRE((showResult && cancel && backButton));
+    CHECK(!showResult->isHidden());
+    CHECK(cancel->isHidden());
+    CHECK(backButton->isHidden());
+    showResult->click();
+    CHECK(result.count() == 1);
+
+    // a cancelled run: the page says so, the stages that did not run are marked, the way back is offered
+    const int slow = queue.enqueue("Обработка", "ping", {"-n", "60", "127.0.0.1"}, plan);
+    panel.watch(slow, "face.mp4 → face_result.mp4");
+    Pump([] { return false; }, 200);
+    CHECK(panel.headline().startsWith("Обработка · Прошло"));
+    CHECK(panel.headline().contains("Осталось ≈"));  // the plan's estimate: 12 s
+    CHECK(!cancel->isHidden());
+    CHECK(showResult->isHidden());
+    cancel->click();
+    Pump([&] { return queue.finished(slow); }, 20000);
+    REQUIRE(queue.cancelled(slow));
+    CHECK(panel.headline().startsWith("Отменено через"));
+    const QStringList after = panel.stageLines();
+    REQUIRE(after.size() == 3);
+    CHECK(after[0].toStdString() == "Глубина · отменена · —");
+    CHECK(after[1] == "Векторы движения · переиспользуется · —");
+    CHECK(!backButton->isHidden());
+    CHECK(cancel->isHidden());
+    backButton->click();
+    CHECK(back.count() == 1);
 }

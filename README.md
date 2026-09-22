@@ -197,6 +197,11 @@ layout and the dialog folders (QSettings), opens maximised the first time, bring
 unsaved changes with «*» in the title and saves the project next to the video on close. Stages are started from the project panel
 (`dlssvid depth|flow|upscale|nr` as a task with progress) and their passes appear in the viewport when finished; the
 `nr` stage has a «Пропатчить DLL…» button that runs `dlssvid nr-patch` over your `nvngx_dlssnr.dll`.
+«Обработать» (stage 9) opens the processing page: elapsed time and the time left (the plan's estimates until each
+stage has measured its own rate), one row per stage (reused ones are ticked at once), «Отменить» (the child process is
+killed; finished passes keep their manifests and are reused next time), «Свернуть в фон» (a system notification tells
+when the run ends, clicking it brings the window back), the tail of the log and «Показать полный лог»; a finished run
+switches the viewport to «До | После» by itself, a cancelled or failed one explains itself and leads back to the project.
 
 ## Layout
 

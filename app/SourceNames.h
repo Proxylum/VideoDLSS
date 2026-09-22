@@ -17,6 +17,8 @@ QString SourceTooltip(const ViewportSource& s);      // the technical side: name
 int SourceRank(const std::string& source);
 // «≈ 2 мин», «≈ 45 с», «≈ 1 ч 10 мин»; and «сегодня 14:02» / «вчера 14:02» / «22.09 14:02» from an ISO-8601 UTC time.
 QString FormatDuration(double seconds);
+// «4:12», «1:02:05»: a clock for elapsed time and the time left on the processing screen.
+QString FormatClock(double seconds);
 QString HumanWhen(const std::string& iso8601);
 // «12.0 ГБ», «60 МБ».
 QString HumanBytes(unsigned long long bytes);

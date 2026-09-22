@@ -90,6 +90,7 @@ public:
     StageEntry* stageEntry(const std::string& stage);
     bool forced(const std::string& stage) const { return force_.count(stage) > 0; }
     QStringList processArgs() const;  // dlssvid process --project <file> --disable-unavailable [--force a,b]
+    QString stageTitle(const std::string& stage) const;  // «Апскейл ×2», «Генерация кадров ×3», «Кодирование»
 
     // ---- start screen, recents, unsaved changes (stage 9, MR E) ----
     struct Recent {

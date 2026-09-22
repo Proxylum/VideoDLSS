@@ -67,6 +67,13 @@ QString FormatDuration(double seconds) {
     return Tr("≈ %1 ч %2 мин").arg(minutes / 60).arg(minutes % 60);
 }
 
+QString FormatClock(double seconds) {
+    const int total = std::max(0, static_cast<int>(std::lround(seconds)));
+    const int h = total / 3600, m = (total / 60) % 60, s = total % 60;
+    if (h > 0) return QString("%1:%2:%3").arg(h).arg(m, 2, 10, QChar('0')).arg(s, 2, 10, QChar('0'));
+    return QString("%1:%2").arg(m).arg(s, 2, 10, QChar('0'));
+}
+
 QString HumanWhen(const std::string& iso8601) {
     const QDateTime t = QDateTime::fromString(QString::fromStdString(iso8601), Qt::ISODate).toLocalTime();
     if (!t.isValid()) return QString::fromStdString(iso8601);

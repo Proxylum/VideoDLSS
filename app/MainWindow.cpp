@@ -2,6 +2,7 @@
 
 #include <QAction>
 #include <QCloseEvent>
+#include <QEvent>
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -16,12 +17,14 @@
 #include <QSettings>
 #include <QShortcut>
 #include <QStatusBar>
+#include <QStyle>
 #include <QVBoxLayout>
 #include <cmath>
 
 #include "CompareBar.h"
 #include "InspectorPanel.h"
 #include "LogPanel.h"
+#include "ProcessingPanel.h"
 #include "ProjectPanel.h"
 #include "SourceNames.h"
 #include "StartPage.h"
@@ -67,6 +70,8 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
 
     // docks (object names: QMainWindow::saveState needs them)
     tasks_ = new TaskQueue(this);
+    processing_ = new ProcessingPanel(*tasks_, pages_);
+    pages_->addWidget(processing_);
     projectPanel_ = new ProjectPanel(model_, *tasks_, this);
     projectDock_ = new QDockWidget(tr("Проект"), this);
     projectDock_->setObjectName("projectDock");
@@ -106,6 +111,21 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     connect(startPage_, &StartPage::openProjectRequested, this, &MainWindow::chooseProject);
     connect(startPage_, &StartPage::openPathRequested, this, &MainWindow::openPath);
     connect(tasks_, &TaskQueue::taskOutput, this, [](int id, const QString& line) { Log()->info("[task {}] {}", id, line.toStdString()); });
+    connect(tasks_, &TaskQueue::taskFinished, this, &MainWindow::onTaskFinished);
+    connect(projectPanel_, &ProjectPanel::processQueued, this, &MainWindow::watchProcess);
+    connect(processing_, &ProcessingPanel::showResultRequested, this, [this] {
+        processingActive_ = false;
+        updatePage();
+    });
+    connect(processing_, &ProcessingPanel::backRequested, this, [this] {
+        processingActive_ = false;
+        updatePage();
+    });
+    connect(processing_, &ProcessingPanel::minimizeRequested, this, &QWidget::showMinimized);
+    connect(processing_, &ProcessingPanel::fullLogRequested, this, [this] {
+        logDock_->show();
+        logDock_->raise();
+    });
 
     buildMenus();
 
@@ -225,7 +245,7 @@ void MainWindow::saveProjectDialog(bool forceDialog) {
 void MainWindow::updatePage() {
     const bool project = model_.hasProject();
     if (project) {
-        pages_->setCurrentWidget(workArea_);
+        pages_->setCurrentWidget(processingActive_ ? static_cast<QWidget*>(processing_) : workArea_);
         if (!workState_.isEmpty()) {
             restoreState(workState_);
             workState_.clear();
@@ -351,6 +371,63 @@ void MainWindow::dropEvent(QDropEvent* e) {
         }
 }
 
+void MainWindow::watchProcess(int taskId, const QString& what) {
+    processTaskId_ = taskId;
+    processingActive_ = true;
+    processing_->watch(taskId, what);
+    updatePage();
+}
+
+void MainWindow::onTaskFinished(int taskId, bool ok) {
+    model_.clearForce();
+    model_.reloadSources();  // the new passes / the result: sources, the plan, the cards
+    if (taskId != processTaskId_) return;
+    processTaskId_ = -1;
+    const QString video = QString::fromStdWString(model_.project().sourceVideo.filename().wstring());
+    const QString took = FormatClock(tasks_->progress(taskId).elapsed);
+    if (ok) {
+        model_.setCompareView(AppModel::CompareView::BeforeAfter);  // the result against the source
+        processingActive_ = false;
+        updatePage();
+        statusBar()->showMessage(tr("Обработка завершена за %1 — «До | После»").arg(took), 10000);
+        if (inBackground()) notify(tr("Обработка завершена"), tr("%1 — результат готов за %2").arg(video, took));
+    } else {
+        // the processing page stays: it says what happened and leads back to the project
+        const bool cancelled = tasks_->cancelled(taskId);
+        if (inBackground())
+            notify(cancelled ? tr("Обработка отменена") : tr("Обработка не удалась"),
+                   cancelled ? tr("%1 — готовые стадии сохранены").arg(video) : tr("%1 — подробности в логе").arg(video));
+    }
+}
+
+bool MainWindow::inBackground() const { return isMinimized() || !isActiveWindow(); }
+
+void MainWindow::notify(const QString& title, const QString& text) {
+    if (!QSystemTrayIcon::isSystemTrayAvailable()) return;
+    if (!tray_) {
+        tray_ = new QSystemTrayIcon(this);
+        QIcon icon = windowIcon();
+        if (icon.isNull()) icon = style()->standardIcon(QStyle::SP_ComputerIcon);
+        tray_->setIcon(icon);
+        tray_->setToolTip("dlssvid");
+        auto restore = [this] {
+            setWindowState((windowState() & ~Qt::WindowMinimized) | Qt::WindowActive);
+            raise();
+            activateWindow();
+        };
+        connect(tray_, &QSystemTrayIcon::messageClicked, this, restore);
+        connect(tray_, &QSystemTrayIcon::activated, this, [restore](QSystemTrayIcon::ActivationReason) { restore(); });
+    }
+    tray_->show();  // the icon must be visible for the message to appear
+    tray_->showMessage(title, text, QSystemTrayIcon::Information, 10000);
+    Log()->info("notification: {} / {}", title.toStdString(), text.toStdString());
+}
+
+bool MainWindow::event(QEvent* e) {
+    if (e->type() == QEvent::WindowActivate && tray_ && !tasks_->busy()) tray_->hide();  // the user is back: no icon to leave behind
+    return QMainWindow::event(e);
+}
+
 void MainWindow::saveSettings() {
     QSettings settings;
     settings.setValue("window/geometry", saveGeometry());
@@ -358,6 +435,13 @@ void MainWindow::saveSettings() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* e) {
+    if (tasks_->busy()) {
+        if (QMessageBox::question(this, tr("Идёт обработка"), tr("Прервать обработку и закрыть? Готовые стадии останутся на диске.")) != QMessageBox::Yes) {
+            e->ignore();
+            return;
+        }
+        tasks_->cancel(tasks_->currentId());
+    }
     switch (model_.closeAction()) {
         case AppModel::CloseAction::Nothing: break;
         case AppModel::CloseAction::AutoSave:
