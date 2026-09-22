@@ -1,6 +1,17 @@
 find_package(Catch2 3 CONFIG REQUIRED)
 include(Catch)
 
+# The tests run from a folder OUTSIDE the checkout. Every NGX initialisation (DLSS / NR / FG) spawns NVIDIA's OTA helper
+# nvngx_update.exe, which inherits the working directory of the test process and outlives it by up to a minute; with
+# the default working directory (build/release/tests) those helpers kept the folder locked and `git clean` of the next
+# CI job failed with "Permission denied" (main pipelines 5881/5886/5892, 2026-09-22). The tests use absolute paths only.
+file(TO_CMAKE_PATH "$ENV{TEMP}" DLSSVID_TEST_CWD_BASE)
+if(NOT DLSSVID_TEST_CWD_BASE)
+  set(DLSSVID_TEST_CWD_BASE "${CMAKE_BINARY_DIR}/..")
+endif()
+set(DLSSVID_TEST_CWD "${DLSSVID_TEST_CWD_BASE}/dlssvid-test-cwd")
+file(MAKE_DIRECTORY "${DLSSVID_TEST_CWD}")
+
 # ---- Unit tests (no video files, WARP adapter unless a GPU is present) ----
 add_executable(dlssvid_unit_tests
   unit/test_frame.cpp
@@ -39,7 +50,7 @@ target_link_libraries(dlssvid_unit_tests PRIVATE dlssvid_core Catch2::Catch2With
 target_compile_definitions(dlssvid_unit_tests PRIVATE
   DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
   DLSSVID_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-catch_discover_tests(dlssvid_unit_tests TEST_PREFIX "unit." DISCOVERY_MODE PRE_TEST)
+catch_discover_tests(dlssvid_unit_tests TEST_PREFIX "unit." DISCOVERY_MODE PRE_TEST WORKING_DIRECTORY "${DLSSVID_TEST_CWD}")
 
 # ---- Integration tests (synthetic clips written with FFmpeg, CLI invoked as a process) ----
 add_executable(dlssvid_integration_tests
@@ -74,7 +85,7 @@ target_compile_definitions(dlssvid_integration_tests PRIVATE
   DLSSVID_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 add_dependencies(dlssvid_integration_tests dlssvid)
-catch_discover_tests(dlssvid_integration_tests TEST_PREFIX "integration." DISCOVERY_MODE PRE_TEST)
+catch_discover_tests(dlssvid_integration_tests TEST_PREFIX "integration." DISCOVERY_MODE PRE_TEST WORKING_DIRECTORY "${DLSSVID_TEST_CWD}")
 
 # ---- Qt application tests (offscreen platform: the model and the task queue without windows) ----
 if(DLSSVID_BUILD_APP)
@@ -93,12 +104,12 @@ if(DLSSVID_BUILD_APP)
             "$<TARGET_FILE_DIR:dlssvid_app_tests>/platforms/qoffscreen.dll"
     VERBATIM)
   # (a single ENVIRONMENT entry: catch_discover_tests splits multi-value properties)
-  catch_discover_tests(dlssvid_app_tests TEST_PREFIX "app." DISCOVERY_MODE PRE_TEST
+  catch_discover_tests(dlssvid_app_tests TEST_PREFIX "app." DISCOVERY_MODE PRE_TEST WORKING_DIRECTORY "${DLSSVID_TEST_CWD}"
     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
   # Regression: a platform plugin that cannot be found must fail fast with a message. Without the
   # check in the tests' QApplication setup Qt shows a modal message box (no console) and aborts,
   # which hung automated runs until someone clicked it (stage 4).
-  add_test(NAME app.platform_plugin_missing_fails_fast COMMAND dlssvid_app_tests "TaskQueue*")
+  add_test(NAME app.platform_plugin_missing_fails_fast COMMAND dlssvid_app_tests "TaskQueue*" WORKING_DIRECTORY "${DLSSVID_TEST_CWD}")
   set_tests_properties(app.platform_plugin_missing_fails_fast PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=nonexistent" TIMEOUT 60
     PASS_REGULAR_EXPRESSION "platform plugin qnonexistent.dll not found")
@@ -114,7 +125,7 @@ target_compile_definitions(dlssvid_golden_tests PRIVATE
   DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
   DLSSVID_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden")
 add_dependencies(dlssvid_golden_tests dlssvid)
-catch_discover_tests(dlssvid_golden_tests TEST_PREFIX "golden." DISCOVERY_MODE PRE_TEST PROPERTIES LABELS golden)
+catch_discover_tests(dlssvid_golden_tests TEST_PREFIX "golden." DISCOVERY_MODE PRE_TEST WORKING_DIRECTORY "${DLSSVID_TEST_CWD}" PROPERTIES LABELS golden)
 
 # ---- build hygiene: ninja must have recorded header dependencies for every C++ object (stale-object incident) ----
 if(CMAKE_GENERATOR MATCHES "Ninja")
