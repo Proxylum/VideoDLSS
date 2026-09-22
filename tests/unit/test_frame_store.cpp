@@ -249,3 +249,27 @@ TEST_CASE("FrameStore discovers previous pass versions as sources named pass@id 
     REQUIRE(store.FindSource(versions[0].name) != nullptr);
     CHECK(store.SourceFps(versions[0].name).num == 24);
 }
+
+// Incident 2026-09-22 (CI, MR C pipeline): a unit test process stayed alive after its checks had passed — the main
+// thread in ~FrameStore joining a loader that slept in cv_.wait() forever. `stop_` was set without the mutex, so a
+// loader between its predicate check and the wait missed the notification (a lost wakeup). The window is a few
+// instructions wide; this stress guard drives shutdown thousands of times with idle and with busy loaders and must
+// finish (ctest kills it otherwise).
+TEST_CASE("FrameStore shuts down reliably with idle and busy loaders (regression: lost wakeup on stop)", "[viewport][store][gpu][regression]") {
+    const auto root = Root("shutdown");
+    WritePass(root / "depth_raw", PassKind::DepthRaw, 8, 4, 0, 9);
+    D3D12Device dev({true, false});
+    FrameStore::Options opt;
+    opt.loaderThreads = 4;
+    for (int i = 0; i < 400; ++i) {
+        FrameStore store(dev, opt);  // idle loaders: created, then stopped at once
+    }
+    const auto sources = FrameStore::DiscoverPasses(root);
+    for (int i = 0; i < 100; ++i) {
+        FrameStore store(dev, opt);  // busy loaders: stopped with work queued or in flight
+        store.SetSources(sources);
+        store.SetCurrentFrame(i % 10, {"depth_raw"});
+        if (i % 3 == 0) store.Update();
+    }
+    CHECK(true);
+}

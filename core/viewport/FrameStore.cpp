@@ -202,7 +202,12 @@ FrameStore::FrameStore(D3D12Device& device, const Options& options) : device_(de
 }
 
 FrameStore::~FrameStore() {
-    stop_ = true;
+    {
+        // Under the mutex, or a loader between its predicate check and the wait misses the notification and the
+        // join below never returns (incident 2026-09-22: a CI test process stuck after passing, one loader asleep).
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_ = true;
+    }
     cv_.notify_all();
     for (auto& t : loaders_)
         if (t.joinable()) t.join();
