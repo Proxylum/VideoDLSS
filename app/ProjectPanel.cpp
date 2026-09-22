@@ -277,7 +277,9 @@ void ProjectPanel::refresh() {
         QStringList reused;
         for (const auto& s : out.reused) reused << (FindStageSchema(s) ? QString::fromStdString(FindStageSchema(s)->title).toLower() : QString::fromStdString(s));
         outReused_->setText(reused.isEmpty() ? tr("— (всё будет посчитано)") : tr("%1 — совпали по отпечатку").arg(reused.join(", ")));
-        outDisk_->setText(out.newBytes > 0 ? tr("+%1 (предыдущие версии остаются рядом)").arg(HumanBytes(out.newBytes)) : tr("без новых пассов"));
+        QString disk = out.newBytes > 0 ? tr("+%1 (предыдущие версии остаются рядом)").arg(HumanBytes(out.newBytes)) : tr("без новых пассов");
+        if (const unsigned long long free = model_.freeSpace()) disk += tr(" · свободно %1").arg(HumanBytes(free));
+        outDisk_->setText(disk);
     } else {
         for (QLabel* l : {outVideo_, outTime_, outReused_, outDisk_}) l->setText("—");
     }

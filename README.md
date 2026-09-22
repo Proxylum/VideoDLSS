@@ -202,6 +202,10 @@ stage has measured its own rate), one row per stage (reused ones are ticked at o
 killed; finished passes keep their manifests and are reused next time), «Свернуть в фон» (a system notification tells
 when the run ends, clicking it brings the window back), the tail of the log and «Показать полный лог»; a finished run
 switches the viewport to «До | После» by itself, a cancelled or failed one explains itself and leads back to the project.
+The result line above the viewport (size, rate, frames, sound, when it was written, how long the run took) offers
+«Сохранить как…» (a copy of the result video), «Открыть папку», «Экспорт пассов…» (one `dlssvid export … --format exr`
+task per pass into a chosen folder) and «Другое видео» (= «Файл → Закрыть проект», `Ctrl+W`, back to the start page);
+keys `1`…`9` follow the chips of the compare bar.
 
 ## Layout
 

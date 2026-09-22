@@ -24,6 +24,7 @@
 #include "AppModel.h"
 #include "SourceNames.h"
 #include "ProcessingPanel.h"
+#include "ResultBar.h"
 #include "TaskQueue.h"
 #include "TestClips.h"
 #include "util/Subprocess.h"
@@ -61,8 +62,12 @@ QApplication& App() {
         std::exit(1);
     }
     static QApplication app(argc, argv);
-    QCoreApplication::setOrganizationName("dlssvid-tests");  // QSettings of the tests, not the user's
-    QCoreApplication::setApplicationName("dlssvid-tests");
+    // QSettings of the tests, not the user's: an INI file per test process under the build tree, so that the test
+    // cases ctest runs in parallel (recents, dialog folders, engineer mode) do not see each other's settings
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, QString::fromStdWString((std::filesystem::path(DLSSVID_TEST_TMP) / "app" / "settings").wstring()));
+    QCoreApplication::setOrganizationName("dlssvid-tests");
+    QCoreApplication::setApplicationName(QString("dlssvid-tests-%1").arg(QCoreApplication::applicationPid()));
     return app;
 }
 
@@ -695,4 +700,78 @@ TEST_CASE("ProcessingPanel shows the stages, the time, the log tail and offers t
     CHECK(cancel->isHidden());
     backButton->click();
     CHECK(back.count() == 1);
+}
+
+TEST_CASE("AppModel result: summary and bar, export copy, exportable passes, chip hotkeys, free space, close project", "[app][model][gpu]") {
+    App();
+    const auto d = Dir("result");
+    ClipSpec spec;
+    spec.width = 32;
+    spec.height = 16;
+    spec.frames = 8;
+    spec.fpsNum = 48;
+    spec.audio = true;
+    const auto result = WriteClip(d / "res.mkv", spec);
+    WritePassFps(d / "passes" / "color_sr", PassKind::ColorSr, 4, 24);
+    WritePassFps(d / "passes" / "depth_dlss", PassKind::DepthDlss, 4, 24);
+    Project p = Project::Create(d / "missing.mp4", d / "passes");
+    p.resultVideo = result;
+    p.Save(d / "proj.dlssvid.json");
+
+    AppModel model(true);
+    ResultBar bar(model);
+    CHECK(model.resultSummary().isEmpty());
+    CHECK(bar.isHidden());
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    const AppModel::ResultInfo info = model.resultInfo();
+    REQUIRE(info.exists);
+    CHECK(info.width == 32);
+    CHECK(info.height == 16);
+    CHECK(info.fps == Approx(48.0));
+    CHECK(info.frames == 8);
+    CHECK(info.audio);
+    CHECK(!info.modified.isEmpty());
+    CHECK(info.runSeconds == 0.0);
+    QString summary = model.resultSummary();
+    CHECK(summary.startsWith(QString::fromUtf8("32×16 · 48 fps · 8 кадров · со звуком · обновлён ")));
+    CHECK(!summary.contains(QString::fromUtf8("готов за")));
+    model.setLastRun(683.0);
+    summary = model.resultSummary();
+    CHECK(summary.endsWith(QString::fromUtf8("готов за 11:23")));
+    CHECK(!bar.isHidden());
+    CHECK(bar.text().contains(QString::fromUtf8("<b>Результат</b> · 32×16")));
+
+    // export = a copy of the result file; the result itself is refused
+    QSignalSpy messages(&model, &AppModel::message);
+    REQUIRE(model.exportResult(Q(d / "out" / "copy.mp4")));
+    CHECK(std::filesystem::file_size(d / "out" / "copy.mp4") == std::filesystem::file_size(result));
+    CHECK(!model.exportResult(Q(result)));
+    CHECK(messages.count() == 2);
+
+    // the passes on disk, in pipeline order; keys 1..9 follow the chips
+    const std::vector<std::string> passes = model.exportablePasses();
+    REQUIRE(passes.size() == 2);
+    CHECK(passes[0] == "depth_dlss");
+    CHECK(passes[1] == "color_sr");
+    const auto chips = model.chips();
+    REQUIRE(chips.size() == 3);
+    CHECK(chips[0].hotkey == 1);
+    CHECK(chips[2].hotkey == 3);
+    CHECK(chips[2].source == "result");
+    CHECK(model.freeSpace() > 0);
+
+    // closing the project: nothing is shown, the recents keep it
+    QSignalSpy closed(&model, &AppModel::projectChanged);
+    REQUIRE(model.closeProject());
+    CHECK(!model.hasProject());
+    CHECK(closed.count() == 1);
+    CHECK(model.resultSummary().isEmpty());
+    CHECK(model.chips().empty());
+    CHECK(model.exportablePasses().empty());
+    CHECK(model.freeSpace() == 0);
+    CHECK(!model.dirty());
+    CHECK(bar.isHidden());
+    REQUIRE(!model.recents().empty());
+    CHECK(QFileInfo(model.recents()[0].path) == QFileInfo(Q(d / "proj.dlssvid.json")));
+    CHECK(!model.closeProject());
 }

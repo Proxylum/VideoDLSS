@@ -15,6 +15,7 @@
 | `InspectorPanel` | layer stack and display settings, wipe, grid cell sources, pixel probe |
 | `TaskQueue` | sequential `dlssvid <stage>` processes with progress parsed from `stage: N/M frames`; stage 9: a plan per task (reused stages, estimates), the measured rate of the running stage, ETA, cancel (kill; queued tasks are dropped), «не запускается» for a program that fails to start |
 | `ProcessingPanel` | the processing page (stage 9): elapsed / left, overall and per-stage progress, «Отменить», «Свернуть в фон», log tail, «Показать результат» / «К проекту» |
+| `ResultBar` | the result line (TASK-0013): what the result video is and «Сохранить как…» / «Открыть папку» / «Экспорт пассов…» / «Другое видео» |
 | `LogPanel` | spdlog sink |
 | `MainWindow` | docks, menus, hotkeys (1..9 sources, F fit, Ctrl+0 1:1, W wipe, Space play, ,/. step), PNG screenshot with cell labels; stage 9: start page / work area / processing page, QSettings, recents, «До | После» after a run, tray notification when the window is minimised or in the background |
 

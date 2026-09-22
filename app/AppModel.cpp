@@ -101,6 +101,15 @@ bool AppModel::saveProjectAs(const QString& file) {
 
 void AppModel::reloadSources() {
     store_->SetSources(project_.Sources());
+    resultAudio_ = false;
+    if (!project_.resultVideo.empty() && std::filesystem::exists(project_.resultVideo)) {
+        try {
+            VideoDecoder probe(project_.resultVideo);
+            resultAudio_ = probe.HasAudio();
+        } catch (const std::exception&) {
+        }
+    }
+    emit resultChanged();
     timelineFps_ = Rational{0, 1};
     state().ResolveLegacyFrame(store_->FpsOf(baseSource()));  // projects before stage 9: frame -> time at the base rate
     state().time = std::clamp(state().time, 0.0, lastTime());
@@ -272,6 +281,7 @@ std::vector<AppModel::Chip> AppModel::chips() const {
         const int ra = SourceRank(a.source), rb = SourceRank(b.source);
         return ra != rb ? ra < rb : a.source < b.source;
     });
+    for (size_t i = 0; i < out.size() && i < 9; ++i) out[i].hotkey = static_cast<int>(i) + 1;  // keys 1..9 follow the chip order
     return out;
 }
 
@@ -570,6 +580,108 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
 }
 
 // ---- start screen, recents, unsaved changes -------------------------------------------------------
+
+AppModel::ResultInfo AppModel::resultInfo() const {
+    ResultInfo r;
+    if (!hasProject() || project_.resultVideo.empty()) return r;
+    const ViewportSource* src = store_->FindSource("result");
+    if (!src) return r;
+    r.exists = true;
+    r.path = QString::fromStdWString(project_.resultVideo.wstring());
+    r.width = src->width;
+    r.height = src->height;
+    r.fps = store_->FpsOf("result");
+    r.frames = src->lastFrame >= 0 ? src->lastFrame + 1 : 0;
+    r.audio = resultAudio_;
+    r.modified = HumanWhen(FileTimeIso8601(project_.resultVideo));
+    r.runSeconds = lastRun_;
+    return r;
+}
+
+QString AppModel::resultSummary() const {
+    const ResultInfo r = resultInfo();
+    if (!r.exists) return {};
+    QStringList parts;
+    if (r.width > 0 && r.height > 0) parts << QString("%1×%2").arg(r.width).arg(r.height);
+    if (r.fps > 0.0) parts << tr("%1 fps").arg(QString::number(r.fps, 'g', 4));
+    if (r.frames > 0) parts << Plural(static_cast<int>(r.frames), tr("кадр"), tr("кадра"), tr("кадров"));
+    parts << (r.audio ? tr("со звуком") : tr("без звука"));
+    if (!r.modified.isEmpty()) parts << tr("обновлён %1").arg(r.modified);
+    if (r.runSeconds > 0.0) parts << tr("готов за %1").arg(FormatClock(r.runSeconds));
+    return parts.join(" · ");
+}
+
+std::vector<std::string> AppModel::exportablePasses() const {
+    std::vector<std::string> out;
+    for (const auto& s : store_->Sources())
+        if (!s.isVideo && s.version.empty() && s.manifest && !s.pass.empty()) out.push_back(s.pass);
+    std::sort(out.begin(), out.end(), [](const std::string& a, const std::string& b) {
+        const int ra = SourceRank(a), rb = SourceRank(b);
+        return ra != rb ? ra < rb : a < b;
+    });
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+unsigned long long AppModel::freeSpace() const {
+    if (!hasProject()) return 0;
+    std::filesystem::path p = project_.passesRoot.empty() ? project_.sourceVideo.parent_path() : project_.passesRoot;
+    std::error_code ec;
+    while (!p.empty() && !std::filesystem::exists(p, ec)) {  // the passes folder may not exist yet: its nearest parent
+        const std::filesystem::path parent = p.parent_path();
+        if (parent == p) break;
+        p = parent;
+    }
+    const std::filesystem::space_info info = std::filesystem::space(p, ec);
+    return ec ? 0ULL : static_cast<unsigned long long>(info.available);
+}
+
+bool AppModel::exportResult(const QString& to) {
+    const ResultInfo r = resultInfo();
+    if (!r.exists) {
+        emit message(tr("Результата ещё нет"));
+        return false;
+    }
+    try {
+        const std::filesystem::path dst(to.toStdWString());
+        std::error_code ec;
+        if (std::filesystem::exists(dst, ec) && std::filesystem::equivalent(dst, project_.resultVideo, ec)) {
+            emit message(tr("Это и есть файл результата"));
+            return false;
+        }
+        if (!dst.parent_path().empty()) std::filesystem::create_directories(dst.parent_path());
+        std::filesystem::copy_file(project_.resultVideo, dst, std::filesystem::copy_options::overwrite_existing);
+        emit message(tr("Результат сохранён: %1").arg(to));
+        return true;
+    } catch (const std::exception& e) {
+        emit message(tr("Не удалось сохранить результат: %1").arg(e.what()));
+        return false;
+    }
+}
+
+bool AppModel::closeProject() {
+    if (!hasProject()) return false;
+    setPlaying(false);
+    project_ = Project{};
+    force_.clear();
+    lastRun_ = 0.0;
+    resultAudio_ = false;
+    store_->SetSources({});
+    dirty_ = false;
+    emit dirtyChanged(false);
+    emit sourcesChanged();
+    emit stateChanged();
+    refreshPlan();  // clears the plan
+    emit resultChanged();
+    emit projectChanged();
+    emit message(tr("Проект закрыт"));
+    return true;
+}
+
+void AppModel::setLastRun(double seconds) {
+    lastRun_ = seconds;
+    emit resultChanged();
+}
 
 AppModel::CloseAction AppModel::closeAction() const {
     if (!dirty_ || !hasProject()) return CloseAction::Nothing;

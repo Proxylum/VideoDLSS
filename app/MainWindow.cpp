@@ -2,6 +2,7 @@
 
 #include <QAction>
 #include <QCloseEvent>
+#include <QDesktopServices>
 #include <QEvent>
 #include <QDir>
 #include <QDragEnterEvent>
@@ -15,6 +16,7 @@
 #include <QMimeData>
 #include <QPainter>
 #include <QSettings>
+#include <QUrl>
 #include <QShortcut>
 #include <QStatusBar>
 #include <QStyle>
@@ -26,6 +28,7 @@
 #include "LogPanel.h"
 #include "ProcessingPanel.h"
 #include "ProjectPanel.h"
+#include "ResultBar.h"
 #include "SourceNames.h"
 #include "StartPage.h"
 #include "TaskQueue.h"
@@ -48,6 +51,8 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     v->setSpacing(2);
     compareBar_ = new CompareBar(model_, workArea_);
     v->addWidget(compareBar_);
+    resultBar_ = new ResultBar(model_, workArea_);
+    v->addWidget(resultBar_);
     auto* labels = new QWidget(workArea_);
     auto* lg = new QGridLayout(labels);
     lg->setContentsMargins(4, 0, 4, 0);
@@ -126,6 +131,10 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
         logDock_->show();
         logDock_->raise();
     });
+    connect(resultBar_, &ResultBar::saveAsRequested, this, &MainWindow::saveResultAs);
+    connect(resultBar_, &ResultBar::openFolderRequested, this, &MainWindow::openResultFolder);
+    connect(resultBar_, &ResultBar::exportPassesRequested, this, &MainWindow::exportPasses);
+    connect(resultBar_, &ResultBar::anotherVideoRequested, this, &MainWindow::closeProject);
 
     buildMenus();
 
@@ -152,6 +161,11 @@ void MainWindow::buildMenus() {
     rebuildRecentMenu();
     file->addAction(tr("Сохранить проект"), QKeySequence::Save, this, [this] { saveProjectDialog(false); });
     file->addAction(tr("Сохранить проект как…"), QKeySequence::SaveAs, this, [this] { saveProjectDialog(true); });
+    file->addAction(tr("Закрыть проект"), QKeySequence("Ctrl+W"), this, &MainWindow::closeProject);
+    file->addSeparator();
+    file->addAction(tr("Сохранить результат как…"), this, &MainWindow::saveResultAs);
+    file->addAction(tr("Открыть папку результата"), this, &MainWindow::openResultFolder);
+    file->addAction(tr("Экспорт пассов…"), this, &MainWindow::exportPasses);
     file->addSeparator();
     file->addAction(tr("Скриншот вьюпорта в PNG…"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S), this, &MainWindow::saveScreenshot);
     file->addSeparator();
@@ -273,12 +287,12 @@ void MainWindow::updateTitle() {
     setWindowTitle(title);
 }
 
+// 1..9 follow the chips of the compare bar (the order the user sees): the «after» side of a comparison, else the single view.
 void MainWindow::selectSource(int hotkey) {
-    const QStringList names = model_.sourceNames();
-    if (hotkey - 1 < names.size()) {
-        if (model_.state().mode == ViewMode::Grid) model_.setMode(ViewMode::Single);
-        model_.setSingleSource(names[hotkey - 1]);
-    }
+    const auto chips = model_.chips();
+    if (hotkey < 1 || static_cast<size_t>(hotkey) > chips.size()) return;
+    if (model_.state().mode == ViewMode::Grid) model_.setMode(ViewMode::Single);
+    model_.showSource(chips[static_cast<size_t>(hotkey - 1)].source);
 }
 
 void MainWindow::updateCellLabels() {
@@ -379,6 +393,7 @@ void MainWindow::watchProcess(int taskId, const QString& what) {
 }
 
 void MainWindow::onTaskFinished(int taskId, bool ok) {
+    if (taskId == processTaskId_ && ok) model_.setLastRun(tasks_->progress(taskId).elapsed);  // «готов за …» in the result line
     model_.clearForce();
     model_.reloadSources();  // the new passes / the result: sources, the plan, the cards
     if (taskId != processTaskId_) return;
@@ -428,6 +443,77 @@ bool MainWindow::event(QEvent* e) {
     return QMainWindow::event(e);
 }
 
+bool MainWindow::settleUnsaved() {
+    switch (model_.closeAction()) {
+        case AppModel::CloseAction::Nothing: return true;
+        case AppModel::CloseAction::AutoSave:
+            if (model_.saveProject()) return true;
+            return QMessageBox::question(this, tr("Проект не сохранён"), tr("Не удалось сохранить проект. Продолжить без сохранения?")) == QMessageBox::Yes;
+        case AppModel::CloseAction::Ask: {
+            const auto r = QMessageBox::question(this, tr("Несохранённый проект"), tr("Сохранить проект?"),
+                                                 QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+            if (r == QMessageBox::Cancel) return false;
+            if (r == QMessageBox::Save) {
+                saveProjectDialog(true);
+                return !model_.dirty();
+            }
+            return true;
+        }
+    }
+    return true;
+}
+
+void MainWindow::closeProject() {
+    if (!model_.hasProject()) return;
+    if (tasks_->busy()) {
+        QMessageBox::information(this, tr("Идёт обработка"), tr("Дождитесь окончания обработки или отмените её, затем закройте проект."));
+        return;
+    }
+    if (!settleUnsaved()) return;
+    processingActive_ = false;
+    model_.closeProject();  // projectChanged -> the start page
+}
+
+void MainWindow::saveResultAs() {
+    const AppModel::ResultInfo r = model_.resultInfo();
+    if (!r.exists) {
+        statusBar()->showMessage(tr("Результата ещё нет — сначала «Обработать»"), 5000);
+        return;
+    }
+    const QString last = model_.lastDir("result");
+    const QString start = last.isEmpty() ? r.path : QDir(last).filePath(QFileInfo(r.path).fileName());
+    const QString f = QFileDialog::getSaveFileName(this, tr("Сохранить результат как"), start, tr("Видео MP4 (*.mp4);;Все файлы (*)"));
+    if (f.isEmpty()) return;
+    model_.rememberDir("result", f);
+    model_.exportResult(f);
+}
+
+void MainWindow::openResultFolder() {
+    const AppModel::ResultInfo r = model_.resultInfo();
+    const QString folder = r.exists ? QFileInfo(r.path).absolutePath() : (model_.hasProject() ? QString::fromStdWString(model_.project().sourceVideo.parent_path().wstring()) : QString());
+    if (folder.isEmpty()) return;
+    QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
+}
+
+void MainWindow::exportPasses() {
+    const std::vector<std::string> passes = model_.exportablePasses();
+    if (passes.empty()) {
+        statusBar()->showMessage(tr("Пассов для экспорта пока нет"), 5000);
+        return;
+    }
+    const QString dir = QFileDialog::getExistingDirectory(this, tr("Папка для экспорта пассов (EXR-последовательности с manifest.json, по подпапке на пасс)"), model_.lastDir("export"));
+    if (dir.isEmpty()) return;
+    model_.rememberDir("export", QDir(dir).filePath("."));
+    for (const std::string& pass : passes) {
+        const QString from = QString::fromStdWString((model_.project().passesRoot / pass).wstring());
+        tasks_->enqueue(tr("Экспорт: %1").arg(HumanSourceName(pass)), model_.cliPath(),
+                        {"export", "--from-dir", from, "-o", QDir(dir).filePath(QString::fromStdString(pass)), "--format", "exr"});
+    }
+    tasksDock_->show();
+    tasksDock_->raise();
+    statusBar()->showMessage(tr("%1 в очереди → %2").arg(Plural(static_cast<int>(passes.size()), tr("задача экспорта"), tr("задачи экспорта"), tr("задач экспорта")), dir), 8000);
+}
+
 void MainWindow::saveSettings() {
     QSettings settings;
     settings.setValue("window/geometry", saveGeometry());
@@ -442,32 +528,9 @@ void MainWindow::closeEvent(QCloseEvent* e) {
         }
         tasks_->cancel(tasks_->currentId());
     }
-    switch (model_.closeAction()) {
-        case AppModel::CloseAction::Nothing: break;
-        case AppModel::CloseAction::AutoSave:
-            if (!model_.saveProject()) {
-                if (QMessageBox::question(this, tr("Проект не сохранён"), tr("Не удалось сохранить проект. Закрыть без сохранения?")) != QMessageBox::Yes) {
-                    e->ignore();
-                    return;
-                }
-            }
-            break;
-        case AppModel::CloseAction::Ask: {
-            const auto r = QMessageBox::question(this, tr("Несохранённый проект"), tr("Сохранить проект перед закрытием?"),
-                                                 QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
-            if (r == QMessageBox::Cancel) {
-                e->ignore();
-                return;
-            }
-            if (r == QMessageBox::Save) {
-                saveProjectDialog(true);
-                if (model_.dirty()) {
-                    e->ignore();
-                    return;
-                }
-            }
-            break;
-        }
+    if (!settleUnsaved()) {
+        e->ignore();
+        return;
     }
     saveSettings();
     QMainWindow::closeEvent(e);
