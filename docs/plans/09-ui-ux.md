@@ -54,7 +54,7 @@
    параметрах).
 5. Документация: `docs/architecture.md` (раскладка версий, отпечаток), README (`--plan`, `passes`).
 
-**Статус (2026-09-22): выполнено** — ветка `stage/09-ui-ux-a`: `PassFingerprint`, `PassVersions`, `PlanProcess` /
+**Статус (2026-09-22): выполнено** — MR !19 (ветка `stage/09-ui-ux-a`): `PassFingerprint`, `PassVersions`, `PlanProcess` /
 `DecideStage` в раннере, `process --plan` / `--keep-versions`, `passes list|use|gc`, `pass_versions_keep` в проекте;
 15 новых тестов (юнит: канонический JSON, отпечаток, инструмент, версии, gc; интеграция: штампы, регрессия на пробел
 ядра, восстановление из истории, усыновление, смена исходника, forced/incomplete/disabled, CLI). Отступления от
