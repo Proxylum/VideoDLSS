@@ -72,7 +72,7 @@
 4. Статус пасса — относительно его собственного fps («готов, 240 кадров»).
 5. Тесты: `AppModel` отображение времени в кадры для 24/48 fps, форматирование таймкода, `FrameStore` регрессия.
 
-**Статус (2026-09-22): выполнено** — MR !NN (ветка `stage/09-ui-ux-b`): `ViewportState::time` (+ `legacyFrame`,
+**Статус (2026-09-22): выполнено** — MR !20 (ветка `stage/09-ui-ux-b`): `ViewportState::time` (+ `legacyFrame`,
 `FormatTimecode`), `FrameStore` с частотой на источник (`FrameAt`, `TexturesAt`, `Duration`, `ExpectedFrames`, окно
 префетча в секундах, статус `Loading`), плашки `FrameStates` в рендерере и шейдере, `AppModel` (шаг по базовому слою,
 частота таймлайна, воспроизведение с максимальной частотой), `TimelineWidget` с таймкодом и переключателем частоты,
