@@ -26,6 +26,8 @@ add_executable(dlssvid_unit_tests
   unit/test_viewport_renderer.cpp
   unit/test_frame_store.cpp
   unit/test_project.cpp
+  unit/test_pass_fingerprint.cpp
+  unit/test_pass_versions.cpp
   unit/test_upscale.cpp
   unit/test_tonemap.cpp
   unit/test_nr.cpp
@@ -60,6 +62,8 @@ add_executable(dlssvid_integration_tests
   integration/test_cli_fg.cpp
   integration/test_process.cpp
   integration/test_cli_process.cpp
+  integration/test_process_versions.cpp
+  integration/test_cli_pass_versions.cpp
 )
 target_link_libraries(dlssvid_integration_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 target_compile_definitions(dlssvid_integration_tests PRIVATE

@@ -47,6 +47,7 @@ nlohmann::json Project::ToJson(const std::filesystem::path& relativeTo) const {
             {"passes", Rel(passesRoot, relativeTo)},
             {"result", Rel(resultVideo, relativeTo)},
             {"stages", st},
+            {"pass_versions_keep", passVersionsKeep},
             {"viewport", viewport.ToJson()}};
 }
 
@@ -64,6 +65,7 @@ Project Project::FromJson(const nlohmann::json& j, const std::filesystem::path& 
         if (!e.name.empty()) p.stages.push_back(e);
     }
     if (p.stages.empty()) p.stages = DefaultStages();
+    p.passVersionsKeep = j.value("pass_versions_keep", 2);
     p.viewport = j.contains("viewport") ? ViewportState::FromJson(j["viewport"]) : ViewportState{};
     return p;
 }

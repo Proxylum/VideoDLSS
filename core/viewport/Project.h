@@ -27,6 +27,7 @@ struct Project {
     std::filesystem::path resultVideo;
     std::vector<StageEntry> stages;
     ViewportState viewport;
+    int passVersionsKeep = 2;  // pass versions kept per pass after a run, the current one included; 0 = keep all (stage 9)
 
     static Project Create(const std::filesystem::path& sourceVideo, const std::filesystem::path& passesRoot);
     static Project Load(const std::filesystem::path& file);

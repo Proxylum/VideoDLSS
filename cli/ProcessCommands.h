@@ -30,6 +30,8 @@ public:
         bool warp = false;
         bool passthrough = false;
         bool noGpuRoundTrip = false;
+        bool plan = false;         // decide and print what would run / be reused, then exit
+        int keepVersions = -1;     // -1: the project's pass_versions_keep or 2
         std::string json;
     };
     struct BenchArgs {

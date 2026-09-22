@@ -4,6 +4,7 @@
 #include <CLI/CLI.hpp>
 
 #include "FgCommands.h"
+#include "PassesCommands.h"
 #include "ProcessCommands.h"
 #include "NrCommands.h"
 #include "UpscaleCommands.h"
@@ -632,6 +633,8 @@ int main(int argc, char** argv) {
 
     cli::ProcessCommands processCommands;  // process (the whole pipeline), bench (stage 8)
     processCommands.Register(app);
+    cli::PassesCommands passesCommands;  // passes list | use | gc (stage 9)
+    passesCommands.Register(app);
 
     ExportArgs ea;
     auto* exp = app.add_subcommand("export", "export a pass as a file sequence + manifest.json");
@@ -733,6 +736,7 @@ int main(int argc, char** argv) {
     try {
         if (info->parsed()) return CmdInfo(infoInput, infoWarp);
         if (const int rc = processCommands.Dispatch(); rc >= 0) return rc;
+        if (const int rc = passesCommands.Dispatch(); rc >= 0) return rc;
         if (exp->parsed()) return CmdExport(ea);
         if (imp->parsed()) return CmdImport(ia);
         if (conv->parsed()) return CmdConvert(ca);

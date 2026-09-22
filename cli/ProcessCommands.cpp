@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "gpu/D3D12Device.h"
+#include "pipeline/PassFingerprint.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/nr/INrBackend.h"
 #include "util/Error.h"
@@ -37,13 +38,15 @@ std::vector<std::string> Split(const std::string& s, char sep) {
 // Common: stages from the project / defaults, --stages filter, aliases and --param.
 void BuildStages(const std::string& projectFile, const std::string& stageList, const std::vector<std::string>& params, const std::string& depthBackend,
                  const std::string& flowBackend, const std::string& upscaleBackend, const std::string& nrBackend, const std::string& fgBackend, double scale,
-                 int multiplier, ProcessOptions& o, std::filesystem::path* projectInput, std::filesystem::path* projectPasses, std::filesystem::path* projectResult) {
+                 int multiplier, ProcessOptions& o, std::filesystem::path* projectInput, std::filesystem::path* projectPasses, std::filesystem::path* projectResult,
+                 int* projectKeep = nullptr) {
     if (!projectFile.empty()) {
         const Project p = Project::Load(projectFile);
         o.stages = StagesFromProject(p);
         if (projectInput) *projectInput = p.sourceVideo;
         if (projectPasses) *projectPasses = p.passesRoot;
         if (projectResult) *projectResult = p.resultVideo;
+        if (projectKeep) *projectKeep = p.passVersionsKeep;
     } else {
         o.stages = DefaultProcessStages();
     }
@@ -75,11 +78,23 @@ void BuildStages(const std::string& projectFile, const std::string& stageList, c
     for (const auto& spec : params) ApplyParamSpec(o.stages, spec);
 }
 
+void PrintPlan(const ProcessPlan& p) {
+    std::printf("%-10s %-8s %-9s %-9s  %s\n", "stage", "action", "needs", "on disk", "why");
+    for (const auto& s : p.stages) {
+        const std::string onDisk = !s.current ? "-" : s.currentFingerprint.empty() ? "legacy" : ShortFingerprint(s.currentFingerprint);
+        std::printf("%-10s %-8s %-9s %-9s  %s%s%s\n", s.name.c_str(), s.action.c_str(), ShortFingerprint(s.fingerprint).c_str(), onDisk.c_str(), s.kind.c_str(),
+                    s.detail.empty() ? "" : ": ", s.detail.c_str());
+    }
+    std::printf("plan: %d stage(s) to run, %d reused; result from %s; passes in %s\n", p.runCount, p.reuseCount,
+                p.finalPass.empty() ? "the source (passthrough)" : p.finalPass.c_str(), p.passesRoot.string().c_str());
+}
+
 void PrintReport(const ProcessResult& r) {
     std::printf("%-12s %-12s %8s %10s %12s  %s\n", "stage", "status", "frames", "seconds", "ms/frame", "output");
     for (const auto& s : r.stages)
-        std::printf("%-12s %-12s %8lld %10.1f %12.1f  %s%s%s\n", s.name.c_str(), s.status.c_str(), static_cast<long long>(s.frames), s.seconds, s.msPerFrame,
-                    s.outDir.string().c_str(), s.reason.empty() ? "" : " — ", s.reason.c_str());
+        std::printf("%-12s %-12s %8lld %10.1f %12.1f  %s%s%s%s\n", s.name.c_str(), s.status.c_str(), static_cast<long long>(s.frames), s.seconds, s.msPerFrame,
+                    s.outDir.string().c_str(), s.fingerprint.empty() ? "" : (" [" + ShortFingerprint(s.fingerprint) + "]").c_str(), s.reason.empty() ? "" : " — ",
+                    s.reason.c_str());
     std::printf("result:      %s (%lld frames at %.3f fps%s) in %.1f s\n", r.output.string().c_str(), static_cast<long long>(r.framesOut), r.outputFps.ToDouble(),
                 r.audio ? ", audio copied" : "", r.seconds);
 }
@@ -87,8 +102,10 @@ void PrintReport(const ProcessResult& r) {
 int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     ProcessOptions o;
     std::filesystem::path projectInput, projectPasses, projectResult;
+    int projectKeep = -1;
     BuildStages(a.project, a.stages, a.params, a.depthBackend, a.flowBackend, a.upscaleBackend, a.nrBackend, a.fgBackend, a.scale, a.multiplier, o, &projectInput,
-                &projectPasses, &projectResult);
+                &projectPasses, &projectResult, &projectKeep);
+    o.keepVersions = a.keepVersions >= 0 ? a.keepVersions : (projectKeep >= 0 ? projectKeep : 2);
     o.input = !a.input.empty() ? std::filesystem::path(a.input) : projectInput;
     if (o.input.empty()) Throw("process: -i/--input (or --project with a source video) is required");
     o.output = !a.output.empty() ? std::filesystem::path(a.output) : projectResult;
@@ -108,6 +125,12 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     o.passthrough = a.passthrough;
     o.gpuRoundtrip = !a.noGpuRoundTrip;
     o.progress = &Progress;
+    if (a.plan) {
+        const ProcessPlan plan = PlanProcess(o);
+        PrintPlan(plan);
+        if (!a.json.empty()) std::ofstream(a.json) << plan.ToJson().dump(2) << "\n";
+        return 0;
+    }
     const ProcessResult r = RunProcess(o);
     PrintReport(r);
     if (!a.json.empty()) std::ofstream(a.json) << r.ToJson().dump(2) << "\n";
@@ -180,7 +203,11 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_flag("--warp", pa_.warp, "use the WARP software adapter");
     process_->add_flag("--passthrough", pa_.passthrough, "decode -> GPU -> encode without processing (stage 0)");
     process_->add_flag("--no-gpu-roundtrip", pa_.noGpuRoundTrip, "passthrough: skip the GPU upload/readback");
-    process_->add_option("--json", pa_.json, "write the stage report to this JSON file");
+    process_->add_flag("--plan", pa_.plan, "decide which stages would run or be reused (fingerprints, versions) and exit without processing");
+    process_->add_option("--keep-versions,--keep_versions", pa_.keepVersions,
+                         "pass versions kept per pass after the run, the current one included; 0 = keep all (default: the project's pass_versions_keep or 2)")
+        ->default_val(-1);
+    process_->add_option("--json", pa_.json, "write the stage report (or the plan with --plan) to this JSON file");
 
     bench_ = app.add_subcommand("bench", "run the pipeline on N frames into a scratch folder and print ms/frame per stage (ТЗ §9)");
     bench_->add_option("-i,--input", ba_.input, "input video file")->required()->check(CLI::ExistingFile);

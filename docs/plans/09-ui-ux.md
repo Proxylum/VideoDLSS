@@ -54,6 +54,14 @@
    параметрах).
 5. Документация: `docs/architecture.md` (раскладка версий, отпечаток), README (`--plan`, `passes`).
 
+**Статус (2026-09-22): выполнено** — ветка `stage/09-ui-ux-a`: `PassFingerprint`, `PassVersions`, `PlanProcess` /
+`DecideStage` в раннере, `process --plan` / `--keep-versions`, `passes list|use|gc`, `pass_versions_keep` в проекте;
+15 новых тестов (юнит: канонический JSON, отпечаток, инструмент, версии, gc; интеграция: штампы, регрессия на пробел
+ядра, восстановление из истории, усыновление, смена исходника, forced/incomplete/disabled, CLI). Отступления от
+плана: `Retire(current)` → `RetirePassVersion`, `Use` → `UsePassVersion`; «проект помнит отпечаток текущей версии» не
+понадобилось — источник правды манифест текущей папки, а совпадающая версия в истории восстанавливается сама
+(`restore`); пассы без отпечатка усыновляются, а не пересчитываются.
+
 ### MR B — таймлайн по времени, сетка, состояния кадра (`core/viewport`, `app`)
 
 1. `ViewportState`: `time` (с) вместо `frame`; `FrameStore`: fps и число кадров каждого источника, `FrameAt(source, t)`,
