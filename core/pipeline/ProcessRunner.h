@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,8 @@ struct ProcessOptions {
     bool passthrough = false;          // stage 0 behaviour: decode -> GPU -> encode, no stages
     bool gpuRoundtrip = true;          // passthrough: upload / readback each frame
     int keepVersions = 2;              // pass versions kept per pass after the run, the current one included; 0 = keep all
+    std::set<std::string> forceStages;  // recompute these stages even when their pass matches (a per-stage --no-skip-existing)
+    std::string sourceHash;             // "sha256:<hex>" of the input when the caller knows it (Project::SourceHash); empty = hash the file
     std::function<void(const std::string& stage, int64_t done, int64_t total)> progress;
 };
 
@@ -104,7 +107,9 @@ struct ProcessPlan {
 };
 
 // Decides every enabled stage the way RunProcess would, from the manifests under the passes root; hashes the source
-// but writes nothing (the passes root is not even created).
+// but writes nothing (the passes root is not even created). Parameters are validated against the stage schema
+// (stages/ParamSchema.h) and fingerprinted with the schema defaults filled in: an explicit default and an absent
+// key are the same run.
 ProcessPlan PlanProcess(const ProcessOptions& options);
 ProcessResult RunProcess(const ProcessOptions& options);
 

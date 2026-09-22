@@ -9,7 +9,11 @@
 #include <string>
 #include <vector>
 
+#include <map>
+#include <set>
+
 #include "gpu/D3D12Device.h"
+#include "pipeline/Estimates.h"
 #include "viewport/FrameStore.h"
 #include "viewport/Project.h"
 #include "viewport/ViewportState.h"
@@ -68,6 +72,25 @@ public:
     std::vector<Chip> chips() const;   // one per current source in pipeline order, versions attached
     bool engineerMode() const { return engineerMode_; }
 
+    // ---- project screen (stage 9, MR D) ----
+    struct StageCardState {
+        QString state;    // «переиспользуется», «пересчёт: Интенсивность 1 → 1.4», «будет посчитано», «выключена» …
+        QString sub;      // «0 мин · посчитано вчера 14:02», «≈ 2 мин · v1 останется на диске»
+        QString version;  // «v1», «v2»
+        QString warning;  // «без глубины и векторов: качество ниже»; empty when fine
+        QString tone;     // ok | run | off | none
+        bool runs = false;
+    };
+    const ProcessPlan& plan() const { return plan_; }        // PlanProcess over the project (empty without a source)
+    const RunOutcome& outcome() const { return outcome_; }  // what the run gives: size, rate, time, disk
+    const SourceInfo& sourceInfo() const { return sourceInfo_; }
+    QString planError() const { return planError_; }         // why there is no plan (bad parameters, no video)
+    QString sourceHashStatus() const;                        // «совпадает с пассами» / «N пассов от другого исходника» / «пассов нет»
+    StageCardState cardState(const std::string& stage) const;
+    StageEntry* stageEntry(const std::string& stage);
+    bool forced(const std::string& stage) const { return force_.count(stage) > 0; }
+    QStringList processArgs() const;  // dlssvid process --project <file> --disable-unavailable [--force a,b]
+
 public slots:
     void openVideo(const QString& file);
     void openProject(const QString& file);
@@ -87,6 +110,14 @@ public slots:
     void showSource(const std::string& source);  // a chip: the «after» side of a comparison, else the single view
     void toggleWipe();                            // W: sets up «before | after» when no comparison is configured
     void setEngineerMode(bool on);                // remembered in QSettings
+    void refreshPlan();                           // plan the run now (manifests + the cached source hash)
+    void schedulePlan();                          // after an edit: coalesced into one refresh
+    void setStageEnabled(const std::string& stage, bool on);
+    void setStageParam(const std::string& stage, const std::string& key, const nlohmann::json& value);
+    void setStageParams(const std::string& stage, const nlohmann::json& params);
+    void setForce(const std::string& stage, bool on);
+    void clearForce();
+    void setEncode(const QString& codec, const std::map<std::string, std::string>& options);
     void notifyStateChanged();   // after direct edits of state()
     void notifyFramesUpdated();  // the frame store uploaded something (the viewport's poll)
 
@@ -100,6 +131,7 @@ signals:
     void playingChanged(bool playing);
     void message(const QString& text);
     void engineerModeChanged(bool on);
+    void planChanged();
 
 private:
     void onPlayTick();
@@ -113,6 +145,13 @@ private:
     Rational timelineFps_{0, 1};  // {0,1}: the base source's rate
     double playStep_ = 1.0 / 24.0;
     bool engineerMode_ = false;
+    ProcessPlan plan_;
+    RunOutcome outcome_;
+    SourceInfo sourceInfo_;
+    QString planError_;
+    std::set<std::string> force_;
+    std::map<std::string, int> history_;  // pass -> previous versions on disk
+    QTimer planTimer_;
 };
 
 }  // namespace dlssvid

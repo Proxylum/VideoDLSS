@@ -251,7 +251,7 @@ TEST_CASE("Switching a parameter back restores the previous version instead of r
     // keepVersions = 0 keeps everything
     o.keepVersions = 0;
     const size_t before = ListPassVersions(o.passesRoot, "color_nr").size();
-    ApplyParamSpec(o.stages, "nr.intensity=2.2");
+    ApplyParamSpec(o.stages, "nr.intensity=1.6");  // within the schema range (0..2): the runner validates parameters now
     RunProcess(o);
     CHECK(ListPassVersions(o.passesRoot, "color_nr").size() == before + 1);
 }
@@ -367,4 +367,58 @@ TEST_CASE("Forced runs, incomplete passes completed in place, a disabled stage l
         CHECK(Manifest::Load(o.passesRoot / "color_fg").inputs.at("color_sr") == Report(r, "upscale").fingerprint);
         CHECK(r.finalPass == o.passesRoot / "color_fg");
     }
+}
+
+TEST_CASE("Schema defaults are the same run; --force recomputes one stage in place; bad parameters are refused", "[integration][process][versions]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("schema");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o = Options(dir, clip);
+    const ProcessResult base = RunProcess(o);
+    CHECK(Statuses(base) == std::vector<std::string>(5, "ran"));
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").stageParams["ms_per_frame"].get<double>() > 0);  // recorded for the estimates
+    CHECK(Manifest::Load(o.passesRoot / "depth_dlss").stageParams["ms_per_frame"].get<double>() > 0);
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").paramsCanonical["style"] == "natural");  // the defaults are part of the fingerprint
+
+    // an explicit default is not a change (before MR D: params_changed, the keys were absent when the pass was made)
+    ApplyParamSpec(o.stages, "nr.intensity=1.0");
+    ApplyParamSpec(o.stages, "nr.passes=1");
+    ApplyParamSpec(o.stages, "fg.multiplier=2");
+    CHECK(PlanProcess(o).runCount == 0);
+
+    // --force: the stage alone, in place (same fingerprint), the stages below stay reused
+    o.forceStages = {"nr"};
+    const ProcessPlan plan = PlanProcess(o);
+    CHECK(Decision(plan, "nr").action == "run");
+    CHECK(Decision(plan, "nr").kind == "forced");
+    CHECK(!Decision(plan, "nr").retire);
+    CHECK(Decision(plan, "fg").action == "reuse");
+    const ProcessResult forced = RunProcess(o);
+    CHECK(Statuses(forced) == std::vector<std::string>{"reused", "reused", "reused", "ran", "reused"});
+    CHECK(Report(forced, "nr").retired.empty());
+    CHECK(ListPassVersions(o.passesRoot, "color_nr").size() == 1);
+    o.forceStages = {"bogus"};
+    CHECK_THROWS_WITH(PlanProcess(o), ContainsSubstring("--force"));
+    o.forceStages.clear();
+
+    // validation against the schema, before anything runs
+    ApplyParamSpec(o.stages, "nr.intensity=5");
+    CHECK_THROWS_WITH(PlanProcess(o), ContainsSubstring("nr.intensity must be within"));
+    CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("nr.intensity must be within"));
+    ApplyParamSpec(o.stages, "nr.intensity=1.0");
+    ApplyParamSpec(o.stages, "fg.multiplier=7");
+    CHECK_THROWS_WITH(PlanProcess(o), ContainsSubstring("fg.multiplier must be one of"));
+    ApplyParamSpec(o.stages, "fg.multiplier=2");
+    CHECK(PlanProcess(o).runCount == 0);
+
+    // a hash the caller knows is used as given (the project's cache): another value means another source
+    o.sourceHash = "sha256:not-the-same-file";
+    const ProcessPlan other = PlanProcess(o);
+    CHECK(other.sourceHash == "sha256:not-the-same-file");
+    CHECK(Decision(other, "depth").kind == "source_changed");
+    o.sourceHash = "garbage";  // not a hash: ignored, the file is hashed
+    CHECK(PlanProcess(o).sourceHash == plan.sourceHash);
 }

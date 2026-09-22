@@ -31,6 +31,8 @@ public:
         bool passthrough = false;
         bool noGpuRoundTrip = false;
         bool plan = false;         // decide and print what would run / be reused, then exit
+        std::string force;         // comma list of stages to recompute even when their pass matches
+        bool codecGiven = false;   // --codec on the command line (else the project's encoder)
         int keepVersions = -1;     // -1: the project's pass_versions_keep or 2
         std::string json;
     };

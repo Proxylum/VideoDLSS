@@ -2,6 +2,7 @@
 
 #include <fstream>
 
+#include "pipeline/PassFingerprint.h"
 #include "util/Error.h"
 #include "util/Log.h"
 
@@ -48,6 +49,8 @@ nlohmann::json Project::ToJson(const std::filesystem::path& relativeTo) const {
             {"result", Rel(resultVideo, relativeTo)},
             {"stages", st},
             {"pass_versions_keep", passVersionsKeep},
+            {"encode", {{"codec", codec}, {"options", codecOptions}}},
+            {"source_hash", {{"value", sourceHash}, {"size", sourceSize}, {"mtime", sourceMtime}}},
             {"viewport", viewport.ToJson()}};
 }
 
@@ -66,6 +69,16 @@ Project Project::FromJson(const nlohmann::json& j, const std::filesystem::path& 
     }
     if (p.stages.empty()) p.stages = DefaultStages();
     p.passVersionsKeep = j.value("pass_versions_keep", 2);
+    if (j.contains("encode") && j["encode"].is_object()) {
+        p.codec = j["encode"].value("codec", "h264_nvenc");
+        if (j["encode"].contains("options") && j["encode"]["options"].is_object())
+            for (const auto& [k, v] : j["encode"]["options"].items()) p.codecOptions[k] = v.is_string() ? v.get<std::string>() : v.dump();
+    }
+    if (j.contains("source_hash") && j["source_hash"].is_object()) {
+        p.sourceHash = j["source_hash"].value("value", "");
+        p.sourceSize = j["source_hash"].value("size", uint64_t{0});
+        p.sourceMtime = j["source_hash"].value("mtime", "");
+    }
     p.viewport = j.contains("viewport") ? ViewportState::FromJson(j["viewport"]) : ViewportState{};
     return p;
 }
@@ -92,6 +105,19 @@ void Project::Save(const std::filesystem::path& target) {
     if (!out) Throw("cannot write project " + abs.string());
     out << ToJson(abs.parent_path()).dump(2) << "\n";
     file = abs;
+}
+
+std::string Project::SourceHash() {
+    if (sourceVideo.empty()) return {};
+    std::error_code ec;
+    const uint64_t size = std::filesystem::file_size(sourceVideo, ec);
+    if (ec) return {};
+    const std::string mtime = FileTimeIso8601(sourceVideo);
+    if (!sourceHash.empty() && size == sourceSize && mtime == sourceMtime) return sourceHash;
+    sourceHash = "sha256:" + Sha256FileCached(sourceVideo);
+    sourceSize = size;
+    sourceMtime = mtime;
+    return sourceHash;
 }
 
 std::vector<ViewportSource> Project::Sources() const {

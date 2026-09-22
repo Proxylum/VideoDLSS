@@ -1,6 +1,9 @@
 #include "SourceNames.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
+#include <QTimeZone>
+#include <cmath>
 
 #include "viewport/FrameStore.h"
 #include "viewport/ViewportState.h"
@@ -54,6 +57,36 @@ QString SourceTooltip(const ViewportSource& s) {
         t += "\n" + QString::fromStdString(s.manifest->paramsCanonical.dump());
     if (s.manifest && !s.manifest->created.empty()) t += "\n" + QString::fromStdString(s.manifest->created);
     return t;
+}
+
+QString FormatDuration(double seconds) {
+    if (seconds < 0) seconds = 0;
+    if (seconds < 90) return Tr("≈ %1 с").arg(static_cast<int>(std::lround(seconds)));
+    const int minutes = static_cast<int>(std::lround(seconds / 60.0));
+    if (minutes < 60) return Tr("≈ %1 мин").arg(minutes);
+    return Tr("≈ %1 ч %2 мин").arg(minutes / 60).arg(minutes % 60);
+}
+
+QString HumanWhen(const std::string& iso8601) {
+    const QDateTime t = QDateTime::fromString(QString::fromStdString(iso8601), Qt::ISODate).toLocalTime();
+    if (!t.isValid()) return QString::fromStdString(iso8601);
+    const QDate today = QDate::currentDate();
+    if (t.date() == today) return Tr("сегодня %1").arg(t.toString("HH:mm"));
+    if (t.date() == today.addDays(-1)) return Tr("вчера %1").arg(t.toString("HH:mm"));
+    return t.toString("dd.MM HH:mm");
+}
+
+QString HumanBytes(unsigned long long b) {
+    if (b >= (1ull << 30)) return QString::number(static_cast<double>(b) / (1ull << 30), 'f', 1) + Tr(" ГБ");
+    if (b >= (1ull << 20)) return QString::number(static_cast<double>(b) / (1ull << 20), 'f', 0) + Tr(" МБ");
+    if (b >= (1ull << 10)) return QString::number(static_cast<double>(b) / (1ull << 10), 'f', 0) + Tr(" КБ");
+    return QString::number(b) + Tr(" Б");
+}
+
+QString Plural(int n, const QString& one, const QString& few, const QString& many) {
+    const int m10 = n % 10, m100 = n % 100;
+    const QString& word = (m10 == 1 && m100 != 11) ? one : (m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20)) ? few : many;
+    return QString::number(n) + " " + word;
 }
 
 int SourceRank(const std::string& source) {

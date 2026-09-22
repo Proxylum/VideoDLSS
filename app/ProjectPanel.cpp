@@ -1,113 +1,419 @@
 #include "ProjectPanel.h"
 
-#include <QCheckBox>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFrame>
 #include <QHBoxLayout>
-#include <QHeaderView>
-#include <QLineEdit>
-#include <QPushButton>
+#include <QMessageBox>
+#include <QScrollArea>
+#include <QShortcut>
+#include <QSignalBlocker>
 #include <QVBoxLayout>
+#include <cmath>
+#include <map>
 
 #include "AppModel.h"
+#include "SourceNames.h"
+#include "StageCard.h"
 #include "TaskQueue.h"
+#include "pipeline/PassFingerprint.h"
+#include "pipeline/PassVersions.h"
+#include "stages/ParamSchema.h"
 #include "util/Log.h"
 
 namespace dlssvid {
 
+namespace {
+
+QLabel* Muted(const QString& text, QWidget* parent) {
+    auto* l = new QLabel(text, parent);
+    l->setStyleSheet("color: #8a8f98;");
+    return l;
+}
+
+QLabel* Value(QWidget* parent) {
+    auto* l = new QLabel(parent);
+    l->setWordWrap(true);
+    l->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    return l;
+}
+
+QFrame* Card(QWidget* parent) {
+    auto* f = new QFrame(parent);
+    f->setFrameShape(QFrame::StyledPanel);
+    return f;
+}
+
+QLabel* Title(const QString& text, QWidget* parent) {
+    auto* l = new QLabel(text, parent);
+    l->setStyleSheet("font-weight: 600;");
+    return l;
+}
+
+// «Интенсивность 1.4 · Стиль естественный»: the visible parameters of a pass version in the schema's words.
+QString HumanParams(const std::string& stage, const nlohmann::json& params) {
+    QStringList parts;
+    if (const StageSchema* schema = FindStageSchema(stage))
+        for (const auto& spec : schema->params) {
+            if (spec.advanced || !params.is_object() || !params.contains(spec.key)) continue;
+            parts << QString("%1 %2").arg(QString::fromStdString(spec.label), QString::fromStdString(ParamValueLabel(spec, params[spec.key])));
+        }
+    return parts.join(" · ");
+}
+
+QString ShortHash(const std::string& hash) {
+    const size_t colon = hash.find(':');
+    const std::string hex = colon == std::string::npos ? hash : hash.substr(colon + 1);
+    if (hex.size() < 12) return QString::fromStdString(hash);
+    return "sha256 " + QString::fromStdString(hex.substr(0, 4)) + "…" + QString::fromStdString(hex.substr(hex.size() - 4));
+}
+
+}  // namespace
+
 ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) : QWidget(parent), model_(model), tasks_(tasks) {
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
-    tree_ = new QTreeWidget(this);
-    tree_->setColumnCount(3);
-    tree_->setHeaderLabels({tr("Элемент"), tr("Статус"), tr("Параметры")});
-    tree_->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    tree_->header()->setStretchLastSection(true);
-    layout->addWidget(tree_);
+    setMinimumWidth(780);  // the cards need the form and the state column side by side (the dock follows)
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    auto* scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);  // the content adapts to the dock's width
+    auto* content = new QWidget(scroll);
+    auto* layout = new QVBoxLayout(content);
+    layout->setContentsMargins(8, 6, 8, 6);
+    layout->setSpacing(8);
+    scroll->setWidget(content);
+    outer->addWidget(scroll);
+
+    // ---- source ----
+    auto* sourceCard = Card(content);
+    auto* sg = new QGridLayout(sourceCard);
+    sg->setContentsMargins(10, 6, 10, 6);
+    sg->setHorizontalSpacing(10);
+    sg->setVerticalSpacing(2);
+    sg->addWidget(Title(tr("Источник"), sourceCard), 0, 0, 1, 2);
+    sourceFile_ = Value(sourceCard);
+    sourceFrame_ = Value(sourceCard);
+    sourceAudio_ = Value(sourceCard);
+    sourcePasses_ = Value(sourceCard);
+    sourceHash_ = Value(sourceCard);
+    int row = 1;
+    for (auto [name, value] : std::initializer_list<std::pair<QString, QLabel*>>{
+             {tr("Файл"), sourceFile_}, {tr("Кадр"), sourceFrame_}, {tr("Звук"), sourceAudio_}, {tr("Пассы"), sourcePasses_}, {tr("Хэш"), sourceHash_}}) {
+        sg->addWidget(Muted(name, sourceCard), row, 0, Qt::AlignTop);
+        sg->addWidget(value, row, 1);
+        ++row;
+    }
+    sg->setColumnStretch(1, 1);
+    layout->addWidget(sourceCard);
+
+    // ---- what the run gives ----
+    auto* outCard = Card(content);
+    auto* og = new QGridLayout(outCard);
+    og->setContentsMargins(10, 6, 10, 6);
+    og->setHorizontalSpacing(10);
+    og->setVerticalSpacing(2);
+    og->addWidget(Title(tr("Что получится"), outCard), 0, 0, 1, 2);
+    outVideo_ = Value(outCard);
+    outTime_ = Value(outCard);
+    outReused_ = Value(outCard);
+    outDisk_ = Value(outCard);
+    row = 1;
+    for (auto [name, value] : std::initializer_list<std::pair<QString, QLabel*>>{{tr("Видео"), outVideo_}, {tr("Время"), outTime_}, {tr("Готово"), outReused_}, {tr("Диск"), outDisk_}}) {
+        og->addWidget(Muted(name, outCard), row, 0, Qt::AlignTop);
+        og->addWidget(value, row, 1);
+        ++row;
+    }
+    outError_ = new QLabel(outCard);
+    outError_->setWordWrap(true);
+    outError_->setStyleSheet("color: #e0a84f;");
+    og->addWidget(outError_, row++, 0, 1, 2);
+    process_ = new QPushButton(tr("Обработать"), outCard);
+    process_->setDefault(true);
+    process_->setMinimumHeight(32);
+    process_->setToolTip(tr("Сохранить проект и прогнать пайплайн (dlssvid process --project): готовые пассы переиспользуются (Ctrl+Enter)"));
+    og->addWidget(process_, row, 0, 1, 2);
+    og->setColumnStretch(1, 1);
+    layout->addWidget(outCard);
+    connect(process_, &QPushButton::clicked, this, &ProjectPanel::processAll);
+    new QShortcut(QKeySequence("Ctrl+Return"), this, [this] { processAll(); });
+
+    // ---- stages ----
+    auto* stagesHead = new QHBoxLayout();
+    stagesHead->addWidget(Title(tr("Стадии"), content));
+    stagesHead->addWidget(Muted(tr("порядок выполнения сверху вниз · готовые пассы переиспользуются"), content), 1);
+    layout->addLayout(stagesHead);
+    for (const char* stage : {"depth", "flow", "upscale", "nr", "fg"}) {
+        auto* card = new StageCard(model_, stage, content);
+        connect(card, &StageCard::runRequested, this, &ProjectPanel::runStage);
+        connect(card, &StageCard::patchDllRequested, this, &ProjectPanel::patchDll);
+        layout->addWidget(card);
+        cards_.push_back(card);
+    }
+    // encode: always last, the project's encoder
+    auto* encodeCard = Card(content);
+    auto* eg = new QGridLayout(encodeCard);
+    eg->setContentsMargins(10, 6, 10, 6);
+    eg->setHorizontalSpacing(12);
+    auto* encodeHead = new QVBoxLayout();
+    encodeHead->setSpacing(0);
+    encodeHead->addWidget(Title(tr("Кодирование"), encodeCard));
+    encodeHead->addWidget(Muted(tr("всегда последним"), encodeCard));
+    eg->addLayout(encodeHead, 0, 0, Qt::AlignTop);
+    auto* encodeForm = new QHBoxLayout();
+    codec_ = new QComboBox(encodeCard);
+    codec_->addItem("H.264 NVENC", "h264_nvenc");
+    codec_->addItem("HEVC NVENC", "hevc_nvenc");
+    codec_->addItem("AV1 NVENC", "av1_nvenc");
+    codec_->addItem(tr("FFV1 (без потерь)"), "ffv1");
+    bitrate_ = new QLineEdit(encodeCard);
+    bitrate_->setPlaceholderText(tr("битрейт, напр. 50M"));
+    bitrate_->setMaximumWidth(110);
+    bitrate_->setToolTip(tr("Опция кодера b= (пусто — по умолчанию кодера)"));
+    encodeAudio_ = Muted("", encodeCard);
+    encodeAudio_->setMinimumWidth(60);
+    codec_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    codec_->setMinimumContentsLength(10);
+    encodeForm->addWidget(codec_);
+    encodeForm->addWidget(bitrate_);
+    encodeForm->addWidget(encodeAudio_, 1);
+    eg->addLayout(encodeForm, 0, 1);
+    encodeState_ = new QLabel(encodeCard);
+    encodeState_->setWordWrap(true);
+    encodeState_->setStyleSheet("color: #e0a84f;");
+    eg->addWidget(encodeState_, 0, 2, Qt::AlignTop);
+    eg->setColumnStretch(1, 1);
+    eg->setColumnMinimumWidth(2, 200);
+    layout->addWidget(encodeCard);
+    auto applyEncode = [this] {
+        if (updating_) return;
+        std::map<std::string, std::string> options = model_.project().codecOptions;
+        const QString b = bitrate_->text().trimmed();
+        if (b.isEmpty()) options.erase("b");
+        else options["b"] = b.toStdString();
+        model_.setEncode(codec_->currentData().toString(), options);
+    };
+    connect(codec_, qOverload<int>(&QComboBox::currentIndexChanged), this, [applyEncode](int) { applyEncode(); });
+    connect(bitrate_, &QLineEdit::editingFinished, this, applyEncode);
+    footer_ = Muted(tr("Улучшение и Генерация кадров используют глубину и векторы: без них качество ниже. Пасс переиспользуется при совпадении "
+                       "отпечатка (исходник, параметры, входы, версия инструмента)."),
+                    content);
+    footer_->setWordWrap(true);
+    layout->addWidget(footer_);
+
+    // ---- versions on disk ----
+    auto* versionsCard = Card(content);
+    auto* vl = new QVBoxLayout(versionsCard);
+    vl->setContentsMargins(10, 6, 10, 6);
+    vl->setSpacing(4);
+    auto* vh = new QHBoxLayout();
+    vh->addWidget(Title(tr("Версии пассов на диске"), versionsCard));
+    versionsInfo_ = Muted("", versionsCard);
+    versionsInfo_->setWordWrap(true);
+    versionsInfo_->setMinimumWidth(120);
+    vh->addWidget(versionsInfo_, 1);
+    gc_ = new QPushButton(tr("Очистить старые"), versionsCard);
+    gc_->setToolTip(tr("Удалить предыдущие версии сверх хранимых (pass_versions_keep); версии, на которые ссылаются другие, остаются"));
+    vh->addWidget(gc_);
+    vl->addLayout(vh);
+    versionsRows_ = new QWidget(versionsCard);
+    versionsGrid_ = new QGridLayout(versionsRows_);
+    versionsGrid_->setContentsMargins(0, 0, 0, 0);
+    versionsGrid_->setHorizontalSpacing(10);
+    versionsGrid_->setVerticalSpacing(2);
+    vl->addWidget(versionsRows_);
+    layout->addWidget(versionsCard);
+    connect(gc_, &QPushButton::clicked, this, [this] {
+        try {
+            const PassGcReport r = GcPassVersions(model_.project().passesRoot, model_.project().passVersionsKeep);
+            Log()->info("gc: {} version(s) removed, {} bytes", r.removed.size(), r.bytes);
+        } catch (const std::exception& e) {
+            QMessageBox::warning(this, tr("Очистка версий"), QString::fromUtf8(e.what()));
+        }
+        model_.reloadSources();
+    });
+    layout->addStretch(1);
+
     connect(&model_, &AppModel::projectChanged, this, &ProjectPanel::refresh);
     connect(&model_, &AppModel::sourcesChanged, this, &ProjectPanel::refresh);
-    connect(&tasks_, &TaskQueue::taskFinished, this, [this](int, bool ok) {
-        if (ok) model_.reloadSources();
-    });
-    connect(tree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
-        if (item && item->parent() == passesItem_) model_.setSingleSource(item->text(0));
+    connect(&model_, &AppModel::planChanged, this, &ProjectPanel::refresh);
+    connect(&model_, &AppModel::engineerModeChanged, this, [this](bool) { refresh(); });
+    connect(&tasks_, &TaskQueue::taskFinished, this, [this](int, bool) {
+        model_.clearForce();
+        model_.reloadSources();
     });
     refresh();
 }
 
 void ProjectPanel::refresh() {
-    tree_->clear();
+    updating_ = true;
     const Project& p = model_.project();
-    sourceItem_ = new QTreeWidgetItem(tree_, {tr("Источник"), p.sourceVideo.empty() ? tr("не задан") : QString::fromStdWString(p.sourceVideo.filename().wstring()),
-                                              QString::fromStdWString(p.passesRoot.wstring())});
-    passesItem_ = new QTreeWidgetItem(tree_, {tr("Пассы")});
-    for (const auto& s : model_.store().Sources()) {
-        QString status;
-        const QString fps = QString::number(model_.store().FpsOf(s.name), 'g', 5);
-        if (s.isVideo) {
-            status = tr("видео, %1 кадров, %2 fps").arg(s.lastFrame + 1).arg(fps);
-        } else {
-            // complete = reaches the source's last frame at the pass's own rate (an FG pass at 48 fps: 479 of 479, not «of 480»)
-            const int64_t n = s.lastFrame - s.firstFrame + 1;
-            const int64_t expected = model_.store().ExpectedFrames(s.name);
-            const bool complete = expected <= 0 || s.lastFrame >= expected - 1;
-            bool imported = false;
-            if (s.manifest && !s.manifest->sourceHash.empty() && !p.sourceVideo.empty()) {
-                // imported = produced from another source (hash mismatch is checked lazily by name only here)
-                imported = s.manifest->sourceFile != p.sourceVideo.filename().string();
-            }
-            status = imported ? tr("импортирован, %1 кадров").arg(n) : complete ? tr("готов, %1 кадров").arg(n) : tr("частично: %1 из %2 (%3 fps)").arg(n).arg(expected).arg(fps);
-        }
-        QString params;
-        if (s.manifest) params = QString("%1x%2 %3, %4 fps").arg(s.width).arg(s.height).arg(QString::fromStdString(std::string(ToString(s.manifest->format)))).arg(fps);
-        new QTreeWidgetItem(passesItem_, {QString::fromStdString(s.name), status, params});
-    }
-    if (model_.store().Sources().empty()) new QTreeWidgetItem(passesItem_, {tr("(нет)"), tr("не посчитаны"), ""});
+    const SourceInfo& src = model_.sourceInfo();
+    const RunOutcome& out = model_.outcome();
+    const bool hasSource = !p.sourceVideo.empty();
+    sourceFile_->setText(hasSource ? QString::fromStdWString(p.sourceVideo.filename().wstring()) : tr("не задан — откройте видео (Ctrl+O)"));
+    sourceFile_->setToolTip(hasSource ? QString::fromStdWString(p.sourceVideo.wstring()) : QString());
+    if (src.width > 0)
+        sourceFrame_->setText(tr("%1×%2 · %3 fps · %4 кадров · %5 с")
+                                  .arg(src.width)
+                                  .arg(src.height)
+                                  .arg(QString::number(src.fps, 'g', 5))
+                                  .arg(src.frames)
+                                  .arg(QString::number(src.fps > 0 ? src.frames / src.fps : 0.0, 'f', 1)));
+    else
+        sourceFrame_->setText("—");
+    sourceAudio_->setText(!hasSource ? "—" : src.audio ? tr("есть — будет скопирован") : tr("нет"));
+    sourcePasses_->setText(hasSource ? QString::fromStdWString(p.passesRoot.wstring()) : "—");
+    const std::string hash = model_.plan().sourceHash;
+    sourceHash_->setText(hash.empty() ? "—" : ShortHash(hash) + " · " + model_.sourceHashStatus());
+    sourceHash_->setToolTip(QString::fromStdString(hash));
 
-    stagesItem_ = new QTreeWidgetItem(tree_, {tr("Стадии")});
-    for (size_t i = 0; i < p.stages.size(); ++i) {
-        const StageEntry& st = p.stages[i];
-        auto* item = new QTreeWidgetItem(stagesItem_, {QString::fromStdString(st.name), "", ""});
-        auto* enabled = new QCheckBox(tree_);
-        enabled->setChecked(st.enabled);
-        connect(enabled, &QCheckBox::toggled, this, [this, i](bool on) {
-            if (i < model_.project().stages.size()) model_.project().stages[i].enabled = on;
-        });
-        tree_->setItemWidget(item, 1, enabled);
-        auto* row = new QWidget(tree_);
-        auto* h = new QHBoxLayout(row);
-        h->setContentsMargins(0, 0, 0, 0);
-        auto* params = new QLineEdit(QString::fromStdString(st.params.dump()), row);
-        params->setToolTip(tr("JSON параметров: ключи становятся опциями CLI (--backend da3 ...)"));
-        connect(params, &QLineEdit::editingFinished, this, [this, i, params] {
-            try {
-                if (i < model_.project().stages.size()) model_.project().stages[i].params = nlohmann::json::parse(params->text().toStdString());
-                params->setStyleSheet("");
-            } catch (...) {
-                params->setStyleSheet("background: #553333");
-            }
-        });
-        auto* run = new QPushButton(tr("Запустить"), row);
-        connect(run, &QPushButton::clicked, this, [this, i] { runStage(static_cast<int>(i)); });
-        h->addWidget(params, 1);
-        h->addWidget(run);
-        if (st.name == "nr") {
-            auto* patch = new QPushButton(tr("Пропатчить DLL…"), row);
-            patch->setToolTip(tr("Пропатчить вашу nvngx_dlssnr.dll для RTX 20/30/40 (dlssnr-patcher, CUDA Toolkit 13.3) и положить результат в bin/nvidia/"));
-            connect(patch, &QPushButton::clicked, this, &ProjectPanel::patchDll);
-            h->addWidget(patch);
-        }
-        tree_->setItemWidget(item, 2, row);
+    if (src.width > 0 && model_.planError().isEmpty()) {
+        outVideo_->setText(tr("%1×%2 · %3 fps · %4").arg(out.width).arg(out.height).arg(QString::number(out.fps, 'g', 5)).arg(out.audio ? tr("со звуком") : tr("без звука")));
+        outTime_->setText(tr("%1 · к запуску %2 из %3 (полный прогон — %4)")
+                              .arg(FormatDuration(out.seconds))
+                              .arg(out.stagesToRun)
+                              .arg(out.stagesTotal)
+                              .arg(FormatDuration(out.fullSeconds)));
+        QStringList reused;
+        for (const auto& s : out.reused) reused << (FindStageSchema(s) ? QString::fromStdString(FindStageSchema(s)->title).toLower() : QString::fromStdString(s));
+        outReused_->setText(reused.isEmpty() ? tr("— (всё будет посчитано)") : tr("%1 — совпали по отпечатку").arg(reused.join(", ")));
+        outDisk_->setText(out.newBytes > 0 ? tr("+%1 (предыдущие версии остаются рядом)").arg(HumanBytes(out.newBytes)) : tr("без новых пассов"));
+    } else {
+        for (QLabel* l : {outVideo_, outTime_, outReused_, outDisk_}) l->setText("—");
     }
-    resultItem_ = new QTreeWidgetItem(tree_, {tr("Результат"), p.resultVideo.empty() ? tr("не задан") : QString::fromStdWString(p.resultVideo.filename().wstring()), ""});
-    auto* processButton = new QPushButton(tr("Обработать → result"), tree_);
-    processButton->setToolTip(tr("Сохранить проект и прогнать весь пайплайн (dlssvid process --project): готовые пассы переиспользуются, результат — видео с аудио"));
-    processButton->setEnabled(!p.sourceVideo.empty());
-    connect(processButton, &QPushButton::clicked, this, &ProjectPanel::processAll);
-    tree_->setItemWidget(resultItem_, 2, processButton);
-    tree_->expandAll();
+    outError_->setText(model_.planError());
+    outError_->setVisible(!model_.planError().isEmpty() && hasSource);
+    const int toRun = std::max(0, out.stagesToRun - 1);  // the encode is not a «stage» for the button
+    process_->setText(toRun > 0 ? tr("Обработать · %1").arg(Plural(toRun, tr("стадия"), tr("стадии"), tr("стадий"))) : tr("Обработать · только кодирование"));
+    process_->setEnabled(hasSource && model_.planError().isEmpty());
+
+    for (StageCard* c : cards_) c->refresh();
+    {
+        const QSignalBlocker b1(codec_), b2(bitrate_);
+        const int idx = codec_->findData(QString::fromStdString(p.codec));
+        codec_->setCurrentIndex(idx >= 0 ? idx : 0);
+        const auto b = p.codecOptions.find("b");
+        bitrate_->setText(b == p.codecOptions.end() ? QString() : QString::fromStdString(b->second));
+    }
+    encodeAudio_->setText(src.audio ? tr("звук копируется") : (hasSource ? tr("без звука") : QString()));
+    const StageEstimate* enc = nullptr;
+    for (const auto& e : out.stages)
+        if (e.stage == "encode") enc = &e;
+    const QString result = p.resultVideo.empty() ? tr("результат") : QString::fromStdWString(p.resultVideo.filename().wstring());
+    encodeState_->setText(hasSource ? tr("пересчёт · %1 · %2 обновится").arg(enc ? FormatDuration(enc->seconds) : "—").arg(result) : QString());
+    refreshVersions();
+    updating_ = false;
+}
+
+void ProjectPanel::refreshVersions() {
+    while (QLayoutItem* item = versionsGrid_->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+    const Project& p = model_.project();
+    std::vector<PassVersionInfo> versions;
+    if (!p.passesRoot.empty()) {
+        try {
+            versions = ListPassVersions(p.passesRoot);
+        } catch (const std::exception& e) {
+            Log()->warn("versions: {}", e.what());
+        }
+    }
+    unsigned long long total = 0, history = 0;
+    for (const auto& v : versions) {
+        total += v.bytes;
+        if (!v.current) history += v.bytes;
+    }
+    versionsInfo_->setText(versions.empty() ? tr("пока ничего не посчитано")
+                                            : tr("%1 · %2 на диске, %3 в предыдущих версиях · хранятся %4 на стадию")
+                                                  .arg(QString::fromStdWString(p.passesRoot.wstring()), HumanBytes(total), HumanBytes(history),
+                                                       Plural(p.passVersionsKeep, tr("последняя"), tr("последние"), tr("последних"))));
+    gc_->setEnabled(history > 0);
+    if (versions.empty()) return;
+    int row = 0, col = 0;
+    for (const QString& h : {tr("Стадия"), tr("Версия"), tr("Параметры"), tr("Когда"), tr("Размер"), tr("Состояние"), QString()}) versionsGrid_->addWidget(Muted(h, versionsRows_), row, col++);
+    ++row;
+    std::map<std::string, int> seen;  // pass -> versions listed so far (the current one is the newest)
+    for (const auto& v : versions) {
+        const std::string stage = StageForPass(v.pass);
+        const int n = ++seen[v.pass];
+        int total_n = 0;
+        for (const auto& o : versions)
+            if (o.pass == v.pass) ++total_n;
+        versionsGrid_->addWidget(new QLabel(HumanSourceName(v.pass), versionsRows_), row, 0);
+        auto* ver = new QLabel(QString("v%1").arg(total_n - n + 1), versionsRows_);
+        ver->setStyleSheet("font-family: monospace;");
+        ver->setToolTip(v.current ? tr("текущая версия") : QString::fromStdString(v.id));
+        versionsGrid_->addWidget(ver, row, 1);
+        auto* params = Muted(stage.empty() ? QString::fromStdString(v.params.dump()) : HumanParams(stage, v.params), versionsRows_);
+        params->setToolTip(QString::fromStdString(v.params.dump()));
+        params->setWordWrap(true);
+        params->setMinimumWidth(90);
+        versionsGrid_->addWidget(params, row, 2);
+        versionsGrid_->addWidget(Muted(HumanWhen(v.created), versionsRows_), row, 3);
+        versionsGrid_->addWidget(new QLabel(HumanBytes(v.bytes), versionsRows_), row, 4);
+        QString state;
+        QString tone = "color: #a7abb3;";
+        if (v.current) {
+            const AppModel::StageCardState st = stage.empty() ? AppModel::StageCardState{} : model_.cardState(stage);
+            state = tr("текущая");
+            if (st.runs) {
+                state += tr(" · будет заменена");
+                tone = "color: #e0a84f;";
+            } else if (st.tone == "ok") {
+                state += tr(" · совпадает");
+                tone = "color: #5fbf7a;";
+            }
+        } else {
+            state = tr("предыдущая");
+        }
+        auto* stateLabel = new QLabel(state, versionsRows_);
+        stateLabel->setStyleSheet(tone);
+        versionsGrid_->addWidget(stateLabel, row, 5);
+        auto* actions = new QWidget(versionsRows_);
+        auto* ah = new QHBoxLayout(actions);
+        ah->setContentsMargins(0, 0, 0, 0);
+        ah->setSpacing(4);
+        const std::string name = v.current ? v.pass : v.pass + "@" + v.id;
+        auto* compare = new QPushButton(tr("Сравнить"), actions);
+        compare->setToolTip(tr("Показать эту версию на стороне «после» шторки"));
+        connect(compare, &QPushButton::clicked, this, [this, name] {
+            if (model_.compareView() != AppModel::CompareView::BeforeAfter) model_.setCompareView(AppModel::CompareView::BeforeAfter);
+            model_.showSource(name);
+        });
+        ah->addWidget(compare);
+        if (!v.current) {
+            const std::string pass = v.pass, id = v.id;
+            auto* use = new QPushButton(tr("Вернуть"), actions);
+            use->setToolTip(tr("Сделать эту версию текущей; нынешняя останется в истории"));
+            connect(use, &QPushButton::clicked, this, [this, pass, id] {
+                try {
+                    UsePassVersion(model_.project().passesRoot, pass, id);
+                } catch (const std::exception& e) {
+                    QMessageBox::warning(this, tr("Версии пассов"), QString::fromUtf8(e.what()));
+                }
+                model_.reloadSources();
+            });
+            ah->addWidget(use);
+            const auto dir = v.dir;
+            auto* remove = new QPushButton(tr("Удалить"), actions);
+            connect(remove, &QPushButton::clicked, this, [this, dir, pass, id] {
+                if (QMessageBox::question(this, tr("Удалить версию"), tr("Удалить %1 (%2) с диска?").arg(HumanSourceName(pass), VersionLabel(id))) != QMessageBox::Yes) return;
+                std::error_code ec;
+                std::filesystem::remove_all(dir, ec);
+                if (ec) QMessageBox::warning(this, tr("Версии пассов"), QString::fromStdString(ec.message()));
+                model_.reloadSources();
+            });
+            ah->addWidget(remove);
+        }
+        ah->addStretch(1);
+        versionsGrid_->addWidget(actions, row, 6);
+        ++row;
+    }
+    versionsGrid_->setColumnStretch(2, 1);
 }
 
 void ProjectPanel::processAll() {
@@ -120,15 +426,17 @@ void ProjectPanel::processAll() {
     } else if (!model_.saveProject()) {
         return;
     }
-    tasks_.enqueue(tr("process"), model_.cliPath(), {"process", "--project", QString::fromStdWString(model_.project().file.wstring()), "--disable-unavailable"});
+    tasks_.enqueue(tr("process"), model_.cliPath(), model_.processArgs());
 }
 
-void ProjectPanel::runStage(int index) {
+void ProjectPanel::runStage(const std::string& stage) {
     const Project& p = model_.project();
-    if (index < 0 || index >= static_cast<int>(p.stages.size()) || p.sourceVideo.empty()) return;
-    const StageEntry& st = p.stages[static_cast<size_t>(index)];
-    QStringList args{QString::fromStdString(st.name), "-i", QString::fromStdWString(p.sourceVideo.wstring()), "-o", QString::fromStdWString(p.passesRoot.wstring())};
-    for (auto it = st.params.begin(); it != st.params.end(); ++it) {
+    const StageEntry* st = nullptr;
+    for (const auto& s : p.stages)
+        if (s.name == stage) st = &s;
+    if (!st || p.sourceVideo.empty()) return;
+    QStringList args{QString::fromStdString(st->name), "-i", QString::fromStdWString(p.sourceVideo.wstring()), "-o", QString::fromStdWString(p.passesRoot.wstring())};
+    for (auto it = st->params.begin(); it != st->params.end(); ++it) {
         const QString key = "--" + QString::fromStdString(it.key());
         if (it.value().is_boolean()) {
             if (it.value().get<bool>()) args << key;
@@ -138,7 +446,7 @@ void ProjectPanel::runStage(int index) {
             args << key << QString::fromStdString(it.value().dump());
         }
     }
-    tasks_.enqueue(QString::fromStdString(st.name), model_.cliPath(), args);
+    tasks_.enqueue(QString::fromStdString(st->name), model_.cliPath(), args);
 }
 
 void ProjectPanel::patchDll() {

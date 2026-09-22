@@ -98,7 +98,7 @@ void CompareBar::rebuildChips() {
             }
             b->setMenu(menu);
             b->setPopupMode(QToolButton::MenuButtonPopup);
-            b->setToolTip(chip.tooltip + "\n" + tr("%n предыдущих версий: меню справа", nullptr, static_cast<int>(chip.versions.size())));
+            b->setToolTip(chip.tooltip + "\n" + tr("%1: меню справа").arg(Plural(static_cast<int>(chip.versions.size()), tr("предыдущая версия"), tr("предыдущие версии"), tr("предыдущих версий"))));
         }
         chipsLayout_->addWidget(b);
         chips_.push_back(b);

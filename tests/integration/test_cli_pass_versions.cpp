@@ -114,6 +114,17 @@ TEST_CASE("dlssvid process --plan decides without running; passes list / use / g
     CHECK(!oldId.empty());
     CHECK(run2.out.find("params_changed") != std::string::npos);
 
+    // --force: one stage recomputed in place (same fingerprint), the others reused; bad parameters are refused before the run
+    const CliResult forced = RunCli(common + std::vector<std::string>{"--param", "nr.intensity=1.5", "--force", "fg", "--json", (dir / "force.json").string()});
+    CHECK(forced.code == 0);
+    const nlohmann::json fj = ReadJson(dir / "force.json");
+    CHECK(fj["stages"][4]["status"] == "ran");
+    CHECK(fj["stages"][4]["decision"]["kind"] == "forced");
+    CHECK(fj["stages"][4]["retired"] == "");
+    CHECK(fj["stages"][3]["status"] == "reused");
+    CHECK(RunCli(common + std::vector<std::string>{"--force", "bogus"}).code != 0);
+    CHECK(RunCli(common + std::vector<std::string>{"--param", "nr.intensity=9", "--plan"}).code != 0);
+
     const CliResult list2 = RunCli({"passes", "list", "--passes", root.string(), "--pass", "color_nr", "--json", (dir / "list2.json").string()});
     CHECK(list2.code == 0);
     const nlohmann::json lj2 = ReadJson(dir / "list2.json");
@@ -161,7 +172,16 @@ TEST_CASE("dlssvid process --plan decides without running; passes list / use / g
     // the project supplies the root and pass_versions_keep
     Project p = Project::Create(clip, root);
     p.passVersionsKeep = 1;
+    p.codec = "ffv1";  // the project's encoder is used when --codec is absent
+    p.resultVideo = dir / "project_result.mkv";
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.params["backend"] = "blend";
+    }
     p.Save(dir / "clip.dlssvid.json");
+    CHECK(RunCli({"process", "--project", (dir / "clip.dlssvid.json").string(), "--warp"}).code == 0);
+    CHECK(std::filesystem::exists(dir / "project_result.mkv"));
     const CliResult viaProject = RunCli({"passes", "list", "--project", (dir / "clip.dlssvid.json").string()});
     CHECK(viaProject.code == 0);
     CHECK(viaProject.out.find("color_fg") != std::string::npos);
