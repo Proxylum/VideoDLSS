@@ -91,6 +91,22 @@ public:
     bool forced(const std::string& stage) const { return force_.count(stage) > 0; }
     QStringList processArgs() const;  // dlssvid process --project <file> --disable-unavailable [--force a,b]
 
+    // ---- start screen, recents, unsaved changes (stage 9, MR E) ----
+    struct Recent {
+        QString path;   // a project file or a video
+        QString title;  // «face»
+        QString info;   // «результат готов · вчера 14:02», «3 пасса · сегодня 10:12», «не обработан», «файл не найден»
+        bool exists = true;
+        bool isProject = false;
+    };
+    std::vector<Recent> recents() const;  // newest first (QSettings recent/files, at most 10)
+    QString readiness() const;            // the GPU, the driver and which DLSS features have their DLL
+    bool dirty() const { return dirty_; }
+    enum class CloseAction { Nothing, AutoSave, Ask };
+    CloseAction closeAction() const;      // nothing to save | save into the project's file | ask (no file yet)
+    QString lastDir(const QString& key) const;               // last folder of a file dialog (QSettings dialogs/<key>)
+    void rememberDir(const QString& key, const QString& file);
+
 public slots:
     void openVideo(const QString& file);
     void openProject(const QString& file);
@@ -118,7 +134,10 @@ public slots:
     void setForce(const std::string& stage, bool on);
     void clearForce();
     void setEncode(const QString& codec, const std::map<std::string, std::string>& options);
-    void notifyStateChanged();   // after direct edits of state()
+    void notifyStateChanged(bool structural = true);  // after direct edits of state(); structural ones (layers, modes) mark the project unsaved
+    void markDirty();
+    void addRecent(const QString& path);
+    void clearRecents();
     void notifyFramesUpdated();  // the frame store uploaded something (the viewport's poll)
 
 signals:
@@ -132,6 +151,8 @@ signals:
     void message(const QString& text);
     void engineerModeChanged(bool on);
     void planChanged();
+    void dirtyChanged(bool dirty);
+    void recentsChanged();
 
 private:
     void onPlayTick();
@@ -145,6 +166,7 @@ private:
     Rational timelineFps_{0, 1};  // {0,1}: the base source's rate
     double playStep_ = 1.0 / 24.0;
     bool engineerMode_ = false;
+    bool dirty_ = false;
     ProcessPlan plan_;
     RunOutcome outcome_;
     SourceInfo sourceInfo_;

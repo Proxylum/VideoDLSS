@@ -190,7 +190,11 @@ The project panel (stage 9) shows the source (frame, sound, passes, hash and whe
 card per stage with a form built from the stage schema (backend list, scale / multiplier toggles, intensity slider; the
 advanced keys in the JSON editor of the engineer mode) and what the plan does with it («переиспользуется», «пересчёт:
 Интенсивность 1 → 1.4», «будет посчитано», a warning when NR / FG would run without depth and vectors), the encoder
-card (stored in the project) and the pass versions on disk («Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»). Stages are started from the project panel
+card (stored in the project) and the pass versions on disk («Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»).
+Without a project the window shows the start page (stage 9): drop a video on it, «Открыть видео…» / «Открыть проект…»,
+the GPU / driver / DLL readiness line and the recent files with their state; the window remembers its size, the dock
+layout and the dialog folders (QSettings), opens maximised the first time, brings a closed panel back from «Вид», marks
+unsaved changes with «*» in the title and saves the project next to the video on close. Stages are started from the project panel
 (`dlssvid depth|flow|upscale|nr` as a task with progress) and their passes appear in the viewport when finished; the
 `nr` stage has a «Пропатчить DLL…» button that runs `dlssvid nr-patch` over your `nvngx_dlssnr.dll`.
 
