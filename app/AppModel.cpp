@@ -104,7 +104,7 @@ void AppModel::reloadSources() {
     resultAudio_ = false;
     if (!project_.resultVideo.empty() && std::filesystem::exists(project_.resultVideo)) {
         try {
-            VideoDecoder probe(project_.resultVideo);
+            VideoDecoder probe(project_.resultVideo, VideoDecoder::Probe());
             resultAudio_ = probe.HasAudio();
         } catch (const std::exception&) {
         }
@@ -388,7 +388,7 @@ void AppModel::refreshPlan() {
         return;
     }
     try {
-        VideoDecoder probe(project_.sourceVideo);
+        VideoDecoder probe(project_.sourceVideo, VideoDecoder::Probe());
         sourceInfo_.audio = probe.HasAudio();
         ProcessOptions o;
         o.input = project_.sourceVideo;

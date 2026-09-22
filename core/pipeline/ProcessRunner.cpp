@@ -352,7 +352,7 @@ Prepared Prepare(const ProcessOptions& options) {
     Prepared r;
     if (options.input.empty() || !std::filesystem::exists(options.input)) Throw("process: input video not found: " + options.input.string());
     {
-        VideoDecoder probe(options.input);
+        VideoDecoder probe(options.input, VideoDecoder::Probe());
         r.info = probe.Info();
     }
     // frame count of the source: containers without one (MKV) report 0 -> unknown (-1)
@@ -549,7 +549,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
 
     VideoStreamInfo info;
     {
-        VideoDecoder probe(options.input);
+        VideoDecoder probe(options.input, VideoDecoder::Probe());
         info = probe.Info();
     }
     // frame count of the source: containers without one (MKV) report 0 -> unknown (-1)

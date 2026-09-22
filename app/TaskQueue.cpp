@@ -324,7 +324,7 @@ void TaskQueue::finishTask(Task& t, bool ok, const QString& status) {
             if (ok) s.percent = 100;
             s.state = rest;
         } else if (s.state == "queued") {
-            s.state = rest;
+            s.state = ok ? "done" : t.cancelled ? "cancelled" : "skipped";  // it never ran: not its failure
             s.percent = ok ? 100 : 0;
             s.seconds = 0.0;  // it never reported a frame: nothing measurable to show (the estimate is moot now)
         }
