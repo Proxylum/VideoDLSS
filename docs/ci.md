@@ -32,6 +32,16 @@ Git на машине раннера должен уметь длинные пу
 каждый job собирает проект с нуля (vcpkg восстанавливает пакеты из бинарного кэша пользователя). Это намеренно:
 чистая сборка ловит устаревшие объекты и пропущенные зависимости.
 
+Тесты запускаются из папки **вне** клона — `%TEMP%\dlssvid-test-cwd` (`DLSSVID_TEST_CWD` в `tests/CMakeLists.txt`,
+`WORKING_DIRECTORY` у всех `catch_discover_tests`). Причина: каждая инициализация NGX (DLSS / NR / FG) в тестах порождает
+обновлятор NVIDIA `nvngx_update.exe -api update -feature …` (OTA), он наследует рабочую папку тестового процесса и живёт
+ещё до минуты после ctest. С рабочей папкой по умолчанию (`build/release/tests`) следующий job (`package` на `main`)
+не мог удалить её при `git clean` — «failed to remove build/release/tests: Permission denied», job падал ещё до
+скрипта (пайплайны 5881, 5886, 5892 от 2026-09-22; тот же симптом дважды вручную чинился во время MR D). Тесты
+работают только с абсолютными путями (`DLSSVID_TEST_TMP`, `DLSSVID_CLI_PATH`, `DLSSVID_GOLDEN_DIR`), поэтому папка не
+важна. Отключить OTA можно только машинно (реестр `HKLM\SOFTWARE\NVIDIA Corporation\Global\NGXCore\EnableOTA`), в
+приложении такого переключателя у NGX нет.
+
 ### Как он запущен и как перезапустить
 
 Служба Windows требует прав администратора (`gitlab-runner install`), поэтому раннер работает как обычный процесс
