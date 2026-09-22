@@ -17,6 +17,8 @@
 #include "LogPanel.h"
 #include "ProjectPanel.h"
 #include "TaskQueue.h"
+#include "CompareBar.h"
+#include "SourceNames.h"
 #include "TimelineWidget.h"
 #include "ViewportWindow.h"
 #include "util/Log.h"
@@ -32,6 +34,8 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     auto* v = new QVBoxLayout(central);
     v->setContentsMargins(0, 0, 0, 0);
     v->setSpacing(2);
+    compareBar_ = new CompareBar(model_, central);
+    v->addWidget(compareBar_);
     auto* labels = new QWidget(central);
     auto* lg = new QGridLayout(labels);
     lg->setContentsMargins(4, 0, 4, 0);
@@ -115,10 +119,18 @@ void MainWindow::buildMenus() {
     view->addSeparator();
     view->addAction(tr("Вписать в окно"), QKeySequence("F"), this, [this] { viewport_->fitView(); });
     view->addAction(tr("1:1"), QKeySequence("Ctrl+0"), this, [this] { viewport_->oneToOne(); });
-    view->addAction(tr("Шторка вкл/выкл"), QKeySequence("W"), this, [this] {
-        model_.state().wipe.enabled = !model_.state().wipe.enabled;
-        model_.notifyStateChanged();
-    });
+    view->addSeparator();
+    view->addAction(tr("До | После"), QKeySequence("W"), this, [this] { model_.toggleWipe(); });
+    view->addAction(tr("Только после"), this, [this] { model_.setCompareView(AppModel::CompareView::AfterOnly); });
+    view->addAction(tr("Сравнить: Апскейл ↔ Улучшение"), this, [this] { model_.applyPreset(AppModel::ComparePreset::SrVsNr); });
+    view->addAction(tr("Сравнить: Исходник ↔ Глубина"), this, [this] { model_.applyPreset(AppModel::ComparePreset::SourceVsDepth); });
+    view->addSeparator();
+    auto* engineer = view->addAction(tr("Инженерный режим"));
+    engineer->setCheckable(true);
+    engineer->setChecked(model_.engineerMode());
+    engineer->setShortcut(QKeySequence("Ctrl+E"));
+    connect(engineer, &QAction::toggled, this, [this](bool on) { model_.setEngineerMode(on); });
+    connect(&model_, &AppModel::engineerModeChanged, engineer, &QAction::setChecked);
 
     // hotkeys 1..9 switch the single-view source (ТЗ §6)
     for (int k = 1; k <= 9; ++k) {
@@ -145,20 +157,35 @@ void MainWindow::updateCellLabels() {
     const bool grid = st.mode == ViewMode::Grid;
     for (size_t i = 0; i < 4; ++i) {
         cellLabels_[i]->setVisible(grid ? (st.expandedCell < 0 || st.expandedCell == static_cast<int>(i)) : i == 0);
-        if (grid) cellLabels_[i]->setText(cellLabel(QString::fromStdString(st.gridSources[i]), st.gridSources[i]));
+        if (grid) {
+            cellLabels_[i]->setText(cellLabel(HumanSourceName(st.gridSources[i]), st.gridSources[i]));
+            cellLabels_[i]->setToolTip(QString::fromStdString(st.gridSources[i]));
+        }
     }
     if (!grid) {
-        QString t;
-        for (const auto& l : st.layers) t += (t.isEmpty() ? "" : " + ") + QString::fromStdString(l.source);
-        cellLabels_[0]->setText(cellLabel(t, model_.baseSource()));
+        if (const LayerState* before = st.CompareSide(false)) {
+            const LayerState* after = st.CompareSide(true);
+            cellLabels_[0]->setText(tr("ДО: %1   |   ПОСЛЕ: %2").arg(cellLabel(HumanSourceName(before->source), before->source, false),
+                                                                       cellLabel(HumanSourceName(after->source), after->source)));
+            cellLabels_[0]->setToolTip(QString::fromStdString(before->source + " | " + after->source));
+        } else {
+            QString t, tech;
+            for (const auto& l : st.layers) {
+                t += (t.isEmpty() ? "" : " + ") + HumanSourceName(l.source);
+                tech += (tech.isEmpty() ? "" : " + ") + QString::fromStdString(l.source);
+            }
+            cellLabels_[0]->setText(cellLabel(t, model_.baseSource()));
+            cellLabels_[0]->setToolTip(tech);
+        }
     }
     setWindowTitle(QString("dlssvid — %1").arg(model_.hasProject() ? QString::fromStdWString(model_.project().sourceVideo.filename().wstring()) : tr("нет проекта")));
 }
 
 // «source  #123 · 00:05.12», plus the state while the frame is not on screen (stage 9: no silent black cells).
-QString MainWindow::cellLabel(const QString& title, const std::string& source) {
+QString MainWindow::cellLabel(const QString& title, const std::string& source, bool withTime) {
     const double t = model_.time();
-    QString s = QString("%1  #%2 · %3").arg(title).arg(model_.store().FrameAt(source, t)).arg(QString::fromStdString(FormatTimecode(t)));
+    QString s = QString("%1  #%2").arg(title).arg(model_.store().FrameAt(source, t));
+    if (withTime) s += QString(" · %1").arg(QString::fromStdString(FormatTimecode(t)));
     switch (model_.frameStateOf(source)) {
         case FrameState::Loading: s += tr(" · загрузка…"); break;
         case FrameState::Missing: s += tr(" · нет кадра"); break;

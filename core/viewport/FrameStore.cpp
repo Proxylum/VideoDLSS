@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 
+#include "pipeline/PassVersions.h"
 #include "util/Error.h"
 #include "util/Log.h"
 
@@ -126,6 +127,7 @@ std::vector<ViewportSource> FrameStore::DiscoverPasses(const std::filesystem::pa
             ViewportSource s;
             s.manifest = std::make_shared<const Manifest>(Manifest::Load(entry.path()));
             s.name = s.manifest->pass.empty() ? entry.path().filename().string() : s.manifest->pass;
+            s.pass = s.name;
             s.path = entry.path();
             s.kind = KindForManifest(*s.manifest);
             s.firstFrame = s.manifest->firstFrame;
@@ -136,6 +138,33 @@ std::vector<ViewportSource> FrameStore::DiscoverPasses(const std::filesystem::pa
             out.push_back(std::move(s));
         } catch (const std::exception& e) {
             Log()->warn("pass folder {} skipped: {}", entry.path().string(), e.what());
+        }
+    }
+    std::sort(out.begin(), out.end(), [](const ViewportSource& a, const ViewportSource& b) { return a.name < b.name; });
+    return out;
+}
+
+std::vector<ViewportSource> FrameStore::DiscoverPassVersions(const std::filesystem::path& passesRoot) {
+    std::vector<ViewportSource> out;
+    if (!std::filesystem::is_directory(passesRoot)) return out;
+    for (const auto& v : ListPassVersions(passesRoot)) {
+        if (v.current) continue;
+        try {
+            ViewportSource s;
+            s.manifest = std::make_shared<const Manifest>(Manifest::Load(v.dir));
+            s.pass = v.pass;
+            s.version = v.id;
+            s.name = VersionSourceName(v.pass, v.id);
+            s.path = v.dir;
+            s.kind = KindForManifest(*s.manifest);
+            s.firstFrame = s.manifest->firstFrame;
+            s.lastFrame = s.manifest->lastFrame;
+            s.width = s.manifest->width;
+            s.height = s.manifest->height;
+            s.fps = s.manifest->fps;
+            out.push_back(std::move(s));
+        } catch (const std::exception& e) {
+            Log()->warn("pass version {} skipped: {}", v.dir.string(), e.what());
         }
     }
     std::sort(out.begin(), out.end(), [](const ViewportSource& a, const ViewportSource& b) { return a.name < b.name; });

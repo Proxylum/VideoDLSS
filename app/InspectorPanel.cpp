@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "AppModel.h"
+#include "SourceNames.h"
 #include "ViewportWindow.h"
 
 namespace dlssvid {
@@ -111,6 +112,7 @@ InspectorPanel::InspectorPanel(AppModel& model, ViewportWindow& viewport, QWidge
         gridForm->addRow(tr("Ячейка %1").arg(i + 1), grid_[static_cast<size_t>(i)]);
     }
     layout->addWidget(gridBox);
+    sections_ = {modeBox, layerBox, wipeBox, gridBox};
 
     probe_ = new QLabel(tr("Пробник: наведите на кадр"), this);
     probe_->setWordWrap(true);
@@ -131,8 +133,9 @@ InspectorPanel::InspectorPanel(AppModel& model, ViewportWindow& viewport, QWidge
     connect(addLayer, &QPushButton::clicked, this, [this] {
         auto& st = model_.state();
         if (st.mode != ViewMode::Overlay) model_.setMode(ViewMode::Overlay);
-        const QStringList names = model_.sourceNames();
-        st.AddOverlayLayer(names.isEmpty() ? "source" : names.last().toStdString());
+        std::vector<std::string> names;
+        for (const QString& n : model_.sourceNames()) names.push_back(n.toStdString());
+        st.AddOverlayLayer(st.NextUnusedSource(names));  // 100 %, the next source not on the stack yet
         model_.notifyStateChanged();
         refresh();
     });
@@ -168,7 +171,13 @@ InspectorPanel::InspectorPanel(AppModel& model, ViewportWindow& viewport, QWidge
     connect(&model_, &AppModel::stateChanged, this, &InspectorPanel::refresh);
     connect(&model_, &AppModel::sourcesChanged, this, &InspectorPanel::refresh);
     connect(&viewport_, &ViewportWindow::probe, this, &InspectorPanel::showProbe);
+    connect(&model_, &AppModel::engineerModeChanged, this, &InspectorPanel::setEngineerMode);
+    setEngineerMode(model_.engineerMode());
     refresh();
+}
+
+void InspectorPanel::setEngineerMode(bool on) {
+    for (QGroupBox* g : sections_) g->setVisible(on);
 }
 
 void InspectorPanel::refresh() {
@@ -185,7 +194,10 @@ void InspectorPanel::refresh() {
     layers_->clear();
     for (size_t i = 0; i < st.layers.size(); ++i) {
         const LayerState& l = st.layers[i];
-        layers_->addItem(QString("%1  %2  %3%").arg(i == 0 ? tr("база") : tr("слой %1").arg(i)).arg(QString::fromStdString(l.source)).arg(static_cast<int>(std::lround(l.opacity * 100))));
+        auto* item = new QListWidgetItem(
+            QString("%1  %2  %3%").arg(i == 0 ? tr("база") : tr("слой %1").arg(i)).arg(HumanSourceName(l.source)).arg(static_cast<int>(std::lround(l.opacity * 100))));
+        item->setToolTip(QString::fromStdString(l.source));
+        layers_->addItem(item);
     }
     const int sel = std::clamp(st.selectedLayer, 0, static_cast<int>(st.layers.size()) - 1);
     layers_->setCurrentRow(sel);

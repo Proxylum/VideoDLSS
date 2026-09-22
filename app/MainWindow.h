@@ -9,6 +9,7 @@
 
 namespace dlssvid {
 
+class CompareBar;
 class ViewportWindow;
 class TimelineWidget;
 class ProjectPanel;
@@ -28,11 +29,12 @@ protected:
 private:
     void buildMenus();
     void updateCellLabels();
-    QString cellLabel(const QString& title, const std::string& source);
+    QString cellLabel(const QString& title, const std::string& source, bool withTime = true);
     void saveScreenshot();
     void selectSource(int hotkey);  // 1..9
 
     AppModel model_;
+    CompareBar* compareBar_;
     ViewportWindow* viewport_;
     QWidget* viewportContainer_;
     TimelineWidget* timeline_;

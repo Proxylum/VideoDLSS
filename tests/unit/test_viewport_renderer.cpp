@@ -215,7 +215,7 @@ TEST_CASE("ViewportRenderer blend modes, opacity, solo and visibility", "[viewpo
     LayerState* l = st.AddOverlayLayer("result");
     REQUIRE(l != nullptr);
     CHECK(st.layers.size() == 2);
-    CHECK(l->opacity == 0.5f);  // new overlay layers start half transparent
+    CHECK(l->opacity == 1.f);  // new overlay layers are full (stage 9): comparisons wipe, they do not blend
     l->opacity = 1.f;
 
     auto render = [&] { return At(r.RenderToImage(st, frame, w, h, w, h), 1, 1); };

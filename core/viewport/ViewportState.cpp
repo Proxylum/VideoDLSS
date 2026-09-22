@@ -39,7 +39,8 @@ std::optional<ViewMode> ParseViewMode(std::string_view s) { return ParseEnum(s, 
 std::optional<DisplayMode> ParseDisplayMode(std::string_view s) { return ParseEnum(s, kDisplayModes); }
 std::optional<BlendMode> ParseBlendMode(std::string_view s) { return ParseEnum(s, kBlendModes); }
 
-DisplayMode LayerState::DefaultDisplayFor(const std::string& source) {
+DisplayMode LayerState::DefaultDisplayFor(const std::string& sourceName) {
+    const std::string source = SplitSourceVersion(sourceName).first;  // a previous version shows like its pass
     if (source == "source" || source == "result") return DisplayMode::Color;
     if (const auto kind = ParsePassKind(source)) {
         switch (*kind) {
@@ -142,7 +143,7 @@ LayerState* ViewportState::AddOverlayLayer(const std::string& source) {
     LayerState l;
     l.source = source;
     l.display = LayerState::DefaultDisplayFor(source);
-    l.opacity = 0.5f;
+    l.opacity = 1.f;  // a full layer: comparisons wipe, they do not blend (stage 9)
     layers.push_back(l);
     selectedLayer = static_cast<int>(layers.size()) - 1;
     return &layers.back();
@@ -167,6 +168,62 @@ std::vector<std::string> ViewportState::NeededSources() const {
         for (const auto& l : layers) add(l.source);
     }
     return out;
+}
+
+std::pair<std::string, std::string> SplitSourceVersion(const std::string& source) {
+    const size_t at = source.find('@');
+    if (at == std::string::npos) return {source, {}};
+    return {source.substr(0, at), source.substr(at + 1)};
+}
+
+std::string VersionSourceName(const std::string& pass, const std::string& version) { return version.empty() ? pass : pass + "@" + version; }
+
+void ViewportState::SetCompare(const std::string& before, const std::string& after) {
+    mode = ViewMode::Overlay;
+    LayerState a, b;
+    a.source = before;
+    a.display = LayerState::DefaultDisplayFor(before);
+    b.source = after;
+    b.display = LayerState::DefaultDisplayFor(after);
+    layers = {a, b};
+    selectedLayer = 1;
+    wipe.enabled = true;
+    wipe.vertical = true;
+    wipe.position = 0.5f;
+    wipe.layerA = 0;
+    wipe.layerB = 1;
+}
+
+void ViewportState::SetAfterOnly(const std::string& after) {
+    mode = ViewMode::Single;
+    if (layers.size() > 1) layers.resize(1);
+    SetSingleSource(after);
+    layers[0].opacity = 1.f;
+    layers[0].visible = true;
+    layers[0].solo = false;
+    selectedLayer = 0;
+    wipe.enabled = false;
+}
+
+bool ViewportState::CompareConfigured() const {
+    if (mode != ViewMode::Overlay || !wipe.enabled) return false;
+    const int n = static_cast<int>(layers.size());
+    if (wipe.layerA < 0 || wipe.layerB < 0 || wipe.layerA >= n || wipe.layerB >= n || wipe.layerA == wipe.layerB) return false;
+    return layers[static_cast<size_t>(wipe.layerA)].source != layers[static_cast<size_t>(wipe.layerB)].source;
+}
+
+const LayerState* ViewportState::CompareSide(bool after) const {
+    if (!CompareConfigured()) return nullptr;
+    return &layers[static_cast<size_t>(after ? wipe.layerB : wipe.layerA)];
+}
+
+std::string ViewportState::NextUnusedSource(const std::vector<std::string>& available) const {
+    for (const auto& a : available) {
+        bool used = false;
+        for (const auto& l : layers) used = used || l.source == a;
+        if (!used) return a;
+    }
+    return available.empty() ? std::string("source") : available.back();
 }
 
 void ViewportState::ResolveLegacyFrame(double baseFps) {

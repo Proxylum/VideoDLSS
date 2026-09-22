@@ -9,7 +9,10 @@
 
 #include "gpu/D3D12Device.h"
 #include "passes/PassSequence.h"
+#include "pipeline/PassVersions.h"
 #include "viewport/FrameStore.h"
+#include "viewport/Project.h"
+#include "viewport/ViewportState.h"
 
 using namespace dlssvid;
 using Catch::Approx;
@@ -211,4 +214,38 @@ TEST_CASE("FrameStore keeps 24 and 48 fps sources in step over the whole clip (r
     CHECK(store.GetStatus(6, "color_sr") == FrameStore::Status::Missing);
     CHECK(store.StatusAt(0.25, "color_sr") == FrameStore::Status::Missing);  // past the end
     CHECK(store.TexturesAt(0.25).empty());
+}
+
+TEST_CASE("FrameStore discovers previous pass versions as sources named pass@id (stage 9)", "[viewport][store]") {
+    const auto root = Root("versions");
+    WritePass(root / "color_nr", PassKind::ColorNr, 8, 4, 0, 3, FileFormat::Png, 24);
+    const auto id = RetirePassVersion(root, "color_nr");
+    REQUIRE(id);
+    WritePass(root / "color_nr", PassKind::ColorNr, 8, 4, 0, 3, FileFormat::Png, 24);
+    WritePass(root / "depth_raw", PassKind::DepthRaw, 8, 4, 0, 3);
+    const auto current = FrameStore::DiscoverPasses(root);
+    REQUIRE(current.size() == 2);
+    CHECK(current[0].name == "color_nr");
+    CHECK(current[0].pass == "color_nr");
+    CHECK(current[0].version.empty());
+    const auto versions = FrameStore::DiscoverPassVersions(root);
+    REQUIRE(versions.size() == 1);
+    CHECK(versions[0].name == "color_nr@" + *id);
+    CHECK(versions[0].pass == "color_nr");
+    CHECK(versions[0].version == *id);
+    CHECK(versions[0].kind == TextureKind::Color);
+    CHECK(versions[0].lastFrame == 3);
+    CHECK(versions[0].fps.num == 24);
+    CHECK(versions[0].path == root / "color_nr.v" / *id);
+    CHECK(SplitSourceVersion(versions[0].name).second == *id);
+    CHECK(FrameStore::DiscoverPassVersions(root / "nope").empty());
+    // the project lists them after the current passes, so the viewport can compare versions with the wipe
+    const auto sources = Project::Create(root / "missing.mp4", root).Sources();
+    REQUIRE(sources.size() == 3);
+    CHECK(sources[2].name == versions[0].name);
+    D3D12Device dev({true, false});
+    FrameStore store(dev);
+    store.SetSources(sources);
+    REQUIRE(store.FindSource(versions[0].name) != nullptr);
+    CHECK(store.SourceFps(versions[0].name).num == 24);
 }

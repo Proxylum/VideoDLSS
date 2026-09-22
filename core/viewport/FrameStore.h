@@ -35,6 +35,8 @@ struct ViewportSource {
     int64_t lastFrame = -1;       // inclusive; video: frameCount - 1 (or -1 when unknown)
     uint32_t width = 0, height = 0;
     Rational fps{0, 1};
+    std::string pass;             // pass folders: the pass name (the current version and its previous versions share it)
+    std::string version;          // a previous version (PassVersions.h): its history id; empty for the current one
     // Pass folders: shared, sources are copied around freely (Manifest is ~0.5 KB + JSON).
     std::shared_ptr<const Manifest> manifest;
     bool HasFrame(int64_t f) const { return f >= firstFrame && (lastFrame < 0 || f <= lastFrame); }
@@ -72,6 +74,8 @@ public:
     const std::vector<ViewportSource>& Sources() const { return sources_; }
     const ViewportSource* FindSource(const std::string& name) const;
     static std::vector<ViewportSource> DiscoverPasses(const std::filesystem::path& passesRoot);
+    // Previous versions under <pass>.v/ as sources named "<pass>@<id>" (stage 9: compare versions with the wipe).
+    static std::vector<ViewportSource> DiscoverPassVersions(const std::filesystem::path& passesRoot);
     static std::optional<ViewportSource> VideoSource(const std::string& name, const std::filesystem::path& file);
 
     // Reference image size (the "source" video or the first source).
