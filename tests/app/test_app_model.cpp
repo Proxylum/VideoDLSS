@@ -700,6 +700,21 @@ TEST_CASE("ProcessingPanel shows the stages, the time, the log tail and offers t
     CHECK(cancel->isHidden());
     backButton->click();
     CHECK(back.count() == 1);
+
+    // a failed run: the stage that was running is the one in error, the stages after it never ran
+    const int failing = queue.enqueue("Обработка", "cmd", {"/c", "echo", "depth:", "1/4", "frames", "&", "exit", "3"}, plan);
+    panel.watch(failing, "face.mp4 → face_result.mp4");
+    Pump([&] { return queue.finished(failing); }, 20000);
+    REQUIRE(queue.finished(failing));
+    CHECK(!queue.succeeded(failing));
+    CHECK(!queue.cancelled(failing));
+    CHECK(panel.headline().startsWith(QString::fromUtf8("Ошибка через")));
+    const QStringList failed = panel.stageLines();
+    REQUIRE(failed.size() == 3);
+    CHECK(failed[0].toStdString().rfind("Глубина · ошибка · ", 0) == 0);
+    CHECK(failed[1].toStdString() == "Векторы движения · переиспользуется · —");
+    CHECK(failed[2].toStdString() == "Кодирование · не запускалась · —");
+    CHECK(!backButton->isHidden());
 }
 
 TEST_CASE("AppModel result: summary and bar, export copy, exportable passes, chip hotkeys, free space, close project", "[app][model][gpu]") {

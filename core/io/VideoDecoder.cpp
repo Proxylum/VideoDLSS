@@ -90,9 +90,8 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
         info_.audioCodecName = d ? d->name : "unknown";
     }
 
-    Log()->info("open {}: {}x{} {} {}/{} fps, {} frames{}{}", url, info_.width, info_.height, info_.codecName,
-                fr.num, fr.den, info_.frameCount, info_.hasAudio ? ", audio " + info_.audioCodecName : "",
-                hwDevice_ ? ", NVDEC" : "");
+    Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "open {}: {}x{} {} {}/{} fps, {} frames{}{}", url, info_.width, info_.height,
+               info_.codecName, fr.num, fr.den, info_.frameCount, info_.hasAudio ? ", audio " + info_.audioCodecName : "", hwDevice_ ? ", NVDEC" : "");
 }
 
 VideoDecoder::~VideoDecoder() {

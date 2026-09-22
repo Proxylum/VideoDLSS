@@ -215,6 +215,9 @@ void ProcessingPanel::render() {
             state = tr("отменена");
             time = s.seconds > 0.0 ? FormatClock(s.seconds) : "—";
             tone = "color: #e0a458;";
+        } else if (s.state == "skipped") {
+            state = tr("не запускалась");
+            time = "—";
         } else {
             state = tr("ошибка");
             time = s.seconds > 0.0 ? FormatClock(s.seconds) : "—";

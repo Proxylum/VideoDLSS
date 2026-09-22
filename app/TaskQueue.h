@@ -30,7 +30,7 @@ public:
     };
     struct StageStatus {
         QString name, title;
-        QString state;         // reused | queued | running | done | cancelled | failed
+        QString state;         // reused | queued | running | done | cancelled | failed | skipped (never ran: the task failed before it)
         double seconds = 0.0;  // measured when running / done, the estimate when queued
         int percent = 0;
     };

@@ -174,7 +174,7 @@ std::vector<ViewportSource> FrameStore::DiscoverPassVersions(const std::filesyst
 std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, const std::filesystem::path& file) {
     if (file.empty() || !std::filesystem::exists(file)) return std::nullopt;
     try {
-        VideoDecoder dec(file);
+        VideoDecoder dec(file, VideoDecoder::Probe());
         const VideoStreamInfo& info = dec.Info();
         ViewportSource s;
         s.name = name;

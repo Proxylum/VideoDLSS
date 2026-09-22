@@ -49,7 +49,13 @@ class VideoDecoder {
 public:
     struct Options {
         HwAccel hwaccel = HwAccel::None;
+        bool probe = false;  // opened only to read Info(): logged at debug level, not as a second "open" of the file
     };
+    static Options Probe() {
+        Options o;
+        o.probe = true;
+        return o;
+    }
 
     explicit VideoDecoder(const std::filesystem::path& path, const Options& options = {});
     ~VideoDecoder();
