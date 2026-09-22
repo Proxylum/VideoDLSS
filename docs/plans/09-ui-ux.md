@@ -114,7 +114,7 @@
 4. Источник: хэш и его совпадение с пассами (кэш хэша по размеру и времени изменения файла).
 5. Тесты: схема → валидация и форма, план → состояния карточек, арифметика оценок, кэш хэша.
 
-**Статус (2026-09-22): выполнено** — MR !NN (ветка `stage/09-ui-ux-d`): `core/stages/ParamSchema` (тип, диапазон, варианты с
+**Статус (2026-09-22): выполнено** — MR !22 (ветка `stage/09-ui-ux-d`): `core/stages/ParamSchema` (тип, диапазон, варианты с
 подписями, умолчания, `advanced`; `ValidateStageParams` в `ProcessRunner::Prepare`, `EffectiveStageParams` перед отпечатком —
 явное умолчание и отсутствующий ключ равны), `ProcessOptions::forceStages` / `process --force`, `ProcessOptions::sourceHash` +
 `Project::SourceHash()` (кэш по размеру и mtime, `source_hash` в проекте), кодер результата в проекте (`encode`),
