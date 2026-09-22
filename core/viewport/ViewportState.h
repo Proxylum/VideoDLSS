@@ -72,7 +72,8 @@ struct ViewportState {
     int expandedCell = -1;                                // grid: -1 = 2x2, 0..3 = one cell full size
     WipeState wipe;
     ViewTransform view;
-    int64_t frame = 0;
+    double time = 0.0;         // seconds on the shared time axis (stage 9): each source shows round(time × its fps)
+    int64_t legacyFrame = -1;  // "frame" of a project written before the time axis; resolved by ResolveLegacyFrame()
     int selectedLayer = 0;
 
     nlohmann::json ToJson() const;
@@ -84,9 +85,14 @@ struct ViewportState {
     LayerState* AddOverlayLayer(const std::string& source);  // nullptr when the stack is full
     void RemoveLayer(int index);
     bool AnySolo() const;
+    // Projects before stage 9 stored a frame index: converts it at the base rate once the sources are known.
+    void ResolveLegacyFrame(double baseFps);
     // Sources the current mode displays (layers or grid cells), without duplicates - for prefetch.
     std::vector<std::string> NeededSources() const;
 };
+
+// "MM:SS.hh" (hours in front from 1 h): the timeline's timecode.
+std::string FormatTimecode(double seconds);
 
 // Zoom limits of ТЗ §6 (25 %..800 %).
 constexpr float kMinZoom = 0.25f;

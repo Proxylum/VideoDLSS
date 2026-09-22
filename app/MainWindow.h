@@ -3,6 +3,7 @@
 #include <QLabel>
 #include <QMainWindow>
 #include <array>
+#include <string>
 
 #include "AppModel.h"
 
@@ -27,6 +28,7 @@ protected:
 private:
     void buildMenus();
     void updateCellLabels();
+    QString cellLabel(const QString& title, const std::string& source);
     void saveScreenshot();
     void selectSource(int hotkey);  // 1..9
 

@@ -18,7 +18,10 @@ ViewportWindow::ViewportWindow(AppModel& model) : model_(model) {
     setMinimumSize(QSize(64, 64));
     pollTimer_.setInterval(16);
     connect(&pollTimer_, &QTimer::timeout, this, [this] {
-        if (model_.store().Update()) dirty_ = true;
+        if (model_.store().Update()) {
+            dirty_ = true;
+            model_.notifyFramesUpdated();
+        }
         if (dirty_ && isExposed()) render();
     });
     pollTimer_.start();
@@ -46,8 +49,9 @@ void ViewportWindow::render() {
     const QSize s = size() * devicePixelRatio();
     renderer_->Resize(static_cast<uint32_t>(std::max(1, s.width())), static_cast<uint32_t>(std::max(1, s.height())));
     try {
-        const FrameTextures frame = model_.store().Textures(model_.state().frame);
-        renderer_->RenderToWindow(model_.state(), frame, model_.store().ImageWidth(), model_.store().ImageHeight());
+        const FrameTextures frame = model_.store().TexturesAt(model_.state().time);
+        const FrameStates states = model_.frameStates();  // plates for cells whose frame is loading / missing
+        renderer_->RenderToWindow(model_.state(), frame, model_.store().ImageWidth(), model_.store().ImageHeight(), &states);
     } catch (const std::exception& e) {
         Log()->error("viewport render: {}", e.what());
     }
@@ -196,9 +200,10 @@ void ViewportWindow::wheelEvent(QWheelEvent* e) {
 PassImage ViewportWindow::screenshot() {
     ensureRenderer();
     const QSize s = size() * devicePixelRatio();
-    const FrameTextures frame = model_.store().Textures(model_.state().frame);
+    const FrameTextures frame = model_.store().TexturesAt(model_.state().time);
+    const FrameStates states = model_.frameStates();
     return renderer_->RenderToImage(model_.state(), frame, model_.store().ImageWidth(), model_.store().ImageHeight(), static_cast<uint32_t>(std::max(1, s.width())),
-                                    static_cast<uint32_t>(std::max(1, s.height())));
+                                    static_cast<uint32_t>(std::max(1, s.height())), &states);
 }
 
 }  // namespace dlssvid

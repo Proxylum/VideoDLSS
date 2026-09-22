@@ -3,6 +3,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -96,13 +98,18 @@ TEST_CASE("dlssvid project init + render write a project and PNG frames", "[inte
     // --save-state writes the viewport state back into the project
     REQUIRE(Run("render --warp --project " + Q(proj) + " --frame 5 --source depth_raw --zoom 2 --save-state -o " + Q(dir / "s.png")) == 0);
     const Project q = Project::Load(proj);
-    CHECK(q.viewport.frame == 5);
+    CHECK(std::abs(q.viewport.time - 5.0 / 24.0) < 1e-9);  // --frame counts at the base rate, the project stores a time
     CHECK(q.viewport.layers[0].source == "depth_raw");
     CHECK(q.viewport.view.zoom == 2.f);
 
     // without a project: --input + --passes; benchmark mode
     REQUIRE(Run("render --warp -i " + Q(clip) + " --passes " + Q(dir / "passes") + " --frame 1 -o " + Q(dir / "noproj.png")) == 0);
     REQUIRE(Run("render --warp --project " + Q(proj) + " --bench 4") == 0);
+    // --time in seconds (wins over --frame); the seventh frame at 24 fps is 0.25 s
+    REQUIRE(Run("render --warp --project " + Q(proj) + " --time 0.25 --frame 1 --save-state -o " + Q(dir / "time.png")) == 0);
+    CHECK(ReadPng(dir / "time.png").width == 64);
+    CHECK(std::abs(Project::Load(proj).viewport.time - 0.25) < 1e-9);
+    CHECK(Run("render --warp --project " + Q(proj) + " --time 9 -o " + Q(dir / "x.png")) != 0);
 
     // errors: frame out of range, unknown mode, missing inputs
     CHECK(Run("render --warp --project " + Q(proj) + " --frame 99 -o " + Q(dir / "x.png")) != 0);

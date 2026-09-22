@@ -55,7 +55,7 @@ cbuffer DrawConstants : register(b0) {
     float gWipePos;
     uint gWipeA;
     uint gWipeB;
-    uint gPad;
+    uint gCellState;     // 0 ready, 1 loading, 2 no frame (stage 9: a plate instead of an empty cell)
     float4 gBackground;  // outside-image colour
     LayerParams gLayers[MAX_LAYERS];
 };
@@ -210,6 +210,11 @@ float4 PSMain(VSOut i) : SV_Target {
         float k = fmod(cs.x + cs.y, 2.0);
         return float4(gBackground.rgb * (0.85 + 0.15 * k), 1);
     }
+    if (gCellState == 2u) {  // no frame of the base layer at this time: diagonal hatch
+        float k = fmod(floor((screen.x + screen.y) / 12.0), 2.0);
+        return float4(lerp(float3(0.11, 0.11, 0.12), float3(0.17, 0.17, 0.19), k), 1);
+    }
+    if (gCellState == 1u) return float4(0.20, 0.21, 0.24, 1);  // still loading: a plain plate
 
     float3 result = 0;
     bool first = true;

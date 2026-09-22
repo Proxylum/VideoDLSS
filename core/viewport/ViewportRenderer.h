@@ -27,6 +27,12 @@ struct LayerTexture {
 // Textures of one frame by source name ("source", "result", pass names).
 using FrameTextures = std::map<std::string, LayerTexture>;
 
+// What the viewport knows about a source's frame at the current time. A cell whose base layer is not ready is
+// drawn as a plate — «загрузка…» (plain) or «нет кадра» (hatched) — instead of an empty background; the text
+// itself is the UI's (stage 9).
+enum class FrameState : uint8_t { Ready = 0, Loading = 1, Missing = 2 };
+using FrameStates = std::map<std::string, FrameState>;
+
 struct RenderTargetSize {
     uint32_t width = 0, height = 0;
 };
@@ -49,13 +55,14 @@ public:
 
     // Image reference size: the "image" all layers are stretched to (usually the source frame size).
     // Renders the state into the window and presents.
-    void RenderToWindow(const ViewportState& state, const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight);
+    void RenderToWindow(const ViewportState& state, const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight,
+                        const FrameStates* states = nullptr);
     // Renders into the offscreen target without reading it back (benchmarks, warm-up).
     void RenderOffscreen(const ViewportState& state, const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight, uint32_t targetWidth,
-                         uint32_t targetHeight);
+                         uint32_t targetHeight, const FrameStates* states = nullptr);
     // Renders into an RGBA8 image (screenshots / CLI / tests).
     PassImage RenderToImage(const ViewportState& state, const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight,
-                            uint32_t targetWidth, uint32_t targetHeight);
+                            uint32_t targetWidth, uint32_t targetHeight, const FrameStates* states = nullptr);
 
     // ---- geometry helpers shared with the UI (cell rects, image<->screen mapping) ----
     struct Rect {
@@ -91,8 +98,8 @@ private:
     double lastRenderMs_ = 0.0;
 
     void RenderInto(ID3D12Resource* target, D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t targetWidth, uint32_t targetHeight, const ViewportState& state,
-                    const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight, D3D12_RESOURCE_STATES targetStateBefore,
-                    D3D12_RESOURCE_STATES targetStateAfter);
+                    const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight, const FrameStates* states,
+                    D3D12_RESOURCE_STATES targetStateBefore, D3D12_RESOURCE_STATES targetStateAfter);
 };
 
 }  // namespace dlssvid

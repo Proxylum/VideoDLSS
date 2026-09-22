@@ -25,7 +25,8 @@ public:
     };
     struct RenderArgs {
         std::string project, input, passes, result, output;
-        int64_t frame = -1;
+        int64_t frame = -1;    // frame at the base rate
+        double time = -1.0;    // seconds (wins over --frame)
         std::string mode;      // single | overlay | grid
         std::string source;    // single: source name
         std::string layers;    // overlay: "base,name[:display[:opacity[:blend]]],..."

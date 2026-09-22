@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <algorithm>
+#include <cmath>
 
 #include "util/Log.h"
 
@@ -81,35 +82,89 @@ bool AppModel::saveProjectAs(const QString& file) {
 
 void AppModel::reloadSources() {
     store_->SetSources(project_.Sources());
-    if (state().frame >= store_->FrameCount() && store_->FrameCount() > 0) state().frame = store_->FrameCount() - 1;
+    timelineFps_ = Rational{0, 1};
+    state().ResolveLegacyFrame(store_->FpsOf(baseSource()));  // projects before stage 9: frame -> time at the base rate
+    state().time = std::clamp(state().time, 0.0, lastTime());
     emit sourcesChanged();
     requestFrames();
     emit stateChanged();
 }
 
-void AppModel::requestFrames() { store_->SetCurrentFrame(state().frame, neededSources()); }
+void AppModel::requestFrames() { store_->SetCurrentTime(state().time, neededSources()); }
 
-void AppModel::setFrame(int64_t frame) {
-    const int64_t count = store_->FrameCount();
-    if (count > 0) frame = std::clamp<int64_t>(frame, 0, count - 1);
-    if (frame < 0) frame = 0;
-    if (frame == state().frame) return;
-    state().frame = frame;
+// ---- time axis ----------------------------------------------------------------------------------
+
+std::string AppModel::baseSource() const {
+    const ViewportState& st = state();
+    if (st.mode == ViewMode::Grid) return st.gridSources[0];
+    return st.layers.empty() ? std::string("source") : st.layers[0].source;
+}
+
+int64_t AppModel::baseFrame() const { return store_->FrameAt(baseSource(), time()); }
+
+Rational AppModel::timelineFps() const { return timelineFps_.num > 0 && timelineFps_.den > 0 ? timelineFps_ : store_->SourceFps(baseSource()); }
+
+int64_t AppModel::timelineFrameCount() const { return static_cast<int64_t>(std::llround(store_->Duration() * timelineFps().ToDouble())); }
+
+int64_t AppModel::timelineFrame() const { return static_cast<int64_t>(std::llround(time() * timelineFps().ToDouble())); }
+
+double AppModel::lastTime() const {
+    const int64_t n = timelineFrameCount();
+    return n > 0 ? static_cast<double>(n - 1) / timelineFps().ToDouble() : 0.0;
+}
+
+std::vector<Rational> AppModel::fpsChoices() const {
+    std::vector<Rational> out;
+    for (const auto& s : store_->Sources()) {
+        const Rational r = store_->SourceFps(s.name);
+        bool dup = false;
+        for (const auto& o : out) dup = dup || std::abs(o.ToDouble() - r.ToDouble()) < 1e-6;
+        if (!dup) out.push_back(r);
+    }
+    std::sort(out.begin(), out.end(), [](const Rational& a, const Rational& b) { return a.ToDouble() < b.ToDouble(); });
+    return out;
+}
+
+FrameState AppModel::frameStateOf(const std::string& source) const {
+    switch (store_->StatusAt(time(), source)) {
+        case FrameStore::Status::Ready: return FrameState::Ready;
+        case FrameStore::Status::Missing: return FrameState::Missing;
+        default: return FrameState::Loading;
+    }
+}
+
+FrameStates AppModel::frameStates() const {
+    FrameStates out;
+    for (const auto& n : neededSources()) out[n] = frameStateOf(n);
+    return out;
+}
+
+void AppModel::setTime(double seconds) {
+    seconds = std::clamp(seconds, 0.0, lastTime());
+    if (std::abs(seconds - state().time) < 1e-9) return;
+    state().time = seconds;
     requestFrames();
-    emit frameChanged(frame);
+    emit timeChanged(seconds);
     emit stateChanged();
 }
 
-void AppModel::stepFrame(int delta) { setFrame(state().frame + delta); }
+void AppModel::setFrame(int64_t timelineFrame) { setTime(static_cast<double>(timelineFrame) / timelineFps().ToDouble()); }
+
+void AppModel::stepFrame(int delta) {
+    const std::string base = baseSource();
+    setTime(store_->TimeOfFrame(base, store_->FrameAt(base, time()) + delta));
+}
+
+void AppModel::setTimelineFps(Rational fps) {
+    timelineFps_ = fps;
+    emit timelineFpsChanged();
+}
 
 void AppModel::setPlaying(bool playing) {
     if (playing == playTimer_.isActive()) return;
     if (playing) {
-        Rational fps = store_->Fps();
-        double rate = fps.num > 0 ? fps.ToDouble() : 24.0;
-        // FG results carry twice the frames of the source (ТЗ §6)
-        const std::string base = state().mode == ViewMode::Grid ? state().gridSources[0] : state().layers.empty() ? "source" : state().layers[0].source;
-        if (base == "color_fg") rate *= 2.0;
+        const double rate = std::max(1.0, store_->MaxFps(neededSources()));  // the fastest shown source: an FG result runs at 2x
+        playStep_ = 1.0 / rate;
         playTimer_.start(static_cast<int>(std::max(1.0, 1000.0 / rate)));
     } else {
         playTimer_.stop();
@@ -118,18 +173,13 @@ void AppModel::setPlaying(bool playing) {
 }
 
 void AppModel::onPlayTick() {
-    const int64_t next = state().frame + 1;
-    const std::string base = state().mode == ViewMode::Grid ? state().gridSources[0] : state().layers.empty() ? "source" : state().layers[0].source;
-    // play only over computed frames: stop when the next frame does not exist
-    if (store_->FrameCount() > 0 && next >= store_->FrameCount()) {
+    const double next = time() + playStep_;
+    // play only over computed frames: stop at the end and where the base source has no frame
+    if (next > lastTime() + 1e-9 || store_->StatusAt(next, baseSource()) == FrameStore::Status::Missing) {
         setPlaying(false);
         return;
     }
-    if (store_->GetStatus(next, base) == FrameStore::Status::Missing) {
-        setPlaying(false);
-        return;
-    }
-    setFrame(next);
+    setTime(next);
 }
 
 void AppModel::setMode(ViewMode mode) {
@@ -149,5 +199,7 @@ void AppModel::notifyStateChanged() {
     requestFrames();
     emit stateChanged();
 }
+
+void AppModel::notifyFramesUpdated() { emit framesUpdated(); }
 
 }  // namespace dlssvid

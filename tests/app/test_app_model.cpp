@@ -8,7 +8,10 @@
 #include <QSignalSpy>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -62,6 +65,14 @@ void WriteDepth(const std::filesystem::path& dir, int frames) {
     w.Finish();
 }
 
+void WritePassFps(const std::filesystem::path& dir, PassKind kind, int frames, int fps) {
+    Manifest m = Manifest::ForPass(kind, 16, 8, FileFormat::Png);
+    m.fps = Rational{fps, 1};
+    PassWriter w(dir, m);
+    for (int f = 0; f < frames; ++f) w.WriteFrame(f, MakePassImage(kind, 16, 8));
+    w.Finish();
+}
+
 void Pump(const std::function<bool()>& done, int ms) {
     QElapsedTimer t;
     t.start();
@@ -81,7 +92,7 @@ TEST_CASE("AppModel opens a project, navigates frames and saves the viewport sta
 
     AppModel model(true);
     QSignalSpy opened(&model, &AppModel::projectChanged);
-    QSignalSpy frames(&model, &AppModel::frameChanged);
+    QSignalSpy frames(&model, &AppModel::timeChanged);
     model.openProject(Q(d / "proj.dlssvid.json"));
     REQUIRE(opened.count() == 1);
     CHECK(model.sourceNames() == QStringList{"depth_raw"});
@@ -91,11 +102,11 @@ TEST_CASE("AppModel opens a project, navigates frames and saves the viewport sta
     model.setSingleSource("depth_raw");
     CHECK(model.state().layers[0].display == DisplayMode::Turbo);
     model.setFrame(99);
-    CHECK(model.state().frame == 4);
+    CHECK(model.baseFrame() == 4);
     model.stepFrame(-10);
-    CHECK(model.state().frame == 0);
+    CHECK(model.baseFrame() == 0);
     model.stepFrame(2);
-    CHECK(model.state().frame == 2);
+    CHECK(model.baseFrame() == 2);
     CHECK(frames.count() == 3);
     model.store().WaitForCurrent();
     CHECK(model.store().GetStatus(2, "depth_raw") == FrameStore::Status::Ready);
@@ -111,14 +122,14 @@ TEST_CASE("AppModel opens a project, navigates frames and saves the viewport sta
     CHECK(model.playing());
     Pump([&] { return !model.playing(); }, 3000);
     CHECK(!model.playing());
-    CHECK(model.state().frame == 4);
+    CHECK(model.baseFrame() == 4);
 
     model.state().wipe.enabled = true;
-    model.state().frame = 1;
+    model.state().time = 1.0;  // fps-less passes: the base rate is 1 fps, a second per frame
     REQUIRE(model.saveProject());
     const Project q = Project::Load(d / "proj.dlssvid.json");
     CHECK(q.viewport.wipe.enabled);
-    CHECK(q.viewport.frame == 1);
+    CHECK(q.viewport.time == 1.0);
     CHECK(q.viewport.layers[0].source == "depth_raw");
 
     // a bad file reports a message instead of throwing
@@ -162,4 +173,67 @@ TEST_CASE("TaskQueue survives a crashing stage process and runs the next task", 
     CHECK(finished[1][0].toInt() == next);
     CHECK(finished[1][1].toBool());
     CHECK(!queue.busy());
+}
+
+TEST_CASE("AppModel time axis: 24 and 48 fps sources, steps by the base layer, timeline rate, legacy frame", "[app][model][gpu]") {
+    App();
+    const auto d = Dir("time");
+    WritePassFps(d / "passes" / "color_sr", PassKind::ColorSr, 6, 24);
+    WritePassFps(d / "passes" / "color_fg", PassKind::ColorFg, 11, 48);
+    // a project written before stage 9 stores a frame index instead of a time
+    nlohmann::json j = Project::Create(d / "missing.mp4", d / "passes").ToJson(d);
+    j["viewport"].erase("time");
+    j["viewport"]["frame"] = 4;
+    j["viewport"]["layers"][0]["source"] = "color_sr";
+    std::ofstream(d / "proj.dlssvid.json") << j.dump(2);
+
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    CHECK(model.baseSource() == "color_sr");
+    CHECK(std::abs(model.time() - 4.0 / 24.0) < 1e-9);  // resolved at the base rate
+    CHECK(model.state().legacyFrame == -1);
+    CHECK(model.baseFrame() == 4);
+    CHECK(model.timelineFps().num == 24);
+    CHECK(model.timelineFrameCount() == 6);
+    CHECK(std::abs(model.lastTime() - 5.0 / 24.0) < 1e-9);
+    REQUIRE(model.fpsChoices().size() == 2);
+    CHECK(model.fpsChoices()[0].num == 24);
+    CHECK(model.fpsChoices()[1].num == 48);
+
+    QSignalSpy times(&model, &AppModel::timeChanged);
+    model.stepFrame(+1);
+    CHECK(model.baseFrame() == 5);
+    model.stepFrame(+1);  // past the end: clamped, no signal
+    CHECK(model.baseFrame() == 5);
+    CHECK(times.count() == 1);
+    model.setTimelineFps(model.fpsChoices()[1]);
+    CHECK(model.timelineFps().num == 48);
+    CHECK(model.timelineFrameCount() == 12);
+    model.setFrame(3);  // 48 fps frames
+    CHECK(std::abs(model.time() - 3.0 / 48.0) < 1e-9);
+    CHECK(model.timelineFrame() == 3);
+    CHECK(model.baseFrame() == 2);  // round(1.5)
+    CHECK(model.store().FrameAt("color_fg", model.time()) == 3);
+    model.stepFrame(-1);  // by the base layer: one 24 fps frame
+    CHECK(model.baseFrame() == 1);
+    CHECK(std::abs(model.time() - 1.0 / 24.0) < 1e-9);
+
+    // frame states drive the plates and the labels
+    model.store().WaitForCurrent();
+    CHECK(model.frameStateOf("color_sr") == FrameState::Ready);
+    CHECK(model.frameStateOf("nope") == FrameState::Missing);
+    model.state().mode = ViewMode::Grid;
+    model.state().gridSources = {"color_fg", "color_sr", "color_fg", "color_sr"};
+    model.notifyStateChanged();
+    CHECK(model.baseSource() == "color_fg");
+    CHECK(model.frameStates().size() == 2);
+
+    // playback runs at the fastest shown rate (48 fps) and stops where the base source ends
+    model.setTime(0.0);
+    model.setPlaying(true);
+    Pump([&] { return !model.playing(); }, 5000);
+    CHECK(!model.playing());
+    CHECK(model.timelineFrame() == 10);  // the last color_fg frame; the timeline itself runs to 11 (0.25 s of color_sr)
+    REQUIRE(model.saveProject());
+    CHECK(std::abs(Project::Load(d / "proj.dlssvid.json").viewport.time - 10.0 / 48.0) < 1e-9);  // saved as a time
 }
