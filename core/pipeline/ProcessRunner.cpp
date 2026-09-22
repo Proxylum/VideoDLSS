@@ -3,11 +3,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <optional>
+#include <set>
 
 #include "convert/ColorConvert.h"
 #include "gpu/D3D12Device.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
+#include "pipeline/PassFingerprint.h"
+#include "pipeline/PassVersions.h"
 #include "pipeline/Pipeline.h"
 #include "stages/depth/DepthStage.h"
 #include "stages/fg/FgStage.h"
@@ -107,11 +111,275 @@ std::filesystem::path ExistingPass(const std::filesystem::path& root, std::initi
     return {};
 }
 
+// ---- planning (stage 9, MR A) ----------------------------------------------------------------------------------
+
+struct RunContext {
+    std::filesystem::path root;
+    std::string sourceHash;
+    int64_t needed = -1;  // source frames the run covers (-1: unknown)
+    bool skipExisting = true;
+};
+
+// The passes on disk (or, while planning, as they will be after the stages decided so far): pass -> fingerprint;
+// legacy passes get a stable pseudo-fingerprint. `ran` lists the passes this plan (re)writes.
+struct PlanState {
+    std::map<std::string, std::string> fp;
+    std::set<std::string> ran;
+};
+
+std::string LegacyId(const Manifest& m) { return "legacy:" + m.sourceHash + ":" + std::to_string(m.frameCount); }
+
+void RefreshFromDisk(PlanState& s, const std::filesystem::path& root) {
+    s.fp.clear();
+    for (const auto& name : PassesUnderRoot(root)) {
+        try {
+            const Manifest m = Manifest::Load(root / name);
+            s.fp[name] = m.fingerprint.empty() ? LegacyId(m) : m.fingerprint;
+        } catch (const std::exception& e) {
+            Log()->warn("process: {} skipped: {}", (root / name).string(), e.what());
+        }
+    }
+}
+
+// After a decision, what the passes look like: the stage's outputs carry the planned fingerprint.
+void Advance(PlanState& s, const StageDecision& d) {
+    if (d.action == "reuse") {
+        if (d.kind == "legacy")
+            for (const auto& out : d.outputs)
+                if (s.fp.count(out)) s.fp[out] = d.fingerprint;  // adopted: stamped with this fingerprint
+        return;
+    }
+    for (const auto& fam : StageFamilyPasses(d.name)) s.fp.erase(fam);  // retired or rewritten
+    for (const auto& out : d.outputs) {
+        s.fp[out] = d.fingerprint;
+        s.ran.insert(out);
+    }
+}
+
+int64_t NeededFor(const std::string& name, const nlohmann::json& p, int64_t needed) {
+    const int fgMult = name == "fg" ? Get<int>(p, "multiplier", 2) : 1;
+    return needed > 0 ? (name == "fg" ? FgFrameCount(needed, fgMult) : needed) : -1;
+}
+
+std::string Brief(const nlohmann::json& v) {
+    if (v.is_null()) return "(none)";
+    return v.is_string() ? v.get<std::string>() : v.dump();
+}
+
+std::string Join(const std::vector<std::string>& v) {
+    std::string s;
+    for (const auto& x : v) s += (s.empty() ? "" : ", ") + x;
+    return s;
+}
+
+// A complete history version of `pass` with this fingerprint, if any.
+std::optional<PassVersionInfo> RestorableVersion(const RunContext& ctx, const std::string& pass, const std::string& fp, int64_t frames) {
+    for (const auto& v : ListPassVersions(ctx.root, pass))
+        if (!v.current && v.fingerprint == fp && PassComplete(v.dir, frames, ctx.sourceHash)) return v;
+    return std::nullopt;
+}
+
+StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, const PlanState& state) {
+    const std::string& name = stage.name;
+    const nlohmann::json& p = stage.params;
+    StageDecision d;
+    d.name = name;
+    d.frames = NeededFor(name, p, ctx.needed);
+    d.outputs = StageOutputPasses(name, p);
+    d.outDir = ctx.root / d.outputs.back();
+    std::vector<std::string> inputsRan;
+    for (const auto& group : StageInputCandidates(name))
+        for (const auto& cand : group) {
+            const auto it = state.fp.find(cand);
+            if (it == state.fp.end()) continue;
+            d.inputs[cand] = it->second;
+            if (state.ran.count(cand)) inputsRan.push_back(cand);
+            break;
+        }
+    const PassFingerprint fp = ComputeFingerprint(name, ctx.sourceHash, p, d.inputs, ToolForStage(name, p));
+    d.fingerprint = fp.value;
+    d.params = fp.params;
+    d.tool = fp.tool.ToJson();
+
+    Manifest m;
+    bool have = false;
+    std::string unreadable;
+    if (Manifest::Exists(d.outDir)) {
+        try {
+            m = Manifest::Load(d.outDir);
+            have = true;
+        } catch (const std::exception& e) {
+            unreadable = e.what();
+        }
+    }
+    d.current = have;
+    if (have) d.currentFingerprint = m.fingerprint;
+    const bool complete = have && PassComplete(d.outDir, d.frames, ctx.sourceHash);
+    auto run = [&](const char* kind, std::string detail, bool retire) {
+        d.action = "run";
+        d.kind = kind;
+        d.detail = std::move(detail);
+        d.retire = retire;
+    };
+    auto restore = [&]() {
+        const auto v = RestorableVersion(ctx, d.outputs.back(), fp.value, d.frames);
+        if (!v) return false;
+        d.action = "restore";
+        d.kind = "restored";
+        d.version = v->id;
+        d.detail = "version " + v->id + " from the history";
+        d.retire = have;
+        return true;
+    };
+    const std::string incomplete = (have ? std::to_string(m.frameCount) : std::string("0")) + " of " + (d.frames > 0 ? std::to_string(d.frames) : std::string("all")) + " frames";
+
+    if (!ctx.skipExisting) {
+        run("forced", "every stage recomputed (--no-skip-existing)", have && m.fingerprint != fp.value);
+        return d;
+    }
+    if (!have) {
+        if (restore()) return d;
+        run("missing", unreadable.empty() ? "no pass yet" : "manifest unreadable: " + unreadable, std::filesystem::exists(d.outDir));
+        return d;
+    }
+    if (m.fingerprint == fp.value) {
+        if (complete) {
+            d.action = "reuse";
+            d.kind = "exact";
+            d.detail = "fingerprint matches";
+        } else {
+            run("incomplete", incomplete, false);
+        }
+        return d;
+    }
+    if (m.fingerprint.empty()) {  // made before fingerprints (or by a standalone `dlssvid <stage>`)
+        if (!inputsRan.empty()) {
+            d.diff["inputs"] = inputsRan;
+            run("input_changed", "input recomputed: " + Join(inputsRan), true);
+        } else if (m.sourceHash != ctx.sourceHash) {
+            run("source_changed", m.sourceHash.empty() ? "the pass has no source hash" : "the pass was made from another source", true);
+        } else if (!complete) {
+            run("incomplete", incomplete, false);
+        } else {
+            d.action = "reuse";
+            d.kind = "legacy";
+            d.detail = "pass predates fingerprints; adopted with the current parameters";
+        }
+        return d;
+    }
+    // another fingerprinted version is current: restore a matching one, else say what changed
+    if (restore()) return d;
+    if (m.sourceHash != ctx.sourceHash) {
+        run("source_changed", "the pass was made from another source", true);
+        return d;
+    }
+    const nlohmann::json oldP = CanonicalizeJson(m.paramsCanonical);
+    nlohmann::json pdiff = nlohmann::json::object();
+    std::vector<std::string> ptext;
+    std::set<std::string> keys;
+    for (const auto& [k, v] : oldP.items()) keys.insert(k);
+    for (const auto& [k, v] : fp.params.items()) keys.insert(k);
+    for (const auto& k : keys) {
+        const nlohmann::json o = oldP.contains(k) ? oldP[k] : nlohmann::json(), n = fp.params.contains(k) ? fp.params[k] : nlohmann::json();
+        if (o != n) {
+            pdiff[k] = {o, n};
+            ptext.push_back(k + ": " + Brief(o) + " -> " + Brief(n));
+        }
+    }
+    if (!pdiff.empty()) {
+        d.diff["params"] = pdiff;
+        run("params_changed", Join(ptext), true);
+        return d;
+    }
+    std::vector<std::string> changedInputs;
+    std::set<std::string> inputNames;
+    for (const auto& [k, v] : m.inputs) inputNames.insert(k);
+    for (const auto& [k, v] : d.inputs) inputNames.insert(k);
+    for (const auto& k : inputNames) {
+        const auto o = m.inputs.find(k), n = d.inputs.find(k);
+        if ((o == m.inputs.end()) != (n == d.inputs.end()) || (o != m.inputs.end() && o->second != n->second)) changedInputs.push_back(k);
+    }
+    if (!changedInputs.empty()) {
+        d.diff["inputs"] = changedInputs;
+        run("input_changed", "input changed: " + Join(changedInputs), true);
+        return d;
+    }
+    const ToolInfo oldT = ToolInfo::FromJson(m.tool);
+    nlohmann::json tdiff = nlohmann::json::object();
+    std::vector<std::string> tfields;
+    auto tool = [&](const char* field, const std::string& o, const std::string& n) {
+        if (o == n) return;
+        tdiff[field] = {o, n};
+        tfields.push_back(field);
+    };
+    tool("app", oldT.app, fp.tool.app);
+    tool("backend", oldT.backend, fp.tool.backend);
+    tool("model", oldT.model, fp.tool.model);
+    tool("model_hash", oldT.modelHash, fp.tool.modelHash);
+    tool("dll_file", oldT.dllFile, fp.tool.dllFile);
+    tool("dll", oldT.dll, fp.tool.dll);
+    if (!tdiff.empty()) {
+        d.diff["tool"] = tdiff;
+        run("tool_changed", "tool changed: " + Join(tfields), true);
+        return d;
+    }
+    run("changed", "fingerprint differs", true);
+    return d;
+}
+
+void StampPass(const std::filesystem::path& dir, const StageDecision& d, const std::string& created) {
+    Manifest m = Manifest::Load(dir);
+    m.fingerprint = d.fingerprint;
+    m.inputs = d.inputs;
+    m.tool = d.tool;
+    m.paramsCanonical = d.params;
+    m.created = created;
+    m.Save(dir);
+}
+
+struct Prepared {
+    VideoStreamInfo info;
+    int64_t sourceFrames = -1;
+    RunContext ctx;
+    std::map<std::string, ProcessStage> wanted;
+    std::string sourceFile;
+};
+
+Prepared Prepare(const ProcessOptions& options) {
+    Prepared r;
+    if (options.input.empty() || !std::filesystem::exists(options.input)) Throw("process: input video not found: " + options.input.string());
+    {
+        VideoDecoder probe(options.input);
+        r.info = probe.Info();
+    }
+    // frame count of the source: containers without one (MKV) report 0 -> unknown (-1)
+    r.sourceFrames = r.info.frameCount > 0 ? r.info.frameCount : -1;
+    r.ctx.needed = options.frames > 0 ? (r.sourceFrames > 0 ? std::min<int64_t>(options.frames, r.sourceFrames) : options.frames) : r.sourceFrames;
+    r.ctx.skipExisting = options.skipExisting;
+    if (options.passesRoot.empty() && options.output.empty()) Throw("process: --passes or -o/--output is needed to locate the passes");
+    r.ctx.root = options.passesRoot.empty() ? options.output.parent_path() / (options.output.stem().string() + "_passes") : options.passesRoot;
+    for (const auto& s : options.stages) {
+        if (std::find(ProcessStageOrder().begin(), ProcessStageOrder().end(), s.name) == ProcessStageOrder().end())
+            Throw("process: unknown stage '" + s.name + "' (depth | flow | upscale | nr | fg)");
+        if (s.enabled) r.wanted[s.name] = s;
+    }
+    r.sourceFile = options.input.filename().string();
+    r.ctx.sourceHash = "sha256:" + Sha256File(options.input);
+    return r;
+}
+
+std::string ProjectedFinalPass(const PlanState& s) {
+    for (const char* n : {"color_fg", "color_nr", "color_sr"})
+        if (s.fp.count(n)) return n;
+    return {};
+}
+
 }  // namespace
 
 nlohmann::json ProcessStageReport::ToJson() const {
-    return {{"name", name},     {"status", status},   {"reason", reason},          {"out_dir", outDir.string()},
-            {"frames", frames}, {"seconds", seconds}, {"ms_per_frame", msPerFrame}, {"details", details}};
+    return {{"name", name},         {"status", status},         {"reason", reason},     {"out_dir", outDir.string()}, {"frames", frames},
+            {"seconds", seconds},   {"ms_per_frame", msPerFrame}, {"details", details}, {"fingerprint", fingerprint},  {"retired", retired},
+            {"restored", restored}, {"decision", decision}};
 }
 
 nlohmann::json ProcessResult::ToJson() const {
@@ -119,6 +387,19 @@ nlohmann::json ProcessResult::ToJson() const {
     for (const auto& s : stages) st.push_back(s.ToJson());
     return {{"stages", st},         {"final_pass", finalPass.string()}, {"output", output.string()}, {"frames_in", framesIn}, {"frames_out", framesOut},
             {"output_fps", outputFps.ToDouble()}, {"audio", audio},   {"seconds", seconds}};
+}
+
+nlohmann::json StageDecision::ToJson() const {
+    return {{"name", name},       {"action", action},   {"kind", kind},         {"detail", detail},   {"diff", diff},
+            {"fingerprint", fingerprint}, {"current", current}, {"current_fingerprint", currentFingerprint}, {"version", version}, {"outputs", outputs},
+            {"out_dir", outDir.string()}, {"frames", frames}, {"retire", retire}, {"params", params}, {"inputs", inputs}, {"tool", tool}};
+}
+
+nlohmann::json ProcessPlan::ToJson() const {
+    nlohmann::json st = nlohmann::json::array();
+    for (const auto& s : stages) st.push_back(s.ToJson());
+    return {{"passes_root", passesRoot.string()}, {"source_hash", sourceHash}, {"frames", frames},       {"stages", st},
+            {"final_pass", finalPass},            {"run_count", runCount},    {"reuse_count", reuseCount}};
 }
 
 const std::vector<std::string>& ProcessStageOrder() {
@@ -226,6 +507,27 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     return r;
 }
 
+ProcessPlan PlanProcess(const ProcessOptions& options) {
+    ProcessPlan plan;
+    if (options.passthrough) return plan;  // nothing to decide: the source goes straight to the encoder
+    const Prepared pr = Prepare(options);
+    plan.passesRoot = pr.ctx.root;
+    plan.sourceHash = pr.ctx.sourceHash;
+    plan.frames = pr.ctx.needed;
+    PlanState state;
+    RefreshFromDisk(state, pr.ctx.root);
+    for (const std::string& name : ProcessStageOrder()) {
+        const auto it = pr.wanted.find(name);
+        if (it == pr.wanted.end()) continue;
+        StageDecision d = DecideStage(pr.ctx, it->second, state);
+        Advance(state, d);
+        (d.action == "run" ? plan.runCount : plan.reuseCount)++;
+        plan.stages.push_back(std::move(d));
+    }
+    plan.finalPass = ProjectedFinalPass(state);
+    return plan;
+}
+
 ProcessResult RunProcess(const ProcessOptions& options) {
     const auto tAll = Clock::now();
     ProcessResult result;
@@ -281,16 +583,12 @@ ProcessResult RunProcess(const ProcessOptions& options) {
     }
 
     // ---- stages over the pass cache ----
-    const std::filesystem::path root = options.passesRoot.empty() ? options.output.parent_path() / (options.output.stem().string() + "_passes") : options.passesRoot;
+    const Prepared pr = Prepare(options);
+    const RunContext& ctx = pr.ctx;
+    const std::filesystem::path& root = ctx.root;
     std::filesystem::create_directories(root);
-    std::map<std::string, ProcessStage> wanted;
-    for (const auto& s : options.stages) {
-        if (std::find(ProcessStageOrder().begin(), ProcessStageOrder().end(), s.name) == ProcessStageOrder().end())
-            Throw("process: unknown stage '" + s.name + "' (depth | flow | upscale | nr | fg)");
-        if (s.enabled) wanted[s.name] = s;
-    }
-    const std::string sourceFile = options.input.filename().string();
-    const std::string sourceHash = "sha256:" + Sha256File(options.input);
+    const std::string& sourceFile = pr.sourceFile;
+    const std::string& sourceHash = ctx.sourceHash;
     D3D12Device device({options.warp, false});
     auto progressFor = [&](const std::string& stage) {
         return [&, stage](int64_t n) {
@@ -298,23 +596,54 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         };
     };
 
+    PlanState state;
+    bool retiredAny = false;
     for (const std::string& name : ProcessStageOrder()) {
-        const auto it = wanted.find(name);
-        if (it == wanted.end()) continue;
+        const auto it = pr.wanted.find(name);
+        if (it == pr.wanted.end()) continue;
         const nlohmann::json& p = it->second.params;
+        RefreshFromDisk(state, root);  // the decision looks at what is really on disk now (a stage may have been disabled)
+        const StageDecision d = DecideStage(ctx, it->second, state);
         ProcessStageReport rep;
         rep.name = name;
-        const int fgMult = name == "fg" ? Get<int>(p, "multiplier", 2) : 1;
-        const std::filesystem::path checkDir = root / (name == "depth" ? "depth_dlss" : name == "flow" ? "mv_dlss" : name == "upscale" ? "color_sr" : name == "nr" ? "color_nr" : "color_fg");
-        const int64_t neededHere = needed > 0 ? (name == "fg" ? FgFrameCount(needed, fgMult) : needed) : -1;
-        if (options.skipExisting && PassComplete(checkDir, neededHere, sourceHash)) {
+        rep.decision = d.ToJson();
+        rep.fingerprint = d.fingerprint;
+        auto framesOf = [&]() { return d.frames > 0 ? d.frames : PassReader::Open(d.outDir).Man().frameCount; };
+        if (d.action == "reuse") {
             rep.status = "reused";
-            rep.outDir = checkDir;
-            rep.frames = neededHere > 0 ? neededHere : PassReader::Open(checkDir).Man().frameCount;
-            Log()->info("process: {} — {} is complete, reused", name, checkDir.string());
+            rep.outDir = d.outDir;
+            rep.frames = framesOf();
+            if (d.kind == "legacy") {
+                rep.reason = "adopted: " + d.detail;
+                for (const auto& pass : StageFamilyPasses(name))
+                    if (Manifest::Exists(root / pass)) StampPass(root / pass, d, FileTimeIso8601(root / pass / Manifest::kFileName));
+            }
+            Log()->info("process: {} — {} is complete, reused{}", name, d.outDir.string(), d.kind == "legacy" ? " (adopted)" : "");
             result.stages.push_back(rep);
             continue;
         }
+        if (d.action == "restore") {
+            for (const auto& pass : StageFamilyPasses(name)) {
+                bool has = false;
+                for (const auto& v : ListPassVersions(root, pass)) has = has || (!v.current && v.id == d.version);
+                if (has && UsePassVersion(root, pass, d.version)) retiredAny = true;
+            }
+            rep.status = "reused";
+            rep.outDir = d.outDir;
+            rep.restored = d.version;
+            rep.reason = "restored: " + d.detail;
+            rep.frames = framesOf();
+            state.ran.insert(d.outputs.begin(), d.outputs.end());
+            Log()->info("process: {} — version {} restored from the history", name, d.version);
+            result.stages.push_back(rep);
+            continue;
+        }
+        if (d.retire)
+            for (const auto& pass : StageFamilyPasses(name))
+                if (const auto id = RetirePassVersion(root, pass)) {
+                    if (pass == d.outputs.back() || rep.retired.empty()) rep.retired = *id;
+                    retiredAny = true;
+                }
         const auto t0 = Clock::now();
         try {
             if (name == "depth") {
@@ -398,10 +727,25 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             Throw("process: stage '" + name + "' failed: " + e.what());
         }
         rep.seconds = Seconds(t0);
-        if (rep.status.empty()) rep.status = "ran";
+        if (rep.status.empty()) {
+            rep.status = "ran";
+            rep.reason = d.kind + ": " + d.detail;
+            const std::string created = NowIso8601();
+            for (const auto& pass : StageFamilyPasses(name))
+                if (Manifest::Exists(root / pass)) StampPass(root / pass, d, created);
+            state.ran.insert(d.outputs.begin(), d.outputs.end());
+        } else {
+            rep.fingerprint.clear();  // disabled: nothing was written
+        }
         rep.msPerFrame = rep.frames ? 1000.0 * rep.seconds / static_cast<double>(rep.frames) : 0.0;
-        if (rep.status == "ran") Log()->info("process: {} done — {} frames in {:.1f} s ({:.1f} ms/frame)", name, rep.frames, rep.seconds, rep.msPerFrame);
+        if (rep.status == "ran")
+            Log()->info("process: {} done — {} frames in {:.1f} s ({:.1f} ms/frame), {} ({})", name, rep.frames, rep.seconds, rep.msPerFrame, ShortFingerprint(d.fingerprint),
+                        rep.reason);
         result.stages.push_back(rep);
+    }
+    if (retiredAny && options.keepVersions > 0) {
+        const PassGcReport gc = GcPassVersions(root, options.keepVersions);
+        if (!gc.removed.empty()) Log()->info("process: {} old pass version(s) removed ({} MB), {} kept per pass", gc.removed.size(), gc.bytes / (1024 * 1024), options.keepVersions);
     }
 
     // ---- encode the last colour pass, or pass the source through ----
@@ -430,6 +774,10 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         enc.status = "ran";
         enc.outDir = result.finalPass;
         enc.frames = r.frames;
+        try {
+            enc.fingerprint = Manifest::Load(result.finalPass).fingerprint;
+        } catch (...) {
+        }
         result.framesOut = r.frames;
         result.framesIn = r.sourceFrames;
         result.outputFps = r.fps;

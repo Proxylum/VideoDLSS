@@ -124,9 +124,21 @@ BT.709: Kr = 0.2126, Kb = 0.0722;  BT.601: Kr = 0.299, Kb = 0.114;  Kg = 1 − K
   "source": {"file": "clip.mp4", "hash": "sha256:…"},
   "stage_params": {},
   "depth": {"units": "meters", "relative": false, "near": 0.1, "far": 1000.0, "min": 0, "max": 0},
-  "mv": {"direction": "forward", "y_up": false, "ref_width": 0, "ref_height": 0}
+  "mv": {"direction": "forward", "y_up": false, "ref_width": 0, "ref_height": 0},
+  "fingerprint": "sha256:…",
+  "inputs": {"color_sr": "sha256:…", "depth_dlss": "sha256:…", "mv_dlss": "sha256:…"},
+  "tool": {"app": "0.1.0", "backend": "ngx", "model": "", "model_hash": "", "dll_file": "nvngx_dlssnr.dll", "dll": "sha256:…"},
+  "params_canonical": {"backend": "ngx", "intensity": 1.4},
+  "created": "2026-09-22T14:09:31Z"
 }
 ```
+
+Последние пять полей (этап 9) пишет только `dlssvid process`: `fingerprint` — отпечаток прогона, по которому пасс
+переиспользуется (`docs/architecture.md`, «Отпечатки и версии пассов»), `inputs` — отпечатки прочитанных пассов,
+`tool` — версия приложения, бэкенд, модель и sha256 NVIDIA DLL, `params_canonical` — параметры стадии в
+канонической записи, `created` — время завершения (UTC). У пассов, записанных `dlssvid <stage>` вручную или до
+этапа 9, полей нет — такой пасс «текущий» и усыновляется первым `process`. Предыдущие версии пасса лежат рядом:
+`<pass>.v/<YYYYMMDD-HHMMSS_<fp8>>/` (тот же формат папки).
 
 Импорт без манифеста: папка сканируется по нумерованным файлам одного формата, пользователь
 указывает `--pass` (и `--convention`, `--size WxH` для бинарных дампов); `--write-manifest`
@@ -141,4 +153,5 @@ dlssvid export  --from-dir out/depth_raw -o out/depth_npz --format npz
 dlssvid export  -i clip.mp4 -o out/nuke --preset nuke --depth-dir out/depth_raw --mv-dir out/mv_raw
 dlssvid import  -i out/depth_raw [--expect-size 1920x1080 --expect-frames 300] [--to-dlss out/depth_dlss --near 0.1 --far 1000]
 dlssvid convert -i out/mv_raw -o out/mv_dlss --to mv_dlss --target 3840x2160 --depth-dir out/depth_raw --dilate 1
+dlssvid passes  list|use <pass|stage> <version>|gc [--keep N] [--dry-run]  --passes out | --project clip.dlssvid.json   (этап 9: версии пассов)
 ```

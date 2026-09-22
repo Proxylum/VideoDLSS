@@ -56,6 +56,8 @@ add_library(dlssvid_core STATIC
   pipeline/IStage.h
   pipeline/Pipeline.h pipeline/Pipeline.cpp
   pipeline/ProcessRunner.h pipeline/ProcessRunner.cpp
+  pipeline/PassFingerprint.h pipeline/PassFingerprint.cpp
+  pipeline/PassVersions.h pipeline/PassVersions.cpp
   gpu/D3D12Device.h gpu/D3D12Device.cpp
   gpu/GpuFrameCache.h gpu/GpuFrameCache.cpp
   io/VideoDecoder.h io/VideoDecoder.cpp

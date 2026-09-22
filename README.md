@@ -152,13 +152,23 @@ dlssvid compare --ref full_rate.mp4 --test passes\color_fg --start 1 --step 2   
 ```
 
 The whole pipeline (stage 8): stages run one after another over the pass cache, a complete pass is reused, the last
-colour pass is encoded with the audio copied from the source. Stage parameters are the project's JSON keys.
+colour pass is encoded with the audio copied from the source. Stage parameters are the project's JSON keys. A pass is
+reused only when its fingerprint matches (stage 9: source hash, canonical parameters, the fingerprints of the passes it
+read, the tool — app version, backend, model, NVIDIA DLL hash); a changed parameter recomputes that stage and the ones
+below it, the replaced folder is kept as a version in `<pass>.v/` and comes back without recomputing when the
+parameters return. `process --plan` shows the decisions first; `passes list|use|gc` manage the versions
+(`docs/architecture.md`, «Отпечатки и версии пассов»).
 
 ```bat
 dlssvid process -i input.mp4 -o result.mp4                                            :: depth -> flow -> upscale x2 -> nr -> fg x2 -> encode (+ audio)
 dlssvid process --project clip.dlssvid.json                                           :: the stages and parameters the GUI saved (button «Обработать → result»)
 dlssvid process -i input.mp4 -o result.mp4 --stages upscale,fg --scale 1.5 --multiplier 2 --param fg.backend=rife
 dlssvid process -i input.mp4 -o result.mp4 --no-skip-existing --disable-unavailable   :: recompute everything; skip nr / fg without a DLL
+dlssvid process --project clip.dlssvid.json --plan [--json plan.json]                 :: what would run or be reused and why (fingerprints, versions) — nothing is processed
+dlssvid process -i input.mp4 -o result.mp4 --param nr.intensity=1.4 --keep-versions 3 :: only nr, fg and the encode rerun; the old color_nr / color_fg stay as versions (default keep: 2)
+dlssvid passes list --passes result_passes [--pass color_nr] [--json list.json]       :: every pass: the current version and the previous ones (fingerprint, parameters, size)
+dlssvid passes use color_nr 20260922-140200 --passes result_passes                   :: switch a pass (or a whole stage: nr) to a previous version; the current one is kept
+dlssvid passes gc --project clip.dlssvid.json [--keep 2] [--dry-run]                  :: drop old versions beyond the newest N per pass (versions other passes list as inputs stay)
 dlssvid bench -i input.mp4 --frames 30 --json bench.json                              :: ms/frame per stage (ТЗ §9)
 dlssvid process -i input.mp4 -o out.mp4 --passthrough --codec ffv1                    :: stage 0: decode -> GPU -> encode
 ```
@@ -181,7 +191,8 @@ core/       gpu/ (D3D12, CUDA interop, frame cache) · io/ (decode, encode) · p
             viewport/ (ViewportState, ViewportRenderer + shaders/, FrameStore, Project)
             stages/upscale (IUpscaler, DlssUpscaler — NGX, NisUpscaler, BicubicUpscaler / Resampler, RtxVsrUpscaler stub, Jitter, UpscaleStage)
             gpu/ComputeKernel (compute PSO + descriptor rings) · passes/ImageMetrics (PSNR, SSIM) · gpu/Ngx (NGX core, shared by DLSS SR and NR)
-            pipeline/ProcessRunner (the whole pipeline over the pass cache + encode with audio; `process`, `bench`)
+            pipeline/ProcessRunner (the whole pipeline over the pass cache + encode with audio; `process`, `bench`; `PlanProcess` = `process --plan`)
+            pipeline/PassFingerprint (canonical JSON, tool identity, the fingerprint a pass is reused by) · pipeline/PassVersions (`<pass>.v/` history: retire, use, list, gc; `passes`)
             stages/tonemap (Tonemapper: passthrough / ACES / Reinhard, sRGB / linear / PQ / HLG in)
             stages/nr (INrBackend, NgxNrBackend — NGX Feature 18 + forwarder/ nvngx.dll_dlssvid.dll, StubNrBackend, NrCompose — resolve / masks / temporal, NrStage, NrPatch)
             stages/fg (IFrameGenerator, DlssgFrameGenerator — NGX Frame Generation, RifeFrameGenerator — TensorRT, BlendFrameGenerator, FgStage)

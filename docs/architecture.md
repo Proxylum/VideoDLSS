@@ -246,10 +246,53 @@ dlssvid process ── ProcessRunner::RunProcess ── depth ─▶ flow ─▶
   (`tests/check_ninja_deps.cmake`) проверяет после сборки, что у каждого объекта с проектными включениями есть
   зависимости; пресеты задают `VSLANG=1033` (действует после установки английского пакета); CI собирает с нуля.
 
+### Отпечатки и версии пассов (этап 9, MR A)
+
+```
+PlanProcess / RunProcess ── для каждой включённой стадии ── DecideStage(что на диске, что решено выше)
+   отпечаток = sha256(канонический JSON {source, stage, params, inputs: {пасс → отпечаток}, tool: {app, backend, model, model_hash, dll_file, dll}})
+   манифест <root>/<pass>/:  совпал и полный ─▶ reuse (exact)          │ совпал, кадров мало ─▶ run (incomplete, на месте)
+                             без отпечатка   ─▶ reuse (legacy, штамп)  │ другой ─▶ такая версия в истории ─▶ restore
+                                                                       │         иначе run (source_changed | params_changed | input_changed | tool_changed) + retire
+   run: <root>/<pass>/ ─▶ <root>/<pass>.v/<YYYYMMDD-HHMMSS_<fp8>>/, стадия пишет на место, манифест получает
+        fingerprint / inputs / tool / params_canonical / created; после прогона gc (keepVersions, по умолчанию 2)
+```
+
+- `core/pipeline/PassFingerprint`: `CanonicalizeJson` (ключи отсортированы, `2.0 == 2`, строка ≠ число),
+  `ToolForStage` — идентичность инструмента до запуска: бэкенд после умолчаний стадии, id модели
+  (`TrtDepthEstimator::DefaultModel`, `flow.model`, `fg.model`) и его sha256 из `models/registry.json`, NVIDIA DLL,
+  которую бэкенд загрузит (`NvidiaDllSearchPaths` / `FindNrDll` / `FindDlssgDll`), её sha256 кэшируется по
+  (путь, размер, mtime). Таблицы стадий (`StageOutputPasses`, `StageFamilyPasses`, `StageInputCandidates`) повторяют
+  `ExistingPass()` раннера: flow читает `depth_raw`, upscale — `depth_dlss`/`mv_dlss`, nr — `color_sr` + guides +
+  `mask_*`, fg — `color_nr`, иначе `color_sr`.
+- `core/pipeline/PassVersions`: текущая версия остаётся в `<root>/<pass>/` (ни один читатель не меняется), история —
+  `<root>/<pass>.v/<id>/`, id = `created` манифеста (иначе mtime) + 8 символов отпечатка (`legacy` без него,
+  `partial` для папки без манифеста). `RetirePassVersion` / `UsePassVersion` (обмен папок, id или уникальный префикс) /
+  `ListPassVersions` / `GcPassVersions`: держит `keep` новейших на пасс (текущая считается), не трогает версии, на
+  которые ссылаются `inputs` любой версии любого пасса; обходит пассы от конца конвейера (снятая версия `color_fg`
+  освобождает версию `color_nr` в том же вызове), dry-run имитирует удаления.
+- `ProcessRunner`: одно решение `DecideStage` для плана и прогона. План идёт по проекции (отпечатки, которые стадии
+  выше произведут), прогон перечитывает диск перед каждой стадией — отключённый `nr` (`--disable-unavailable`)
+  оставляет `fg` читать `color_sr`, и это попадает в отпечаток `color_fg`. Штамп ставится после успешного завершения
+  стадии на все папки её семейства (`depth_raw` + `depth_dlss`); упавшая или отключённая стадия штамп не получает,
+  снятая версия остаётся в истории. Число кадров в отпечаток не входит — это проверка полноты (`incomplete` →
+  пересчёт на месте, версия не создаётся); `--no-skip-existing` при равном отпечатке тоже пишет на место.
+  Пассы без отпечатка (этап 8, `dlssvid <stage>` вручную) усыновляются при первом прогоне — только если совпадает хэш
+  исходника и ни один их вход в этом плане не пересчитывается; иначе пересчёт.
+- Манифест: блок `fingerprint`, `inputs`, `tool`, `params_canonical`, `created` (`docs/conventions.md` §6),
+  schema_version прежняя; блок пишет только `dlssvid process`. Отчёт `process --json`: `fingerprint`, `retired`,
+  `restored`, `decision` у каждой стадии; `process --plan --json` — план целиком.
+- CLI: `process --plan`, `--keep-versions N` (проект: `pass_versions_keep`, по умолчанию 2, 0 = хранить всё);
+  `passes list|use|gc` (`cli/PassesCommands`). GUI подключается в MR D (карточки стадий показывают решения плана).
+- Границы: параметры сравниваются как заданы (явный default ≠ отсутствие ключа → лишний пересчёт, но не ложное
+  переиспользование; схема параметров MR D канонизирует); версии итогового видео не ведутся; хэш DLL — той, что
+  найдена в момент плана.
+
 ## Хаки и временные решения
 
 | Где | Что | Почему | Когда убираем |
 |---|---|---|---|
+| `PassFingerprint::ToolForStage`, `DecideStage` | параметры стадии хэшируются как заданы, без умолчаний стадии | схемы параметров ещё нет; лишний пересчёт безопаснее ложного переиспользования | MR D: канонизация через `ParamSchema` |
 | `VideoDecoder::ReceiveFrame` | NVDEC-кадры скачиваются на CPU (`av_hwframe_transfer_data`) | этап 0 проверяет bit-exact путь, а не производительность | этап 2: NVDEC → CUDA → D3D12 без CPU |
 | `VideoDecoder::ConvertFrame` | не-8-бит-4:2:0 источники → swscale → yuv420p (lossy) | стадии работают в 8-бит 4:2:0 до появления GPU-конверсии | этап 2: RGBA16F на GPU |
 | `PassthroughStage` | round-trip upload → readback каждого кадра | доказательство корректности пути GPU | остаётся как диагностический режим |

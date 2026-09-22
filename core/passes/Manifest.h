@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
@@ -61,6 +62,12 @@ struct Manifest {
     nlohmann::json stageParams = nlohmann::json::object();
     DepthParams depth;
     MvParams mv;
+    // Stage 9 (MR A): written by ProcessRunner after a run — empty in passes made by a standalone `dlssvid <stage>`.
+    std::string fingerprint;                    // "sha256:<hex>" of the run that produced the pass (PassFingerprint.h)
+    std::map<std::string, std::string> inputs;  // input pass -> its fingerprint at the time of the run
+    nlohmann::json tool = nlohmann::json::object();             // ToolInfo: app version, backend, model, DLL hash
+    nlohmann::json paramsCanonical = nlohmann::json::object();  // canonical stage parameters the fingerprint hashed
+    std::string created;                        // ISO-8601 UTC, when the pass was finished (or adopted)
 
     static Manifest ForPass(PassKind kind, uint32_t w, uint32_t h, FileFormat format);
 

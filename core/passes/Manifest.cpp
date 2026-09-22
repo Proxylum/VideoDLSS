@@ -102,6 +102,13 @@ nlohmann::json Manifest::ToJson() const {
     j["depth"] = {{"units", depth.units}, {"relative", depth.relative}, {"near", depth.zNear},
                   {"far", depth.zFar},     {"min", depth.minValue},      {"max", depth.maxValue}};
     j["mv"] = {{"direction", mv.direction}, {"y_up", mv.yUp}, {"ref_width", mv.refWidth}, {"ref_height", mv.refHeight}};
+    if (!fingerprint.empty()) {  // only passes stamped by ProcessRunner carry the version block
+        j["fingerprint"] = fingerprint;
+        j["inputs"] = inputs;
+        j["tool"] = tool;
+        j["params_canonical"] = paramsCanonical;
+        j["created"] = created;
+    }
     return j;
 }
 
@@ -157,6 +164,12 @@ Manifest Manifest::FromJson(const nlohmann::json& j) {
         m.mv.refWidth = v.value("ref_width", 0u);
         m.mv.refHeight = v.value("ref_height", 0u);
     }
+    m.fingerprint = j.value("fingerprint", "");
+    if (j.contains("inputs") && j["inputs"].is_object())
+        for (const auto& [k, v] : j["inputs"].items()) m.inputs[k] = v.is_string() ? v.get<std::string>() : "";
+    m.tool = j.value("tool", nlohmann::json::object());
+    m.paramsCanonical = j.value("params_canonical", nlohmann::json::object());
+    m.created = j.value("created", "");
     if (m.width == 0 || m.height == 0) Throw("manifest: width/height missing");
     if (m.filePattern.empty()) m.filePattern = m.pass + "_%06d" + ExtensionFor(m.format, m.pixelType, m.channels.size());
     return m;

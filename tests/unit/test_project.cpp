@@ -57,6 +57,7 @@ TEST_CASE("Project saves relative paths and loads them back absolute", "[viewpor
     p.viewport.view = ViewTransform{2.f, 100.f, 50.f};
     p.viewport.frame = 17;
     p.viewport.gridSources = {"source", "depth_raw", "mv_dlss", "color_sr"};
+    p.passVersionsKeep = 3;
     p.Save(d / "sub" / "proj.dlssvid.json");
     REQUIRE(std::filesystem::exists(d / "sub" / "proj.dlssvid.json"));
     CHECK(p.file == std::filesystem::absolute(d / "sub" / "proj.dlssvid.json"));
@@ -70,6 +71,7 @@ TEST_CASE("Project saves relative paths and loads them back absolute", "[viewpor
     CHECK(j["result"] == "../out/result.mp4");
     CHECK(j["stages"][0]["enabled"] == false);
     CHECK(j["viewport"]["frame"] == 17);
+    CHECK(j["pass_versions_keep"] == 3);
 
     const Project q = Project::Load(d / "sub" / "proj.dlssvid.json");
     CHECK(q.sourceVideo == std::filesystem::absolute(d / "clip.mp4").lexically_normal());
@@ -77,6 +79,8 @@ TEST_CASE("Project saves relative paths and loads them back absolute", "[viewpor
     CHECK(q.resultVideo == std::filesystem::absolute(d / "out" / "result.mp4").lexically_normal());
     CHECK(q.stages == p.stages);
     CHECK(q.viewport == p.viewport);
+    CHECK(q.passVersionsKeep == 3);
+    CHECK(Project::FromJson(nlohmann::json::parse(R"({"schema_version": 1})"), d).passVersionsKeep == 2);  // default when absent
 
     // unsupported schema and a broken file are errors
     std::ofstream(d / "bad.json") << "{\"schema_version\": 99}";
