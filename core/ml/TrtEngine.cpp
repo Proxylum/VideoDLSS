@@ -11,6 +11,7 @@
 #include "util/Error.h"
 #include "util/Half.h"
 #include "util/Log.h"
+#include "util/Paths.h"
 #include "util/Sha256.h"
 
 namespace dlssvid {
@@ -66,7 +67,7 @@ size_t ElementSize(nvinfer1::DataType t) {
 }
 
 std::vector<char> ReadAll(const std::filesystem::path& p) {
-    std::ifstream in(p, std::ios::binary);
+    std::ifstream in(Win32LongPath(p), std::ios::binary);  // engine cache names are long: past MAX_PATH in deep folders
     if (!in) Throw("cannot open " + p.string());
     return std::vector<char>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 }
@@ -119,7 +120,7 @@ std::unique_ptr<TrtEngine> TrtEngine::FromOnnx(const std::filesystem::path& onnx
     if (!std::filesystem::exists(onnx)) Throw("ONNX file not found: " + onnx.string());
 
     const std::filesystem::path cache = CachePathFor(onnx, options);
-    if (std::filesystem::exists(cache)) {
+    if (std::filesystem::exists(Win32LongPath(cache))) {
         Log()->info("TensorRT engine cache hit: {}", cache.string());
         return FromEngineFile(cache);
     }
@@ -174,9 +175,9 @@ std::unique_ptr<TrtEngine> TrtEngine::FromOnnx(const std::filesystem::path& onnx
 
     std::unique_ptr<nvinfer1::IHostMemory> plan(builder->buildSerializedNetwork(*network, *config));
     if (!plan) Throw("buildSerializedNetwork failed for " + onnxStr);
-    std::filesystem::create_directories(cache.parent_path());
+    std::filesystem::create_directories(Win32LongPath(cache.parent_path()));
     {
-        std::ofstream out(cache, std::ios::binary);
+        std::ofstream out(Win32LongPath(cache), std::ios::binary);
         if (!out) Throw("cannot write engine cache " + cache.string());
         out.write(static_cast<const char*>(plan->data()), static_cast<std::streamsize>(plan->size()));
     }

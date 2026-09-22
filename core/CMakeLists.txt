@@ -51,6 +51,7 @@ add_library(dlssvid_core STATIC
   util/Error.h util/Error.cpp
   util/Half.h
   util/Sha256.h util/Sha256.cpp
+  util/Paths.h util/Paths.cpp
   util/Subprocess.h util/Subprocess.cpp
   pipeline/Frame.h pipeline/Frame.cpp
   pipeline/IStage.h

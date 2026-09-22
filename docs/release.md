@@ -49,7 +49,8 @@ dlss-video/
 обычный пакет. Загрузчик ищет TensorRT в `bin\tensorrt` рядом с exe (после `DLSSVID_TENSORRT_DIR`/`TENSORRT_ROOT`),
 модели — в `models/cache` рядом с `registry.json`. TensorRT-движки под конкретную GPU собираются при первом запуске
 (DA3 ≈ 2 мин, VDA ≈ 4 мин, SEA-RAFT ≈ 2.5 мин) и кладутся в тот же `models/cache` — папка должна быть доступна
-на запись (распаковывайте не в Program Files, либо задайте `DLSSVID_MODELS_DIR`). ONNX другого соотношения сторон
+на запись (распаковывайте не в Program Files, либо задайте `DLSSVID_MODELS_DIR`); глубина папки не важна — имена
+движков длинные, и пути за 260 символов открываются через `\\?\` (`core/util/Paths.h`, с 0.2.0). ONNX другого соотношения сторон
 (не 16:9 и не 2.4:1) по-прежнему требует экспорта через venv (`docs/dll-setup.md`).
 
 ## Установка на чистой машине
@@ -75,6 +76,19 @@ C:\dlss-video\bin\dlssvid_golden_tests.exe "[golden]~[gpu]"   :: только д
 
 Эталоны (`tests/golden/ref/`) перезаписываются разработчиком командой `set DLSSVID_GOLDEN_UPDATE=1` перед запуском
 теста из build-дерева — только когда изменение результата осознанно (новая версия NIS, тонмаппинга и т. п.).
+
+## Выпуск версии
+
+1. Ветка `release/X.Y.Z`: `project(dlss-video VERSION X.Y.Z)` в `CMakeLists.txt`, раздел в `CHANGELOG.md`, строка версии в README.
+   Версия релиза не входит в отпечатки пассов: поле `tool.app` — версия алгоритма пассов `kPassToolVersion`
+   (`core/pipeline/PassFingerprint.h`), её поднимают отдельно и только когда результат стадии меняется при тех же
+   параметрах, иначе релиз обесценил бы все пассы пользователей.
+2. Локально: сборка, `ctest`, `scripts\package.cmd` (и `full`), распаковать ZIP во временную папку, golden на распакованной
+   копии (`DLSSVID_CLI`, `DLSSVID_GOLDEN_DIR`; для `[gpu]`-части положить DLL NVIDIA в её `bin\nvidia`).
+3. MR → CI → слияние в `main` → аннотированный тег `vX.Y.Z` на merge-коммите → push тега: пайплайн тега собирает
+   `dlss-video-X.Y.Z-win64.zip` (job `package`, артефакт хранится месяц) → GitLab Release на теге (API `releases`) с разделом
+   CHANGELOG и ссылкой на артефакт `https://git.krem.digital/ai/video-dlss/-/jobs/artifacts/vX.Y.Z/download?job=package`.
+4. Полный пакет (несколько ГБ) в CI не собирается — собирается на машине разработчика и выкладывается вручную.
 
 ## Полный прогон
 

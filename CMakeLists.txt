@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(dlss-video
-  VERSION 0.1.0
+  VERSION 0.2.0
   DESCRIPTION "Offline DLSS video pipeline (SR / NR / FG) for Windows + NVIDIA RTX"
   LANGUAGES CXX)
 
@@ -192,7 +192,7 @@ install(FILES models/registry.json DESTINATION models)
 install(DIRECTORY models/export/ DESTINATION models/export PATTERN ".venv" EXCLUDE PATTERN "__pycache__" EXCLUDE)
 install(DIRECTORY depth_worker/ DESTINATION depth_worker PATTERN ".venv" EXCLUDE PATTERN "__pycache__" EXCLUDE)
 install(DIRECTORY docs/ DESTINATION docs)
-install(FILES README.md DESTINATION .)
+install(FILES README.md CHANGELOG.md DESTINATION .)
 
 set(CPACK_PACKAGE_NAME "dlss-video")
 set(CPACK_PACKAGE_VENDOR "VideoDLSS")

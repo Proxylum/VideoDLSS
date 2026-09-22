@@ -347,7 +347,8 @@ dlssvid process ── ProcessRunner::RunProcess ── depth ─▶ flow ─▶
 
 ```
 PlanProcess / RunProcess ── для каждой включённой стадии ── DecideStage(что на диске, что решено выше)
-   отпечаток = sha256(канонический JSON {source, stage, params, inputs: {пасс → отпечаток}, tool: {app, backend, model, model_hash, dll_file, dll}})
+   отпечаток = sha256(канонический JSON {source, stage, params, inputs: {пасс → отпечаток}, tool: {app, backend, model, model_hash, dll_file, dll}});
+   `tool.app` — версия алгоритма пассов `kPassToolVersion` (с 0.2.0 не равна версии релиза: релиз не обесценивает пассы)
    манифест <root>/<pass>/:  совпал и полный ─▶ reuse (exact)          │ совпал, кадров мало ─▶ run (incomplete, на месте)
                              без отпечатка   ─▶ reuse (legacy, штамп)  │ другой ─▶ такая версия в истории ─▶ restore
                                                                        │         иначе run (source_changed | params_changed | input_changed | tool_changed) + retire

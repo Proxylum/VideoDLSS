@@ -8,6 +8,11 @@
 
 namespace dlssvid {
 
+// The «app» part of the tool in a pass fingerprint. It is NOT the release version (DLSSVID_VERSION): a release that
+// changes nothing in what a stage writes must not invalidate every pass on disk. Bump it only when a stage's output
+// changes for the same parameters, inputs, model and DLL (a new tonemap, a different NIS, …).
+constexpr const char* kPassToolVersion = "0.1.0";
+
 // Pass fingerprints (stage 9, MR A — docs/architecture.md «Отпечатки и версии пассов»). A pass is reused only when the
 // fingerprint of the run that would produce it equals the one stored in its manifest:
 //   fingerprint = sha256(canonical JSON of {source hash, stage, canonical parameters, input pass fingerprints, tool})
@@ -20,7 +25,7 @@ std::string CanonicalJson(const nlohmann::json& j);
 // What computes a pass, as far as it is known before the run: application version, backend, model id and its registry
 // hash, the NVIDIA DLL the backend loads (sha256 of the file found in the search path).
 struct ToolInfo {
-    std::string app;        // DLSSVID_VERSION
+    std::string app;        // kPassToolVersion: the pass algorithm version, not the release
     std::string backend;    // the stage's backend after defaults
     std::string model;      // registry id (depth / flow / rife); empty when the backend has no model
     std::string modelHash;  // sha256 from models/registry.json when the entry lists one
