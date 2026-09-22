@@ -35,6 +35,7 @@ private:
     void runStage(const std::string& stage);
     void processAll();  // save the project and run `dlssvid process --project` (the whole pipeline -> result)
     void patchDll();    // nr stage: dlssnr-patcher over the user's nvngx_dlssnr.dll (`dlssvid nr-patch`)
+    void choosePassesRoot();  // «Пассы · изменить…»: another folder for the passes (tens of GB)
 
     AppModel& model_;
     TaskQueue& tasks_;
@@ -42,6 +43,7 @@ private:
     QLabel* sourceFrame_;
     QLabel* sourceAudio_;
     QLabel* sourcePasses_;
+    QPushButton* changePasses_;
     QLabel* sourceHash_;
     QLabel* outVideo_;
     QLabel* outTime_;

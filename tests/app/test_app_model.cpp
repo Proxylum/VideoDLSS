@@ -775,6 +775,20 @@ TEST_CASE("AppModel result: summary and bar, export copy, exportable passes, chi
     CHECK(chips[2].source == "result");
     CHECK(model.freeSpace() > 0);
 
+    // another passes folder: the project points there, the passes come from there, the file remembers it
+    WritePassFps(d / "passes2" / "color_sr", PassKind::ColorSr, 4, 24);
+    QSignalSpy projectChanges(&model, &AppModel::projectChanged);
+    model.setPassesRoot(Q(d / "passes2"));
+    CHECK(model.dirty());
+    CHECK(projectChanges.count() == 1);
+    CHECK(model.project().passesRoot == d / "passes2");
+    CHECK(model.exportablePasses() == std::vector<std::string>{"color_sr"});
+    model.setPassesRoot(Q(d / "passes2"));  // the same folder again: nothing happens
+    CHECK(projectChanges.count() == 1);
+    REQUIRE(model.saveProject());
+    CHECK(Project::Load(d / "proj.dlssvid.json").passesRoot == d / "passes2");
+    CHECK(!model.dirty());
+
     // closing the project: nothing is shown, the recents keep it
     QSignalSpy closed(&model, &AppModel::projectChanged);
     REQUIRE(model.closeProject());

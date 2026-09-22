@@ -323,10 +323,12 @@ void MainWindow::updateCellLabels() {
     }
 }
 
-// «source  #123 · 00:05.12», plus the state while the frame is not on screen (stage 9: no silent black cells).
+// «Исходник · 1920×800  #123 · 00:05.12», plus the state while the frame is not on screen (stage 9: no silent black cells).
 QString MainWindow::cellLabel(const QString& title, const std::string& source, bool withTime) {
     const double t = model_.time();
-    QString s = QString("%1  #%2").arg(title).arg(model_.store().FrameAt(source, t));
+    QString s = title;
+    if (const ViewportSource* src = model_.store().FindSource(source); src && src->width > 0) s += QString(" · %1×%2").arg(src->width).arg(src->height);
+    s += QString("  #%1").arg(model_.store().FrameAt(source, t));
     if (withTime) s += QString(" · %1").arg(QString::fromStdString(FormatTimecode(t)));
     switch (model_.frameStateOf(source)) {
         case FrameState::Loading: s += tr(" · загрузка…"); break;

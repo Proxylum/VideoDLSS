@@ -457,6 +457,16 @@ void AppModel::setEncode(const QString& codec, const std::map<std::string, std::
     emit projectChanged();
 }
 
+void AppModel::setPassesRoot(const QString& dir) {
+    const std::filesystem::path p(dir.toStdWString());
+    if (p.empty() || p == project_.passesRoot) return;
+    project_.passesRoot = p;
+    markDirty();
+    reloadSources();  // the passes found there and the plan against them
+    emit projectChanged();
+    emit message(tr("Папка пассов: %1").arg(dir));
+}
+
 QStringList AppModel::processArgs() const {
     QStringList args{"process", "--project", QString::fromStdWString(project_.file.wstring()), "--disable-unavailable"};
     if (!force_.empty()) {

@@ -106,6 +106,11 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
         sg->addWidget(value, row, 1);
         ++row;
     }
+    changePasses_ = new QPushButton(tr("изменить…"), sourceCard);
+    changePasses_->setFlat(true);
+    changePasses_->setToolTip(tr("Другая папка для пассов: промежуточные кадры стадий занимают десятки гигабайт"));
+    connect(changePasses_, &QPushButton::clicked, this, &ProjectPanel::choosePassesRoot);
+    sg->addWidget(changePasses_, 4, 2, Qt::AlignTop);  // the «Пассы» row
     sg->setColumnStretch(1, 1);
     layout->addWidget(sourceCard);
 
@@ -263,6 +268,7 @@ void ProjectPanel::refresh() {
         sourceFrame_->setText("—");
     sourceAudio_->setText(!hasSource ? "—" : src.audio ? tr("есть — будет скопирован") : tr("нет"));
     sourcePasses_->setText(hasSource ? QString::fromStdWString(p.passesRoot.wstring()) : "—");
+    changePasses_->setEnabled(hasSource && !tasks_.busy());
     const std::string hash = model_.plan().sourceHash;
     sourceHash_->setText(hash.empty() ? "—" : ShortHash(hash) + " · " + model_.sourceHashStatus());
     sourceHash_->setToolTip(QString::fromStdString(hash));
@@ -456,6 +462,19 @@ void ProjectPanel::runStage(const std::string& stage) {
         }
     }
     tasks_.enqueue(QString::fromStdString(st->name), model_.cliPath(), args);
+}
+
+void ProjectPanel::choosePassesRoot() {
+    if (!model_.hasProject()) return;
+    if (tasks_.busy()) {
+        QMessageBox::information(this, tr("Идёт обработка"), tr("Папку пассов можно сменить после окончания обработки."));
+        return;
+    }
+    const QString current = QString::fromStdWString(model_.project().passesRoot.wstring());
+    const QString dir = QFileDialog::getExistingDirectory(this, tr("Папка пассов (промежуточные кадры стадий, десятки ГБ)"), current.isEmpty() ? model_.lastDir("passes") : current);
+    if (dir.isEmpty()) return;
+    model_.rememberDir("passes", QDir(dir).filePath("."));
+    model_.setPassesRoot(dir);
 }
 
 void ProjectPanel::patchDll() {
