@@ -167,6 +167,7 @@ dlssvid process -i input.mp4 -o result.mp4 --stages upscale,fg --scale 1.5 --mul
 dlssvid process -i input.mp4 -o result.mp4 --no-skip-existing --disable-unavailable   :: recompute everything; skip nr / fg without a DLL
 dlssvid process --project clip.dlssvid.json --plan [--json plan.json]                 :: what would run or be reused and why (fingerprints, versions) — nothing is processed
 dlssvid process -i input.mp4 -o result.mp4 --param nr.intensity=1.4 --keep-versions 3 :: only nr, fg and the encode rerun; the old color_nr / color_fg stay as versions (default keep: 2)
+dlssvid process --project clip.dlssvid.json --force nr,fg                            :: recompute these stages in place even when their passes match; parameters are validated first
 dlssvid passes list --passes result_passes [--pass color_nr] [--json list.json]       :: every pass: the current version and the previous ones (fingerprint, parameters, size)
 dlssvid passes use color_nr 20260922-140200 --passes result_passes                   :: switch a pass (or a whole stage: nr) to a previous version; the current one is kept
 dlssvid passes gc --project clip.dlssvid.json [--keep 2] [--dry-run]                  :: drop old versions beyond the newest N per pass (versions other passes list as inputs stay)
@@ -183,7 +184,13 @@ Comparison is one action (stage 9): the bar above the viewport switches «До |
 result, `W`), «Только после» and «Сетка 2×2»; one chip per source with its human name («Исходник», «Глубина», «Апскейл»,
 «Улучшение», «Генерация», «Результат»; technical names in tooltips) picks the «after» side, chips with a history open a
 menu of previous versions (`<pass>@<id>`, also valid in `render --layers`); presets «Апскейл ↔ Улучшение» and
-«Исходник ↔ Глубина» live in the «Вид» menu; «Инженерный режим» (`Ctrl+E`) reveals the layer stack and the inspector. Stages are started from the project panel
+«Исходник ↔ Глубина» live in the «Вид» menu; «Инженерный режим» (`Ctrl+E`) reveals the layer stack and the inspector.
+The project panel (stage 9) shows the source (frame, sound, passes, hash and whether the passes match it), «Что получится»
+(the result's size and rate, the time and disk of what will run, one button «Обработать · N стадий», `Ctrl+Enter`), one
+card per stage with a form built from the stage schema (backend list, scale / multiplier toggles, intensity slider; the
+advanced keys in the JSON editor of the engineer mode) and what the plan does with it («переиспользуется», «пересчёт:
+Интенсивность 1 → 1.4», «будет посчитано», a warning when NR / FG would run without depth and vectors), the encoder
+card (stored in the project) and the pass versions on disk («Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»). Stages are started from the project panel
 (`dlssvid depth|flow|upscale|nr` as a task with progress) and their passes appear in the viewport when finished; the
 `nr` stage has a «Пропатчить DLL…» button that runs `dlssvid nr-patch` over your `nvngx_dlssnr.dll`.
 

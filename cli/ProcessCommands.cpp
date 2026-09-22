@@ -39,14 +39,17 @@ std::vector<std::string> Split(const std::string& s, char sep) {
 void BuildStages(const std::string& projectFile, const std::string& stageList, const std::vector<std::string>& params, const std::string& depthBackend,
                  const std::string& flowBackend, const std::string& upscaleBackend, const std::string& nrBackend, const std::string& fgBackend, double scale,
                  int multiplier, ProcessOptions& o, std::filesystem::path* projectInput, std::filesystem::path* projectPasses, std::filesystem::path* projectResult,
-                 int* projectKeep = nullptr) {
+                 int* projectKeep = nullptr, std::string* projectCodec = nullptr, std::map<std::string, std::string>* projectCodecOptions = nullptr) {
     if (!projectFile.empty()) {
-        const Project p = Project::Load(projectFile);
+        Project p = Project::Load(projectFile);
         o.stages = StagesFromProject(p);
+        o.sourceHash = p.SourceHash();  // the project's cache: no rehash when the file is unchanged
         if (projectInput) *projectInput = p.sourceVideo;
         if (projectPasses) *projectPasses = p.passesRoot;
         if (projectResult) *projectResult = p.resultVideo;
         if (projectKeep) *projectKeep = p.passVersionsKeep;
+        if (projectCodec) *projectCodec = p.codec;
+        if (projectCodecOptions) *projectCodecOptions = p.codecOptions;
     } else {
         o.stages = DefaultProcessStages();
     }
@@ -103,9 +106,12 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     ProcessOptions o;
     std::filesystem::path projectInput, projectPasses, projectResult;
     int projectKeep = -1;
+    std::string projectCodec;
+    std::map<std::string, std::string> projectCodecOptions;
     BuildStages(a.project, a.stages, a.params, a.depthBackend, a.flowBackend, a.upscaleBackend, a.nrBackend, a.fgBackend, a.scale, a.multiplier, o, &projectInput,
-                &projectPasses, &projectResult, &projectKeep);
+                &projectPasses, &projectResult, &projectKeep, &projectCodec, &projectCodecOptions);
     o.keepVersions = a.keepVersions >= 0 ? a.keepVersions : (projectKeep >= 0 ? projectKeep : 2);
+    for (const auto& name : Split(a.force, ',')) o.forceStages.insert(name);
     o.input = !a.input.empty() ? std::filesystem::path(a.input) : projectInput;
     if (o.input.empty()) Throw("process: -i/--input (or --project with a source video) is required");
     o.output = !a.output.empty() ? std::filesystem::path(a.output) : projectResult;
@@ -113,7 +119,8 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     o.passesRoot = !a.passes.empty() ? std::filesystem::path(a.passes) : projectPasses;
     o.skipExisting = !a.noSkipExisting;
     o.disableUnavailable = a.disableUnavailable;
-    o.codec = a.codec;
+    o.codec = !a.codecGiven && !projectCodec.empty() ? projectCodec : a.codec;  // the project's encoder unless --codec says otherwise
+    if (a.codecOptions.empty()) o.codecOptions = projectCodecOptions;
     for (const auto& kv : a.codecOptions) {
         const auto eq = kv.find('=');
         if (eq == std::string::npos) Throw("--codec-opt expects key=value, got: " + kv);
@@ -204,6 +211,7 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_flag("--passthrough", pa_.passthrough, "decode -> GPU -> encode without processing (stage 0)");
     process_->add_flag("--no-gpu-roundtrip", pa_.noGpuRoundTrip, "passthrough: skip the GPU upload/readback");
     process_->add_flag("--plan", pa_.plan, "decide which stages would run or be reused (fingerprints, versions) and exit without processing");
+    process_->add_option("--force", pa_.force, "comma list of stages to recompute even when their pass matches (nr,fg)");
     process_->add_option("--keep-versions,--keep_versions", pa_.keepVersions,
                          "pass versions kept per pass after the run, the current one included; 0 = keep all (default: the project's pass_versions_keep or 2)")
         ->default_val(-1);
@@ -223,7 +231,10 @@ void ProcessCommands::Register(CLI::App& app) {
 }
 
 int ProcessCommands::Dispatch() {
-    if (process_ && process_->parsed()) return CmdProcess(pa_);
+    if (process_ && process_->parsed()) {
+        pa_.codecGiven = process_->count("--codec") > 0;
+        return CmdProcess(pa_);
+    }
     if (bench_ && bench_->parsed()) return CmdBench(ba_);
     return -1;
 }

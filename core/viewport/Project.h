@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
@@ -28,6 +29,12 @@ struct Project {
     std::vector<StageEntry> stages;
     ViewportState viewport;
     int passVersionsKeep = 2;  // pass versions kept per pass after a run, the current one included; 0 = keep all (stage 9)
+    std::string codec = "h264_nvenc";               // the result's encoder (`process` uses it unless the CLI says otherwise)
+    std::map<std::string, std::string> codecOptions;  // encoder private options (b=50M, preset=p5 ...)
+    // Source hash cache (stage 9, MR D): the hash is recomputed only when the file's size or time changed.
+    std::string sourceHash;   // "sha256:<hex>" of sourceVideo as last seen
+    uint64_t sourceSize = 0;
+    std::string sourceMtime;  // ISO-8601 UTC
 
     static Project Create(const std::filesystem::path& sourceVideo, const std::filesystem::path& passesRoot);
     static Project Load(const std::filesystem::path& file);
@@ -36,6 +43,8 @@ struct Project {
     nlohmann::json ToJson(const std::filesystem::path& relativeTo) const;
     static Project FromJson(const nlohmann::json& j, const std::filesystem::path& relativeTo);
 
+    // "sha256:<hex>" of the source video, from the cache when its size and time still match (empty without a file).
+    std::string SourceHash();
     // Sources for the FrameStore: "source", "result" (when set) and every pass folder found under passesRoot.
     std::vector<ViewportSource> Sources() const;
     static std::vector<StageEntry> DefaultStages();

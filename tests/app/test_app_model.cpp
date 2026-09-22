@@ -18,14 +18,20 @@
 
 #include <QSettings>
 
+#include <catch2/catch_approx.hpp>
+
 #include "AppModel.h"
 #include "SourceNames.h"
 #include "TaskQueue.h"
+#include "TestClips.h"
+#include "util/Subprocess.h"
 #include "pipeline/PassVersions.h"
 #include "passes/PassSequence.h"
 #include "viewport/Project.h"
 
 using namespace dlssvid;
+using namespace dlssvid::test;
+using Catch::Approx;
 
 namespace {
 
@@ -346,4 +352,104 @@ TEST_CASE("AppModel compares in one action: views, presets, chips with versions,
     }
     model.setEngineerMode(false);
     CHECK(!AppModel(true).engineerMode());
+}
+
+TEST_CASE("AppModel plans the project screen: card states, outcome, forced stages, source hash, validation", "[app][model][gpu]") {
+    App();
+    const auto d = Dir("plan");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    spec.audio = true;
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    Project p = Project::Create(clip, d / "passes");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.params["backend"] = "blend";
+    }
+    p.resultVideo = d / "result.mkv";
+    p.codec = "ffv1";
+    p.Save(d / "proj.dlssvid.json");
+
+    AppModel model(true);
+    QSignalSpy plans(&model, &AppModel::planChanged);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    CHECK(plans.count() >= 1);
+    CHECK(model.planError().isEmpty());
+    CHECK(model.sourceInfo().width == 48);
+    CHECK(model.sourceInfo().frames == 4);
+    CHECK(model.sourceInfo().audio);
+    REQUIRE(model.plan().stages.size() == 5);
+    CHECK(model.outcome().width == 96);
+    CHECK(model.outcome().fps == Approx(48.0));
+    CHECK(model.outcome().stagesToRun == 6);
+    CHECK(model.outcome().seconds > 0.0);
+    CHECK(model.cardState("depth").state == QString::fromUtf8("будет посчитано"));
+    CHECK(model.cardState("depth").tone == "run");
+    CHECK(model.cardState("depth").version == "v1");
+    CHECK(model.cardState("nr").runs);
+    CHECK(model.cardState("nr").warning.isEmpty());  // depth and flow run first: the guides will be there
+    CHECK(model.sourceHashStatus() == QString::fromUtf8("пассов пока нет"));
+    CHECK(!model.plan().sourceHash.empty());
+    CHECK(model.project().sourceHash == model.plan().sourceHash);  // cached in the project
+
+    // the pipeline as the GUI runs it (dlssvid process --project), then everything is reused
+    REQUIRE(model.saveProject());
+    QStringList args = model.processArgs();
+    CHECK(args.size() == 4);
+    args << "--warp";
+    std::vector<std::string> cmd{DLSSVID_CLI_PATH};
+    for (const QString& a : args) cmd.push_back(a.toStdString());
+    std::string out;
+    REQUIRE(Subprocess::Run(cmd, &out) == 0);
+    model.reloadSources();
+    CHECK(model.cardState("depth").state == QString::fromUtf8("переиспользуется"));
+    CHECK(model.cardState("depth").tone == "ok");
+    CHECK(model.cardState("depth").version == "v1");
+    CHECK(model.cardState("depth").sub.startsWith(QString::fromUtf8("0 мин")));
+    CHECK(model.outcome().stagesToRun == 1);  // only the encode
+    CHECK(model.outcome().reused.size() == 5);
+    CHECK(model.sourceHashStatus() == QString::fromUtf8("совпадает с пассами"));
+
+    // a changed parameter: nr recomputes, fg follows, the rest stays
+    model.setStageParam("nr", "intensity", 1.4);
+    model.refreshPlan();
+    CHECK(model.cardState("nr").state.startsWith(QString::fromUtf8("пересчёт: Интенсивность")));
+    CHECK(model.cardState("nr").state.contains("1.4"));
+    CHECK(model.cardState("nr").version == "v2");
+    CHECK(model.cardState("nr").sub.contains(QString::fromUtf8("v1 останется")));
+    CHECK(model.cardState("fg").state == QString::fromUtf8("пересчёт: изменился вход"));
+    CHECK(model.cardState("fg").sub.contains(QString::fromUtf8("Улучшение")));
+    CHECK(model.cardState("upscale").state == QString::fromUtf8("переиспользуется"));
+    CHECK(model.outcome().stagesToRun == 3);
+    CHECK(model.outcome().newBytes > 0);
+    model.setStageParam("nr", "intensity", 1.0);
+    model.setForce("fg", true);
+    model.refreshPlan();
+    CHECK(model.cardState("fg").state == QString::fromUtf8("пересчёт (принудительно)"));
+    CHECK(model.processArgs().contains("--force"));
+    CHECK(model.processArgs().contains("fg"));
+    model.clearForce();
+    model.refreshPlan();
+    CHECK(model.outcome().stagesToRun == 1);
+
+    model.setStageEnabled("depth", false);
+    model.refreshPlan();
+    CHECK(model.cardState("depth").state == QString::fromUtf8("выключена"));
+    CHECK(model.cardState("depth").tone == "off");
+    model.setStageEnabled("depth", true);
+
+    // a parameter outside the schema: the plan says what is wrong instead of failing later
+    model.setStageParams("nr", nlohmann::json{{"backend", "stub"}, {"intensity", 9}});
+    model.refreshPlan();
+    CHECK(model.planError().contains("nr.intensity"));
+    CHECK(model.cardState("nr").state.contains("nr.intensity"));
+    model.setStageParams("nr", nlohmann::json{{"backend", "stub"}});
+    model.refreshPlan();
+    CHECK(model.planError().isEmpty());
+    model.setEncode("hevc_nvenc", {{"b", "50M"}});
+    CHECK(model.project().codec == "hevc_nvenc");
+    CHECK(model.project().codecOptions.at("b") == "50M");
 }

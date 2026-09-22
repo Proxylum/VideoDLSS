@@ -13,6 +13,7 @@
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/Pipeline.h"
+#include "stages/ParamSchema.h"
 #include "stages/depth/DepthStage.h"
 #include "stages/fg/FgStage.h"
 #include "stages/flow/FlowStage.h"
@@ -118,6 +119,7 @@ struct RunContext {
     std::string sourceHash;
     int64_t needed = -1;  // source frames the run covers (-1: unknown)
     bool skipExisting = true;
+    std::set<std::string> force;  // stages recomputed on request
 };
 
 // The passes on disk (or, while planning, as they will be after the stages decided so far): pass -> fingerprint;
@@ -181,7 +183,7 @@ std::optional<PassVersionInfo> RestorableVersion(const RunContext& ctx, const st
 
 StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, const PlanState& state) {
     const std::string& name = stage.name;
-    const nlohmann::json& p = stage.params;
+    const nlohmann::json p = EffectiveStageParams(name, stage.params);  // schema defaults filled in: the run's real parameters
     StageDecision d;
     d.name = name;
     d.frames = NeededFor(name, p, ctx.needed);
@@ -233,8 +235,8 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     };
     const std::string incomplete = (have ? std::to_string(m.frameCount) : std::string("0")) + " of " + (d.frames > 0 ? std::to_string(d.frames) : std::string("all")) + " frames";
 
-    if (!ctx.skipExisting) {
-        run("forced", "every stage recomputed (--no-skip-existing)", have && m.fingerprint != fp.value);
+    if (!ctx.skipExisting || ctx.force.count(name)) {
+        run("forced", ctx.skipExisting ? "recomputed on request (--force)" : "every stage recomputed (--no-skip-existing)", have && m.fingerprint != fp.value);
         return d;
     }
     if (!have) {
@@ -327,8 +329,9 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     return d;
 }
 
-void StampPass(const std::filesystem::path& dir, const StageDecision& d, const std::string& created) {
+void StampPass(const std::filesystem::path& dir, const StageDecision& d, const std::string& created, double msPerFrame = 0.0) {
     Manifest m = Manifest::Load(dir);
+    if (msPerFrame > 0) m.stageParams["ms_per_frame"] = msPerFrame;  // the last run on this machine: the estimates use it
     m.fingerprint = d.fingerprint;
     m.inputs = d.inputs;
     m.tool = d.tool;
@@ -356,6 +359,7 @@ Prepared Prepare(const ProcessOptions& options) {
     r.sourceFrames = r.info.frameCount > 0 ? r.info.frameCount : -1;
     r.ctx.needed = options.frames > 0 ? (r.sourceFrames > 0 ? std::min<int64_t>(options.frames, r.sourceFrames) : options.frames) : r.sourceFrames;
     r.ctx.skipExisting = options.skipExisting;
+    r.ctx.force = options.forceStages;
     if (options.passesRoot.empty() && options.output.empty()) Throw("process: --passes or -o/--output is needed to locate the passes");
     r.ctx.root = options.passesRoot.empty() ? options.output.parent_path() / (options.output.stem().string() + "_passes") : options.passesRoot;
     for (const auto& s : options.stages) {
@@ -363,8 +367,15 @@ Prepared Prepare(const ProcessOptions& options) {
             Throw("process: unknown stage '" + s.name + "' (depth | flow | upscale | nr | fg)");
         if (s.enabled) r.wanted[s.name] = s;
     }
+    std::vector<std::string> problems;
+    for (const auto& [name, s] : r.wanted)
+        for (const auto& p : ValidateStageParams(name, s.params)) problems.push_back(p);
+    if (!problems.empty()) Throw("process: " + Join(problems));
+    for (const auto& f : options.forceStages)
+        if (std::find(ProcessStageOrder().begin(), ProcessStageOrder().end(), f) == ProcessStageOrder().end())
+            Throw("process: --force: unknown stage '" + f + "' (depth | flow | upscale | nr | fg)");
     r.sourceFile = options.input.filename().string();
-    r.ctx.sourceHash = "sha256:" + Sha256File(options.input);
+    r.ctx.sourceHash = options.sourceHash.rfind("sha256:", 0) == 0 ? options.sourceHash : "sha256:" + Sha256FileCached(options.input);
     return r;
 }
 
@@ -727,17 +738,17 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             Throw("process: stage '" + name + "' failed: " + e.what());
         }
         rep.seconds = Seconds(t0);
+        rep.msPerFrame = rep.frames ? 1000.0 * rep.seconds / static_cast<double>(rep.frames) : 0.0;
         if (rep.status.empty()) {
             rep.status = "ran";
             rep.reason = d.kind + ": " + d.detail;
             const std::string created = NowIso8601();
             for (const auto& pass : StageFamilyPasses(name))
-                if (Manifest::Exists(root / pass)) StampPass(root / pass, d, created);
+                if (Manifest::Exists(root / pass)) StampPass(root / pass, d, created, rep.msPerFrame);
             state.ran.insert(d.outputs.begin(), d.outputs.end());
         } else {
             rep.fingerprint.clear();  // disabled: nothing was written
         }
-        rep.msPerFrame = rep.frames ? 1000.0 * rep.seconds / static_cast<double>(rep.frames) : 0.0;
         if (rep.status == "ran")
             Log()->info("process: {} done — {} frames in {:.1f} s ({:.1f} ms/frame), {} ({})", name, rep.frames, rep.seconds, rep.msPerFrame, ShortFingerprint(d.fingerprint),
                         rep.reason);

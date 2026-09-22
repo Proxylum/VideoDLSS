@@ -28,6 +28,8 @@ add_executable(dlssvid_unit_tests
   unit/test_project.cpp
   unit/test_pass_fingerprint.cpp
   unit/test_pass_versions.cpp
+  unit/test_param_schema.cpp
+  unit/test_estimates.cpp
   unit/test_upscale.cpp
   unit/test_tonemap.cpp
   unit/test_nr.cpp
@@ -76,7 +78,8 @@ catch_discover_tests(dlssvid_integration_tests TEST_PREFIX "integration." DISCOV
 
 # ---- Qt application tests (offscreen platform: the model and the task queue without windows) ----
 if(DLSSVID_BUILD_APP)
-  add_executable(dlssvid_app_tests app/test_app_model.cpp)
+  add_executable(dlssvid_app_tests app/test_app_model.cpp integration/TestClips.h integration/TestClips.cpp)
+  target_include_directories(dlssvid_app_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/integration)
   target_link_libraries(dlssvid_app_tests PRIVATE dlssvid_app Catch2::Catch2WithMain Qt6::Test)
   target_compile_definitions(dlssvid_app_tests PRIVATE
     DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"

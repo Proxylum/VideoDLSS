@@ -8,6 +8,8 @@
 #include <cmath>
 
 #include "SourceNames.h"
+#include "pipeline/PassVersions.h"
+#include "stages/ParamSchema.h"
 #include "util/Log.h"
 
 namespace dlssvid {
@@ -18,6 +20,9 @@ AppModel::AppModel(bool warp, QObject* parent) : QObject(parent) {
     playTimer_.setTimerType(Qt::PreciseTimer);
     connect(&playTimer_, &QTimer::timeout, this, &AppModel::onPlayTick);
     engineerMode_ = QSettings().value("view/engineerMode", false).toBool();
+    planTimer_.setSingleShot(true);
+    planTimer_.setInterval(250);
+    connect(&planTimer_, &QTimer::timeout, this, &AppModel::refreshPlan);
 }
 
 AppModel::~AppModel() = default;
@@ -91,6 +96,7 @@ void AppModel::reloadSources() {
     emit sourcesChanged();
     requestFrames();
     emit stateChanged();
+    refreshPlan();
 }
 
 void AppModel::requestFrames() { store_->SetCurrentTime(state().time, neededSources()); }
@@ -323,6 +329,206 @@ void AppModel::toggleWipe() {
         }
     }
     setCompareView(CompareView::BeforeAfter);
+}
+
+// ---- project screen ------------------------------------------------------------------------------
+
+StageEntry* AppModel::stageEntry(const std::string& stage) {
+    for (auto& s : project_.stages)
+        if (s.name == stage) return &s;
+    return nullptr;
+}
+
+void AppModel::refreshPlan() {
+    planTimer_.stop();
+    plan_ = ProcessPlan{};
+    outcome_ = RunOutcome{};
+    sourceInfo_ = SourceInfo{};
+    planError_.clear();
+    history_.clear();
+    if (const ViewportSource* src = store_->FindSource("source")) {
+        sourceInfo_.width = src->width;
+        sourceInfo_.height = src->height;
+        sourceInfo_.fps = store_->FpsOf("source");
+        sourceInfo_.frames = src->lastFrame + 1;
+    }
+    if (!hasProject() || !std::filesystem::exists(project_.sourceVideo)) {
+        planError_ = hasProject() ? tr("видео не найдено") : tr("нет проекта");
+        emit planChanged();
+        return;
+    }
+    try {
+        VideoDecoder probe(project_.sourceVideo);
+        sourceInfo_.audio = probe.HasAudio();
+        ProcessOptions o;
+        o.input = project_.sourceVideo;
+        o.output = project_.resultVideo.empty() ? project_.sourceVideo.parent_path() / (project_.sourceVideo.stem().string() + "_result.mp4") : project_.resultVideo;
+        o.passesRoot = project_.passesRoot;
+        o.stages = StagesFromProject(project_);
+        o.keepVersions = project_.passVersionsKeep;
+        o.forceStages = force_;
+        o.sourceHash = project_.SourceHash();
+        plan_ = PlanProcess(o);
+        outcome_ = EstimateRun(plan_, o.stages, sourceInfo_);
+        for (const auto& v : ListPassVersions(project_.passesRoot))
+            if (!v.current) ++history_[v.pass];
+    } catch (const std::exception& e) {
+        planError_ = QString::fromUtf8(e.what());
+    }
+    emit planChanged();
+}
+
+void AppModel::schedulePlan() { planTimer_.start(); }
+
+void AppModel::setStageEnabled(const std::string& stage, bool on) {
+    if (StageEntry* e = stageEntry(stage); e && e->enabled != on) {
+        e->enabled = on;
+        emit projectChanged();
+        schedulePlan();
+    }
+}
+
+void AppModel::setStageParam(const std::string& stage, const std::string& key, const nlohmann::json& value) {
+    StageEntry* e = stageEntry(stage);
+    if (!e) return;
+    if (e->params.contains(key) && e->params[key] == value) return;
+    e->params[key] = value;
+    emit projectChanged();
+    schedulePlan();
+}
+
+void AppModel::setStageParams(const std::string& stage, const nlohmann::json& params) {
+    StageEntry* e = stageEntry(stage);
+    if (!e || !params.is_object() || e->params == params) return;
+    e->params = params;
+    emit projectChanged();
+    schedulePlan();
+}
+
+void AppModel::setForce(const std::string& stage, bool on) {
+    if (on) force_.insert(stage);
+    else force_.erase(stage);
+    schedulePlan();
+}
+
+void AppModel::clearForce() {
+    if (force_.empty()) return;
+    force_.clear();
+    schedulePlan();
+}
+
+void AppModel::setEncode(const QString& codec, const std::map<std::string, std::string>& options) {
+    project_.codec = codec.toStdString();
+    project_.codecOptions = options;
+    emit projectChanged();
+}
+
+QStringList AppModel::processArgs() const {
+    QStringList args{"process", "--project", QString::fromStdWString(project_.file.wstring()), "--disable-unavailable"};
+    if (!force_.empty()) {
+        QString list;
+        for (const auto& s : force_) list += (list.isEmpty() ? "" : ",") + QString::fromStdString(s);
+        args << "--force" << list;
+    }
+    return args;
+}
+
+QString AppModel::sourceHashStatus() const {
+    if (plan_.sourceHash.empty()) return {};
+    int passes = 0, other = 0;
+    for (const auto& s : store_->Sources()) {
+        if (!s.manifest || !s.version.empty()) continue;
+        ++passes;
+        if (!s.manifest->sourceHash.empty() && s.manifest->sourceHash != plan_.sourceHash) ++other;
+    }
+    if (passes == 0) return tr("пассов пока нет");
+    if (other == 0) return tr("совпадает с пассами");
+    return tr("%1 от другого исходника").arg(Plural(other, tr("пасс"), tr("пасса"), tr("пассов")));
+}
+
+AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
+    StageCardState st;
+    st.tone = "none";
+    const StageEntry* entry = nullptr;
+    for (const auto& s : project_.stages)
+        if (s.name == stage) entry = &s;
+    if (!entry || !entry->enabled) {
+        st.state = tr("выключена");
+        st.tone = "off";
+        return st;
+    }
+    const StageDecision* d = nullptr;
+    for (const auto& s : plan_.stages)
+        if (s.name == stage) d = &s;
+    if (!d) {
+        st.state = planError_.isEmpty() ? tr("—") : planError_;
+        return st;
+    }
+    const std::string primary = d->outputs.empty() ? stage : d->outputs.back();
+    const int history = history_.count(primary) ? history_.at(primary) : 0;
+    const StageEstimate* est = nullptr;
+    for (const auto& e : outcome_.stages)
+        if (e.stage == stage) est = &e;
+    const QString eta = est ? FormatDuration(est->seconds) : QString();
+    std::string created;
+    if (const ViewportSource* src = store_->FindSource(primary); src && src->manifest) created = src->manifest->created;
+    const StageSchema* schema = FindStageSchema(stage);
+    if (d->action == "reuse") {
+        st.state = d->kind == "legacy" ? tr("переиспользуется (без отпечатка)") : tr("переиспользуется");
+        st.sub = created.empty() ? tr("0 мин") : tr("0 мин · посчитано %1").arg(HumanWhen(created));
+        st.version = QString("v%1").arg(history + 1);
+        st.tone = "ok";
+    } else if (d->action == "restore") {
+        st.state = tr("вернётся версия %1").arg(VersionLabel(d->version));
+        st.sub = tr("0 мин · без пересчёта");
+        st.version = QString("v%1").arg(history + 1);
+        st.tone = "ok";
+    } else {
+        st.runs = true;
+        st.tone = "run";
+        st.version = QString("v%1").arg(d->current ? history + (d->retire ? 2 : 1) : 1);
+        if (d->kind == "missing") {
+            st.state = tr("будет посчитано");
+        } else if (d->kind == "params_changed") {
+            QStringList parts;
+            if (d->diff.contains("params"))
+                for (const auto& [key, pair] : d->diff["params"].items()) {
+                    const ParamSpec* spec = schema ? schema->Find(key) : nullptr;
+                    const QString label = spec ? QString::fromStdString(spec->label) : QString::fromStdString(key);
+                    const nlohmann::json o = pair.is_array() && pair.size() > 0 ? pair[0] : nlohmann::json(), n = pair.is_array() && pair.size() > 1 ? pair[1] : nlohmann::json();
+                    parts << QString("%1 %2 → %3").arg(label, spec ? QString::fromStdString(ParamValueLabel(*spec, o)) : QString::fromStdString(o.dump()),
+                                                          spec ? QString::fromStdString(ParamValueLabel(*spec, n)) : QString::fromStdString(n.dump()));
+                }
+            st.state = tr("пересчёт: %1").arg(parts.isEmpty() ? QString::fromStdString(d->detail) : parts.join(", "));
+        } else if (d->kind == "input_changed") {
+            st.state = tr("пересчёт: изменился вход");
+            QStringList names;
+            if (d->diff.contains("inputs"))
+                for (const auto& n : d->diff["inputs"]) names << HumanSourceName(n.get<std::string>());
+            if (!names.isEmpty()) st.sub = tr("из-за «%1»").arg(names.join(", "));
+        } else if (d->kind == "source_changed") {
+            st.state = tr("другой исходник");
+        } else if (d->kind == "forced") {
+            st.state = tr("пересчёт (принудительно)");
+        } else if (d->kind == "incomplete") {
+            st.state = tr("досчитать: %1").arg(QString::fromStdString(d->detail));
+        } else if (d->kind == "tool_changed") {
+            st.state = tr("пересчёт: другая версия инструмента");
+        } else {
+            st.state = tr("пересчёт");
+        }
+        QStringList sub;
+        if (!eta.isEmpty()) sub << eta;
+        if (!st.sub.isEmpty()) sub << st.sub;
+        if (d->retire) sub << tr("v%1 останется на диске").arg(d->current ? history + 1 : 1);
+        st.sub = sub.join(" · ");
+    }
+    if (schema && !schema->guides.empty() && (stage == "nr" || stage == "fg" || stage == "upscale")) {
+        bool any = false;
+        for (const auto& g : schema->guides) any = any || d->inputs.count(g) > 0;
+        if (!any) st.warning = tr("без глубины и векторов: качество ниже");
+    }
+    return st;
 }
 
 void AppModel::setEngineerMode(bool on) {

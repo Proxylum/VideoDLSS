@@ -15,5 +15,12 @@ QString VersionLabel(const std::string& versionId);  // "20260922-140200_3f2a9c1
 QString SourceTooltip(const ViewportSource& s);      // the technical side: name, size, frames, rate, version parameters
 // Pipeline order for chips and lists: source, depth, vectors, upscale, nr, fg, result, then the rest by name.
 int SourceRank(const std::string& source);
+// «≈ 2 мин», «≈ 45 с», «≈ 1 ч 10 мин»; and «сегодня 14:02» / «вчера 14:02» / «22.09 14:02» from an ISO-8601 UTC time.
+QString FormatDuration(double seconds);
+QString HumanWhen(const std::string& iso8601);
+// «12.0 ГБ», «60 МБ».
+QString HumanBytes(unsigned long long bytes);
+// «1 стадия», «3 стадии», «5 стадий»: n with the Russian form of the noun.
+QString Plural(int n, const QString& one, const QString& few, const QString& many);
 
 }  // namespace dlssvid

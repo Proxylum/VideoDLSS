@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
+#include <thread>
 #include <fstream>
 
 #include "passes/PassSequence.h"
@@ -114,4 +115,38 @@ TEST_CASE("Project stage entries survive JSON with unknown fields", "[viewport][
     CHECK(p.stages[0].enabled);
     CHECK(p.stages[0].params["backend"] == "vda");
     CHECK(p.viewport.mode == ViewMode::Single);
+}
+
+TEST_CASE("Project caches the source hash by size and time and keeps the encoder settings", "[viewport][project]") {
+    const auto d = Dir("hash");
+    std::ofstream(d / "clip.bin", std::ios::binary) << "video bytes";
+    Project p = Project::Create(d / "clip.bin", d / "passes");
+    CHECK(p.sourceHash.empty());
+    const std::string h1 = p.SourceHash();
+    CHECK(h1.rfind("sha256:", 0) == 0);
+    CHECK(p.sourceSize == 11);
+    CHECK(!p.sourceMtime.empty());
+    CHECK(p.SourceHash() == h1);  // from the cache
+    p.codec = "hevc_nvenc";
+    p.codecOptions["b"] = "50M";
+    p.Save(d / "p.dlssvid.json");
+    Project q = Project::Load(d / "p.dlssvid.json");
+    CHECK(q.sourceHash == h1);
+    CHECK(q.sourceSize == 11);
+    CHECK(q.sourceMtime == p.sourceMtime);
+    CHECK(q.codec == "hevc_nvenc");
+    CHECK(q.codecOptions.at("b") == "50M");
+    // the file changed (another size): recomputed
+    std::ofstream(d / "clip.bin", std::ios::binary) << "video bytes v2";
+    const std::string h2 = q.SourceHash();
+    CHECK(h2 != h1);
+    CHECK(q.sourceSize == 14);
+    Project none;
+    CHECK(none.SourceHash().empty());
+    Project missing = Project::Create(d / "nope.bin", d / "passes");
+    CHECK(missing.SourceHash().empty());
+    const Project defaults = Project::FromJson(nlohmann::json::parse(R"({"schema_version": 1})"), d);
+    CHECK(defaults.codec == "h264_nvenc");
+    CHECK(defaults.codecOptions.empty());
+    CHECK(defaults.sourceHash.empty());
 }
