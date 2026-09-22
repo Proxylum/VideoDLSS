@@ -43,23 +43,25 @@ void ProjectPanel::refresh() {
     sourceItem_ = new QTreeWidgetItem(tree_, {tr("Источник"), p.sourceVideo.empty() ? tr("не задан") : QString::fromStdWString(p.sourceVideo.filename().wstring()),
                                               QString::fromStdWString(p.passesRoot.wstring())});
     passesItem_ = new QTreeWidgetItem(tree_, {tr("Пассы")});
-    const int64_t frameCount = model_.store().FrameCount();
     for (const auto& s : model_.store().Sources()) {
         QString status;
+        const QString fps = QString::number(model_.store().FpsOf(s.name), 'g', 5);
         if (s.isVideo) {
-            status = tr("видео, %1 кадров").arg(s.lastFrame + 1);
+            status = tr("видео, %1 кадров, %2 fps").arg(s.lastFrame + 1).arg(fps);
         } else {
+            // complete = reaches the source's last frame at the pass's own rate (an FG pass at 48 fps: 479 of 479, not «of 480»)
             const int64_t n = s.lastFrame - s.firstFrame + 1;
-            const bool complete = frameCount == 0 || n >= frameCount;
+            const int64_t expected = model_.store().ExpectedFrames(s.name);
+            const bool complete = expected <= 0 || s.lastFrame >= expected - 1;
             bool imported = false;
             if (s.manifest && !s.manifest->sourceHash.empty() && !p.sourceVideo.empty()) {
                 // imported = produced from another source (hash mismatch is checked lazily by name only here)
                 imported = s.manifest->sourceFile != p.sourceVideo.filename().string();
             }
-            status = imported ? tr("импортирован, %1 кадров").arg(n) : complete ? tr("готов, %1 кадров").arg(n) : tr("частично: %1 из %2").arg(n).arg(frameCount);
+            status = imported ? tr("импортирован, %1 кадров").arg(n) : complete ? tr("готов, %1 кадров").arg(n) : tr("частично: %1 из %2 (%3 fps)").arg(n).arg(expected).arg(fps);
         }
         QString params;
-        if (s.manifest) params = QString("%1x%2 %3").arg(s.width).arg(s.height).arg(QString::fromStdString(std::string(ToString(s.manifest->format))));
+        if (s.manifest) params = QString("%1x%2 %3, %4 fps").arg(s.width).arg(s.height).arg(QString::fromStdString(std::string(ToString(s.manifest->format)))).arg(fps);
         new QTreeWidgetItem(passesItem_, {QString::fromStdString(s.name), status, params});
     }
     if (model_.store().Sources().empty()) new QTreeWidgetItem(passesItem_, {tr("(нет)"), tr("не посчитаны"), ""});

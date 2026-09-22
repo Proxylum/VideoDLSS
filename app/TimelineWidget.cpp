@@ -4,8 +4,10 @@
 #include <QSignalBlocker>
 #include <QStyle>
 #include <algorithm>
+#include <cmath>
 
 #include "AppModel.h"
+#include "viewport/ViewportState.h"
 
 namespace dlssvid {
 
@@ -14,6 +16,7 @@ TimelineWidget::TimelineWidget(AppModel& model, QWidget* parent) : QWidget(paren
     layout->setContentsMargins(4, 2, 4, 2);
     auto* toStart = new QToolButton(this);
     toStart->setIcon(style()->standardIcon(QStyle::SP_MediaSkipBackward));
+    toStart->setToolTip(tr("В начало"));
     auto* prev = new QToolButton(this);
     prev->setIcon(style()->standardIcon(QStyle::SP_MediaSeekBackward));
     prev->setToolTip(tr("Кадр назад (,)"));
@@ -27,7 +30,11 @@ TimelineWidget::TimelineWidget(AppModel& model, QWidget* parent) : QWidget(paren
     slider_->setTracking(true);
     frame_ = new QSpinBox(this);
     frame_->setMinimumWidth(80);
+    frame_->setToolTip(tr("Кадр таймлайна (в частоте справа)"));
     info_ = new QLabel(this);
+    fps_ = new QComboBox(this);
+    fps_->setToolTip(tr("Частота кадров таймлайна: источники с разной частотой сопоставляются по времени"));
+    fps_->setVisible(false);
     layout->addWidget(toStart);
     layout->addWidget(prev);
     layout->addWidget(play_);
@@ -35,29 +42,57 @@ TimelineWidget::TimelineWidget(AppModel& model, QWidget* parent) : QWidget(paren
     layout->addWidget(slider_, 1);
     layout->addWidget(frame_);
     layout->addWidget(info_);
+    layout->addWidget(fps_);
 
-    connect(toStart, &QToolButton::clicked, this, [this] { model_.setFrame(0); });
+    connect(toStart, &QToolButton::clicked, this, [this] { model_.setTime(0.0); });
     connect(prev, &QToolButton::clicked, this, [this] { model_.stepFrame(-1); });
     connect(next, &QToolButton::clicked, this, [this] { model_.stepFrame(+1); });
     connect(play_, &QToolButton::clicked, this, [this] { model_.setPlaying(!model_.playing()); });
     connect(slider_, &QSlider::valueChanged, this, [this](int v) { model_.setFrame(v); });
     connect(frame_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int v) { model_.setFrame(v); });
-    connect(&model_, &AppModel::frameChanged, this, [this](qint64) { refresh(); });
-    connect(&model_, &AppModel::sourcesChanged, this, [this] { refresh(); });
+    connect(fps_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int i) {
+        const auto choices = model_.fpsChoices();
+        if (i >= 0 && static_cast<size_t>(i) < choices.size()) model_.setTimelineFps(choices[static_cast<size_t>(i)]);
+    });
+    connect(&model_, &AppModel::timeChanged, this, [this](double) { refresh(); });
+    connect(&model_, &AppModel::timelineFpsChanged, this, [this] { refresh(); });
+    connect(&model_, &AppModel::stateChanged, this, [this] { refresh(); });
+    connect(&model_, &AppModel::sourcesChanged, this, [this] {
+        refreshRates();
+        refresh();
+    });
     connect(&model_, &AppModel::playingChanged, this, [this](bool p) { play_->setIcon(style()->standardIcon(p ? QStyle::SP_MediaPause : QStyle::SP_MediaPlay)); });
+    refreshRates();
     refresh();
 }
 
+void TimelineWidget::refreshRates() {
+    const auto choices = model_.fpsChoices();
+    const QSignalBlocker b(fps_);
+    fps_->clear();
+    for (const auto& r : choices) fps_->addItem(tr("%1 fps").arg(QString::number(r.ToDouble(), 'g', 5)));
+    fps_->setVisible(choices.size() > 1);
+}
+
 void TimelineWidget::refresh() {
-    const int64_t count = model_.store().FrameCount();
+    const int64_t count = model_.timelineFrameCount();
     const int max = static_cast<int>(std::max<int64_t>(0, count - 1));
-    const QSignalBlocker b1(slider_), b2(frame_);
+    const QSignalBlocker b1(slider_), b2(frame_), b3(fps_);
     slider_->setRange(0, max);
     frame_->setRange(0, max);
-    slider_->setValue(static_cast<int>(model_.state().frame));
-    frame_->setValue(static_cast<int>(model_.state().frame));
-    const Rational fps = model_.store().Fps();
-    info_->setText(tr("/ %1  %2 fps").arg(count).arg(fps.num > 0 ? QString::number(fps.ToDouble(), 'f', 2) : "?"));
+    const int cur = static_cast<int>(model_.timelineFrame());
+    slider_->setValue(cur);
+    frame_->setValue(cur);
+    const Rational tl = model_.timelineFps();
+    const auto choices = model_.fpsChoices();
+    for (size_t i = 0; i < choices.size(); ++i)
+        if (std::abs(choices[i].ToDouble() - tl.ToDouble()) < 1e-6) fps_->setCurrentIndex(static_cast<int>(i));
+    info_->setText(tr("%1 / %2   %3 #%4   %5 fps")
+                       .arg(QString::fromStdString(FormatTimecode(model_.time())))
+                       .arg(QString::fromStdString(FormatTimecode(model_.lastTime())))
+                       .arg(QString::fromStdString(model_.baseSource()))
+                       .arg(model_.baseFrame())
+                       .arg(QString::number(tl.ToDouble(), 'g', 5)));
 }
 
 }  // namespace dlssvid

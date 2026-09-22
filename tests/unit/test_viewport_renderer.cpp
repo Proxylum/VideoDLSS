@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <set>
 #include <vector>
 
 #include "gpu/D3D12Device.h"
@@ -429,4 +430,35 @@ TEST_CASE("ViewportRenderer zoom keeps point sampling and pans to the requested 
     img = r.RenderToImage(st, frame, w, h, 4, 4);
     const Px p = At(img, 1, 1);
     CHECK((p.r > 60 && p.r < 200));
+}
+
+TEST_CASE("ViewportRenderer plates: a missing frame is hatched, a loading one is a plain plate, a ready one is the texture", "[viewport][renderer][gpu]") {
+    D3D12Device dev({true, false});
+    ViewportRenderer r(dev);
+    const ViewportState st = OneToOne(32, 16);
+    const FrameTextures none;
+    const PassImage empty = r.RenderToImage(st, none, 32, 16, 32, 16);  // no state: the empty background as before
+    const FrameStates missing{{"source", FrameState::Missing}}, loading{{"source", FrameState::Loading}};
+    const PassImage hatched = r.RenderToImage(st, none, 32, 16, 32, 16, &missing);
+    const PassImage plate = r.RenderToImage(st, none, 32, 16, 32, 16, &loading);
+    std::set<int> hatchTones, plateTones, emptyTones;
+    for (uint32_t x = 0; x < 32; ++x) {
+        hatchTones.insert(Lum(At(hatched, x, 8)));
+        plateTones.insert(Lum(At(plate, x, 8)));
+        emptyTones.insert(Lum(At(empty, x, 8)));
+    }
+    CHECK(hatchTones.size() == 2);  // diagonal stripes
+    CHECK(plateTones.size() == 1);  // one flat tone
+    CHECK(*plateTones.begin() < 140);
+    CHECK(*hatchTones.rbegin() < 140);
+    CHECK(plateTones != emptyTones);
+    CHECK(hatchTones != emptyTones);
+    CHECK(plateTones != hatchTones);
+    // a ready state with a texture renders the texture; a state of another source does not touch this cell
+    const Tex tex = MakeColor(dev, 32, 16, [](uint32_t, uint32_t) { return std::array<float, 3>{1.f, 0.f, 0.f}; });
+    const FrameTextures frame{{"source", tex.desc}};
+    const FrameStates ready{{"source", FrameState::Ready}}, other{{"depth_raw", FrameState::Missing}};
+    CHECK(Near(At(r.RenderToImage(st, frame, 32, 16, 32, 16, &ready), 5, 8), 255, 0, 0, 3));
+    CHECK(Near(At(r.RenderToImage(st, frame, 32, 16, 32, 16, &other), 5, 8), 255, 0, 0, 3));
+    CHECK(Near(At(r.RenderToImage(st, frame, 32, 16, 32, 16), 5, 8), 255, 0, 0, 3));
 }

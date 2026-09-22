@@ -276,7 +276,7 @@ void InspectorPanel::showProbe(int cell, float imageX, float imageY, bool inside
     }
     const uint32_t x = static_cast<uint32_t>(imageX), y = static_cast<uint32_t>(imageY);
     QString text = tr("Пробник (%1, %2)%3").arg(x).arg(y).arg(model_.state().mode == ViewMode::Grid ? tr(" ячейка %1").arg(cell + 1) : "");
-    const FrameTextures frame = model_.store().Textures(model_.state().frame);
+    const FrameTextures frame = model_.store().TexturesAt(model_.state().time);
     for (const auto& [name, tex] : frame) {
         // pass textures may have another resolution (mv_dlss at target size): scale the probe
         const uint32_t tx = std::min(tex.width - 1, static_cast<uint32_t>(imageX * tex.width / std::max(1u, model_.store().ImageWidth())));

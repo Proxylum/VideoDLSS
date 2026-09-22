@@ -192,16 +192,25 @@ void FrameStore::SetSources(std::vector<ViewportSource> sources) {
     entries_.clear();
     residentBytes_ = 0;
     imageW_ = imageH_ = 0;
-    frameCount_ = 0;
     fps_ = Rational{0, 1};
+    duration_ = 0.0;
+    bool fromSource = false;
     for (const auto& s : sources_) {
         if (s.name == "source" || imageW_ == 0) {
             imageW_ = s.width;
             imageH_ = s.height;
         }
-        if (s.lastFrame >= 0) frameCount_ = std::max(frameCount_, s.lastFrame + 1);
-        if (s.fps.num > 0 && (fps_.num == 0 || s.name == "source")) fps_ = s.fps;
+        if (s.fps.num <= 0 || s.fps.den <= 0) continue;
+        // base rate: the source video's; without it the slowest source (the source is the slowest, FG doubles it)
+        if (s.name == "source") {
+            fps_ = s.fps;
+            fromSource = true;
+        } else if (!fromSource && (fps_.num == 0 || s.fps.ToDouble() < fps_.ToDouble())) {
+            fps_ = s.fps;
+        }
     }
+    for (const auto& s : sources_)
+        if (s.lastFrame >= 0) duration_ = std::max(duration_, static_cast<double>(s.lastFrame + 1) / FpsOf(s.name));
 }
 
 const ViewportSource* FrameStore::FindSource(const std::string& name) const {
@@ -210,39 +219,88 @@ const ViewportSource* FrameStore::FindSource(const std::string& name) const {
     return nullptr;
 }
 
+// ---- time axis ----------------------------------------------------------------------------------------
+
+Rational FrameStore::BaseFps() const { return fps_.num > 0 && fps_.den > 0 ? fps_ : Rational{1, 1}; }
+
+Rational FrameStore::SourceFps(const std::string& source) const {
+    const ViewportSource* s = FindSource(source);
+    return s && s->fps.num > 0 && s->fps.den > 0 ? s->fps : BaseFps();
+}
+
+double FrameStore::MaxFps(const std::vector<std::string>& sources) const {
+    double best = BaseFps().ToDouble();
+    if (sources.empty()) {
+        for (const auto& s : sources_) best = std::max(best, FpsOf(s.name));
+    } else {
+        for (const auto& n : sources) best = std::max(best, FpsOf(n));
+    }
+    return best;
+}
+
+int64_t FrameStore::FrameCount() const { return static_cast<int64_t>(std::llround(duration_ * BaseFps().ToDouble())); }
+
+int64_t FrameStore::FrameAt(const std::string& source, double time) const { return static_cast<int64_t>(std::llround(time * FpsOf(source))); }
+
+double FrameStore::TimeOfFrame(const std::string& source, int64_t frame) const { return static_cast<double>(frame) / FpsOf(source); }
+
+double FrameStore::ReferenceLastTime() const {
+    if (const ViewportSource* src = FindSource("source"); src && src->lastFrame >= 0) return TimeOfFrame("source", src->lastFrame);
+    double last = 0.0;
+    for (const auto& s : sources_)
+        if (s.lastFrame >= 0) last = std::max(last, TimeOfFrame(s.name, s.lastFrame));
+    return last;
+}
+
+int64_t FrameStore::ExpectedFrames(const std::string& source) const {
+    if (sources_.empty()) return 0;
+    return FrameAt(source, ReferenceLastTime()) + 1;
+}
+
+int FrameStore::SpanOf(const std::string& source) const {
+    const double window = static_cast<double>(options_.prefetch) / MaxFps();  // seconds on either side
+    return std::max(1, static_cast<int>(std::llround(window * FpsOf(source))));
+}
+
+int64_t FrameStore::CurrentFrame() const { return FrameAt("", currentTime_); }
+
 // ---- scheduling -----------------------------------------------------------------------------------
 
-bool FrameStore::InWindow(int64_t frame) const { return std::llabs(frame - current_) <= options_.prefetch; }
+bool FrameStore::InWindow(const Key& key) const { return std::llabs(key.frame - FrameAt(key.source, currentTime_)) <= SpanOf(key.source); }
 
-void FrameStore::SetCurrentFrame(int64_t frame, const std::vector<std::string>& neededSources) {
+void FrameStore::SetCurrentTime(double time, const std::vector<std::string>& neededSources) {
     std::lock_guard<std::mutex> lock(mutex_);
-    current_ = frame;
+    currentTime_ = std::max(0.0, time);
     needed_ = neededSources;
-    // Rebuild the queue: current frame first, then prefetch outwards (forward first). Loads in
+    // Rebuild the queue: every source's current frame first, then prefetch outwards (forward first). Loads in
     // flight stay marked so they are not requested a second time.
     queue_.clear();
     queued_ = inFlight_;
-    auto push = [&](int64_t f) {
-        for (const auto& name : needed_) {
-            const ViewportSource* s = FindSource(name);
-            if (!s || !s->HasFrame(f)) continue;
-            const Key k{f, name};
-            if (entries_.count(k) || missing_.count(k) || queued_.count(k)) continue;
-            queue_.push_back(k);
-            queued_.insert(k);
-        }
+    auto push = [&](const std::string& name, int64_t f) {
+        const ViewportSource* s = FindSource(name);
+        if (!s || !s->HasFrame(f)) return;
+        const Key k{f, name};
+        if (entries_.count(k) || missing_.count(k) || queued_.count(k)) return;
+        queue_.push_back(k);
+        queued_.insert(k);
     };
-    push(frame);
-    for (int d = 1; d <= options_.prefetch; ++d) {
-        push(frame + d);
-        if (frame - d >= 0) push(frame - d);
-    }
+    int maxSpan = 0;
+    for (const auto& name : needed_) maxSpan = std::max(maxSpan, SpanOf(name));
+    for (int d = 0; d <= maxSpan; ++d)
+        for (const auto& name : needed_) {
+            if (d > SpanOf(name)) continue;
+            const int64_t f0 = FrameAt(name, currentTime_);
+            push(name, f0 + d);
+            if (d > 0 && f0 - d >= 0) push(name, f0 - d);
+        }
     cv_.notify_all();
 }
 
+void FrameStore::SetCurrentFrame(int64_t frame, const std::vector<std::string>& neededSources) { SetCurrentTime(TimeOfFrame("", frame), neededSources); }
+
 bool FrameStore::Wanted(const Key& key) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!InWindow(key.frame)) return false;
+    if (!InWindow(key)) return false;
     if (std::find(needed_.begin(), needed_.end(), key.source) == needed_.end()) return false;
     if (entries_.count(key) || missing_.count(key)) return false;
     for (const auto& l : loaded_)
@@ -254,9 +312,10 @@ FrameStore::Status FrameStore::GetStatus(int64_t frame, const std::string& sourc
     std::lock_guard<std::mutex> lock(mutex_);
     const Key k{frame, source};
     if (entries_.count(k)) return Status::Ready;
-    if (queued_.count(k)) return Status::Queued;
+    if (inFlight_.count(k)) return Status::Loading;
     for (const auto& l : loaded_)
-        if (l.key.frame == frame && l.key.source == source) return l.missing ? Status::Missing : Status::Queued;
+        if (l.key.frame == frame && l.key.source == source) return l.missing ? Status::Missing : Status::Loading;
+    if (queued_.count(k)) return Status::Queued;
     const ViewportSource* s = FindSource(source);
     if (!s || !s->HasFrame(frame) || missing_.count(k)) return Status::Missing;
     return Status::Queued;  // not loaded yet but loadable
@@ -269,6 +328,18 @@ FrameTextures FrameStore::Textures(int64_t frame) const {
         if (key.frame != frame) continue;
         out[key.source] = e.desc;
         const_cast<Entry&>(e).lastUse = ++const_cast<uint64_t&>(useCounter_);
+    }
+    return out;
+}
+
+FrameTextures FrameStore::TexturesAt(double time) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    FrameTextures out;
+    for (const auto& s : sources_) {
+        const auto it = entries_.find(Key{FrameAt(s.name, time), s.name});
+        if (it == entries_.end()) continue;
+        out[s.name] = it->second.desc;
+        const_cast<Entry&>(it->second).lastUse = ++const_cast<uint64_t&>(useCounter_);
     }
     return out;
 }
@@ -480,12 +551,13 @@ void FrameStore::Evict() {
         // least recently used entry outside the prefetch window; if all are inside, the oldest anyway
         auto victim = entries_.end();
         for (auto it = entries_.begin(); it != entries_.end(); ++it) {
-            if (InWindow(it->first.frame)) continue;
+            if (InWindow(it->first)) continue;
             if (victim == entries_.end() || it->second.lastUse < victim->second.lastUse) victim = it;
         }
         if (victim == entries_.end()) {
             for (auto it = entries_.begin(); it != entries_.end(); ++it)
-                if (it->first.frame != current_ && (victim == entries_.end() || it->second.lastUse < victim->second.lastUse)) victim = it;
+                if (it->first.frame != FrameAt(it->first.source, currentTime_) && (victim == entries_.end() || it->second.lastUse < victim->second.lastUse))
+                    victim = it;
         }
         if (victim == entries_.end()) break;
         residentBytes_ -= victim->second.bytes;
@@ -501,9 +573,9 @@ void FrameStore::WaitForCurrent(uint32_t timeoutMs) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
             for (const auto& name : needed_) {
-                const Key k{current_, name};
+                const Key k{FrameAt(name, currentTime_), name};
                 const ViewportSource* s = FindSource(name);
-                if (!s || !s->HasFrame(current_) || missing_.count(k) || entries_.count(k)) continue;
+                if (!s || !s->HasFrame(k.frame) || missing_.count(k) || entries_.count(k)) continue;
                 pending = true;
             }
         }

@@ -45,15 +45,22 @@ struct ViewportSource {
 // into CPU images (one decoder per video source, frames on the way to a seek target are kept
 // when the viewport wants them); Update() (render thread) uploads them into textures within a
 // budget and evicts least-recently-used frames outside the prefetch window.
+//
+// Time axis (stage 9): the viewport position is a time in seconds, every source keeps its own
+// frame rate and shows frame round(time × fps) — a 24 fps source and a 48 fps result stay in step
+// over the whole clip. Sources without a rate (pass folders written without one, tests) follow the
+// base rate: the "source" video's, else the slowest known one, else 1 fps (frame == second).
 class FrameStore {
 public:
     struct Options {
         size_t vramBudgetBytes = size_t{1536} << 20;  // 1.5 GiB
-        int prefetch = 6;                             // frames before/after the current one
+        int prefetch = 6;                             // frames of the fastest source before/after the current time
         int uploadsPerUpdate = 4;
         int loaderThreads = 0;                        // 0 = auto (2..4)
     };
-    enum class Status { Missing, Queued, Ready };
+    // Missing: outside the source or failed to read; Queued: loadable, not requested yet or waiting in the
+    // queue; Loading: a loader reads it or it waits for the upload; Ready: resident on the GPU.
+    enum class Status { Missing, Queued, Loading, Ready };
 
     explicit FrameStore(D3D12Device& device, const Options& options = {});
     ~FrameStore();
@@ -67,24 +74,42 @@ public:
     static std::vector<ViewportSource> DiscoverPasses(const std::filesystem::path& passesRoot);
     static std::optional<ViewportSource> VideoSource(const std::string& name, const std::filesystem::path& file);
 
-    // Reference image size (the "source" video or the first source) and frame range.
+    // Reference image size (the "source" video or the first source).
     uint32_t ImageWidth() const { return imageW_; }
     uint32_t ImageHeight() const { return imageH_; }
-    int64_t FrameCount() const { return frameCount_; }
-    Rational Fps() const { return fps_; }
 
-    // Sets the current frame and the sources it needs; schedules current-first loads and prefetch.
+    // ---- time axis ----
+    Rational Fps() const { return fps_; }       // base rate as declared ({0,1} when no source has one)
+    Rational BaseFps() const;                    // effective base rate (1 fps when unknown)
+    Rational SourceFps(const std::string& source) const;  // the source's rate, else the base rate
+    double FpsOf(const std::string& source) const { return SourceFps(source).ToDouble(); }
+    double MaxFps(const std::vector<std::string>& sources = {}) const;  // fastest of these (all sources when empty)
+    double Duration() const { return duration_; }   // seconds covered by the longest source
+    int64_t FrameCount() const;                     // frames of the base rate over the duration
+    int64_t FrameAt(const std::string& source, double time) const;  // round(time × fps); may lie outside the source
+    double TimeOfFrame(const std::string& source, int64_t frame) const;
+    // Frames a source needs to reach the reference end: the "source" video's last frame (else the longest source's).
+    int64_t ExpectedFrames(const std::string& source) const;
+
+    // Sets the current time and the sources it needs; schedules current-first loads and prefetch (a window of
+    // `prefetch` frames of the fastest source on either side, fewer frames for slower sources).
+    void SetCurrentTime(double time, const std::vector<std::string>& neededSources);
+    double CurrentTime() const { return currentTime_; }
+    // The same at the base rate: frame / base fps.
     void SetCurrentFrame(int64_t frame, const std::vector<std::string>& neededSources);
-    int64_t CurrentFrame() const { return current_; }
+    int64_t CurrentFrame() const;
 
     // Render thread: uploads finished loads, evicts, returns whether anything changed.
     bool Update();
-    // Blocks until the current frame's needed sources are ready (or missing), then uploads. CLI / tests.
+    // Blocks until the current time's needed sources are ready (or missing), then uploads. CLI / tests.
     void WaitForCurrent(uint32_t timeoutMs = 60000);
 
     Status GetStatus(int64_t frame, const std::string& source) const;
-    // Textures of a frame that are ready right now (missing entries are simply absent).
+    Status StatusAt(double time, const std::string& source) const { return GetStatus(FrameAt(source, time), source); }
+    // Textures resident right now: of one frame index in every source (uniform rates: tests, benchmarks) ...
     FrameTextures Textures(int64_t frame) const;
+    // ... or of every source's frame at `time` (missing entries are simply absent).
+    FrameTextures TexturesAt(double time) const;
     size_t ResidentBytes() const { return residentBytes_; }
     size_t ResidentCount() const;
     int LoaderThreads() const { return static_cast<int>(loaders_.size()); }
@@ -122,15 +147,17 @@ private:
     Loaded LoadPass(const Key& key, const ViewportSource& src, SourceRuntime& rt);
     bool Wanted(const Key& key) const;  // needed by the viewport and not resident / known-missing
     void Evict();
-    bool InWindow(int64_t frame) const;
+    bool InWindow(const Key& key) const;              // within the prefetch window of its source (mutex_ held)
+    int SpanOf(const std::string& source) const;      // prefetch frames of a source: window seconds × its rate
+    double ReferenceLastTime() const;                 // time of the reference's last frame (ExpectedFrames)
 
     D3D12Device& device_;
     Options options_;
     std::vector<ViewportSource> sources_;
     std::map<std::string, std::unique_ptr<SourceRuntime>> runtimes_;
     uint32_t imageW_ = 0, imageH_ = 0;
-    int64_t frameCount_ = 0;
     Rational fps_{0, 1};
+    double duration_ = 0.0;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;        // loaders wait for work
@@ -143,7 +170,7 @@ private:
     std::map<Key, Entry> entries_;      // GPU-resident
     size_t residentBytes_ = 0;
     uint64_t useCounter_ = 0;
-    int64_t current_ = 0;
+    double currentTime_ = 0.0;
     std::vector<std::string> needed_;
     std::atomic<bool> stop_{false};
     std::vector<std::thread> loaders_;

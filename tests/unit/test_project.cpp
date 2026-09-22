@@ -55,7 +55,7 @@ TEST_CASE("Project saves relative paths and loads them back absolute", "[viewpor
     p.viewport.wipe.enabled = true;
     p.viewport.wipe.position = 0.25f;
     p.viewport.view = ViewTransform{2.f, 100.f, 50.f};
-    p.viewport.frame = 17;
+    p.viewport.time = 17.0;
     p.viewport.gridSources = {"source", "depth_raw", "mv_dlss", "color_sr"};
     p.passVersionsKeep = 3;
     p.Save(d / "sub" / "proj.dlssvid.json");
@@ -70,7 +70,7 @@ TEST_CASE("Project saves relative paths and loads them back absolute", "[viewpor
     CHECK(j["passes"] == "../passes");
     CHECK(j["result"] == "../out/result.mp4");
     CHECK(j["stages"][0]["enabled"] == false);
-    CHECK(j["viewport"]["frame"] == 17);
+    CHECK(j["viewport"]["time"] == 17.0);
     CHECK(j["pass_versions_keep"] == 3);
 
     const Project q = Project::Load(d / "sub" / "proj.dlssvid.json");

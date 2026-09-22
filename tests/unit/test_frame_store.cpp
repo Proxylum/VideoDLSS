@@ -1,5 +1,6 @@
 // FrameStore: pass discovery, statuses, prefetch window and LRU eviction within a VRAM budget.
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
@@ -11,6 +12,7 @@
 #include "viewport/FrameStore.h"
 
 using namespace dlssvid;
+using Catch::Approx;
 
 namespace {
 
@@ -21,8 +23,11 @@ std::filesystem::path Root(const char* name) {
     return d;
 }
 
-void WritePass(const std::filesystem::path& dir, PassKind kind, uint32_t w, uint32_t h, int64_t first, int64_t last, FileFormat format = FileFormat::Exr) {
-    PassWriter writer(dir, Manifest::ForPass(kind, w, h, format));
+void WritePass(const std::filesystem::path& dir, PassKind kind, uint32_t w, uint32_t h, int64_t first, int64_t last, FileFormat format = FileFormat::Exr,
+               int fps = 0) {
+    Manifest m = Manifest::ForPass(kind, w, h, format);
+    if (fps > 0) m.fps = Rational{fps, 1};
+    PassWriter writer(dir, m);
     for (int64_t f = first; f <= last; ++f) {
         PassImage img = MakePassImage(kind, w, h);
         for (uint32_t y = 0; y < h; ++y)
@@ -149,4 +154,61 @@ TEST_CASE("FrameStore evicts least recently used frames outside the window withi
     store.SetCurrentFrame(0, {"depth_raw"});
     store.WaitForCurrent();
     CHECK(store.GetStatus(0, "depth_raw") == FrameStore::Status::Ready);
+}
+
+// Stage 9 (MR B): the audit's «black cells» — a 24 fps source and a 48 fps result shared one frame index, so past
+// the shorter index range the source, depth and vectors had «no frame». On the time axis every source shows its own
+// frame at the same time over the whole clip.
+TEST_CASE("FrameStore keeps 24 and 48 fps sources in step over the whole clip (regression: black cells past the shorter index range)",
+          "[viewport][store][gpu][regression]") {
+    const auto root = Root("mixed_fps");
+    WritePass(root / "color_sr", PassKind::ColorSr, 8, 4, 0, 5, FileFormat::Png, 24);   // 6 frames at 24 fps: 0.25 s
+    WritePass(root / "color_fg", PassKind::ColorFg, 8, 4, 0, 10, FileFormat::Png, 48);  // 2N-1 frames at 48 fps
+    WritePass(root / "depth_raw", PassKind::DepthRaw, 8, 4, 0, 5);                      // no rate: follows the base rate
+    D3D12Device dev({true, false});
+    FrameStore::Options opt;
+    opt.prefetch = 2;
+    FrameStore store(dev, opt);
+    store.SetSources(FrameStore::DiscoverPasses(root));
+    CHECK(store.Fps().num == 24);
+    CHECK(store.BaseFps().num == 24);
+    CHECK(store.SourceFps("color_fg").num == 48);
+    CHECK(store.SourceFps("depth_raw").num == 24);
+    CHECK(store.FpsOf("nope") == 24.0);
+    CHECK(store.MaxFps() == 48.0);
+    CHECK(store.MaxFps({"color_sr", "depth_raw"}) == 24.0);
+    CHECK(store.Duration() == Approx(0.25));
+    CHECK(store.FrameCount() == 6);
+    CHECK(store.FrameAt("color_fg", 5.0 / 24.0) == 10);
+    CHECK(store.FrameAt("color_sr", 10.0 / 48.0) == 5);
+    CHECK(store.FrameAt("color_sr", 0.0) == 0);
+    CHECK(store.TimeOfFrame("color_fg", 10) == Approx(10.0 / 48.0));
+    CHECK(store.ExpectedFrames("color_fg") == 11);  // reaches the last 24 fps frame (5/24 s) at 48 fps
+    CHECK(store.ExpectedFrames("depth_raw") == 6);
+    CHECK(store.ExpectedFrames("color_sr") == 6);
+
+    // every frame of the 48 fps result has a frame of the 24 fps sources at the same time
+    for (int64_t r = 0; r <= 10; ++r) {
+        const double t = store.TimeOfFrame("color_fg", r);
+        store.SetCurrentTime(t, {"color_sr", "color_fg", "depth_raw"});
+        store.WaitForCurrent();
+        INFO("result frame " << r);
+        CHECK(store.StatusAt(t, "color_fg") == FrameStore::Status::Ready);
+        CHECK(store.StatusAt(t, "color_sr") == FrameStore::Status::Ready);
+        CHECK(store.StatusAt(t, "depth_raw") == FrameStore::Status::Ready);
+        const FrameTextures tex = store.TexturesAt(t);
+        CHECK(tex.count("color_fg") == 1);
+        CHECK(tex.count("color_sr") == 1);
+        CHECK(tex.count("depth_raw") == 1);
+        CHECK(store.FrameAt("color_sr", t) == (r + 1) / 2);  // round(r / 2), halves away from zero
+    }
+    // the base-rate API goes through the time axis: base frame 5 = 5/24 s = result frame 10
+    store.SetCurrentFrame(5, {"color_fg"});
+    CHECK(store.CurrentTime() == Approx(5.0 / 24.0));
+    CHECK(store.CurrentFrame() == 5);
+    store.WaitForCurrent();
+    CHECK(store.GetStatus(10, "color_fg") == FrameStore::Status::Ready);
+    CHECK(store.GetStatus(6, "color_sr") == FrameStore::Status::Missing);
+    CHECK(store.StatusAt(0.25, "color_sr") == FrameStore::Status::Missing);  // past the end
+    CHECK(store.TexturesAt(0.25).empty());
 }

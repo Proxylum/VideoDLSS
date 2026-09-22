@@ -74,7 +74,9 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     connect(&model_, &AppModel::message, this, [this](const QString& m) { statusBar()->showMessage(m, 5000); });
     connect(viewport_, &ViewportWindow::zoomChanged, this, [this](float z) { zoomLabel_->setText(QString("%1 %").arg(static_cast<int>(std::lround(z * 100)))); });
     connect(&model_, &AppModel::stateChanged, this, &MainWindow::updateCellLabels);
-    connect(&model_, &AppModel::frameChanged, this, [this](qint64) { updateCellLabels(); });
+    connect(&model_, &AppModel::timeChanged, this, [this](double) { updateCellLabels(); });
+    connect(&model_, &AppModel::framesUpdated, this, &MainWindow::updateCellLabels);  // «загрузка…» -> the frame
+    connect(&model_, &AppModel::sourcesChanged, this, &MainWindow::updateCellLabels);
     connect(tasks_, &TaskQueue::taskOutput, this, [](int id, const QString& line) { Log()->info("[task {}] {}", id, line.toStdString()); });
 
     buildMenus();
@@ -143,14 +145,26 @@ void MainWindow::updateCellLabels() {
     const bool grid = st.mode == ViewMode::Grid;
     for (size_t i = 0; i < 4; ++i) {
         cellLabels_[i]->setVisible(grid ? (st.expandedCell < 0 || st.expandedCell == static_cast<int>(i)) : i == 0);
-        if (grid) cellLabels_[i]->setText(QString("%1  #%2").arg(QString::fromStdString(st.gridSources[i])).arg(st.frame));
+        if (grid) cellLabels_[i]->setText(cellLabel(QString::fromStdString(st.gridSources[i]), st.gridSources[i]));
     }
     if (!grid) {
         QString t;
         for (const auto& l : st.layers) t += (t.isEmpty() ? "" : " + ") + QString::fromStdString(l.source);
-        cellLabels_[0]->setText(QString("%1  #%2").arg(t).arg(st.frame));
+        cellLabels_[0]->setText(cellLabel(t, model_.baseSource()));
     }
     setWindowTitle(QString("dlssvid — %1").arg(model_.hasProject() ? QString::fromStdWString(model_.project().sourceVideo.filename().wstring()) : tr("нет проекта")));
+}
+
+// «source  #123 · 00:05.12», plus the state while the frame is not on screen (stage 9: no silent black cells).
+QString MainWindow::cellLabel(const QString& title, const std::string& source) {
+    const double t = model_.time();
+    QString s = QString("%1  #%2 · %3").arg(title).arg(model_.store().FrameAt(source, t)).arg(QString::fromStdString(FormatTimecode(t)));
+    switch (model_.frameStateOf(source)) {
+        case FrameState::Loading: s += tr(" · загрузка…"); break;
+        case FrameState::Missing: s += tr(" · нет кадра"); break;
+        default: break;
+    }
+    return s;
 }
 
 void MainWindow::saveScreenshot() {

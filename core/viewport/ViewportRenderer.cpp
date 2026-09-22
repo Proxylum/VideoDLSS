@@ -39,7 +39,7 @@ struct DrawConstantsGpu {
     float image[4];
     uint32_t layerCount, anySolo, wipeEnabled, wipeVertical;
     float wipePos;
-    uint32_t wipeA, wipeB, pad;
+    uint32_t wipeA, wipeB, cellState;  // cellState: 0 ready, 1 loading, 2 no frame (a plate instead of an empty cell)
     float background[4];
     LayerParamsGpu layers[kMaxLayers];
 };
@@ -285,8 +285,8 @@ std::vector<LayerState> ViewportRenderer::CellLayers(const ViewportState& state,
 // ---- rendering ----------------------------------------------------------------------------------
 
 void ViewportRenderer::RenderInto(ID3D12Resource* target, D3D12_CPU_DESCRIPTOR_HANDLE rtv, uint32_t W, uint32_t H, const ViewportState& state,
-                                  const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight, D3D12_RESOURCE_STATES before,
-                                  D3D12_RESOURCE_STATES after) {
+                                  const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight, const FrameStates* states,
+                                  D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after) {
     Impl& im = *impl_;
     const auto t0 = std::chrono::steady_clock::now();
     im.srvCursor = 0;
@@ -338,6 +338,9 @@ void ViewportRenderer::RenderInto(ID3D12Resource* target, D3D12_CPU_DESCRIPTOR_H
             c.wipePos = std::clamp(state.wipe.position, 0.f, 1.f);
             c.wipeA = static_cast<uint32_t>(std::max(0, state.wipe.layerA));
             c.wipeB = static_cast<uint32_t>(std::max(0, state.wipe.layerB));
+            c.cellState = 0;
+            if (states && !layers.empty())
+                if (const auto it = states->find(layers[0].source); it != states->end()) c.cellState = static_cast<uint32_t>(it->second);
             c.background[0] = c.background[1] = 0.16f;
             c.background[2] = 0.18f;
             c.background[3] = 1.f;
@@ -418,18 +421,19 @@ void ViewportRenderer::RenderInto(ID3D12Resource* target, D3D12_CPU_DESCRIPTOR_H
     lastRenderMs_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 }
 
-void ViewportRenderer::RenderToWindow(const ViewportState& state, const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight) {
+void ViewportRenderer::RenderToWindow(const ViewportState& state, const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight,
+                                      const FrameStates* states) {
     Impl& im = *impl_;
     if (!im.swapchain) Throw("ViewportRenderer::RenderToWindow: no window attached");
     const uint32_t index = im.swapchain->GetCurrentBackBufferIndex();
-    RenderInto(im.backbuffers[index].Get(), im.Rtv(index), im.windowW, im.windowH, state, frame, imageWidth, imageHeight, D3D12_RESOURCE_STATE_PRESENT,
+    RenderInto(im.backbuffers[index].Get(), im.Rtv(index), im.windowW, im.windowH, state, frame, imageWidth, imageHeight, states, D3D12_RESOURCE_STATE_PRESENT,
                D3D12_RESOURCE_STATE_PRESENT);
     const HRESULT hr = im.swapchain->Present(1, 0);
     if (FAILED(hr) && hr != DXGI_STATUS_OCCLUDED) CheckHr(hr, "Present");
 }
 
 void ViewportRenderer::RenderOffscreen(const ViewportState& state, const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight,
-                                       uint32_t targetWidth, uint32_t targetHeight) {
+                                       uint32_t targetWidth, uint32_t targetHeight, const FrameStates* states) {
     Impl& im = *impl_;
     targetWidth = std::max(1u, targetWidth);
     targetHeight = std::max(1u, targetHeight);
@@ -440,13 +444,13 @@ void ViewportRenderer::RenderOffscreen(const ViewportState& state, const FrameTe
         im.offscreenH = targetHeight;
         im.device.Get()->CreateRenderTargetView(im.offscreen.Get(), nullptr, im.Rtv(2));
     }
-    RenderInto(im.offscreen.Get(), im.Rtv(2), targetWidth, targetHeight, state, frame, imageWidth, imageHeight, D3D12_RESOURCE_STATE_COMMON,
+    RenderInto(im.offscreen.Get(), im.Rtv(2), targetWidth, targetHeight, state, frame, imageWidth, imageHeight, states, D3D12_RESOURCE_STATE_COMMON,
                D3D12_RESOURCE_STATE_COMMON);
 }
 
 PassImage ViewportRenderer::RenderToImage(const ViewportState& state, const FrameTextures& frame, uint32_t imageWidth, uint32_t imageHeight,
-                                          uint32_t targetWidth, uint32_t targetHeight) {
-    RenderOffscreen(state, frame, imageWidth, imageHeight, targetWidth, targetHeight);
+                                          uint32_t targetWidth, uint32_t targetHeight, const FrameStates* states) {
+    RenderOffscreen(state, frame, imageWidth, imageHeight, targetWidth, targetHeight, states);
     Impl& im = *impl_;
     size_t pitch = 0;
     std::vector<uint8_t> bytes = im.device.ReadbackTexture2D(im.offscreen.Get(), pitch);

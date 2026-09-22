@@ -1,6 +1,10 @@
 #include "viewport/ViewportState.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
+
+#include <algorithm>
 
 #include "passes/PassImage.h"
 #include "util/Error.h"
@@ -85,7 +89,7 @@ nlohmann::json ViewportState::ToJson() const {
             {"expanded_cell", expandedCell},
             {"wipe", {{"enabled", wipe.enabled}, {"vertical", wipe.vertical}, {"position", wipe.position}, {"layer_a", wipe.layerA}, {"layer_b", wipe.layerB}}},
             {"view", {{"zoom", view.zoom}, {"center_x", view.centerX}, {"center_y", view.centerY}}},
-            {"frame", frame},
+            {"time", time},
             {"selected_layer", selectedLayer}};
 }
 
@@ -117,7 +121,8 @@ ViewportState ViewportState::FromJson(const nlohmann::json& j) {
         s.view.centerX = v.value("center_x", 0.f);
         s.view.centerY = v.value("center_y", 0.f);
     }
-    s.frame = j.value("frame", int64_t{0});
+    s.time = std::max(0.0, j.value("time", 0.0));
+    s.legacyFrame = !j.contains("time") && j.contains("frame") && j["frame"].is_number() ? j["frame"].get<int64_t>() : int64_t{-1};
     s.selectedLayer = std::clamp(j.value("selected_layer", 0), 0, static_cast<int>(s.layers.size()) - 1);
     return s;
 }
@@ -162,6 +167,21 @@ std::vector<std::string> ViewportState::NeededSources() const {
         for (const auto& l : layers) add(l.source);
     }
     return out;
+}
+
+void ViewportState::ResolveLegacyFrame(double baseFps) {
+    if (legacyFrame < 0) return;
+    time = baseFps > 0 ? static_cast<double>(legacyFrame) / baseFps : 0.0;
+    legacyFrame = -1;
+}
+
+std::string FormatTimecode(double seconds) {
+    const long long hundredths = std::llround(std::max(0.0, seconds) * 100.0);
+    const long long h = hundredths / 360000, m = hundredths / 6000 % 60, s = hundredths / 100 % 60, hh = hundredths % 100;
+    char buf[32];
+    if (h > 0) std::snprintf(buf, sizeof buf, "%lld:%02lld:%02lld.%02lld", h, m, s, hh);
+    else std::snprintf(buf, sizeof buf, "%02lld:%02lld.%02lld", m, s, hh);
+    return buf;
 }
 
 bool ViewportState::AnySolo() const {

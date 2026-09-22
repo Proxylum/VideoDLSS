@@ -2,6 +2,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+
 #include "viewport/ViewportState.h"
 
 using namespace dlssvid;
@@ -113,7 +115,7 @@ TEST_CASE("ViewportState JSON round trip and tolerant parsing", "[viewport][stat
     s.expandedCell = 2;
     s.wipe = WipeState{true, false, 0.3f, 1, 0};
     s.view = ViewTransform{2.5f, 10.f, 20.f};
-    s.frame = 123;
+    s.time = 5.125;
     s.selectedLayer = 1;
 
     const nlohmann::json j = s.ToJson();
@@ -123,7 +125,7 @@ TEST_CASE("ViewportState JSON round trip and tolerant parsing", "[viewport][stat
     CHECK(j["layers"][1]["blend"] == "difference");
     CHECK(j["wipe"]["position"] == 0.3f);
     CHECK(j["view"]["zoom"] == 2.5f);
-    CHECK(j["frame"] == 123);
+    CHECK(j["time"] == 5.125);
     CHECK(ViewportState::FromJson(j) == s);
     CHECK(ViewportState::FromJson(nlohmann::json::parse(j.dump())) == s);
 
@@ -147,4 +149,27 @@ TEST_CASE("ViewportState JSON round trip and tolerant parsing", "[viewport][stat
     nlohmann::json many = {{"layers", nlohmann::json::array()}};
     for (int i = 0; i < 8; ++i) many["layers"].push_back({{"source", "source"}});
     CHECK(ViewportState::FromJson(many).layers.size() == static_cast<size_t>(ViewportState::kMaxLayers));
+}
+
+TEST_CASE("ViewportState reads the frame of pre-stage-9 projects and formats timecodes", "[viewport][state]") {
+    ViewportState legacy = ViewportState::FromJson(nlohmann::json::parse(R"({"frame": 123})"));
+    CHECK(legacy.time == 0.0);
+    CHECK(legacy.legacyFrame == 123);
+    legacy.ResolveLegacyFrame(24.0);
+    CHECK(std::abs(legacy.time - 5.125) < 1e-12);
+    CHECK(legacy.legacyFrame == -1);
+    legacy.ResolveLegacyFrame(48.0);  // already resolved: nothing changes
+    CHECK(std::abs(legacy.time - 5.125) < 1e-12);
+    const ViewportState both = ViewportState::FromJson(nlohmann::json::parse(R"({"frame": 123, "time": 2.5})"));
+    CHECK(both.time == 2.5);
+    CHECK(both.legacyFrame == -1);  // a time wins over a frame
+    CHECK(ViewportState::FromJson(nlohmann::json::parse(R"({"time": -3})")).time == 0.0);
+    CHECK(!ViewportState{}.ToJson().contains("frame"));
+
+    CHECK(FormatTimecode(0.0) == "00:00.00");
+    CHECK(FormatTimecode(4.98) == "00:04.98");
+    CHECK(FormatTimecode(9.9583) == "00:09.96");
+    CHECK(FormatTimecode(65.5) == "01:05.50");
+    CHECK(FormatTimecode(3600.0) == "1:00:00.00");
+    CHECK(FormatTimecode(-1.0) == "00:00.00");
 }

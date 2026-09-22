@@ -113,7 +113,11 @@ void ApplyOverrides(ViewportState& st, const ViewportCommands::RenderArgs& a) {
             }
         }
     }
-    if (a.frame >= 0) st.frame = a.frame;
+    if (a.frame >= 0) st.legacyFrame = a.frame;  // a base-rate frame: becomes a time once the sources (and the rate) are known
+    if (a.time >= 0) {
+        st.time = a.time;
+        st.legacyFrame = -1;
+    }
 }
 
 int CmdProjectInit(const ViewportCommands::ProjectArgs& a) {
@@ -139,8 +143,9 @@ int CmdProjectShow(const ViewportCommands::ProjectArgs& a) {
     const Project p = Project::Load(a.project);
     std::printf("%s\n", p.ToJson(p.file.parent_path()).dump(2).c_str());
     for (const auto& s : p.Sources())
-        std::printf("source:   %-12s %s  %ux%u  frames %lld..%lld%s\n", s.name.c_str(), s.path.string().c_str(), s.width, s.height,
-                    static_cast<long long>(s.firstFrame), static_cast<long long>(s.lastFrame), s.isVideo ? "  (video)" : "");
+        std::printf("source:   %-12s %s  %ux%u  frames %lld..%lld  %g fps%s\n", s.name.c_str(), s.path.string().c_str(), s.width, s.height,
+                    static_cast<long long>(s.firstFrame), static_cast<long long>(s.lastFrame), s.fps.num > 0 ? s.fps.ToDouble() : 0.0,
+                    s.isVideo ? "  (video)" : "");
     return 0;
 }
 
@@ -162,6 +167,7 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
     FrameStore store(device);
     store.SetSources(project.Sources());
     if (store.Sources().empty()) Throw("render: no sources (video not readable and no pass folders under " + project.passesRoot.string() + ")");
+    st.ResolveLegacyFrame(store.BaseFps().ToDouble());
     const std::vector<std::string> needed = st.NeededSources();
     for (const auto& n : needed)
         if (!store.FindSource(n)) Log()->warn("render: source '{}' is not available (shown empty)", n);
@@ -171,10 +177,12 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
         th = store.ImageHeight();
     }
     ViewportRenderer renderer(device);
-    auto renderFrame = [&](int64_t f) {
-        store.SetCurrentFrame(f, needed);
+    auto renderAt = [&](double t) {
+        store.SetCurrentTime(t, needed);
         store.WaitForCurrent();
-        return renderer.RenderToImage(st, store.Textures(f), store.ImageWidth(), store.ImageHeight(), tw, th);
+        FrameStates states;  // after the wait a source is either on the GPU or has no frame here
+        for (const auto& n : needed) states[n] = store.StatusAt(t, n) == FrameStore::Status::Ready ? FrameState::Ready : FrameState::Missing;
+        return renderer.RenderToImage(st, store.TexturesAt(t), store.ImageWidth(), store.ImageHeight(), tw, th, &states);
     };
 
     if (a.bench > 0) {
@@ -204,20 +212,22 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
         return 0;
     }
 
-    if (store.FrameCount() > 0 && st.frame >= store.FrameCount()) Throw("render: frame " + std::to_string(st.frame) + " is outside 0.." + std::to_string(store.FrameCount() - 1));
+    if (store.Duration() > 0 && st.time > store.Duration() + 1e-9)
+        Throw("render: time " + std::to_string(st.time) + " s is outside 0.." + std::to_string(store.Duration()) + " s (" + std::to_string(store.FrameCount()) +
+              " frames at the base rate)");
     const auto t0 = std::chrono::steady_clock::now();
-    const PassImage img = renderFrame(st.frame);
+    const PassImage img = renderAt(st.time);
     bool any = false;
-    for (const auto& n : needed) any = any || store.GetStatus(st.frame, n) == FrameStore::Status::Ready;
-    if (!any) Throw("render: frame " + std::to_string(st.frame) + " has none of the requested sources");
+    for (const auto& n : needed) any = any || store.StatusAt(st.time, n) == FrameStore::Status::Ready;
+    if (!any) Throw("render: " + FormatTimecode(st.time) + " has none of the requested sources");
     if (!a.output.empty()) {
         std::filesystem::create_directories(std::filesystem::absolute(a.output).parent_path());
         WritePng(a.output, img);
     }
     if (a.saveState && !project.file.empty()) project.Save();
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    std::printf("rendered frame %lld (%s, %ux%u) in %.1f ms%s%s\n", static_cast<long long>(st.frame), std::string(ToString(st.mode)).c_str(), tw, th, ms,
-                a.output.empty() ? "" : " -> ", a.output.c_str());
+    std::printf("rendered %s (frame %lld at %g fps; %s, %ux%u) in %.1f ms%s%s\n", FormatTimecode(st.time).c_str(), static_cast<long long>(store.CurrentFrame()),
+                store.BaseFps().ToDouble(), std::string(ToString(st.mode)).c_str(), tw, th, ms, a.output.empty() ? "" : " -> ", a.output.c_str());
     return 0;
 }
 
@@ -238,7 +248,8 @@ void ViewportCommands::Register(CLI::App& app) {
     render_->add_option("--passes", ra_.passes, "passes root folder");
     render_->add_option("--result", ra_.result, "result video");
     render_->add_option("-o,--output", ra_.output, "output PNG");
-    render_->add_option("--frame", ra_.frame, "frame index (default: the project's viewport frame)");
+    render_->add_option("--frame", ra_.frame, "frame index at the base rate (default: the project's viewport time)");
+    render_->add_option("--time", ra_.time, "time in seconds (wins over --frame)");
     render_->add_option("--mode", ra_.mode, "single | overlay | grid");
     render_->add_option("--source", ra_.source, "single mode: source name (source, result, depth_raw, mv_raw, ...)");
     render_->add_option("--layers", ra_.layers, "overlay: base,name[:display[:opacity[:blend]]],...");
