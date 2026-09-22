@@ -91,7 +91,7 @@
 4. Переключатель «Инженерный режим» показывает стек слоёв и секции инспектора; в обычном режиме они скрыты.
 5. Тесты: app — переключение режимов, пресеты, состав чипов; `ViewportState` — сериализация новых полей.
 
-**Статус (2026-09-22): выполнено** — MR !NN (ветка `stage/09-ui-ux-c`): `ViewportState::SetCompare` / `SetAfterOnly` /
+**Статус (2026-09-22): выполнено** — MR !21 (ветка `stage/09-ui-ux-c`): `ViewportState::SetCompare` / `SetAfterOnly` /
 `CompareConfigured` / `CompareSide` / `NextUnusedSource`, источники-версии `<pass>@<id>` (`SplitSourceVersion`,
 `FrameStore::DiscoverPassVersions`, `Project::Sources`), `AppModel` (`compareView`, `setCompareView`, `applyPreset`,
 `showSource`, `toggleWipe`, `chips`, `engineerMode` в QSettings), `app/CompareBar` (режимы, чипы с меню версий,
