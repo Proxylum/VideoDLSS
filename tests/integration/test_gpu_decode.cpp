@@ -12,6 +12,8 @@
 #include "stages/passthrough/PassthroughStage.h"
 
 #ifdef DLSSVID_WITH_CUDA
+#include <cuda_runtime.h>
+
 #include "gpu/CudaInterop.h"
 #endif
 
@@ -96,4 +98,32 @@ TEST_CASE("GPU frames from NVDEC match the CPU decode and reach D3D12 without a 
 
 #else
 TEST_CASE("GPU decode path not built", "[integration][gpu][nvdec]") { SUCCEED("DLSSVID_WITH_CUDA is off"); }
+#endif
+
+#ifdef DLSSVID_WITH_CUDA
+// Regression (2026-09-22): in `dlssvid process` the depth stage (TensorRT, cudart) created the primary context with
+// the default scheduling before the flow stage opened its NVDEC decoder; FFmpeg insists on blocking sync for the
+// primary context it retains and refused ("Primary context already active with incompatible flags"), so the flow
+// stage decoded in software and fed OFA from the CPU. The decoder now aligns the flags first.
+TEST_CASE("NVDEC still opens after the CUDA runtime created the primary context with other scheduling flags", "[integration][gpu][nvdec][regression]") {
+    D3D12Device dev;
+    std::string reason;
+    if (dev.IsWarp() || !dev.IsNvidia() || !CudaInterop::Available(&reason)) SKIP("no NVIDIA GPU / CUDA: " << reason);
+    if (!VideoEncoder::EncoderAvailable("h264_nvenc")) SKIP("h264_nvenc unavailable");
+    const auto clip = H264Clip();
+    // what a stage before the decoder does: the primary context comes up with a scheduling FFmpeg does not want
+    REQUIRE(cudaSetDeviceFlags(cudaDeviceScheduleSpin) == cudaSuccess);
+    REQUIRE(cudaFree(nullptr) == cudaSuccess);
+    unsigned flags = 0;
+    REQUIRE(cudaGetDeviceFlags(&flags) == cudaSuccess);
+    REQUIRE((flags & cudaDeviceScheduleMask) == cudaDeviceScheduleSpin);
+
+    VideoDecoder hw(clip, VideoDecoder::Options{HwAccel::Cuda});
+    CHECK(hw.UsingHwAccel());
+    CpuFrame frame;
+    REQUIRE(hw.NextFrame(frame));
+    CHECK(frame.desc.width == 320);
+    REQUIRE(cudaGetDeviceFlags(&flags) == cudaSuccess);
+    CHECK((flags & cudaDeviceScheduleMask) == cudaDeviceScheduleBlockingSync);
+}
 #endif

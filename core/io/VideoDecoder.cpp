@@ -12,6 +12,10 @@ extern "C" {
 
 #include <cmath>
 
+#ifdef DLSSVID_WITH_CUDA
+#include <cuda_runtime.h>
+#endif
+
 #include "util/Error.h"
 #include "util/Log.h"
 
@@ -49,6 +53,14 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     if (options.hwaccel == HwAccel::Cuda) {
         // Primary CUDA context: device pointers are then usable from cudart, TensorRT and the
         // Optical Flow API in this process without context juggling.
+#ifdef DLSSVID_WITH_CUDA
+        // FFmpeg retains the primary context and insists on CU_CTX_SCHED_BLOCKING_SYNC; a stage that used the CUDA
+        // runtime before this decoder (TensorRT depth, OFA) has already created it with the default scheduling, and
+        // FFmpeg then refuses NVDEC ("Primary context already active with incompatible flags") and the stage decodes
+        // in software. cudart applies the flags to the active primary context too: align them first.
+        if (const cudaError_t e = cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync); e != cudaSuccess)
+            Log()->debug("cudaSetDeviceFlags(BlockingSync) before NVDEC: {}", cudaGetErrorString(e));
+#endif
         const int err = av_hwdevice_ctx_create(&hwDevice_, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, AV_CUDA_USE_PRIMARY_CONTEXT);
         if (err < 0) {
             Log()->warn("CUDA hwaccel unavailable ({}), decoding in software", AvErrorToString(err));
