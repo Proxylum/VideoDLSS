@@ -205,7 +205,8 @@ switches the viewport to «До | После» by itself, a cancelled or failed 
 The result line above the viewport (size, rate, frames, sound, when it was written, how long the run took) offers
 «Сохранить как…» (a copy of the result video), «Открыть папку», «Экспорт пассов…» (one `dlssvid export … --format exr`
 task per pass into a chosen folder) and «Другое видео» (= «Файл → Закрыть проект», `Ctrl+W`, back to the start page);
-keys `1`…`9` follow the chips of the compare bar.
+keys `1`…`9` follow the chips of the compare bar. The passes folder can be changed from the project panel («Пассы ·
+изменить…», the project remembers it); cell labels carry the source size («Исходник · 1920×800  #123 · 00:05.12»).
 
 ## Layout
 

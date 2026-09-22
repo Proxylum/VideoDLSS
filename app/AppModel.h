@@ -155,6 +155,7 @@ public slots:
     void setForce(const std::string& stage, bool on);
     void clearForce();
     void setEncode(const QString& codec, const std::map<std::string, std::string>& options);
+    void setPassesRoot(const QString& dir);  // where the stages write and read their passes (the project's «passes»)
     void notifyStateChanged(bool structural = true);  // after direct edits of state(); structural ones (layers, modes) mark the project unsaved
     void markDirty();
     void addRecent(const QString& path);
