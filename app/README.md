@@ -13,9 +13,10 @@
 | `TimelineWidget` | scrubber, frame number, play/pause, ±1 |
 | `ProjectPanel` | source, passes with status, stages with enable/params and «Запустить» (CLI via `TaskQueue`); «Обработать → result» saves the project and runs `dlssvid process --project` (stage 8); the `nr` stage adds «Пропатчить DLL…» — picks your `nvngx_dlssnr.dll` (and the patcher / CUDA 13.3 folders when `DLSSNR_PATCHER_ROOT` / `CUDA_PATH_V13_3` are unset) and queues `dlssvid nr-patch` (stage 6) |
 | `InspectorPanel` | layer stack and display settings, wipe, grid cell sources, pixel probe |
-| `TaskQueue` | sequential `dlssvid <stage>` processes with progress parsed from `N/M frames` |
+| `TaskQueue` | sequential `dlssvid <stage>` processes with progress parsed from `stage: N/M frames`; stage 9: a plan per task (reused stages, estimates), the measured rate of the running stage, ETA, cancel (kill; queued tasks are dropped), «не запускается» for a program that fails to start |
+| `ProcessingPanel` | the processing page (stage 9): elapsed / left, overall and per-stage progress, «Отменить», «Свернуть в фон», log tail, «Показать результат» / «К проекту» |
 | `LogPanel` | spdlog sink |
-| `MainWindow` | docks, menus, hotkeys (1..9 sources, F fit, Ctrl+0 1:1, W wipe, Space play, ,/. step), PNG screenshot with cell labels |
+| `MainWindow` | docks, menus, hotkeys (1..9 sources, F fit, Ctrl+0 1:1, W wipe, Space play, ,/. step), PNG screenshot with cell labels; stage 9: start page / work area / processing page, QSettings, recents, «До | После» after a run, tray notification when the window is minimised or in the background |
 
 Build: `-DDLSSVID_BUILD_APP=ON` (default) with `QT_ROOT` pointing at `.../Qt/6.8.x/msvc2022_64`;
 without Qt the GUI is skipped with a warning. `windeployqt` runs post-build, so the executable

@@ -27,6 +27,9 @@ public:
 public slots:
     void refresh();
 
+signals:
+    void processQueued(int taskId, const QString& what);  // «Обработать»: the run is queued; what = «face.mp4 → face_result.mp4»
+
 private:
     void refreshVersions();
     void runStage(const std::string& stage);

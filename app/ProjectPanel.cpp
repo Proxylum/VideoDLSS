@@ -240,10 +240,7 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     connect(&model_, &AppModel::sourcesChanged, this, &ProjectPanel::refresh);
     connect(&model_, &AppModel::planChanged, this, &ProjectPanel::refresh);
     connect(&model_, &AppModel::engineerModeChanged, this, [this](bool) { refresh(); });
-    connect(&tasks_, &TaskQueue::taskFinished, this, [this](int, bool) {
-        model_.clearForce();
-        model_.reloadSources();
-    });
+    connect(&tasks_, &TaskQueue::taskStarted, this, [this](int) { refresh(); });  // «Обработать» waits for the running task
     refresh();
 }
 
@@ -288,7 +285,7 @@ void ProjectPanel::refresh() {
     outError_->setVisible(!model_.planError().isEmpty() && hasSource);
     const int toRun = std::max(0, out.stagesToRun - 1);  // the encode is not a «stage» for the button
     process_->setText(toRun > 0 ? tr("Обработать · %1").arg(Plural(toRun, tr("стадия"), tr("стадии"), tr("стадий"))) : tr("Обработать · только кодирование"));
-    process_->setEnabled(hasSource && model_.planError().isEmpty());
+    process_->setEnabled(hasSource && model_.planError().isEmpty() && !tasks_.busy());
 
     for (StageCard* c : cards_) c->refresh();
     {
@@ -426,7 +423,17 @@ void ProjectPanel::processAll() {
     } else if (!model_.saveProject()) {
         return;
     }
-    tasks_.enqueue(tr("process"), model_.cliPath(), model_.processArgs());
+    std::vector<TaskQueue::StagePlan> plan;
+    for (const StageEstimate& e : model_.outcome().stages) {
+        TaskQueue::StagePlan s;
+        s.name = QString::fromStdString(e.stage);
+        s.title = model_.stageTitle(e.stage);
+        s.seconds = e.seconds;
+        s.reused = e.action != "run";
+        plan.push_back(s);
+    }
+    const int id = tasks_.enqueue(tr("Обработка"), model_.cliPath(), model_.processArgs(), plan);
+    emit processQueued(id, QString("%1 → %2").arg(QString::fromStdWString(p.sourceVideo.filename().wstring()), QString::fromStdWString(p.resultVideo.filename().wstring())));
 }
 
 void ProjectPanel::runStage(const std::string& stage) {

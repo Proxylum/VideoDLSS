@@ -457,6 +457,20 @@ QStringList AppModel::processArgs() const {
     return args;
 }
 
+QString AppModel::stageTitle(const std::string& stage) const {
+    if (stage == "encode") return tr("Кодирование");
+    const StageSchema* schema = FindStageSchema(stage);
+    QString title = schema ? QString::fromStdString(schema->title) : QString::fromStdString(stage);
+    const StageEntry* entry = nullptr;
+    for (const auto& s : project_.stages)
+        if (s.name == stage) entry = &s;
+    if (!entry) return title;
+    const nlohmann::json p = EffectiveStageParams(stage, entry->params);
+    if (stage == "upscale" && p.contains("scale") && p["scale"].is_number()) title += QString(" ×%1").arg(p["scale"].get<double>());
+    if (stage == "fg" && p.contains("multiplier") && p["multiplier"].is_number()) title += QString(" ×%1").arg(p["multiplier"].get<int>());
+    return title;
+}
+
 QString AppModel::sourceHashStatus() const {
     if (plan_.sourceHash.empty()) return {};
     int passes = 0, other = 0;
