@@ -23,6 +23,7 @@ class LogPanel;
 class TaskQueue;
 class StartPage;
 class ProcessingPanel;
+class ResultBar;
 
 // The application window: the start page until a project is open, then the work area (compare bar, cell labels,
 // viewport, timeline) with the project / inspector / log / task docks. Stage 9 (MR E): the window remembers its
@@ -56,6 +57,11 @@ private:
     void updateTitle();  // «dlssvid — face.mp4*»
     void rebuildRecentMenu();
     void saveSettings();
+    bool settleUnsaved();     // save or ask per AppModel::closeAction(); false when the user cancels
+    void closeProject();      // «Другое видео» / Ctrl+W: back to the start page
+    void saveResultAs();
+    void openResultFolder();
+    void exportPasses();      // one `dlssvid export` task per current pass into a chosen folder
     void watchProcess(int taskId, const QString& what);  // the run was queued: show the processing page
     void onTaskFinished(int taskId, bool ok);
     void notify(const QString& title, const QString& text);  // system notification (QSystemTrayIcon)
@@ -67,6 +73,7 @@ private:
     ProcessingPanel* processing_;
     QWidget* workArea_;
     CompareBar* compareBar_;
+    ResultBar* resultBar_;
     ViewportWindow* viewport_;
     QWidget* viewportContainer_;
     TimelineWidget* timeline_;

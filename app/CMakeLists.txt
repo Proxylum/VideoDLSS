@@ -14,6 +14,7 @@ qt_add_library(dlssvid_app STATIC
   LogPanel.h LogPanel.cpp
   TaskQueue.h TaskQueue.cpp
   ProcessingPanel.h ProcessingPanel.cpp
+  ResultBar.h ResultBar.cpp
   MainWindow.h MainWindow.cpp
 )
 target_include_directories(dlssvid_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

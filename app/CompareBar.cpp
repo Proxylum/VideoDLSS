@@ -81,7 +81,9 @@ void CompareBar::rebuildChips() {
     for (const AppModel::Chip& chip : model_.chips()) {
         auto* b = new QToolButton(this);
         b->setText(chip.label);
-        b->setToolTip(chip.tooltip);
+        QString tip = chip.tooltip;
+        if (chip.hotkey > 0) tip += "\n" + tr("клавиша %1").arg(chip.hotkey);
+        b->setToolTip(tip);
         b->setCheckable(true);
         b->setAutoRaise(true);
         const std::string source = chip.source;
@@ -98,7 +100,7 @@ void CompareBar::rebuildChips() {
             }
             b->setMenu(menu);
             b->setPopupMode(QToolButton::MenuButtonPopup);
-            b->setToolTip(chip.tooltip + "\n" + tr("%1: меню справа").arg(Plural(static_cast<int>(chip.versions.size()), tr("предыдущая версия"), tr("предыдущие версии"), tr("предыдущих версий"))));
+            b->setToolTip(tip + "\n" + tr("%1: меню справа").arg(Plural(static_cast<int>(chip.versions.size()), tr("предыдущая версия"), tr("предыдущие версии"), tr("предыдущих версий"))));
         }
         chipsLayout_->addWidget(b);
         chips_.push_back(b);

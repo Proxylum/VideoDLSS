@@ -65,6 +65,7 @@ public:
         std::string source;                    // the current version of a pass, "source" or "result"
         QString label, tooltip;                // human name; the technical side
         std::vector<ViewportSource> versions;  // previous versions of the pass (the chip's menu)
+        int hotkey = 0;                        // 1..9: the key that shows this chip (chip order); 0 beyond the ninth
     };
     CompareView compareView() const;   // derived from the state: a configured wipe, a grid, or a single view
     std::string beforeSource() const;  // "source" when present, else the first colour pass
@@ -108,11 +109,30 @@ public:
     QString lastDir(const QString& key) const;               // last folder of a file dialog (QSettings dialogs/<key>)
     void rememberDir(const QString& key, const QString& file);
 
+    // ---- the result and what to do with it (TASK-0013) ----
+    struct ResultInfo {
+        bool exists = false;
+        QString path;
+        uint32_t width = 0, height = 0;
+        double fps = 0.0;
+        int64_t frames = 0;       // 0 when unknown
+        bool audio = false;
+        QString modified;         // «сегодня 19:23»
+        double runSeconds = 0.0;  // the run of this session that made it; 0 when none
+    };
+    ResultInfo resultInfo() const;
+    QString resultSummary() const;                      // «3840×1600 · 48 fps · 479 кадров · со звуком · обновлён сегодня 19:23 · готов за 11:22»; empty without a result
+    std::vector<std::string> exportablePasses() const;  // current pass folders with a manifest, pipeline order
+    unsigned long long freeSpace() const;               // bytes free on the volume of the passes root (0 when unknown)
+
 public slots:
     void openVideo(const QString& file);
     void openProject(const QString& file);
     bool saveProject();
     bool saveProjectAs(const QString& file);
+    bool exportResult(const QString& to);  // copy the result video to `to` (overwrites); a message either way
+    bool closeProject();                   // forget the project (unsaved changes are settled by the caller): the start page
+    void setLastRun(double seconds);       // the run that has just produced the result
     void reloadSources();  // after a stage finished: rescan pass folders
     void setTime(double seconds);
     void setFrame(int64_t timelineFrame);  // in frames of the timeline rate
@@ -154,6 +174,7 @@ signals:
     void planChanged();
     void dirtyChanged(bool dirty);
     void recentsChanged();
+    void resultChanged();
 
 private:
     void onPlayTick();
@@ -175,6 +196,8 @@ private:
     std::set<std::string> force_;
     std::map<std::string, int> history_;  // pass -> previous versions on disk
     QTimer planTimer_;
+    bool resultAudio_ = false;  // the result video has a sound track (probed on reload)
+    double lastRun_ = 0.0;      // seconds the last run of this session took
 };
 
 }  // namespace dlssvid
