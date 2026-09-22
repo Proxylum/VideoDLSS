@@ -8,8 +8,12 @@
 #include <cmath>
 
 #include "SourceNames.h"
+#include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "stages/ParamSchema.h"
+#include "stages/fg/IFrameGenerator.h"
+#include "stages/nr/INrBackend.h"
+#include "stages/upscale/IUpscaler.h"
 #include "util/Log.h"
 
 namespace dlssvid {
@@ -50,11 +54,13 @@ void AppModel::openVideo(const QString& file) {
         project_ = Project::Create(std::filesystem::path(file.toStdWString()), {});
         // default project file next to the video
         project_.file = std::filesystem::path(file.toStdWString()).replace_extension(".dlssvid.json");
-        if (std::filesystem::exists(project_.file)) {
-            project_ = Project::Load(project_.file);
-        }
+        const bool loaded = std::filesystem::exists(project_.file);
+        if (loaded) project_ = Project::Load(project_.file);
         reloadSources();
+        dirty_ = !loaded;  // a project made from the video is not on disk yet: it is saved next to the video on close
+        emit dirtyChanged(dirty_);
         emit projectChanged();
+        addRecent(file);
         emit message(tr("Открыт %1").arg(file));
     } catch (const std::exception& e) {
         emit message(tr("Ошибка: %1").arg(e.what()));
@@ -65,7 +71,10 @@ void AppModel::openProject(const QString& file) {
     try {
         project_ = Project::Load(std::filesystem::path(file.toStdWString()));
         reloadSources();
+        dirty_ = false;
+        emit dirtyChanged(false);
         emit projectChanged();
+        addRecent(file);
         emit message(tr("Проект %1").arg(file));
     } catch (const std::exception& e) {
         emit message(tr("Ошибка: %1").arg(e.what()));
@@ -80,6 +89,8 @@ bool AppModel::saveProject() {
 bool AppModel::saveProjectAs(const QString& file) {
     try {
         project_.Save(std::filesystem::path(file.toStdWString()));
+        dirty_ = false;
+        emit dirtyChanged(false);
         emit message(tr("Проект сохранён: %1").arg(file));
         return true;
     } catch (const std::exception& e) {
@@ -194,19 +205,28 @@ void AppModel::onPlayTick() {
 void AppModel::setMode(ViewMode mode) {
     if (state().mode == mode) return;
     state().mode = mode;
+    markDirty();
     requestFrames();
     emit stateChanged();
 }
 
 void AppModel::setSingleSource(const QString& name) {
     state().SetSingleSource(name.toStdString());
+    markDirty();
     requestFrames();
     emit stateChanged();
 }
 
-void AppModel::notifyStateChanged() {
+void AppModel::notifyStateChanged(bool structural) {
+    if (structural) markDirty();
     requestFrames();
     emit stateChanged();
+}
+
+void AppModel::markDirty() {
+    if (dirty_) return;
+    dirty_ = true;
+    emit dirtyChanged(true);
 }
 
 void AppModel::notifyFramesUpdated() { emit framesUpdated(); }
@@ -383,6 +403,7 @@ void AppModel::schedulePlan() { planTimer_.start(); }
 void AppModel::setStageEnabled(const std::string& stage, bool on) {
     if (StageEntry* e = stageEntry(stage); e && e->enabled != on) {
         e->enabled = on;
+        markDirty();
         emit projectChanged();
         schedulePlan();
     }
@@ -393,6 +414,7 @@ void AppModel::setStageParam(const std::string& stage, const std::string& key, c
     if (!e) return;
     if (e->params.contains(key) && e->params[key] == value) return;
     e->params[key] = value;
+    markDirty();
     emit projectChanged();
     schedulePlan();
 }
@@ -401,6 +423,7 @@ void AppModel::setStageParams(const std::string& stage, const nlohmann::json& pa
     StageEntry* e = stageEntry(stage);
     if (!e || !params.is_object() || e->params == params) return;
     e->params = params;
+    markDirty();
     emit projectChanged();
     schedulePlan();
 }
@@ -420,6 +443,7 @@ void AppModel::clearForce() {
 void AppModel::setEncode(const QString& codec, const std::map<std::string, std::string>& options) {
     project_.codec = codec.toStdString();
     project_.codecOptions = options;
+    markDirty();
     emit projectChanged();
 }
 
@@ -529,6 +553,81 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
         if (!any) st.warning = tr("без глубины и векторов: качество ниже");
     }
     return st;
+}
+
+// ---- start screen, recents, unsaved changes -------------------------------------------------------
+
+AppModel::CloseAction AppModel::closeAction() const {
+    if (!dirty_ || !hasProject()) return CloseAction::Nothing;
+    return project_.file.empty() ? CloseAction::Ask : CloseAction::AutoSave;
+}
+
+QString AppModel::lastDir(const QString& key) const { return QSettings().value("dialogs/" + key).toString(); }
+
+void AppModel::rememberDir(const QString& key, const QString& file) {
+    if (!file.isEmpty()) QSettings().setValue("dialogs/" + key, QFileInfo(file).absolutePath());
+}
+
+std::vector<AppModel::Recent> AppModel::recents() const {
+    std::vector<Recent> out;
+    for (const QString& path : QSettings().value("recent/files").toStringList()) {
+        Recent r;
+        r.path = path;
+        const QFileInfo fi(path);
+        r.exists = fi.exists();
+        r.isProject = path.endsWith(".dlssvid.json", Qt::CaseInsensitive) || path.endsWith(".json", Qt::CaseInsensitive);
+        r.title = fi.fileName();
+        if (r.isProject && r.title.endsWith(".dlssvid.json", Qt::CaseInsensitive)) r.title.chop(13);  // ".dlssvid.json"
+        else if (r.title.contains('.')) r.title = r.title.left(r.title.lastIndexOf('.'));
+        if (!r.exists) {
+            r.info = tr("файл не найден");
+        } else if (r.isProject) {
+            try {
+                const Project p = Project::Load(std::filesystem::path(path.toStdWString()));
+                const int passes = static_cast<int>(FrameStore::DiscoverPasses(p.passesRoot).size());
+                if (!p.resultVideo.empty() && std::filesystem::exists(p.resultVideo)) r.info = tr("результат готов");
+                else if (passes > 0) r.info = Plural(passes, tr("пасс"), tr("пасса"), tr("пассов"));
+                else r.info = tr("не обработан");
+            } catch (const std::exception&) {
+                r.info = tr("проект не читается");
+            }
+        } else {
+            const bool hasProject = QFileInfo::exists(QString::fromStdWString(std::filesystem::path(path.toStdWString()).replace_extension(".dlssvid.json").wstring()));
+            r.info = hasProject ? tr("видео · есть проект") : tr("видео · не обработан");
+        }
+        if (r.exists) r.info += " · " + HumanWhen(FileTimeIso8601(std::filesystem::path(path.toStdWString())));
+        out.push_back(std::move(r));
+    }
+    return out;
+}
+
+void AppModel::addRecent(const QString& path) {
+    QSettings settings;
+    QStringList list = settings.value("recent/files").toStringList();
+    list.removeAll(path);
+    list.prepend(path);
+    while (list.size() > 10) list.removeLast();
+    settings.setValue("recent/files", list);
+    emit recentsChanged();
+}
+
+void AppModel::clearRecents() {
+    QSettings().remove("recent/files");
+    emit recentsChanged();
+}
+
+QString AppModel::readiness() const {
+    const QString adapter = QString::fromStdString(device_->AdapterName());
+    if (device_->IsWarp()) return tr("%1 (WARP, программный рендер) — без NVIDIA GPU доступны NIS, бикубик и смешивание кадров").arg(adapter);
+    QStringList parts{adapter};
+    const std::string driver = NvidiaDriverFromUmd(device_->UmdDriverVersion()).ToString();
+    if (!driver.empty()) parts << tr("драйвер %1").arg(QString::fromStdString(driver));
+    bool sr = false;
+    for (const auto& dir : NvidiaDllSearchPaths()) sr = sr || std::filesystem::exists(dir / "nvngx_dlss.dll");
+    parts << (sr ? tr("DLSS SR ✓") : tr("DLSS SR ✗ (нет nvngx_dlss.dll)"));
+    parts << (!FindNrDll().empty() ? tr("Neural Rendering ✓") : tr("Neural Rendering ✗ (нет nvngx_dlssnr.dll)"));
+    parts << (!FindDlssgDll().empty() ? tr("генерация кадров ✓") : tr("генерация кадров ✗ (нет nvngx_dlssg.dll)"));
+    return parts.join(" · ");
 }
 
 void AppModel::setEngineerMode(bool on) {

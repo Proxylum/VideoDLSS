@@ -2,23 +2,30 @@
 
 #include <QAction>
 #include <QCloseEvent>
-#include <QDockWidget>
+#include <QDir>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QGridLayout>
 #include <QImage>
 #include <QMenuBar>
+#include <QMessageBox>
+#include <QMimeData>
 #include <QPainter>
+#include <QSettings>
 #include <QShortcut>
 #include <QStatusBar>
 #include <QVBoxLayout>
 #include <cmath>
 
+#include "CompareBar.h"
 #include "InspectorPanel.h"
 #include "LogPanel.h"
 #include "ProjectPanel.h"
-#include "TaskQueue.h"
-#include "CompareBar.h"
 #include "SourceNames.h"
+#include "StartPage.h"
+#include "TaskQueue.h"
 #include "TimelineWidget.h"
 #include "ViewportWindow.h"
 #include "util/Log.h"
@@ -27,16 +34,18 @@ namespace dlssvid {
 
 MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_(warp) {
     setWindowTitle("dlssvid");
-    resize(1500, 900);
+    setAcceptDrops(true);
 
-    // centre: cell labels + viewport + timeline
-    auto* central = new QWidget(this);
-    auto* v = new QVBoxLayout(central);
+    // pages: the start screen, then the work area (cell labels + viewport + timeline)
+    pages_ = new QStackedWidget(this);
+    startPage_ = new StartPage(model_, pages_);
+    workArea_ = new QWidget(pages_);
+    auto* v = new QVBoxLayout(workArea_);
     v->setContentsMargins(0, 0, 0, 0);
     v->setSpacing(2);
-    compareBar_ = new CompareBar(model_, central);
+    compareBar_ = new CompareBar(model_, workArea_);
     v->addWidget(compareBar_);
-    auto* labels = new QWidget(central);
+    auto* labels = new QWidget(workArea_);
     auto* lg = new QGridLayout(labels);
     lg->setContentsMargins(4, 0, 4, 0);
     for (size_t i = 0; i < 4; ++i) {
@@ -46,32 +55,38 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     }
     v->addWidget(labels);
     viewport_ = new ViewportWindow(model_);
-    viewportContainer_ = QWidget::createWindowContainer(viewport_, central);
+    viewportContainer_ = QWidget::createWindowContainer(viewport_, workArea_);
     viewportContainer_->setMinimumSize(320, 200);
     viewportContainer_->setFocusPolicy(Qt::StrongFocus);
     v->addWidget(viewportContainer_, 1);
-    timeline_ = new TimelineWidget(model_, central);
+    timeline_ = new TimelineWidget(model_, workArea_);
     v->addWidget(timeline_);
-    setCentralWidget(central);
+    pages_->addWidget(startPage_);
+    pages_->addWidget(workArea_);
+    setCentralWidget(pages_);
 
-    // docks
+    // docks (object names: QMainWindow::saveState needs them)
     tasks_ = new TaskQueue(this);
     projectPanel_ = new ProjectPanel(model_, *tasks_, this);
-    auto* projectDock = new QDockWidget(tr("Проект"), this);
-    projectDock->setWidget(projectPanel_);
-    addDockWidget(Qt::LeftDockWidgetArea, projectDock);
+    projectDock_ = new QDockWidget(tr("Проект"), this);
+    projectDock_->setObjectName("projectDock");
+    projectDock_->setWidget(projectPanel_);
+    addDockWidget(Qt::LeftDockWidgetArea, projectDock_);
     inspector_ = new InspectorPanel(model_, *viewport_, this);
-    auto* inspectorDock = new QDockWidget(tr("Инспектор"), this);
-    inspectorDock->setWidget(inspector_);
-    addDockWidget(Qt::RightDockWidgetArea, inspectorDock);
+    inspectorDock_ = new QDockWidget(tr("Инспектор"), this);
+    inspectorDock_->setObjectName("inspectorDock");
+    inspectorDock_->setWidget(inspector_);
+    addDockWidget(Qt::RightDockWidgetArea, inspectorDock_);
     log_ = new LogPanel(this);
-    auto* logDock = new QDockWidget(tr("Лог"), this);
-    logDock->setWidget(log_);
-    addDockWidget(Qt::BottomDockWidgetArea, logDock);
-    auto* tasksDock = new QDockWidget(tr("Задачи"), this);
-    tasksDock->setWidget(tasks_);
-    addDockWidget(Qt::BottomDockWidgetArea, tasksDock);
-    tabifyDockWidget(logDock, tasksDock);
+    logDock_ = new QDockWidget(tr("Лог"), this);
+    logDock_->setObjectName("logDock");
+    logDock_->setWidget(log_);
+    addDockWidget(Qt::BottomDockWidgetArea, logDock_);
+    tasksDock_ = new QDockWidget(tr("Задачи"), this);
+    tasksDock_->setObjectName("tasksDock");
+    tasksDock_->setWidget(tasks_);
+    addDockWidget(Qt::BottomDockWidgetArea, tasksDock_);
+    tabifyDockWidget(logDock_, tasksDock_);
 
     zoomLabel_ = new QLabel(this);
     statusBar()->addPermanentWidget(zoomLabel_);
@@ -81,32 +96,42 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     connect(&model_, &AppModel::timeChanged, this, [this](double) { updateCellLabels(); });
     connect(&model_, &AppModel::framesUpdated, this, &MainWindow::updateCellLabels);  // «загрузка…» -> the frame
     connect(&model_, &AppModel::sourcesChanged, this, &MainWindow::updateCellLabels);
+    connect(&model_, &AppModel::projectChanged, this, [this] {
+        updatePage();
+        updateTitle();
+    });
+    connect(&model_, &AppModel::dirtyChanged, this, [this](bool) { updateTitle(); });
+    connect(&model_, &AppModel::recentsChanged, this, &MainWindow::rebuildRecentMenu);
+    connect(startPage_, &StartPage::openVideoRequested, this, &MainWindow::chooseVideo);
+    connect(startPage_, &StartPage::openProjectRequested, this, &MainWindow::chooseProject);
+    connect(startPage_, &StartPage::openPathRequested, this, &MainWindow::openPath);
     connect(tasks_, &TaskQueue::taskOutput, this, [](int id, const QString& line) { Log()->info("[task {}] {}", id, line.toStdString()); });
 
     buildMenus();
+
+    // the window as it was left; the first time: maximised
+    QSettings settings;
+    const QByteArray geometry = settings.value("window/geometry").toByteArray();
+    if (!geometry.isEmpty()) restoreGeometry(geometry);
+    else {
+        resize(1500, 900);
+        setWindowState(Qt::WindowMaximized);
+    }
+    workState_ = settings.value("window/state").toByteArray();
+    docksSized_ = !workState_.isEmpty();
+    updatePage();
+    updateTitle();
     updateCellLabels();
 }
 
 void MainWindow::buildMenus() {
     auto* file = menuBar()->addMenu(tr("&Файл"));
-    file->addAction(tr("Открыть видео…"), QKeySequence::Open, this, [this] {
-        const QString f = QFileDialog::getOpenFileName(this, tr("Видео"), {}, tr("Видео (*.mp4 *.mov *.mkv *.avi);;Все файлы (*)"));
-        if (!f.isEmpty()) model_.openVideo(f);
-    });
-    file->addAction(tr("Открыть проект…"), this, [this] {
-        const QString f = QFileDialog::getOpenFileName(this, tr("Проект"), {}, tr("Проект dlssvid (*.dlssvid.json)"));
-        if (!f.isEmpty()) model_.openProject(f);
-    });
-    file->addAction(tr("Сохранить проект"), QKeySequence::Save, this, [this] {
-        if (!model_.saveProject()) {
-            const QString f = QFileDialog::getSaveFileName(this, tr("Сохранить проект"), {}, tr("Проект dlssvid (*.dlssvid.json)"));
-            if (!f.isEmpty()) model_.saveProjectAs(f);
-        }
-    });
-    file->addAction(tr("Сохранить проект как…"), this, [this] {
-        const QString f = QFileDialog::getSaveFileName(this, tr("Сохранить проект"), {}, tr("Проект dlssvid (*.dlssvid.json)"));
-        if (!f.isEmpty()) model_.saveProjectAs(f);
-    });
+    file->addAction(tr("Открыть видео…"), QKeySequence::Open, this, &MainWindow::chooseVideo);
+    file->addAction(tr("Открыть проект…"), QKeySequence("Ctrl+Shift+O"), this, &MainWindow::chooseProject);
+    recentMenu_ = file->addMenu(tr("Недавние"));
+    rebuildRecentMenu();
+    file->addAction(tr("Сохранить проект"), QKeySequence::Save, this, [this] { saveProjectDialog(false); });
+    file->addAction(tr("Сохранить проект как…"), QKeySequence::SaveAs, this, [this] { saveProjectDialog(true); });
     file->addSeparator();
     file->addAction(tr("Скриншот вьюпорта в PNG…"), QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S), this, &MainWindow::saveScreenshot);
     file->addSeparator();
@@ -125,6 +150,16 @@ void MainWindow::buildMenus() {
     view->addAction(tr("Сравнить: Апскейл ↔ Улучшение"), this, [this] { model_.applyPreset(AppModel::ComparePreset::SrVsNr); });
     view->addAction(tr("Сравнить: Исходник ↔ Глубина"), this, [this] { model_.applyPreset(AppModel::ComparePreset::SourceVsDepth); });
     view->addSeparator();
+    // panels: a closed dock comes back from here (audit finding 6)
+    for (auto [dock, text] : {std::pair<QDockWidget*, QString>{projectDock_, tr("Панель «Проект»")},
+                              {inspectorDock_, tr("Панель «Инспектор»")},
+                              {logDock_, tr("Панель «Лог»")},
+                              {tasksDock_, tr("Панель «Задачи»")}}) {
+        QAction* a = dock->toggleViewAction();
+        a->setText(text);
+        view->addAction(a);
+    }
+    view->addSeparator();
     auto* engineer = view->addAction(tr("Инженерный режим"));
     engineer->setCheckable(true);
     engineer->setChecked(model_.engineerMode());
@@ -142,6 +177,80 @@ void MainWindow::buildMenus() {
     new QShortcut(QKeySequence(Qt::Key_Comma), this, [this] { model_.stepFrame(-1); });
     new QShortcut(QKeySequence(Qt::Key_Right), this, [this] { model_.stepFrame(+1); });
     new QShortcut(QKeySequence(Qt::Key_Left), this, [this] { model_.stepFrame(-1); });
+}
+
+void MainWindow::rebuildRecentMenu() {
+    if (!recentMenu_) return;
+    recentMenu_->clear();
+    const auto recents = model_.recents();
+    for (const AppModel::Recent& r : recents) {
+        QAction* a = recentMenu_->addAction(QString("%1 — %2").arg(r.title, r.info));
+        a->setToolTip(r.path);
+        a->setEnabled(r.exists);
+        const QString path = r.path;
+        connect(a, &QAction::triggered, this, [this, path] { openPath(path); });
+    }
+    if (recents.empty()) recentMenu_->addAction(tr("(пусто)"))->setEnabled(false);
+    recentMenu_->addSeparator();
+    recentMenu_->addAction(tr("Очистить список"), this, [this] { model_.clearRecents(); })->setEnabled(!recents.empty());
+}
+
+void MainWindow::chooseVideo() {
+    const QString f = QFileDialog::getOpenFileName(this, tr("Видео"), model_.lastDir("video"), tr("Видео (*.mp4 *.mov *.mkv *.avi *.m4v *.webm);;Все файлы (*)"));
+    if (f.isEmpty()) return;
+    model_.rememberDir("video", f);
+    model_.openVideo(f);
+}
+
+void MainWindow::chooseProject() {
+    const QString f = QFileDialog::getOpenFileName(this, tr("Проект"), model_.lastDir("project"), tr("Проект dlssvid (*.dlssvid.json)"));
+    if (f.isEmpty()) return;
+    model_.rememberDir("project", f);
+    model_.openProject(f);
+}
+
+void MainWindow::saveProjectDialog(bool forceDialog) {
+    if (!model_.hasProject()) return;
+    if (!forceDialog && model_.saveProject()) return;
+    const Project& p = model_.project();
+    QString start = model_.lastDir("project");
+    if (!p.file.empty()) start = QString::fromStdWString(p.file.wstring());
+    else if (!p.sourceVideo.empty()) start = QString::fromStdWString(std::filesystem::path(p.sourceVideo).replace_extension(".dlssvid.json").wstring());
+    const QString f = QFileDialog::getSaveFileName(this, tr("Сохранить проект"), start, tr("Проект dlssvid (*.dlssvid.json)"));
+    if (f.isEmpty()) return;
+    model_.rememberDir("project", f);
+    model_.saveProjectAs(f);
+}
+
+void MainWindow::updatePage() {
+    const bool project = model_.hasProject();
+    if (project) {
+        pages_->setCurrentWidget(workArea_);
+        if (!workState_.isEmpty()) {
+            restoreState(workState_);
+            workState_.clear();
+        } else {
+            for (QDockWidget* d : {projectDock_, inspectorDock_, logDock_, tasksDock_}) d->show();
+        }
+        if (!docksSized_) {  // the first project: the dock wide enough for the stage cards
+            resizeDocks({projectDock_}, {820}, Qt::Horizontal);
+            docksSized_ = true;
+        }
+    } else {
+        pages_->setCurrentWidget(startPage_);
+        if (workState_.isEmpty()) workState_ = saveState();
+        for (QDockWidget* d : {projectDock_, inspectorDock_, logDock_, tasksDock_}) d->hide();
+        startPage_->refresh();
+    }
+}
+
+void MainWindow::updateTitle() {
+    QString title = "dlssvid";
+    if (model_.hasProject()) {
+        title += QString(" — %1").arg(QString::fromStdWString(model_.project().sourceVideo.filename().wstring()));
+        if (model_.dirty()) title += "*";
+    }
+    setWindowTitle(title);
 }
 
 void MainWindow::selectSource(int hotkey) {
@@ -178,7 +287,6 @@ void MainWindow::updateCellLabels() {
             cellLabels_[0]->setToolTip(tech);
         }
     }
-    setWindowTitle(QString("dlssvid — %1").arg(model_.hasProject() ? QString::fromStdWString(model_.project().sourceVideo.filename().wstring()) : tr("нет проекта")));
 }
 
 // «source  #123 · 00:05.12», plus the state while the frame is not on screen (stage 9: no silent black cells).
@@ -195,8 +303,9 @@ QString MainWindow::cellLabel(const QString& title, const std::string& source, b
 }
 
 void MainWindow::saveScreenshot() {
-    const QString f = QFileDialog::getSaveFileName(this, tr("Скриншот"), "viewport.png", "PNG (*.png)");
+    const QString f = QFileDialog::getSaveFileName(this, tr("Скриншот"), QDir(model_.lastDir("screenshot")).filePath("viewport.png"), "PNG (*.png)");
     if (f.isEmpty()) return;
+    model_.rememberDir("screenshot", f);
     try {
         const PassImage img = viewport_->screenshot();
         QImage q(img.data.data(), static_cast<int>(img.width), static_cast<int>(img.height), static_cast<int>(img.RowBytes()), QImage::Format_RGBA8888);
@@ -225,8 +334,58 @@ void MainWindow::openPath(const QString& path) {
     else model_.openVideo(path);
 }
 
+void MainWindow::dragEnterEvent(QDragEnterEvent* e) {
+    for (const QUrl& url : e->mimeData()->urls())
+        if (url.isLocalFile() && IsOpenablePath(url.toLocalFile())) {
+            e->acceptProposedAction();
+            return;
+        }
+}
+
+void MainWindow::dropEvent(QDropEvent* e) {
+    for (const QUrl& url : e->mimeData()->urls())
+        if (url.isLocalFile() && IsOpenablePath(url.toLocalFile())) {
+            openPath(url.toLocalFile());
+            e->acceptProposedAction();
+            return;
+        }
+}
+
+void MainWindow::saveSettings() {
+    QSettings settings;
+    settings.setValue("window/geometry", saveGeometry());
+    settings.setValue("window/state", model_.hasProject() ? saveState() : workState_);
+}
+
 void MainWindow::closeEvent(QCloseEvent* e) {
-    if (model_.hasProject() && !model_.project().file.empty()) model_.saveProject();
+    switch (model_.closeAction()) {
+        case AppModel::CloseAction::Nothing: break;
+        case AppModel::CloseAction::AutoSave:
+            if (!model_.saveProject()) {
+                if (QMessageBox::question(this, tr("Проект не сохранён"), tr("Не удалось сохранить проект. Закрыть без сохранения?")) != QMessageBox::Yes) {
+                    e->ignore();
+                    return;
+                }
+            }
+            break;
+        case AppModel::CloseAction::Ask: {
+            const auto r = QMessageBox::question(this, tr("Несохранённый проект"), tr("Сохранить проект перед закрытием?"),
+                                                 QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+            if (r == QMessageBox::Cancel) {
+                e->ignore();
+                return;
+            }
+            if (r == QMessageBox::Save) {
+                saveProjectDialog(true);
+                if (model_.dirty()) {
+                    e->ignore();
+                    return;
+                }
+            }
+            break;
+        }
+    }
+    saveSettings();
     QMainWindow::closeEvent(e);
 }
 

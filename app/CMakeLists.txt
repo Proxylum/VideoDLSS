@@ -6,6 +6,7 @@ qt_add_library(dlssvid_app STATIC
   SourceNames.h SourceNames.cpp
   CompareBar.h CompareBar.cpp
   StageCard.h StageCard.cpp
+  StartPage.h StartPage.cpp
   ViewportWindow.h ViewportWindow.cpp
   TimelineWidget.h TimelineWidget.cpp
   ProjectPanel.h ProjectPanel.cpp

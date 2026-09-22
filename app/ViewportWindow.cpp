@@ -100,7 +100,7 @@ bool ViewportWindow::imageAt(const QPointF& pos, int& cell, float& ix, float& iy
 
 void ViewportWindow::fitView() {
     model_.state().view = ViewTransform{};
-    model_.notifyStateChanged();
+    model_.notifyStateChanged(false);
     emit zoomChanged(currentZoom());
 }
 
@@ -120,7 +120,7 @@ void ViewportWindow::zoomTo(float zoom, const QPointF* anchor) {
     view.zoom = zoom;
     view.centerX = ix - (static_cast<float>(a.x()) - cx) / zoom;
     view.centerY = iy - (static_cast<float>(a.y()) - cy) / zoom;
-    model_.notifyStateChanged();
+    model_.notifyStateChanged(false);
     emit zoomChanged(zoom);
 }
 
@@ -149,7 +149,7 @@ void ViewportWindow::mouseMoveEvent(QMouseEvent* e) {
         const QPointF d = pos - lastMouse_;
         view.centerX -= static_cast<float>(d.x()) / view.zoom;
         view.centerY -= static_cast<float>(d.y()) / view.zoom;
-        model_.notifyStateChanged();
+        model_.notifyStateChanged(false);
     } else if (wiping_) {
         int cell;
         float ix, iy;
@@ -157,7 +157,7 @@ void ViewportWindow::mouseMoveEvent(QMouseEvent* e) {
         auto& w = model_.state().wipe;
         const float p = w.vertical ? ix / std::max(1u, model_.store().ImageWidth()) : iy / std::max(1u, model_.store().ImageHeight());
         w.position = std::clamp(p, 0.f, 1.f);
-        model_.notifyStateChanged();
+        model_.notifyStateChanged(false);
     }
     lastMouse_ = pos;
     int cell;
@@ -180,7 +180,7 @@ void ViewportWindow::mouseReleaseEvent(QMouseEvent* e) {
                 st.expandedCell = ViewportRenderer::CellAt(st, static_cast<uint32_t>(width()), static_cast<uint32_t>(height()), static_cast<float>(e->position().x()),
                                                            static_cast<float>(e->position().y()));
             }
-            model_.notifyStateChanged();
+            model_.notifyStateChanged(false);
         }
     }
 }

@@ -16,6 +16,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <QFileInfo>
 #include <QSettings>
 
 #include <catch2/catch_approx.hpp>
@@ -452,4 +453,89 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     model.setEncode("hevc_nvenc", {{"b", "50M"}});
     CHECK(model.project().codec == "hevc_nvenc");
     CHECK(model.project().codecOptions.at("b") == "50M");
+}
+
+TEST_CASE("AppModel remembers recents and dialog folders, tracks unsaved changes and reports the GPU readiness", "[app][model][gpu]") {
+    App();
+    QSettings().clear();
+    const auto d = Dir("recent");
+    AppModel model(true);
+    CHECK(model.recents().empty());
+    CHECK(!model.dirty());
+    CHECK(model.closeAction() == AppModel::CloseAction::Nothing);
+    CHECK(model.readiness().contains("WARP"));  // the tests run on the software adapter
+
+    // a project from its file: clean, first in the recents with its state
+    WriteDepth(d / "passes" / "depth_raw", 3);
+    Project p = Project::Create(d / "missing.mp4", d / "passes");
+    p.Save(d / "proj.dlssvid.json");
+    QSignalSpy dirtySpy(&model, &AppModel::dirtyChanged);
+    QSignalSpy recentsSpy(&model, &AppModel::recentsChanged);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    CHECK(!model.dirty());
+    CHECK(model.closeAction() == AppModel::CloseAction::Nothing);
+    REQUIRE(model.recents().size() == 1);
+    CHECK(model.recents()[0].title == "proj");
+    CHECK(model.recents()[0].isProject);
+    CHECK(model.recents()[0].exists);
+    CHECK(model.recents()[0].info.startsWith(QString::fromUtf8("1 пасс")));
+    CHECK(recentsSpy.count() == 1);
+
+    // edits mark the project unsaved, a view change does not, saving cleans it
+    model.setStageParam("nr", "intensity", 1.2);
+    CHECK(model.dirty());
+    CHECK(model.closeAction() == AppModel::CloseAction::AutoSave);
+    REQUIRE(model.saveProject());
+    CHECK(!model.dirty());
+    model.notifyStateChanged(false);
+    CHECK(!model.dirty());
+    model.setMode(ViewMode::Grid);
+    CHECK(model.dirty());
+    CHECK(dirtySpy.count() == 4);  // open: false; edit: true; save: false; mode: true
+    REQUIRE(model.saveProject());
+
+    // a video without a project file: a new project, unsaved, saved next to the video on close
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    model.openVideo(Q(clip));
+    CHECK(model.hasProject());
+    CHECK(model.dirty());
+    CHECK(model.closeAction() == AppModel::CloseAction::AutoSave);
+    CHECK(model.project().file == std::filesystem::path(clip).replace_extension(".dlssvid.json"));
+    REQUIRE(model.recents().size() == 2);
+    CHECK(model.recents()[0].path == Q(clip));
+    CHECK(!model.recents()[0].isProject);
+    CHECK(model.recents()[0].title == "clip");
+    CHECK(model.recents()[0].info.startsWith(QString::fromUtf8("видео · не обработан")));
+    REQUIRE(model.saveProject());
+    CHECK(!model.dirty());
+    model.openVideo(Q(clip));  // the project file next to the video is picked up: clean
+    CHECK(!model.dirty());
+    CHECK(model.recents()[0].info.startsWith(QString::fromUtf8("видео · есть проект")));
+
+    // the list dedupes, keeps ten entries, marks missing files and survives another model
+    for (int i = 0; i < 12; ++i) model.addRecent(Q(d / ("gone" + std::to_string(i) + ".mkv")));
+    CHECK(model.recents().size() == 10);
+    CHECK(!model.recents()[0].exists);
+    CHECK(model.recents()[0].info == QString::fromUtf8("файл не найден"));
+    model.addRecent(Q(clip));
+    CHECK(model.recents().size() == 10);
+    CHECK(model.recents()[0].path == Q(clip));
+    CHECK(model.recents()[0].exists);
+    {
+        AppModel other(true);
+        CHECK(other.recents().size() == 10);
+    }
+    model.clearRecents();
+    CHECK(model.recents().empty());
+
+    // dialog folders
+    CHECK(model.lastDir("video").isEmpty());
+    model.rememberDir("video", Q(clip));
+    CHECK(model.lastDir("video") == QFileInfo(Q(clip)).absolutePath());
+    model.rememberDir("video", QString());
+    CHECK(model.lastDir("video") == QFileInfo(Q(clip)).absolutePath());
 }
