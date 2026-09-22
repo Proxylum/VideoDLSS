@@ -119,7 +119,7 @@ std::string Sha256FileCached(const std::filesystem::path& path) {
 
 ToolInfo ToolForStage(const std::string& stage, const nlohmann::json& p) {
     ToolInfo t;
-    t.app = DLSSVID_VERSION;
+    t.app = kPassToolVersion;  // not DLSSVID_VERSION: a release does not invalidate the passes (CHANGELOG 0.2.0)
     const char* def = stage == "depth" ? "da3" : stage == "flow" ? "ofa" : stage == "upscale" ? "dlss" : stage == "nr" ? "ngx" : stage == "fg" ? "dlssg" : "";
     t.backend = Str(p, "backend", def);
     const std::string model = Str(p, "model", "");
