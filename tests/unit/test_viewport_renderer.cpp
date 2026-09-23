@@ -432,7 +432,8 @@ TEST_CASE("ViewportRenderer zoom keeps point sampling and pans to the requested 
     CHECK((p.r > 60 && p.r < 200));
 }
 
-TEST_CASE("ViewportRenderer plates: a missing frame is hatched, a loading one is a plain plate, a ready one is the texture", "[viewport][renderer][gpu]") {
+TEST_CASE("ViewportRenderer plates: a missing frame is hatched, a loading one is a plain plate, a ready or stale one is the texture",
+          "[viewport][renderer][gpu]") {
     D3D12Device dev({true, false});
     ViewportRenderer r(dev);
     const ViewportState st = OneToOne(32, 16);
@@ -461,4 +462,7 @@ TEST_CASE("ViewportRenderer plates: a missing frame is hatched, a loading one is
     CHECK(Near(At(r.RenderToImage(st, frame, 32, 16, 32, 16, &ready), 5, 8), 255, 0, 0, 3));
     CHECK(Near(At(r.RenderToImage(st, frame, 32, 16, 32, 16, &other), 5, 8), 255, 0, 0, 3));
     CHECK(Near(At(r.RenderToImage(st, frame, 32, 16, 32, 16), 5, 8), 255, 0, 0, 3));
+    // a stale state (the store holds the previous frame while the exact one loads) draws the texture given, no plate
+    const FrameStates stale{{"source", FrameState::Stale}};
+    CHECK(Near(At(r.RenderToImage(st, frame, 32, 16, 32, 16, &stale), 5, 8), 255, 0, 0, 3));
 }

@@ -159,8 +159,16 @@ FrameState AppModel::frameStateOf(const std::string& source) const {
     switch (store_->StatusAt(time(), source)) {
         case FrameStore::Status::Ready: return FrameState::Ready;
         case FrameStore::Status::Missing: return FrameState::Missing;
-        default: return FrameState::Loading;
+        default: return store_->HeldFrameAt(time(), source) ? FrameState::Stale : FrameState::Loading;
     }
+}
+
+bool AppModel::framesReadyAt(double t) const {
+    for (const auto& n : neededSources()) {
+        const FrameStore::Status st = store_->StatusAt(t, n);
+        if (st != FrameStore::Status::Ready && st != FrameStore::Status::Missing) return false;
+    }
+    return true;
 }
 
 FrameStates AppModel::frameStates() const {
@@ -195,6 +203,7 @@ void AppModel::setPlaying(bool playing) {
     if (playing) {
         const double rate = std::max(1.0, store_->MaxFps(neededSources()));  // the fastest shown source: an FG result runs at 2x
         playStep_ = 1.0 / rate;
+        playStalled_ = 0;
         playTimer_.start(static_cast<int>(std::max(1.0, 1000.0 / rate)));
     } else {
         playTimer_.stop();
@@ -214,6 +223,15 @@ void AppModel::onPlayTick() {
         setPlaying(false);
         return;
     }
+    // Every frame is shown: while a shown source has not decoded the next frame, the tick waits (finished loads are
+    // uploaded first, so the wait is as short as it can be) - a slow decode plays slower than real time instead of
+    // skipping frames or flashing plates. A frame that does not arrive within kPlayStallSeconds is skipped, so
+    // playback never freezes.
+    if (!framesReadyAt(next)) {
+        if (store_->Update()) notifyFramesUpdated();
+        if (!framesReadyAt(next) && ++playStalled_ < std::max(1, static_cast<int>(kPlayStallSeconds / playStep_))) return;
+    }
+    playStalled_ = 0;
     setTime(next);
 }
 

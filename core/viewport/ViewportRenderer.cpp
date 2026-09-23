@@ -338,9 +338,10 @@ void ViewportRenderer::RenderInto(ID3D12Resource* target, D3D12_CPU_DESCRIPTOR_H
             c.wipePos = std::clamp(state.wipe.position, 0.f, 1.f);
             c.wipeA = static_cast<uint32_t>(std::max(0, state.wipe.layerA));
             c.wipeB = static_cast<uint32_t>(std::max(0, state.wipe.layerB));
-            c.cellState = 0;
+            c.cellState = 0;  // a held (stale) frame is drawn like a ready one
             if (states && !layers.empty())
-                if (const auto it = states->find(layers[0].source); it != states->end()) c.cellState = static_cast<uint32_t>(it->second);
+                if (const auto it = states->find(layers[0].source); it != states->end() && it->second != FrameState::Stale)
+                    c.cellState = static_cast<uint32_t>(it->second);
             c.background[0] = c.background[1] = 0.16f;
             c.background[2] = 0.18f;
             c.background[3] = 1.f;

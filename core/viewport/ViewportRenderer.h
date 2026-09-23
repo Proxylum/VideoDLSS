@@ -29,8 +29,9 @@ using FrameTextures = std::map<std::string, LayerTexture>;
 
 // What the viewport knows about a source's frame at the current time. A cell whose base layer is not ready is
 // drawn as a plate — «загрузка…» (plain) or «нет кадра» (hatched) — instead of an empty background; the text
-// itself is the UI's (stage 9).
-enum class FrameState : uint8_t { Ready = 0, Loading = 1, Missing = 2 };
+// itself is the UI's (stage 9). Stale: the frame is still loading and the texture given is the source's nearest
+// resident one (FrameStore::TexturesAt holds the last frame) - drawn like a ready frame, no plate.
+enum class FrameState : uint8_t { Ready = 0, Loading = 1, Missing = 2, Stale = 3 };
 using FrameStates = std::map<std::string, FrameState>;
 
 struct RenderTargetSize {

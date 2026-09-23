@@ -54,9 +54,12 @@ public:
     int64_t timelineFrame() const;            // the current time in those frames
     double lastTime() const;                  // time of the last timeline frame
     std::vector<Rational> fpsChoices() const;  // distinct source rates, ascending
-    // Frame state of the needed sources at the current time (plates and cell labels).
+    // Frame state of the needed sources at the current time (plates and cell labels); Stale while the store holds the
+    // last frame for one that is still loading.
     FrameStates frameStates() const;
     FrameState frameStateOf(const std::string& source) const;
+    // Every needed source has its frame at `t` resident (or none at all): playback steps only onto such frames.
+    bool framesReadyAt(double t) const;
 
     // ---- comparison in one action (stage 9, MR C) ----
     enum class CompareView { BeforeAfter, AfterOnly, Grid };
@@ -183,6 +186,7 @@ signals:
 private:
     void onPlayTick();
     void requestFrames();
+    static constexpr double kPlayStallSeconds = 2.0;  // a frame not decoded within this is skipped by playback
     bool hasSource(const std::string& name) const;
 
     std::unique_ptr<D3D12Device> device_;
@@ -191,6 +195,7 @@ private:
     QTimer playTimer_;
     Rational timelineFps_{0, 1};  // {0,1}: the base source's rate
     double playStep_ = 1.0 / 24.0;
+    int playStalled_ = 0;  // ticks playback has waited for the next frame
     bool engineerMode_ = false;
     bool loop_ = false;
     bool dirty_ = false;

@@ -344,7 +344,12 @@ bool FrameStore::Wanted(const Key& key) const {
 
 FrameStore::Status FrameStore::GetStatus(int64_t frame, const std::string& source) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    const Key k{frame, source};
+    return StatusLocked(Key{frame, source});
+}
+
+FrameStore::Status FrameStore::StatusLocked(const Key& k) const {
+    const int64_t frame = k.frame;
+    const std::string& source = k.source;
     if (entries_.count(k)) return Status::Ready;
     if (inFlight_.count(k)) return Status::Loading;
     for (const auto& l : loaded_)
@@ -366,16 +371,43 @@ FrameTextures FrameStore::Textures(int64_t frame) const {
     return out;
 }
 
+std::map<FrameStore::Key, FrameStore::Entry>::const_iterator FrameStore::NearestResident(int64_t frame, const std::string& source) const {
+    // entries_ is ordered by frame, then source: down from the first entry past `frame` for the nearest earlier frame
+    // of the source, up from there for the nearest later one.
+    const auto past = entries_.lower_bound(Key{frame + 1, std::string()});
+    for (auto it = past; it != entries_.begin();) {
+        --it;
+        if (it->first.source == source) return it;
+    }
+    for (auto it = past; it != entries_.end(); ++it)
+        if (it->first.source == source) return it;
+    return entries_.end();
+}
+
 FrameTextures FrameStore::TexturesAt(double time) const {
     std::lock_guard<std::mutex> lock(mutex_);
     FrameTextures out;
     for (const auto& s : sources_) {
-        const auto it = entries_.find(Key{FrameAt(s.name, time), s.name});
-        if (it == entries_.end()) continue;
+        const Key key{FrameAt(s.name, time), s.name};
+        std::map<Key, Entry>::const_iterator it = entries_.find(key);
+        if (it == entries_.end()) {
+            if (StatusLocked(key) == Status::Missing) continue;  // nothing to show and nothing to hold
+            it = NearestResident(key.frame, s.name);          // hold the last frame while this one loads
+            if (it == entries_.end()) continue;
+        }
         out[s.name] = it->second.desc;
         const_cast<Entry&>(it->second).lastUse = ++const_cast<uint64_t&>(useCounter_);
     }
     return out;
+}
+
+std::optional<int64_t> FrameStore::HeldFrameAt(double time, const std::string& source) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const Key key{FrameAt(source, time), source};
+    if (entries_.count(key) || StatusLocked(key) == Status::Missing) return std::nullopt;
+    const auto it = NearestResident(key.frame, source);
+    if (it == entries_.end()) return std::nullopt;
+    return it->first.frame;
 }
 
 size_t FrameStore::ResidentCount() const {
