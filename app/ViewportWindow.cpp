@@ -18,13 +18,11 @@ ViewportWindow::ViewportWindow(AppModel& model) : model_(model) {
     setMinimumSize(QSize(64, 64));
     pollTimer_.setInterval(16);
     connect(&pollTimer_, &QTimer::timeout, this, [this] {
-        if (model_.store().Update()) {
-            dirty_ = true;
-            model_.notifyFramesUpdated();
-        }
+        if (model_.store().Update()) model_.notifyFramesUpdated();  // -> dirty_ below
         if (dirty_ && isExposed()) render();
     });
     pollTimer_.start();
+    connect(&model_, &AppModel::framesUpdated, this, [this] { dirty_ = true; });  // also uploads by the playback tick
     connect(&model_, &AppModel::stateChanged, this, [this] { requestRender(); });
     connect(&model_, &AppModel::sourcesChanged, this, [this] { requestRender(); });
 }

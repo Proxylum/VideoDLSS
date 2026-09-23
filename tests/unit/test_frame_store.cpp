@@ -273,3 +273,47 @@ TEST_CASE("FrameStore shuts down reliably with idle and busy loaders (regression
     }
     CHECK(true);
 }
+
+// Incident 2026-09-23 (user report): during playback of «До | После» the split screen flickered — on the ticks where a
+// source's frame had not decoded yet (a 3840×1600 result decodes on the CPU slower than its 48 fps) the cell fell to a
+// plate or an empty background, because TexturesAt returned only exactly resident frames. Now the nearest resident frame
+// of the source stands in while the exact one loads; missing frames are still not substituted.
+TEST_CASE("FrameStore holds the nearest resident frame while the exact one loads (regression: split-screen flicker in playback)",
+          "[viewport][store][gpu][regression]") {
+    const auto root = Root("hold");
+    WritePass(root / "depth_raw", PassKind::DepthRaw, 8, 4, 0, 9);
+    D3D12Device dev({true, false});
+    FrameStore::Options opt;
+    opt.prefetch = 1;  // a one-frame window: frames further away stay queued until the time moves there
+    FrameStore store(dev, opt);
+    store.SetSources(FrameStore::DiscoverPasses(root));
+    const auto t = [&](int64_t f) { return store.TimeOfFrame("depth_raw", f); };
+    store.SetCurrentFrame(3, {"depth_raw"});
+    store.WaitForCurrent();
+    // the window (2..4) settles: the loaders finish, Update() uploads
+    REQUIRE(WaitUntil([&] {
+        store.Update();
+        return store.GetStatus(2, "depth_raw") == FrameStore::Status::Ready && store.GetStatus(4, "depth_raw") == FrameStore::Status::Ready;
+    }));
+    CHECK(!store.HeldFrameAt(t(3), "depth_raw").has_value());  // the exact frame is resident: nothing is held
+    CHECK(store.TexturesAt(t(3)).at("depth_raw").minValue == 30.f);  // WritePass: frame f holds values from f*10
+    // frame 8 is loadable but not requested yet: the nearest earlier resident frame (4) stands in for it
+    CHECK(store.GetStatus(8, "depth_raw") == FrameStore::Status::Queued);
+    REQUIRE(store.HeldFrameAt(t(8), "depth_raw").has_value());
+    CHECK(*store.HeldFrameAt(t(8), "depth_raw") == 4);
+    CHECK(store.TexturesAt(t(8)).at("depth_raw").minValue == 40.f);
+    // frame 0: nothing earlier is resident, the nearest later frame (2) stands in
+    REQUIRE(store.HeldFrameAt(t(0), "depth_raw").has_value());
+    CHECK(*store.HeldFrameAt(t(0), "depth_raw") == 2);
+    CHECK(store.TexturesAt(t(0)).at("depth_raw").minValue == 20.f);
+    // a frame outside the pass is missing, not held: the cell keeps its «нет кадра» plate instead of a stale image
+    CHECK(store.GetStatus(42, "depth_raw") == FrameStore::Status::Missing);
+    CHECK(!store.HeldFrameAt(t(42), "depth_raw").has_value());
+    CHECK(store.TexturesAt(t(42)).empty());
+    CHECK(!store.HeldFrameAt(t(8), "nope").has_value());
+    // once the exact frame is resident it replaces the stand-in
+    store.SetCurrentFrame(8, {"depth_raw"});
+    store.WaitForCurrent();
+    CHECK(!store.HeldFrameAt(t(8), "depth_raw").has_value());
+    CHECK(store.TexturesAt(t(8)).at("depth_raw").minValue == 80.f);
+}

@@ -300,6 +300,7 @@ void InspectorPanel::showProbe(int cell, float imageX, float imageY, bool inside
             case TextureKind::Mv: line = QString("%1: u %2 v %3").arg(QString::fromStdString(name)).arg(v[0], 0, 'f', 3).arg(v[1], 0, 'f', 3); break;
             default: line = QString("%1: %2").arg(QString::fromStdString(name)).arg(v[0], 0, 'g', 6); break;
         }
+        if (model_.frameStateOf(name) == FrameState::Stale) line += tr(" · загрузка…");  // values of the held previous frame
         text += "\n" + line;
     }
     probe_->setText(text);

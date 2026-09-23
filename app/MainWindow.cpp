@@ -340,7 +340,8 @@ QString MainWindow::cellLabel(const QString& title, const std::string& source, b
     s += QString("  #%1").arg(model_.store().FrameAt(source, t));
     if (withTime) s += QString(" · %1").arg(QString::fromStdString(FormatTimecode(t)));
     switch (model_.frameStateOf(source)) {
-        case FrameState::Loading: s += tr(" · загрузка…"); break;
+        case FrameState::Loading:
+        case FrameState::Stale: s += tr(" · загрузка…"); break;  // stale: the previous frame stays on screen meanwhile
         case FrameState::Missing: s += tr(" · нет кадра"); break;
         default: break;
     }

@@ -898,3 +898,49 @@ TEST_CASE("AppModel loops playback back to the start when the loop toggle is on"
     AppModel again(true);
     CHECK(!again.loop());  // the setting was left off
 }
+
+// Incident 2026-09-23 (user report): the «До | После» split screen flickered during playback — on the ticks where a
+// source's frame had not decoded yet the cell fell to a plate or an empty background (a 3840×1600 result decodes on the
+// CPU slower than its 48 fps). Now the store holds the previous frame (test_frame_store.cpp), the model reports it as
+// Stale (drawn as is, the label says «загрузка…»), and playback steps only onto frames every shown source has resident,
+// uploading finished loads itself: a slow decode plays slower than real time instead of skipping frames.
+TEST_CASE("AppModel reports held frames as stale and plays only over resident frames (regression: split-screen flicker)",
+          "[app][model][gpu][regression]") {
+    App();
+    const auto d = Dir("stale");
+    WritePassFps(d / "passes" / "color_sr", PassKind::ColorSr, 40, 24);
+    Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setSingleSource("color_sr");
+    model.setTime(0.0);
+    model.store().WaitForCurrent();
+    REQUIRE(model.frameStateOf("color_sr") == FrameState::Ready);
+    // a jump beyond the prefetch window: frame 30 is not resident yet (nothing uploads until WaitForCurrent), a resident
+    // frame stands in for it — Stale for the renderer (no plate) and for the label
+    model.setFrame(30);
+    REQUIRE(model.store().GetStatus(30, "color_sr") != FrameStore::Status::Ready);
+    CHECK(model.frameStateOf("color_sr") == FrameState::Stale);
+    CHECK(model.frameStates().at("color_sr") == FrameState::Stale);
+    const auto held = model.store().HeldFrameAt(model.time(), "color_sr");
+    REQUIRE(held.has_value());
+    CHECK(*held < 30);
+    model.store().WaitForCurrent();
+    CHECK(model.frameStateOf("color_sr") == FrameState::Ready);
+    CHECK(!model.store().HeldFrameAt(model.time(), "color_sr").has_value());
+    // playback from the start visits every frame in order, and each one is resident when the time lands on it
+    model.setTime(0.0);
+    std::vector<int64_t> visited;
+    bool resident = true;
+    QObject::connect(&model, &AppModel::timeChanged, &model, [&](double) {
+        visited.push_back(model.baseFrame());
+        resident = resident && model.store().StatusAt(model.time(), "color_sr") == FrameStore::Status::Ready;
+    });
+    model.setPlaying(true);
+    Pump([&] { return !model.playing(); }, 15000);
+    CHECK(!model.playing());
+    std::vector<int64_t> expected;
+    for (int64_t f = 1; f < 40; ++f) expected.push_back(f);
+    CHECK(visited == expected);
+    CHECK(resident);
+}

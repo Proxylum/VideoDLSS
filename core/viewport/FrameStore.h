@@ -112,8 +112,14 @@ public:
     Status StatusAt(double time, const std::string& source) const { return GetStatus(FrameAt(source, time), source); }
     // Textures resident right now: of one frame index in every source (uniform rates: tests, benchmarks) ...
     FrameTextures Textures(int64_t frame) const;
-    // ... or of every source's frame at `time` (missing entries are simply absent).
+    // ... or of every source's frame at `time`. While a loadable frame is not resident yet, the source's nearest
+    // resident frame stands in for it (earlier frames first): the viewport holds the last frame instead of flashing a
+    // plate on every tick of playback or scrubbing. Missing frames are never substituted; absent entries mean nothing
+    // to show.
     FrameTextures TexturesAt(double time) const;
+    // The stand-in TexturesAt(time) shows for `source`: nullopt when the exact frame is resident or missing, or when
+    // nothing of the source is resident.
+    std::optional<int64_t> HeldFrameAt(double time, const std::string& source) const;
     size_t ResidentBytes() const { return residentBytes_; }
     size_t ResidentCount() const;
     int LoaderThreads() const { return static_cast<int>(loaders_.size()); }
@@ -150,6 +156,9 @@ private:
     std::vector<Loaded> LoadVideo(const Key& key, const ViewportSource& src, SourceRuntime& rt);
     Loaded LoadPass(const Key& key, const ViewportSource& src, SourceRuntime& rt);
     bool Wanted(const Key& key) const;  // needed by the viewport and not resident / known-missing
+    Status StatusLocked(const Key& key) const;  // GetStatus with mutex_ held
+    // Nearest resident frame of the source (the nearest earlier one, else the nearest later); end() when none (mutex_ held).
+    std::map<Key, Entry>::const_iterator NearestResident(int64_t frame, const std::string& source) const;
     void Evict();
     bool InWindow(const Key& key) const;              // within the prefetch window of its source (mutex_ held)
     int SpanOf(const std::string& source) const;      // prefetch frames of a source: window seconds × its rate
