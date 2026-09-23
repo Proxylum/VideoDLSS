@@ -5,7 +5,14 @@
 
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QComboBox>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSignalSpy>
+#include <QPalette>
+#include <QStyle>
+#include <QVBoxLayout>
+#include <QWheelEvent>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -25,6 +32,7 @@
 #include "SourceNames.h"
 #include "ProcessingPanel.h"
 #include "ResultBar.h"
+#include "Theme.h"
 #include "TaskQueue.h"
 #include "TestClips.h"
 #include "util/Subprocess.h"
@@ -803,4 +811,60 @@ TEST_CASE("AppModel result: summary and bar, export copy, exportable passes, chi
     REQUIRE(!model.recents().empty());
     CHECK(QFileInfo(model.recents()[0].path) == QFileInfo(Q(d / "proj.dlssvid.json")));
     CHECK(!model.closeProject());
+}
+
+// Regression (TASK-0017): a wheel over the project panel used to change the backend of a stage when the pointer happened
+// to be over a combo box; unfocused value controls now pass the wheel on to the page.
+TEST_CASE("Theme: the wheel over a combo box in a scrolling page scrolls the page; outside it changes the value", "[app][theme]") {
+    QApplication& app = App();
+    ApplyTheme(app);
+    CHECK(app.styleSheet().contains("#4aa3df"));
+    CHECK(app.palette().color(QPalette::Window) == QColor("#17181b"));
+
+    QScrollArea area;
+    auto* content = new QWidget(&area);
+    auto* layout = new QVBoxLayout(content);
+    auto* combo = new QComboBox(content);
+    combo->addItems({"a", "b", "c"});
+    layout->addWidget(combo);
+    auto* filler = new QWidget(content);
+    filler->setMinimumHeight(3000);
+    layout->addWidget(filler);
+    area.setWidget(content);
+    area.resize(300, 200);
+    area.show();
+    Pump([] { return false; }, 100);
+    REQUIRE(area.verticalScrollBar()->maximum() > 0);
+    CHECK(combo->currentIndex() == 0);
+    // the page (the combo's parent) must receive the wheel the combo gave up
+    struct WheelSpy : QObject {
+        int wheels = 0;
+        bool eventFilter(QObject*, QEvent* e) override {
+            if (e->type() == QEvent::Wheel) ++wheels;
+            return false;
+        }
+    } spy;
+    content->installEventFilter(&spy);
+
+    auto wheel = [&](QWidget* target) {
+        const QPointF pos(10, 10);
+        QWheelEvent e(pos, target->mapToGlobal(pos.toPoint()), QPoint(0, -120), QPoint(0, -120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+        QApplication::sendEvent(target, &e);
+    };
+    // inside the page: the combo keeps its value, the page scrolls — focused or not
+    wheel(combo);
+    Pump([] { return false; }, 50);
+    CHECK(combo->currentIndex() == 0);
+    CHECK(spy.wheels >= 1);
+    combo->setFocus();
+    wheel(combo);
+    CHECK(combo->currentIndex() == 0);
+    CHECK(spy.wheels >= 2);
+    // outside a scrolling page the wheel still changes the value (the timeline's frame box)
+    QComboBox loose;
+    loose.addItems({"a", "b", "c"});
+    loose.show();
+    Pump([] { return false; }, 50);
+    wheel(&loose);
+    CHECK(loose.currentIndex() == 1);
 }

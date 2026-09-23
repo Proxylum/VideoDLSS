@@ -8,6 +8,7 @@
 
 #include "AppModel.h"
 #include "SourceNames.h"
+#include "Theme.h"
 
 namespace dlssvid {
 
@@ -19,6 +20,7 @@ QToolButton* ModeButton(QWidget* parent, const QString& text, const QString& tip
     b->setToolTip(tip);
     b->setCheckable(true);
     b->setAutoRaise(true);
+    SetRole(b, "segment");
     return b;
 }
 
@@ -32,32 +34,47 @@ QFrame* Separator(QWidget* parent) {
 }  // namespace
 
 CompareBar::CompareBar(AppModel& model, QWidget* parent) : QWidget(parent), model_(model) {
+    setObjectName("compareBar");
+    setAttribute(Qt::WA_StyledBackground, true);
+    SetRole(this, "bar");
+    setMinimumHeight(48);
     auto* layout = new QHBoxLayout(this);
-    layout->setContentsMargins(6, 2, 6, 2);
-    layout->setSpacing(4);
-    layout->addWidget(new QLabel(tr("Режим:"), this));
+    layout->setContentsMargins(16, 6, 16, 6);
+    layout->setSpacing(10);
+    auto* modeLabel = new QLabel(tr("Режим"), this);
+    SetRole(modeLabel, "muted");
+    layout->addWidget(modeLabel);
     beforeAfter_ = ModeButton(this, tr("До | После"), tr("Шторка между исходником и результатом (W)"));
     afterOnly_ = ModeButton(this, tr("Только после"), tr("Один источник на весь вьюпорт"));
     grid_ = ModeButton(this, tr("Сетка 2×2"), tr("Четыре источника рядом (Ctrl+3)"));
     auto* modes = new QButtonGroup(this);
     modes->setExclusive(true);
+    auto* modeGroup = new QFrame(this);
+    SetRole(modeGroup, "segments");
+    auto* modeLayout = new QHBoxLayout(modeGroup);
+    modeLayout->setContentsMargins(0, 0, 0, 0);
+    modeLayout->setSpacing(0);
     for (QToolButton* b : {beforeAfter_, afterOnly_, grid_}) {
         modes->addButton(b);
-        layout->addWidget(b);
+        modeLayout->addWidget(b);
     }
+    layout->addWidget(modeGroup);
     layout->addWidget(Separator(this));
-    layout->addWidget(new QLabel(tr("Слой:"), this));
+    auto* layerLabel = new QLabel(tr("Слой"), this);
+    SetRole(layerLabel, "muted");
+    layout->addWidget(layerLabel);
     chipsLayout_ = new QHBoxLayout();
-    chipsLayout_->setSpacing(4);
+    chipsLayout_->setSpacing(8);
     layout->addLayout(chipsLayout_);
     layout->addStretch(1);
-    engineer_ = ModeButton(this, tr("Инженерный режим"), tr("Стек слоёв, настройки слоя, шторки и сетки в инспекторе (Ctrl+E)"));
+    engineer_ = new QCheckBox(tr("Инженерный режим"), this);
+    engineer_->setToolTip(tr("Стек слоёв, настройки слоя, шторки и сетки в инспекторе (Ctrl+E)"));
     layout->addWidget(engineer_);
 
     connect(beforeAfter_, &QToolButton::clicked, this, [this] { model_.setCompareView(AppModel::CompareView::BeforeAfter); });
     connect(afterOnly_, &QToolButton::clicked, this, [this] { model_.setCompareView(AppModel::CompareView::AfterOnly); });
     connect(grid_, &QToolButton::clicked, this, [this] { model_.setCompareView(AppModel::CompareView::Grid); });
-    connect(engineer_, &QToolButton::toggled, this, [this](bool on) { model_.setEngineerMode(on); });
+    connect(engineer_, &QCheckBox::toggled, this, [this](bool on) { model_.setEngineerMode(on); });
     connect(&model_, &AppModel::engineerModeChanged, this, [this](bool on) {
         const QSignalBlocker b(engineer_);
         engineer_->setChecked(on);
@@ -80,6 +97,7 @@ void CompareBar::rebuildChips() {
     chipSources_.clear();
     for (const AppModel::Chip& chip : model_.chips()) {
         auto* b = new QToolButton(this);
+        SetRole(b, "chip");
         b->setText(chip.label);
         QString tip = chip.tooltip;
         if (chip.hotkey > 0) tip += "\n" + tr("клавиша %1").arg(chip.hotkey);

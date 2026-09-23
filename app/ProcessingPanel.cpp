@@ -8,6 +8,7 @@
 #include <cmath>
 
 #include "SourceNames.h"
+#include "Theme.h"
 
 namespace dlssvid {
 
@@ -25,10 +26,10 @@ ProcessingPanel::ProcessingPanel(TaskQueue& tasks, QWidget* parent) : QWidget(pa
     layout->setSpacing(12);
 
     headline_ = new QLabel(column);
-    headline_->setStyleSheet("font-size: 20px; font-weight: 600;");
+    SetRole(headline_, "h2");
     layout->addWidget(headline_);
     what_ = new QLabel(column);
-    what_->setStyleSheet("color: #a7abb3;");
+    SetRole(what_, "muted");
     what_->setWordWrap(true);
     layout->addWidget(what_);
 
@@ -37,29 +38,38 @@ ProcessingPanel::ProcessingPanel(TaskQueue& tasks, QWidget* parent) : QWidget(pa
     bar_->setMinimumHeight(22);
     layout->addWidget(bar_);
 
-    rowsWidget_ = new QWidget(column);
+    auto* rowsCard = new QFrame(column);
+    SetRole(rowsCard, "card");
+    auto* rowsLayout = new QVBoxLayout(rowsCard);
+    rowsLayout->setContentsMargins(12, 6, 12, 6);
+    rowsWidget_ = new QWidget(rowsCard);
+    rowsLayout->addWidget(rowsWidget_);
     auto* grid = new QGridLayout(rowsWidget_);
     grid->setContentsMargins(0, 4, 0, 4);
     grid->setHorizontalSpacing(16);
-    grid->setVerticalSpacing(6);
+    grid->setVerticalSpacing(10);
     grid->setColumnStretch(0, 1);
     grid->setColumnMinimumWidth(1, 180);
     grid->setColumnMinimumWidth(2, 64);
     grid->setColumnMinimumWidth(3, 140);
-    layout->addWidget(rowsWidget_);
+    layout->addWidget(rowsCard);
 
     auto* buttons = new QHBoxLayout();
     cancel_ = new QPushButton(tr("Отменить"), column);
     cancel_->setObjectName("cancel");
+    SetRole(cancel_, "tall");
     cancel_->setToolTip(tr("Остановить обработку; готовые стадии останутся на диске и переиспользуются в следующий раз"));
     minimize_ = new QPushButton(tr("Свернуть в фон"), column);
     minimize_->setObjectName("minimize");
+    SetRole(minimize_, "tall");
     minimize_->setToolTip(tr("Свернуть окно; по завершении придёт системное уведомление"));
     result_ = new QPushButton(tr("Показать результат"), column);
     result_->setObjectName("showResult");
-    result_->setMinimumHeight(32);
+    SetRole(result_, "primary");
     back_ = new QPushButton(tr("К проекту"), column);
     back_->setObjectName("back");
+    SetRole(back_, "tall");
+    buttons->setSpacing(10);
     buttons->addWidget(cancel_);
     buttons->addWidget(minimize_);
     buttons->addStretch(1);
@@ -75,12 +85,12 @@ ProcessingPanel::ProcessingPanel(TaskQueue& tasks, QWidget* parent) : QWidget(pa
 
     note_ = new QLabel(column);
     note_->setWordWrap(true);
-    note_->setStyleSheet("color: #8a8f98;");
+    SetRole(note_, "hint");
     layout->addWidget(note_);
 
     auto* logHead = new QHBoxLayout();
     auto* logTitle = new QLabel(tr("Лог"), column);
-    logTitle->setStyleSheet("font-weight: 600;");
+    SetRole(logTitle, "title");
     fullLog_ = new QPushButton(tr("Показать полный лог"), column);
     fullLog_->setObjectName("fullLog");
     fullLog_->setFlat(true);
@@ -159,6 +169,7 @@ void ProcessingPanel::rebuildRows(const TaskQueue::Progress& p) {
         r.bar->setTextVisible(false);
         r.bar->setFixedHeight(8);
         r.time = new QLabel(rowsWidget_);
+        SetRole(r.time, "mono");
         r.time->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         r.state = new QLabel(rowsWidget_);
         grid->addWidget(r.title, row, 0);
@@ -197,7 +208,8 @@ void ProcessingPanel::render() {
         Row& r = rows_[i];
         r.bar->setVisible(s.state == "running");
         r.bar->setValue(s.percent);
-        QString state, time, tone = "color: #a7abb3;";
+        QString state, time;
+        const char* tone = "muted";
         if (s.state == "reused") {
             state = tr("переиспользуется");
             time = "—";
@@ -207,24 +219,24 @@ void ProcessingPanel::render() {
         } else if (s.state == "running") {
             state = tr("%1 %").arg(s.percent);
             time = FormatClock(s.seconds);
-            tone = "color: #7aa2ff;";
+            tone = "accent";
         } else if (s.state == "queued") {
             state = tr("в очереди");
             time = s.seconds > 0.0 ? tr("≈ %1").arg(FormatClock(s.seconds)) : "—";
         } else if (s.state == "cancelled") {
             state = tr("отменена");
             time = s.seconds > 0.0 ? FormatClock(s.seconds) : "—";
-            tone = "color: #e0a458;";
+            tone = "warn";
         } else if (s.state == "skipped") {
             state = tr("не запускалась");
             time = "—";
         } else {
             state = tr("ошибка");
             time = s.seconds > 0.0 ? FormatClock(s.seconds) : "—";
-            tone = "color: #ff7a7a;";
+            tone = "danger";
         }
         r.state->setText(state);
-        r.state->setStyleSheet(tone);
+        SetRole(r.state, tone);
         r.time->setText(time);
     }
 
