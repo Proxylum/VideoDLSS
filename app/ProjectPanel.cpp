@@ -186,16 +186,15 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     bitrateCustom_->setSuffix(tr(" Мбит/с"));
     bitrateCustom_->setValue(50);
     bitrateCustom_->setVisible(false);
-    bitrateInfo_ = Muted("", encodeCard);
     encodeAudio_ = Muted("", encodeCard);
     encodeAudio_->setMinimumWidth(60);
+    encodeAudio_->setWordWrap(true);
     codec_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     codec_->setMinimumContentsLength(10);
     encodeForm->addWidget(codec_);
     encodeForm->addWidget(bitrate_);
     encodeForm->addWidget(bitrateCustom_);
-    encodeForm->addWidget(bitrateInfo_);
-    encodeForm->addWidget(encodeAudio_, 1);
+    encodeForm->addWidget(encodeAudio_, 1);  // «≈ 45 Мбит/с · файл ≈ 54 МБ · звук копируется»
     eg->addLayout(encodeForm, 0, 1);
     encodeState_ = new QLabel(encodeCard);
     encodeState_->setWordWrap(true);
@@ -339,9 +338,9 @@ void ProjectPanel::refresh() {
             if (!mbps) info = tr("≈ %1 Мбит/с").arg(QString::number(used, 'g', 3));
             if (seconds > 0.0 && used > 0.0) info += (info.isEmpty() ? QString() : QString(" · ")) + tr("файл ≈ %1").arg(HumanBytes(static_cast<unsigned long long>(used * 1e6 / 8.0 * seconds)));
         }
-        bitrateInfo_->setText(info);
+        const QString audio = src.audio ? tr("звук копируется") : (hasSource ? tr("без звука") : QString());
+        encodeAudio_->setText(info.isEmpty() ? audio : (audio.isEmpty() ? info : info + " · " + audio));
     }
-    encodeAudio_->setText(src.audio ? tr("звук копируется") : (hasSource ? tr("без звука") : QString()));
     const StageEstimate* enc = nullptr;
     for (const auto& e : out.stages)
         if (e.stage == "encode") enc = &e;

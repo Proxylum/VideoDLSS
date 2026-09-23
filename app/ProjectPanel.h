@@ -56,7 +56,6 @@ private:
     QComboBox* codec_;
     QComboBox* bitrate_;      // «Авто» | presets in Mbit/s | «Свой…»
     QSpinBox* bitrateCustom_;  // the custom value, Mbit/s
-    QLabel* bitrateInfo_;      // what «Авто» gives and the rough file size
     QLabel* encodeAudio_;
     QLabel* encodeState_;
     QLabel* versionsInfo_;
