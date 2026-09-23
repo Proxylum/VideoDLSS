@@ -15,6 +15,7 @@
 #include <cmath>
 
 #include "AppModel.h"
+#include "Theme.h"
 #include "stages/ParamSchema.h"
 
 namespace dlssvid {
@@ -44,7 +45,7 @@ int ChoiceIndex(const ParamSpec& spec, const nlohmann::json& value) {
     return -1;
 }
 
-const char* kToneStyle[] = {"color: #5fbf7a;", "color: #e0a84f;", "color: #8a8f98;", "color: #a7abb3;"};  // ok, run, off, none
+const char* kToneRole[] = {"ok", "warn", "muted", "muted"};  // ok, run, off, none
 
 int ToneIndex(const QString& tone) {
     if (tone == "ok") return 0;
@@ -56,21 +57,22 @@ int ToneIndex(const QString& tone) {
 }  // namespace
 
 StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent) : QFrame(parent), model_(model), stage_(stage), schema_(FindStageSchema(stage)) {
-    setFrameShape(QFrame::StyledPanel);
+    setFrameShape(QFrame::NoFrame);
     setObjectName("stageCard");
+    SetRole(this, "card");
     auto* grid = new QGridLayout(this);
-    grid->setContentsMargins(10, 6, 10, 6);
-    grid->setHorizontalSpacing(12);
-    grid->setVerticalSpacing(4);
+    grid->setContentsMargins(14, 9, 14, 9);
+    grid->setHorizontalSpacing(14);
+    grid->setVerticalSpacing(6);
 
     enabled_ = new QCheckBox(this);
     enabled_->setToolTip(tr("Стадия участвует в обработке"));
     title_ = new QLabel(schema_ ? QString::fromStdString(schema_->title) : QString::fromStdString(stage), this);
-    title_->setStyleSheet("font-weight: 600;");
+    SetRole(title_, "title");
     subtitle_ = new QLabel(schema_ ? QString::fromStdString(schema_->subtitle) : QString(), this);
-    subtitle_->setStyleSheet("color: #8a8f98;");
+    SetRole(subtitle_, "hint");
     auto* head = new QVBoxLayout();
-    head->setSpacing(0);
+    head->setSpacing(2);
     head->addWidget(title_);
     head->addWidget(subtitle_);
     grid->addWidget(enabled_, 0, 0, Qt::AlignTop);
@@ -80,7 +82,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     auto* form = new QFormLayout(form_);
     form->setContentsMargins(0, 0, 0, 0);
     form->setHorizontalSpacing(8);
-    form->setVerticalSpacing(4);
+    form->setVerticalSpacing(6);
     form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
     if (schema_)
         for (const ParamSpec& spec : schema_->params) {
@@ -92,14 +94,14 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     grid->addWidget(form_, 0, 2, 2, 1);
 
     auto* side = new QVBoxLayout();
-    side->setSpacing(1);
+    side->setSpacing(3);
     state_ = new QLabel(this);
     state_->setWordWrap(true);
     sub_ = new QLabel(this);
     sub_->setWordWrap(true);
-    sub_->setStyleSheet("color: #8a8f98;");
+    SetRole(sub_, "hint");
     version_ = new QLabel(this);
-    version_->setStyleSheet("font-family: monospace; color: #a7abb3; border: 1px solid #3a3e46; border-radius: 4px; padding: 1px 5px;");
+    SetRole(version_, "version");
     auto* stateRow = new QHBoxLayout();
     stateRow->addWidget(version_, 0, Qt::AlignTop);
     stateRow->addWidget(state_, 1);
@@ -107,7 +109,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     side->addWidget(sub_);
     warning_ = new QLabel(this);
     warning_->setWordWrap(true);
-    warning_->setStyleSheet("color: #e0a84f;");
+    SetRole(warning_, "warn");
     side->addWidget(warning_);
     force_ = new QCheckBox(tr("пересчитать"), this);
     force_->setToolTip(tr("Посчитать заново, даже если пасс совпадает по отпечатку"));
@@ -127,7 +129,9 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     json_->setMaximumHeight(52);
     json_->setToolTip(tr("Все параметры стадии (JSON): ключи становятся опциями CLI"));
     applyJson_ = new QPushButton(tr("Применить JSON"), engineer_);
+    SetRole(applyJson_, "small");
     run_ = new QPushButton(tr("Запустить отдельно"), engineer_);
+    SetRole(run_, "small");
     run_->setToolTip(tr("Только эта стадия как процесс dlssvid %1").arg(QString::fromStdString(stage)));
     eng->addWidget(json_, 1);
     auto* buttons = new QVBoxLayout();
@@ -135,6 +139,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     buttons->addWidget(run_);
     if (stage == "nr") {
         patch_ = new QPushButton(tr("Пропатчить DLL…"), engineer_);
+        SetRole(patch_, "small");
         patch_->setToolTip(tr("Пропатчить вашу nvngx_dlssnr.dll для RTX 20/30/40 (dlssnr-patcher, CUDA Toolkit 13.3) и положить результат в bin/nvidia/"));
         buttons->addWidget(patch_);
         connect(patch_, &QPushButton::clicked, this, &StageCard::patchDllRequested);
@@ -167,7 +172,12 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
             auto* row = new QWidget(form_);
             auto* h = new QHBoxLayout(row);
             h->setContentsMargins(0, 0, 0, 0);
-            h->setSpacing(2);
+            h->setSpacing(0);
+            auto* group_frame = new QFrame(row);  // the segmented control of the mockups: one bordered group
+            SetRole(group_frame, "segments");
+            auto* segments = new QHBoxLayout(group_frame);
+            segments->setContentsMargins(0, 0, 0, 0);
+            segments->setSpacing(0);
             auto* group = new QButtonGroup(row);
             group->setExclusive(true);
             std::vector<QToolButton*> buttons;
@@ -177,12 +187,14 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
                 b->setToolTip(QString::fromStdString(c.hint));
                 b->setCheckable(true);
                 b->setAutoRaise(true);
+                SetRole(b, "segment");
                 group->addButton(b);
-                h->addWidget(b);
+                segments->addWidget(b);
                 buttons.push_back(b);
                 const std::string value = c.value;
                 connect(b, &QToolButton::clicked, this, [this, spec, value] { setParam(spec.key, ChoiceValue(spec, value)); });
             }
+            h->addWidget(group_frame);
             h->addStretch(1);
             pull_.push_back([this, spec, buttons] {
                 const StageEntry* e = model_.stageEntry(stage_);
@@ -318,7 +330,7 @@ void StageCard::refresh() {
     for (const auto& pull : pull_) pull();
     const AppModel::StageCardState st = model_.cardState(stage_);
     state_->setText(st.state);
-    state_->setStyleSheet(kToneStyle[ToneIndex(st.tone)]);
+    SetRole(state_, kToneRole[ToneIndex(st.tone)]);
     sub_->setText(st.sub);
     sub_->setVisible(!st.sub.isEmpty());
     version_->setText(st.version);

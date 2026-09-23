@@ -16,6 +16,7 @@ qt_add_library(dlssvid_app STATIC
   ProcessingPanel.h ProcessingPanel.cpp
   ResultBar.h ResultBar.cpp
   MainWindow.h MainWindow.cpp
+  Theme.h Theme.cpp
 )
 target_include_directories(dlssvid_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(dlssvid_app PUBLIC dlssvid_core Qt6::Widgets)

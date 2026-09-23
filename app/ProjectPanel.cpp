@@ -18,6 +18,7 @@
 #include "AppModel.h"
 #include "SourceNames.h"
 #include "StageCard.h"
+#include "Theme.h"
 #include "TaskQueue.h"
 #include "io/EncodeDefaults.h"
 #include "pipeline/PassFingerprint.h"
@@ -31,7 +32,7 @@ namespace {
 
 QLabel* Muted(const QString& text, QWidget* parent) {
     auto* l = new QLabel(text, parent);
-    l->setStyleSheet("color: #8a8f98;");
+    SetRole(l, "muted");
     return l;
 }
 
@@ -44,13 +45,14 @@ QLabel* Value(QWidget* parent) {
 
 QFrame* Card(QWidget* parent) {
     auto* f = new QFrame(parent);
-    f->setFrameShape(QFrame::StyledPanel);
+    f->setFrameShape(QFrame::NoFrame);
+    SetRole(f, "card");
     return f;
 }
 
 QLabel* Title(const QString& text, QWidget* parent) {
     auto* l = new QLabel(text, parent);
-    l->setStyleSheet("font-weight: 600;");
+    SetRole(l, "title");
     return l;
 }
 
@@ -75,7 +77,7 @@ QString ShortHash(const std::string& hash) {
 }  // namespace
 
 ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) : QWidget(parent), model_(model), tasks_(tasks) {
-    setMinimumWidth(780);  // the cards need the form and the state column side by side (the dock follows)
+    setMinimumWidth(900);  // the mockup's stage grid (44 + 190 + form + 216 with 14 px gaps) plus the card paddings
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
     auto* scroll = new QScrollArea(this);
@@ -84,17 +86,17 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);  // the content adapts to the dock's width
     auto* content = new QWidget(scroll);
     auto* layout = new QVBoxLayout(content);
-    layout->setContentsMargins(8, 6, 8, 6);
-    layout->setSpacing(8);
+    layout->setContentsMargins(12, 10, 12, 10);
+    layout->setSpacing(10);
     scroll->setWidget(content);
     outer->addWidget(scroll);
 
     // ---- source ----
     auto* sourceCard = Card(content);
     auto* sg = new QGridLayout(sourceCard);
-    sg->setContentsMargins(10, 6, 10, 6);
-    sg->setHorizontalSpacing(10);
-    sg->setVerticalSpacing(2);
+    sg->setContentsMargins(14, 9, 14, 9);
+    sg->setHorizontalSpacing(12);
+    sg->setVerticalSpacing(3);
     sg->addWidget(Title(tr("Источник"), sourceCard), 0, 0, 1, 2);
     sourceFile_ = Value(sourceCard);
     sourceFrame_ = Value(sourceCard);
@@ -109,7 +111,7 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
         ++row;
     }
     changePasses_ = new QPushButton(tr("изменить…"), sourceCard);
-    changePasses_->setFlat(true);
+    SetRole(changePasses_, "small");
     changePasses_->setToolTip(tr("Другая папка для пассов: промежуточные кадры стадий занимают десятки гигабайт"));
     connect(changePasses_, &QPushButton::clicked, this, &ProjectPanel::choosePassesRoot);
     sg->addWidget(changePasses_, 4, 2, Qt::AlignTop);  // the «Пассы» row
@@ -119,9 +121,9 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     // ---- what the run gives ----
     auto* outCard = Card(content);
     auto* og = new QGridLayout(outCard);
-    og->setContentsMargins(10, 6, 10, 6);
-    og->setHorizontalSpacing(10);
-    og->setVerticalSpacing(2);
+    og->setContentsMargins(14, 9, 14, 9);
+    og->setHorizontalSpacing(12);
+    og->setVerticalSpacing(3);
     og->addWidget(Title(tr("Что получится"), outCard), 0, 0, 1, 2);
     outVideo_ = Value(outCard);
     outTime_ = Value(outCard);
@@ -135,11 +137,11 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     }
     outError_ = new QLabel(outCard);
     outError_->setWordWrap(true);
-    outError_->setStyleSheet("color: #e0a84f;");
+    SetRole(outError_, "warn");
     og->addWidget(outError_, row++, 0, 1, 2);
     process_ = new QPushButton(tr("Обработать"), outCard);
     process_->setDefault(true);
-    process_->setMinimumHeight(32);
+    SetRole(process_, "primary-big");
     process_->setToolTip(tr("Сохранить проект и прогнать пайплайн (dlssvid process --project): готовые пассы переиспользуются (Ctrl+Enter)"));
     og->addWidget(process_, row, 0, 1, 2);
     og->setColumnStretch(1, 1);
@@ -161,8 +163,9 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     }
     // encode: always last, the project's encoder
     auto* encodeCard = Card(content);
+    SetRole(encodeCard, "card-dashed");
     auto* eg = new QGridLayout(encodeCard);
-    eg->setContentsMargins(10, 6, 10, 6);
+    eg->setContentsMargins(14, 9, 14, 9);
     eg->setHorizontalSpacing(12);
     auto* encodeHead = new QVBoxLayout();
     encodeHead->setSpacing(0);
@@ -198,7 +201,7 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     eg->addLayout(encodeForm, 0, 1);
     encodeState_ = new QLabel(encodeCard);
     encodeState_->setWordWrap(true);
-    encodeState_->setStyleSheet("color: #e0a84f;");
+    SetRole(encodeState_, "warn");
     eg->addWidget(encodeState_, 0, 2, Qt::AlignTop);
     eg->setColumnStretch(1, 1);
     eg->setColumnMinimumWidth(2, 200);
@@ -235,6 +238,7 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     versionsInfo_->setMinimumWidth(120);
     vh->addWidget(versionsInfo_, 1);
     gc_ = new QPushButton(tr("Очистить старые"), versionsCard);
+    SetRole(gc_, "small");
     gc_->setToolTip(tr("Удалить предыдущие версии сверх хранимых (pass_versions_keep); версии, на которые ссылаются другие, остаются"));
     vh->addWidget(gc_);
     vl->addLayout(vh);
@@ -387,7 +391,7 @@ void ProjectPanel::refreshVersions() {
             if (o.pass == v.pass) ++total_n;
         versionsGrid_->addWidget(new QLabel(HumanSourceName(v.pass), versionsRows_), row, 0);
         auto* ver = new QLabel(QString("v%1").arg(total_n - n + 1), versionsRows_);
-        ver->setStyleSheet("font-family: monospace;");
+        SetRole(ver, "mono");
         ver->setToolTip(v.current ? tr("текущая версия") : QString::fromStdString(v.id));
         versionsGrid_->addWidget(ver, row, 1);
         auto* params = Muted(stage.empty() ? QString::fromStdString(v.params.dump()) : HumanParams(stage, v.params), versionsRows_);
@@ -398,22 +402,22 @@ void ProjectPanel::refreshVersions() {
         versionsGrid_->addWidget(Muted(HumanWhen(v.created), versionsRows_), row, 3);
         versionsGrid_->addWidget(new QLabel(HumanBytes(v.bytes), versionsRows_), row, 4);
         QString state;
-        QString tone = "color: #a7abb3;";
+        const char* tone = "muted";
         if (v.current) {
             const AppModel::StageCardState st = stage.empty() ? AppModel::StageCardState{} : model_.cardState(stage);
             state = tr("текущая");
             if (st.runs) {
                 state += tr(" · будет заменена");
-                tone = "color: #e0a84f;";
+                tone = "warn";
             } else if (st.tone == "ok") {
                 state += tr(" · совпадает");
-                tone = "color: #5fbf7a;";
+                tone = "ok";
             }
         } else {
             state = tr("предыдущая");
         }
         auto* stateLabel = new QLabel(state, versionsRows_);
-        stateLabel->setStyleSheet(tone);
+        SetRole(stateLabel, tone);
         versionsGrid_->addWidget(stateLabel, row, 5);
         auto* actions = new QWidget(versionsRows_);
         auto* ah = new QHBoxLayout(actions);
@@ -421,6 +425,7 @@ void ProjectPanel::refreshVersions() {
         ah->setSpacing(4);
         const std::string name = v.current ? v.pass : v.pass + "@" + v.id;
         auto* compare = new QPushButton(tr("Сравнить"), actions);
+        SetRole(compare, "small");
         compare->setToolTip(tr("Показать эту версию на стороне «после» шторки"));
         connect(compare, &QPushButton::clicked, this, [this, name] {
             if (model_.compareView() != AppModel::CompareView::BeforeAfter) model_.setCompareView(AppModel::CompareView::BeforeAfter);
@@ -430,6 +435,7 @@ void ProjectPanel::refreshVersions() {
         if (!v.current) {
             const std::string pass = v.pass, id = v.id;
             auto* use = new QPushButton(tr("Вернуть"), actions);
+            SetRole(use, "small");
             use->setToolTip(tr("Сделать эту версию текущей; нынешняя останется в истории"));
             connect(use, &QPushButton::clicked, this, [this, pass, id] {
                 try {
@@ -442,6 +448,7 @@ void ProjectPanel::refreshVersions() {
             ah->addWidget(use);
             const auto dir = v.dir;
             auto* remove = new QPushButton(tr("Удалить"), actions);
+            SetRole(remove, "small");
             connect(remove, &QPushButton::clicked, this, [this, dir, pass, id] {
                 if (QMessageBox::question(this, tr("Удалить версию"), tr("Удалить %1 (%2) с диска?").arg(HumanSourceName(pass), VersionLabel(id))) != QMessageBox::Yes) return;
                 std::error_code ec;

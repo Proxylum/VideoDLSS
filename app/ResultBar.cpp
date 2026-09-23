@@ -3,13 +3,17 @@
 #include <QHBoxLayout>
 
 #include "AppModel.h"
+#include "Theme.h"
 
 namespace dlssvid {
 
 ResultBar::ResultBar(AppModel& model, QWidget* parent) : QWidget(parent), model_(model) {
+    setAttribute(Qt::WA_StyledBackground, true);
+    SetRole(this, "bar");
+    setMinimumHeight(48);
     auto* layout = new QHBoxLayout(this);
-    layout->setContentsMargins(6, 2, 6, 2);
-    layout->setSpacing(6);
+    layout->setContentsMargins(16, 6, 16, 6);
+    layout->setSpacing(10);
     summary_ = new QLabel(this);
     summary_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(summary_, 1);
@@ -25,10 +29,8 @@ ResultBar::ResultBar(AppModel& model, QWidget* parent) : QWidget(parent), model_
     another_ = new QPushButton(tr("Другое видео"), this);
     another_->setObjectName("anotherVideo");
     another_->setToolTip(tr("Закрыть проект и вернуться к стартовому экрану (Ctrl+W)"));
-    for (QPushButton* b : {saveAs_, openFolder_, exportPasses_, another_}) {
-        b->setFlat(true);
-        layout->addWidget(b);
-    }
+    SetRole(saveAs_, "primary");
+    for (QPushButton* b : {openFolder_, exportPasses_, another_, saveAs_}) layout->addWidget(b);
     connect(saveAs_, &QPushButton::clicked, this, &ResultBar::saveAsRequested);
     connect(openFolder_, &QPushButton::clicked, this, &ResultBar::openFolderRequested);
     connect(exportPasses_, &QPushButton::clicked, this, &ResultBar::exportPassesRequested);

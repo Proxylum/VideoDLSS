@@ -194,7 +194,8 @@ advanced keys in the JSON editor of the engineer mode) and what the plan does wi
 Интенсивность 1 → 1.4», «будет посчитано», a warning when NR / FG would run without depth and vectors), the encoder
 card (stored in the project; the bitrate is «Авто» — chosen from the result's size, rate and codec, see
 `core/io/EncodeDefaults` — or a preset in Mbit/s or a custom value, with the rough file size) and the pass versions on disk
-(«Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»).
+(«Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»). The look follows the mockups of `docs/ux-guidelines.md`
+(`app/Theme`: dark palette, control sizes and paddings, the accent for the one primary action).
 Without a project the window shows the start page (stage 9): drop a video on it, «Открыть видео…» / «Открыть проект…»,
 the GPU / driver / DLL readiness line and the recent files with their state; the window remembers its size, the dock
 layout and the dialog folders (QSettings), opens maximised the first time, brings a closed panel back from «Вид», marks

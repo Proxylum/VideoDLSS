@@ -32,6 +32,7 @@
 #include "SourceNames.h"
 #include "StartPage.h"
 #include "TaskQueue.h"
+#include "Theme.h"
 #include "TimelineWidget.h"
 #include "ViewportWindow.h"
 #include "util/Log.h"
@@ -55,9 +56,11 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     v->addWidget(resultBar_);
     auto* labels = new QWidget(workArea_);
     auto* lg = new QGridLayout(labels);
-    lg->setContentsMargins(4, 0, 4, 0);
+    lg->setContentsMargins(16, 4, 16, 2);
+    lg->setHorizontalSpacing(10);
     for (size_t i = 0; i < 4; ++i) {
         cellLabels_[i] = new QLabel(labels);
+        SetRole(cellLabels_[i], "cell-label");
         cellLabels_[i]->setAlignment(Qt::AlignCenter);
         lg->addWidget(cellLabels_[i], 0, static_cast<int>(i));
     }
@@ -267,7 +270,7 @@ void MainWindow::updatePage() {
             for (QDockWidget* d : {projectDock_, inspectorDock_, logDock_, tasksDock_}) d->show();
         }
         if (!docksSized_) {  // the first project: the dock wide enough for the stage cards
-            resizeDocks({projectDock_}, {820}, Qt::Horizontal);
+            resizeDocks({projectDock_}, {920}, Qt::Horizontal);
             docksSized_ = true;
         }
     } else {

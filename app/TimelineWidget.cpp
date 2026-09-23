@@ -7,13 +7,15 @@
 #include <cmath>
 
 #include "AppModel.h"
+#include "Theme.h"
 #include "viewport/ViewportState.h"
 
 namespace dlssvid {
 
 TimelineWidget::TimelineWidget(AppModel& model, QWidget* parent) : QWidget(parent), model_(model) {
     auto* layout = new QHBoxLayout(this);
-    layout->setContentsMargins(4, 2, 4, 2);
+    layout->setContentsMargins(16, 6, 16, 6);
+    layout->setSpacing(8);
     auto* toStart = new QToolButton(this);
     toStart->setIcon(style()->standardIcon(QStyle::SP_MediaSkipBackward));
     toStart->setToolTip(tr("В начало"));
@@ -35,6 +37,7 @@ TimelineWidget::TimelineWidget(AppModel& model, QWidget* parent) : QWidget(paren
     fps_ = new QComboBox(this);
     fps_->setToolTip(tr("Частота кадров таймлайна: источники с разной частотой сопоставляются по времени"));
     fps_->setVisible(false);
+    for (QToolButton* b : {toStart, prev, play_, next}) SetRole(b, "icon");
     layout->addWidget(toStart);
     layout->addWidget(prev);
     layout->addWidget(play_);

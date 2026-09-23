@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "SourceNames.h"
+#include "Theme.h"
 #include "util/Log.h"
 
 namespace dlssvid {
@@ -103,7 +104,7 @@ int TaskQueue::enqueue(const QString& title, const QString& program, const QStri
     table_->setCellWidget(t.row, kColProgress, bar);
     table_->setItem(t.row, kColStatus, new QTableWidgetItem(tr("в очереди")));
     auto* cancel = new QPushButton(tr("Отменить"), table_);
-    cancel->setFlat(true);
+    SetRole(cancel, "small");
     const int id = t.id;
     connect(cancel, &QPushButton::clicked, this, [this, id] { this->cancel(id); });
     table_->setCellWidget(t.row, kColCancel, cancel);

@@ -5,12 +5,14 @@
 #include <QCommandLineParser>
 
 #include "MainWindow.h"
+#include "Theme.h"
 #include "util/Log.h"
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QApplication::setApplicationName("dlssvid");
     QApplication::setOrganizationName("dlssvid");
+    dlssvid::ApplyTheme(app);
     QCommandLineParser parser;
     parser.setApplicationDescription("DLSS Video Pipeline — viewport");
     parser.addHelpOption();

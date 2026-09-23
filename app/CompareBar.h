@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QHBoxLayout>
+#include <QCheckBox>
 #include <QToolButton>
 #include <QWidget>
 #include <string>
@@ -26,7 +27,7 @@ private:
     QToolButton* beforeAfter_;
     QToolButton* afterOnly_;
     QToolButton* grid_;
-    QToolButton* engineer_;
+    QCheckBox* engineer_;
     QHBoxLayout* chipsLayout_;
     std::vector<QToolButton*> chips_;
     std::vector<std::string> chipSources_;
