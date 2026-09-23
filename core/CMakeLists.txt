@@ -65,6 +65,7 @@ add_library(dlssvid_core STATIC
   gpu/GpuFrameCache.h gpu/GpuFrameCache.cpp
   io/VideoDecoder.h io/VideoDecoder.cpp
   io/VideoEncoder.h io/VideoEncoder.cpp
+  io/EncodeDefaults.h io/EncodeDefaults.cpp
   stages/passthrough/PassthroughStage.h stages/passthrough/PassthroughStage.cpp
   passes/PassImage.h passes/PassImage.cpp
   passes/Manifest.h passes/Manifest.cpp

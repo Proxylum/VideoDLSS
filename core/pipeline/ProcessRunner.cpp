@@ -8,6 +8,7 @@
 
 #include "convert/ColorConvert.h"
 #include "gpu/D3D12Device.h"
+#include "io/EncodeDefaults.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
 #include "pipeline/PassFingerprint.h"
@@ -483,7 +484,11 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     eo.codec = codec;
     eo.frameRate = fps.num > 0 ? fps : Rational{30, 1};
     eo.timeBase = Rational{eo.frameRate.den, eo.frameRate.num};
-    eo.codecOptions = codecOptions;
+    // no `b` given: the bitrate for this output (NVENC's own default is far too low for 4K)
+    eo.codecOptions = EffectiveCodecOptions(codec, codecOptions, m.width, m.height, eo.frameRate.ToDouble());
+    if (!codecOptions.count("b") && eo.codecOptions.count("b"))
+        Log()->info("encode: bitrate {} chosen for {}x{} at {:.3g} fps ({}); --codec-opt b=... overrides", eo.codecOptions.at("b"), m.width, m.height,
+                    eo.frameRate.ToDouble(), codec);
     VideoEncoder encoder(output, FrameDesc{m.width, m.height, PixelFormat::Yuv420p}, eo);
     EncodeReport r;
     r.fps = eo.frameRate;
@@ -565,7 +570,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         eopt.codec = options.codec;
         eopt.frameRate = info.frameRate;
         eopt.timeBase = info.timeBase;
-        eopt.codecOptions = options.codecOptions;
+        eopt.codecOptions = EffectiveCodecOptions(options.codec, options.codecOptions, info.width, info.height, info.frameRate.ToDouble());
         VideoEncoder encoder(options.output, FrameDesc{info.width, info.height, PixelFormat::Yuv420p}, eopt);
         D3D12Device device({options.warp, false});
         Pipeline pipeline(device, 4);

@@ -192,7 +192,9 @@ The project panel (stage 9) shows the source (frame, sound, passes, hash and whe
 card per stage with a form built from the stage schema (backend list, scale / multiplier toggles, intensity slider; the
 advanced keys in the JSON editor of the engineer mode) and what the plan does with it («переиспользуется», «пересчёт:
 Интенсивность 1 → 1.4», «будет посчитано», a warning when NR / FG would run without depth and vectors), the encoder
-card (stored in the project) and the pass versions on disk («Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»).
+card (stored in the project; the bitrate is «Авто» — chosen from the result's size, rate and codec, see
+`core/io/EncodeDefaults` — or a preset in Mbit/s or a custom value, with the rough file size) and the pass versions on disk
+(«Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»).
 Without a project the window shows the start page (stage 9): drop a video on it, «Открыть видео…» / «Открыть проект…»,
 the GPU / driver / DLL readiness line and the recent files with their state; the window remembers its size, the dock
 layout and the dialog folders (QSettings), opens maximised the first time, brings a closed panel back from «Вид», marks

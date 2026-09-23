@@ -5,6 +5,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QWidget>
 #include <string>
 #include <vector>
@@ -53,7 +54,8 @@ private:
     QPushButton* process_;
     std::vector<StageCard*> cards_;
     QComboBox* codec_;
-    QLineEdit* bitrate_;
+    QComboBox* bitrate_;      // «Авто» | presets in Mbit/s | «Свой…»
+    QSpinBox* bitrateCustom_;  // the custom value, Mbit/s
     QLabel* encodeAudio_;
     QLabel* encodeState_;
     QLabel* versionsInfo_;

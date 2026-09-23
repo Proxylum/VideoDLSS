@@ -41,6 +41,7 @@ add_executable(dlssvid_unit_tests
   unit/test_pass_versions.cpp
   unit/test_param_schema.cpp
   unit/test_estimates.cpp
+  unit/test_encode_defaults.cpp
   unit/test_paths.cpp
   unit/test_upscale.cpp
   unit/test_tonemap.cpp

@@ -12,12 +12,14 @@
 #include <QSignalBlocker>
 #include <QVBoxLayout>
 #include <cmath>
+#include <optional>
 #include <map>
 
 #include "AppModel.h"
 #include "SourceNames.h"
 #include "StageCard.h"
 #include "TaskQueue.h"
+#include "io/EncodeDefaults.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "stages/ParamSchema.h"
@@ -173,17 +175,26 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     codec_->addItem("HEVC NVENC", "hevc_nvenc");
     codec_->addItem("AV1 NVENC", "av1_nvenc");
     codec_->addItem(tr("FFV1 (без потерь)"), "ffv1");
-    bitrate_ = new QLineEdit(encodeCard);
-    bitrate_->setPlaceholderText(tr("битрейт, напр. 50M"));
-    bitrate_->setMaximumWidth(110);
-    bitrate_->setToolTip(tr("Опция кодера b= (пусто — по умолчанию кодера)"));
+    bitrate_ = new QComboBox(encodeCard);
+    bitrate_->addItem(tr("Авто"), -1);
+    for (int mbps : {20, 35, 50, 80, 120, 200}) bitrate_->addItem(tr("%1 Мбит/с").arg(mbps), mbps);
+    bitrate_->addItem(tr("Свой…"), 0);
+    bitrate_->setToolTip(tr("Битрейт видео (опция кодера b). «Авто» — по разрешению, частоте и кодеку результата: для H.264 1080p30 ≈ 16, 4K30 ≈ 45, "
+                            "4K60 ≈ 70 Мбит/с; HEVC ≈ 0,65×, AV1 ≈ 0,55× от этого"));
+    bitrateCustom_ = new QSpinBox(encodeCard);
+    bitrateCustom_->setRange(1, 400);
+    bitrateCustom_->setSuffix(tr(" Мбит/с"));
+    bitrateCustom_->setValue(50);
+    bitrateCustom_->setVisible(false);
     encodeAudio_ = Muted("", encodeCard);
     encodeAudio_->setMinimumWidth(60);
+    encodeAudio_->setWordWrap(true);
     codec_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     codec_->setMinimumContentsLength(10);
     encodeForm->addWidget(codec_);
     encodeForm->addWidget(bitrate_);
-    encodeForm->addWidget(encodeAudio_, 1);
+    encodeForm->addWidget(bitrateCustom_);
+    encodeForm->addWidget(encodeAudio_, 1);  // «≈ 45 Мбит/с · файл ≈ 54 МБ · звук копируется»
     eg->addLayout(encodeForm, 0, 1);
     encodeState_ = new QLabel(encodeCard);
     encodeState_->setWordWrap(true);
@@ -195,13 +206,17 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     auto applyEncode = [this] {
         if (updating_) return;
         std::map<std::string, std::string> options = model_.project().codecOptions;
-        const QString b = bitrate_->text().trimmed();
-        if (b.isEmpty()) options.erase("b");
-        else options["b"] = b.toStdString();
+        const int choice = bitrate_->currentData().toInt();  // -1 auto, 0 custom, else Mbit/s
+        if (choice < 0) options.erase("b");
+        else options["b"] = BitrateOption(choice > 0 ? choice : bitrateCustom_->value());
         model_.setEncode(codec_->currentData().toString(), options);
     };
     connect(codec_, qOverload<int>(&QComboBox::currentIndexChanged), this, [applyEncode](int) { applyEncode(); });
-    connect(bitrate_, &QLineEdit::editingFinished, this, applyEncode);
+    connect(bitrate_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, applyEncode](int) {
+        bitrateCustom_->setVisible(bitrate_->currentData().toInt() == 0);
+        applyEncode();
+    });
+    connect(bitrateCustom_, &QSpinBox::editingFinished, this, applyEncode);
     footer_ = Muted(tr("Улучшение и Генерация кадров используют глубину и векторы: без них качество ниже. Пасс переиспользуется при совпадении "
                        "отпечатка (исходник, параметры, входы, версия инструмента)."),
                     content);
@@ -297,13 +312,35 @@ void ProjectPanel::refresh() {
 
     for (StageCard* c : cards_) c->refresh();
     {
-        const QSignalBlocker b1(codec_), b2(bitrate_);
+        const QSignalBlocker b1(codec_), b2(bitrate_), b3(bitrateCustom_);
         const int idx = codec_->findData(QString::fromStdString(p.codec));
         codec_->setCurrentIndex(idx >= 0 ? idx : 0);
         const auto b = p.codecOptions.find("b");
-        bitrate_->setText(b == p.codecOptions.end() ? QString() : QString::fromStdString(b->second));
+        const std::optional<double> mbps = b == p.codecOptions.end() ? std::nullopt : ParseBitrateMbps(b->second);
+        int choice = -1;  // auto
+        if (mbps) {
+            choice = 0;  // custom unless a preset matches
+            for (int i = 0; i < bitrate_->count(); ++i)
+                if (bitrate_->itemData(i).toInt() > 0 && std::fabs(bitrate_->itemData(i).toInt() - *mbps) < 0.01) choice = bitrate_->itemData(i).toInt();
+            if (choice == 0) bitrateCustom_->setValue(std::max(1, static_cast<int>(std::lround(*mbps))));
+        }
+        bitrate_->setCurrentIndex(std::max(0, bitrate_->findData(choice)));
+        bitrateCustom_->setVisible(choice == 0);
+        const bool lossy = LossyCodec(p.codec);
+        bitrate_->setEnabled(lossy && hasSource);
+        bitrateCustom_->setEnabled(lossy && hasSource);
+        // what the run will use and roughly how big the file gets
+        QString info;
+        if (!lossy) info = tr("без потерь");
+        else if (hasSource && out.width > 0) {
+            const double used = mbps ? *mbps : RecommendedBitrateMbps(p.codec, out.width, out.height, out.fps);
+            const double seconds = src.fps > 0.0 ? static_cast<double>(src.frames) / src.fps : 0.0;
+            if (!mbps) info = tr("≈ %1 Мбит/с").arg(QString::number(used, 'g', 3));
+            if (seconds > 0.0 && used > 0.0) info += (info.isEmpty() ? QString() : QString(" · ")) + tr("файл ≈ %1").arg(HumanBytes(static_cast<unsigned long long>(used * 1e6 / 8.0 * seconds)));
+        }
+        const QString audio = src.audio ? tr("звук копируется") : (hasSource ? tr("без звука") : QString());
+        encodeAudio_->setText(info.isEmpty() ? audio : (audio.isEmpty() ? info : info + " · " + audio));
     }
-    encodeAudio_->setText(src.audio ? tr("звук копируется") : (hasSource ? tr("без звука") : QString()));
     const StageEstimate* enc = nullptr;
     for (const auto& e : out.stages)
         if (e.stage == "encode") enc = &e;
