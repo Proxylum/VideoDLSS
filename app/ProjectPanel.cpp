@@ -77,7 +77,7 @@ QString ShortHash(const std::string& hash) {
 }  // namespace
 
 ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) : QWidget(parent), model_(model), tasks_(tasks) {
-    setMinimumWidth(840);  // the cards need the form and the state column side by side (the dock follows)
+    setMinimumWidth(900);  // the mockup's stage grid (44 + 190 + form + 216 with 14 px gaps) plus the card paddings
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(0, 0, 0, 0);
     auto* scroll = new QScrollArea(this);

@@ -102,7 +102,7 @@ QToolButton:hover { background: @card; border-color: @control; }
 QToolButton:checked { background: @tint; border-color: @accent; }
 QToolButton:disabled { color: @disabled; }
 QToolButton[role="icon"] { min-height: 28px; min-width: 28px; padding: 0 6px; }
-QToolButton[role="segment"] { min-height: 32px; padding: 0 12px; border: 0; border-radius: 0; background: @bg; color: @muted; }
+QToolButton[role="segment"] { min-height: 32px; padding: 0 10px; border: 0; border-radius: 0; background: @bg; color: @muted; }
 QToolButton[role="segment"]:hover { background: @card; color: @text; }
 QToolButton[role="segment"]:checked { background: @accent; color: @on-accent; font-weight: 600; }
 QFrame[role="segments"] { border: 1px solid @control; border-radius: 4px; background: @bg; }

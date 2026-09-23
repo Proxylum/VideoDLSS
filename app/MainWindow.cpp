@@ -270,7 +270,7 @@ void MainWindow::updatePage() {
             for (QDockWidget* d : {projectDock_, inspectorDock_, logDock_, tasksDock_}) d->show();
         }
         if (!docksSized_) {  // the first project: the dock wide enough for the stage cards
-            resizeDocks({projectDock_}, {860}, Qt::Horizontal);
+            resizeDocks({projectDock_}, {920}, Qt::Horizontal);
             docksSized_ = true;
         }
     } else {
