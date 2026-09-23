@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QIcon>
 #include <QString>
 
 class QApplication;
@@ -23,5 +24,8 @@ void SetRole(QWidget* widget, const char* role);  // sets the property and repol
 // changing the value: a wheel over the project panel used to switch stage backends by accident. Controls outside a
 // scroll area (the timeline's frame box) keep the wheel. Installed by ApplyTheme.
 void InstallWheelGuard(QApplication& app);
+// Playback glyphs drawn in the theme's text colour (Fusion's standard media icons are dark on the dark bar).
+enum class Glyph { ToStart, Prev, Play, Pause, Next, Loop };
+QIcon ThemeIcon(Glyph glyph);
 
 }  // namespace dlssvid

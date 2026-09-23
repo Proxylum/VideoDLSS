@@ -1,12 +1,16 @@
 #include "Theme.h"
 
 #include <QAbstractScrollArea>
+#include <algorithm>
 #include <QAbstractSlider>
 #include <QAbstractSpinBox>
 #include <QApplication>
 #include <QComboBox>
 #include <QEvent>
 #include <QFont>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPixmap>
 #include <QScrollBar>
 #include <QPalette>
 #include <QStyle>
@@ -210,6 +214,64 @@ void InstallWheelGuard(QApplication& app) {
     if (guard) return;
     guard = new WheelGuard(&app);
     app.installEventFilter(guard);
+}
+
+QIcon ThemeIcon(Glyph glyph) {
+    QIcon icon;
+    for (int size : {16, 20, 24, 32, 48}) {
+        QPixmap pm(size, size);
+        pm.fill(Qt::transparent);
+        QPainter p(&pm);
+        p.setRenderHint(QPainter::Antialiasing);
+        const QColor ink(kText);
+        p.setPen(Qt::NoPen);
+        p.setBrush(ink);
+        const qreal s = size;
+        auto triangle = [&](qreal x0, qreal x1, bool right) {  // a play-style triangle between x0 and x1 (fractions of the size)
+            QPainterPath path;
+            const qreal top = s * 0.22, bottom = s * 0.78, mid = s * 0.5;
+            if (right) {
+                path.moveTo(s * x0, top);
+                path.lineTo(s * x1, mid);
+                path.lineTo(s * x0, bottom);
+            } else {
+                path.moveTo(s * x1, top);
+                path.lineTo(s * x0, mid);
+                path.lineTo(s * x1, bottom);
+            }
+            path.closeSubpath();
+            p.drawPath(path);
+        };
+        auto bar = [&](qreal x) { p.drawRect(QRectF(s * x, s * 0.22, std::max(1.5, s * 0.1), s * 0.56)); };
+        switch (glyph) {
+            case Glyph::ToStart: bar(0.2); triangle(0.36, 0.8, false); break;
+            case Glyph::Prev: triangle(0.28, 0.72, false); break;
+            case Glyph::Play: triangle(0.3, 0.78, true); break;
+            case Glyph::Pause: bar(0.28); bar(0.6); break;
+            case Glyph::Next: triangle(0.28, 0.72, true); break;
+            case Glyph::Loop: {  // a circular arrow: an open ring with an arrowhead at its gap
+                QPen pen(ink, std::max(1.5, s * 0.1));
+                pen.setCapStyle(Qt::RoundCap);
+                p.setPen(pen);
+                p.setBrush(Qt::NoBrush);
+                const QRectF ring(s * 0.2, s * 0.2, s * 0.6, s * 0.6);
+                p.drawArc(ring, 30 * 16, 300 * 16);
+                p.setPen(Qt::NoPen);
+                p.setBrush(ink);
+                QPainterPath head;  // at the arc's end (30°): pointing along the ring
+                const qreal cx = s * 0.5 + s * 0.3 * 0.866, cy = s * 0.5 - s * 0.3 * 0.5;
+                head.moveTo(cx + s * 0.02, cy - s * 0.14);
+                head.lineTo(cx + s * 0.12, cy + s * 0.06);
+                head.lineTo(cx - s * 0.12, cy + s * 0.02);
+                head.closeSubpath();
+                p.drawPath(head);
+                break;
+            }
+        }
+        p.end();
+        icon.addPixmap(pm);
+    }
+    return icon;
 }
 
 void SetRole(QWidget* widget, const char* role) {

@@ -17,17 +17,22 @@ TimelineWidget::TimelineWidget(AppModel& model, QWidget* parent) : QWidget(paren
     layout->setContentsMargins(16, 6, 16, 6);
     layout->setSpacing(8);
     auto* toStart = new QToolButton(this);
-    toStart->setIcon(style()->standardIcon(QStyle::SP_MediaSkipBackward));
+    toStart->setIcon(ThemeIcon(Glyph::ToStart));
     toStart->setToolTip(tr("В начало"));
     auto* prev = new QToolButton(this);
-    prev->setIcon(style()->standardIcon(QStyle::SP_MediaSeekBackward));
+    prev->setIcon(ThemeIcon(Glyph::Prev));
     prev->setToolTip(tr("Кадр назад (,)"));
     play_ = new QToolButton(this);
-    play_->setIcon(style()->standardIcon(QStyle::SP_MediaPlay));
+    play_->setIcon(ThemeIcon(Glyph::Play));
     play_->setToolTip(tr("Play / Pause (пробел)"));
     auto* next = new QToolButton(this);
-    next->setIcon(style()->standardIcon(QStyle::SP_MediaSeekForward));
+    next->setIcon(ThemeIcon(Glyph::Next));
     next->setToolTip(tr("Кадр вперёд (.)"));
+    loop_ = new QToolButton(this);
+    loop_->setIcon(ThemeIcon(Glyph::Loop));
+    loop_->setCheckable(true);
+    loop_->setChecked(model_.loop());
+    loop_->setToolTip(tr("Зациклить воспроизведение (L)"));
     slider_ = new QSlider(Qt::Horizontal, this);
     slider_->setTracking(true);
     frame_ = new QSpinBox(this);
@@ -37,11 +42,12 @@ TimelineWidget::TimelineWidget(AppModel& model, QWidget* parent) : QWidget(paren
     fps_ = new QComboBox(this);
     fps_->setToolTip(tr("Частота кадров таймлайна: источники с разной частотой сопоставляются по времени"));
     fps_->setVisible(false);
-    for (QToolButton* b : {toStart, prev, play_, next}) SetRole(b, "icon");
+    for (QToolButton* b : {toStart, prev, play_, next, loop_}) SetRole(b, "icon");
     layout->addWidget(toStart);
     layout->addWidget(prev);
     layout->addWidget(play_);
     layout->addWidget(next);
+    layout->addWidget(loop_);
     layout->addWidget(slider_, 1);
     layout->addWidget(frame_);
     layout->addWidget(info_);
@@ -51,6 +57,11 @@ TimelineWidget::TimelineWidget(AppModel& model, QWidget* parent) : QWidget(paren
     connect(prev, &QToolButton::clicked, this, [this] { model_.stepFrame(-1); });
     connect(next, &QToolButton::clicked, this, [this] { model_.stepFrame(+1); });
     connect(play_, &QToolButton::clicked, this, [this] { model_.setPlaying(!model_.playing()); });
+    connect(loop_, &QToolButton::toggled, this, [this](bool on) { model_.setLoop(on); });
+    connect(&model_, &AppModel::loopChanged, this, [this](bool on) {
+        const QSignalBlocker b(loop_);
+        loop_->setChecked(on);
+    });
     connect(slider_, &QSlider::valueChanged, this, [this](int v) { model_.setFrame(v); });
     connect(frame_, qOverload<int>(&QSpinBox::valueChanged), this, [this](int v) { model_.setFrame(v); });
     connect(fps_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int i) {
@@ -64,7 +75,7 @@ TimelineWidget::TimelineWidget(AppModel& model, QWidget* parent) : QWidget(paren
         refreshRates();
         refresh();
     });
-    connect(&model_, &AppModel::playingChanged, this, [this](bool p) { play_->setIcon(style()->standardIcon(p ? QStyle::SP_MediaPause : QStyle::SP_MediaPlay)); });
+    connect(&model_, &AppModel::playingChanged, this, [this](bool p) { play_->setIcon(ThemeIcon(p ? Glyph::Pause : Glyph::Play)); });
     refreshRates();
     refresh();
 }

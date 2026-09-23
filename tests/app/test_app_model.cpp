@@ -868,3 +868,33 @@ TEST_CASE("Theme: the wheel over a combo box in a scrolling page scrolls the pag
     wheel(&loose);
     CHECK(loose.currentIndex() == 1);
 }
+
+TEST_CASE("AppModel loops playback back to the start when the loop toggle is on", "[app][model][gpu]") {
+    App();
+    const auto d = Dir("loop");
+    WritePassFps(d / "passes" / "color_sr", PassKind::ColorSr, 6, 24);
+    Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setSingleSource("color_sr");
+    REQUIRE(model.lastTime() > 0.0);
+    QSignalSpy loops(&model, &AppModel::loopChanged);
+    model.setLoop(true);
+    CHECK(model.loop());
+    CHECK(loops.count() == 1);
+    model.setLoop(true);
+    CHECK(loops.count() == 1);  // no change, no signal
+    // from the last frame: the next tick wraps to the start and keeps playing
+    model.setTime(model.lastTime());
+    model.setPlaying(true);
+    Pump([&] { return model.time() < model.lastTime() / 2; }, 3000);
+    CHECK(model.playing());
+    CHECK(model.time() < model.lastTime() / 2);
+    // without the loop the same run stops at the end
+    model.setLoop(false);
+    Pump([&] { return !model.playing(); }, 5000);
+    CHECK(!model.playing());
+    CHECK(model.time() == Approx(model.lastTime()));
+    AppModel again(true);
+    CHECK(!again.loop());  // the setting was left off
+}

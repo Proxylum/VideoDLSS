@@ -26,6 +26,7 @@ private:
     QSlider* slider_;
     QSpinBox* frame_;
     QToolButton* play_;
+    QToolButton* loop_;
     QLabel* info_;
     QComboBox* fps_;
 };

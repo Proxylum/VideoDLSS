@@ -24,6 +24,7 @@ AppModel::AppModel(bool warp, QObject* parent) : QObject(parent) {
     playTimer_.setTimerType(Qt::PreciseTimer);
     connect(&playTimer_, &QTimer::timeout, this, &AppModel::onPlayTick);
     engineerMode_ = QSettings().value("view/engineerMode", false).toBool();
+    loop_ = QSettings().value("view/loop", false).toBool();
     planTimer_.setSingleShot(true);
     planTimer_.setInterval(250);
     connect(&planTimer_, &QTimer::timeout, this, &AppModel::refreshPlan);
@@ -203,12 +204,24 @@ void AppModel::setPlaying(bool playing) {
 
 void AppModel::onPlayTick() {
     const double next = time() + playStep_;
-    // play only over computed frames: stop at the end and where the base source has no frame
-    if (next > lastTime() + 1e-9 || store_->StatusAt(next, baseSource()) == FrameStore::Status::Missing) {
+    if (next > lastTime() + 1e-9) {  // the end: wrap when looping, else stop
+        if (loop_ && lastTime() > 0.0) setTime(0.0);
+        else setPlaying(false);
+        return;
+    }
+    // play only over computed frames: stop where the base source has no frame
+    if (store_->StatusAt(next, baseSource()) == FrameStore::Status::Missing) {
         setPlaying(false);
         return;
     }
     setTime(next);
+}
+
+void AppModel::setLoop(bool on) {
+    if (loop_ == on) return;
+    loop_ = on;
+    QSettings().setValue("view/loop", on);
+    emit loopChanged(on);
 }
 
 void AppModel::setMode(ViewMode mode) {
