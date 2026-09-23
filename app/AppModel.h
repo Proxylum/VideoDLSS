@@ -140,6 +140,8 @@ public slots:
     void setTimelineFps(Rational fps);     // {0,1}: follow the base source
     void setPlaying(bool playing);
     bool playing() const { return playTimer_.isActive(); }
+    bool loop() const { return loop_; }              // playback wraps to the start at the end (QSettings view/loop)
+    void setLoop(bool on);
     void setMode(ViewMode mode);
     void setSingleSource(const QString& name);
     void setCompareView(CompareView view);
@@ -170,6 +172,7 @@ signals:
     void timelineFpsChanged();
     void framesUpdated();
     void playingChanged(bool playing);
+    void loopChanged(bool on);
     void message(const QString& text);
     void engineerModeChanged(bool on);
     void planChanged();
@@ -189,6 +192,7 @@ private:
     Rational timelineFps_{0, 1};  // {0,1}: the base source's rate
     double playStep_ = 1.0 / 24.0;
     bool engineerMode_ = false;
+    bool loop_ = false;
     bool dirty_ = false;
     ProcessPlan plan_;
     RunOutcome outcome_;

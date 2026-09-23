@@ -181,6 +181,12 @@ void MainWindow::buildMenus() {
     view->addSeparator();
     view->addAction(tr("Вписать в окно"), QKeySequence("F"), this, [this] { viewport_->fitView(); });
     view->addAction(tr("1:1"), QKeySequence("Ctrl+0"), this, [this] { viewport_->oneToOne(); });
+    auto* loop = view->addAction(tr("Зациклить воспроизведение"));
+    loop->setCheckable(true);
+    loop->setChecked(model_.loop());
+    loop->setShortcut(QKeySequence("L"));
+    connect(loop, &QAction::toggled, this, [this](bool on) { model_.setLoop(on); });
+    connect(&model_, &AppModel::loopChanged, loop, &QAction::setChecked);
     view->addSeparator();
     view->addAction(tr("До | После"), QKeySequence("W"), this, [this] { model_.toggleWipe(); });
     view->addAction(tr("Только после"), this, [this] { model_.setCompareView(AppModel::CompareView::AfterOnly); });
