@@ -9,6 +9,7 @@
 #include <string>
 
 #include "TestClips.h"
+#include "stages/upscale/WorkerUpscaler.h"
 #ifdef DLSSVID_WITH_TENSORRT
 #include "gpu/D3D12Device.h"
 #include "ml/TrtLoader.h"
@@ -93,3 +94,18 @@ TEST_CASE("CLI upscale --backend trt runs a registry model from --models-dir", "
     CHECK(Run("upscale --backend trt --model nope --models-dir " + Q(models) + " --no-fallback --frames 1 -i " + Q(clip) + " -o " + Q(dir / "bad")) != 0);
 }
 #endif
+
+TEST_CASE("CLI upscale --backend worker runs the worker's stub with a window", "[cli][upscale][worker]") {
+    const UpscalerAvailability a = WorkerUpscaler::Available();
+    if (!a.available) SKIP("sr_worker unavailable: " << a.reason);
+    const auto dir = TempDir() / "cli_upscale_worker";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 40;
+    spec.height = 24;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    REQUIRE(Run("upscale --backend worker --model stub --window 2 --overlap 1 --scale 2 -i " + Q(clip) + " -o " + Q(dir / "out")) == 0);
+    CHECK(std::filesystem::exists(dir / "out" / "color_sr" / "manifest.json"));
+}

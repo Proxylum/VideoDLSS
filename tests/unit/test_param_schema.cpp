@@ -126,5 +126,10 @@ TEST_CASE("EffectiveStageParams keeps backend-scoped parameters for their backen
     REQUIRE(s);
     REQUIRE(s->Find("model"));
     CHECK(s->Find("model")->backends == std::vector<std::string>{"trt"});
+    CHECK(s->Find("window")->backends == std::vector<std::string>{"worker"});
+    const nlohmann::json worker = EffectiveStageParams("upscale", {{"backend", "worker"}});
+    CHECK(!worker.contains("model"));
+    CHECK(worker["window"] == 0);
+    CHECK(worker["models_dir"] == "");
     CHECK(s->Find("backend")->backends.empty());
 }

@@ -113,9 +113,9 @@ TEST_CASE("ResolveUpscaleTarget keeps the aspect ratio, even sizes and the 4K ca
 
 TEST_CASE("Upscaler factory and availability", "[upscale]") {
 #ifdef DLSSVID_WITH_TENSORRT
-    CHECK(UpscalerBackends().size() == 4);  // dlss, nis, bicubic, trt
+    CHECK(UpscalerBackends().size() == 5);  // dlss, nis, bicubic, trt, worker
 #else
-    CHECK(UpscalerBackends().size() == 3);
+    CHECK(UpscalerBackends().size() == 4);
 #endif
     CHECK(UpscalerAvailable("nis").available);
     CHECK(UpscalerAvailable("bicubic").available);

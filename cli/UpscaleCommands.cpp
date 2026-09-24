@@ -54,6 +54,8 @@ int CmdUpscale(const UpscaleCommands::UpscaleArgs& a) {
     o.model = a.model;
     o.tile = a.tile;
     o.modelsDir = a.modelsDir;
+    o.window = a.window;
+    o.overlap = a.overlap;
     o.outputDir = a.output;
     const auto fmt = ParseFileFormat(a.format);
     if (!fmt || (*fmt != FileFormat::Exr && *fmt != FileFormat::Png)) Throw("--format must be exr|png16");
@@ -177,13 +179,15 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
 }  // namespace
 
 void UpscaleCommands::Register(CLI::App& app) {
-    upscale_ = app.add_subcommand("upscale", "upscale a video into the color_sr pass (dlss | nis | bicubic | trt)");
+    upscale_ = app.add_subcommand("upscale", "upscale a video into the color_sr pass (dlss | nis | bicubic | trt | worker)");
     upscale_->add_option("-i,--input", ua_.input, "input video file")->required()->check(CLI::ExistingFile);
     upscale_->add_option("-o,--output", ua_.output, "pass root folder (writes color_sr/)")->required();
-    upscale_->add_option("--backend", ua_.backend, "dlss (default; NGX, jitter emulation) | nis | bicubic | trt (Real-ESRGAN and other ONNX models through TensorRT)")->default_val("dlss");
+    upscale_->add_option("--backend", ua_.backend, "dlss (default; NGX, jitter emulation) | nis | bicubic | trt (Real-ESRGAN and other ONNX models through TensorRT) | worker (RealBasicVSR in PyTorch, sr_worker)")->default_val("dlss");
     upscale_->add_option("--model", ua_.model, "trt: model id from models/registry.json (default realesrgan-x2plus)");
     upscale_->add_option("--tile", ua_.tile, "trt: tile size in px (0 = the model's registry default, 512)")->default_val(0);
     upscale_->add_option("--models-dir,--models_dir", ua_.modelsDir, "folder with registry.json (default: auto)");
+    upscale_->add_option("--window", ua_.window, "worker: frames per pass of the video model (0 = registry default)")->default_val(0);
+    upscale_->add_option("--overlap", ua_.overlap, "worker: frames the next window re-estimates and blends (0 = registry default)")->default_val(0);
     upscale_->add_option("--scale", ua_.scale, "scale factor: 1.5 | 2 | 3 (output capped at 3840x2160)")->default_val(2.0);
     upscale_->add_option("--target", ua_.target, "explicit output size WxH (instead of --scale)");
     upscale_->add_option("--depth-dir", ua_.depthDir, "depth_dlss pass folder (dlss)");

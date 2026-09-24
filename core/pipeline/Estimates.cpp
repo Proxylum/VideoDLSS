@@ -18,7 +18,7 @@ constexpr double kReferenceOutputMegapixels = 3840.0 * 1600.0 / 1e6;
 double Baseline(const std::string& stage, const std::string& backend) {
     if (stage == "depth") return backend == "vda" ? 300.0 : backend == "worker" ? 600.0 : backend == "stub" ? 5.0 : 350.0;
     if (stage == "flow") return backend == "searaft" ? 580.0 : backend == "stub" ? 5.0 : 500.0;
-    if (stage == "upscale") return backend == "nis" ? 260.0 : backend == "bicubic" ? 250.0 : backend == "trt" ? 900.0 : 420.0;
+    if (stage == "upscale") return backend == "nis" ? 260.0 : backend == "bicubic" ? 250.0 : backend == "trt" ? 900.0 : backend == "worker" ? 1500.0 : 420.0;
     if (stage == "nr") return backend == "stub" ? 30.0 : 480.0;
     if (stage == "fg") return backend == "rife" ? 900.0 : backend == "blend" ? 400.0 : 780.0;
     if (stage == "encode") return 150.0;

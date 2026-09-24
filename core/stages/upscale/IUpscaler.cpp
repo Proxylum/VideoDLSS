@@ -7,6 +7,7 @@
 #include "stages/upscale/BicubicUpscaler.h"
 #include "stages/upscale/DlssUpscaler.h"
 #include "stages/upscale/NisUpscaler.h"
+#include "stages/upscale/WorkerUpscaler.h"
 #ifdef DLSSVID_WITH_TENSORRT
 #include "stages/upscale/TrtUpscaler.h"
 #endif
@@ -19,11 +20,20 @@ namespace dlssvid {
 
 void IUpscaler::EvaluateCpu(const PassImage&, PassImage&) { Throw(std::string(Name()) + ": no CPU path"); }
 
+void IUpscaler::EvaluateCpuWindow(const std::vector<const PassImage*>& in, uint32_t, uint32_t, std::vector<PassImage>& out) {
+    out.clear();
+    for (const PassImage* f : in) {
+        PassImage o;
+        EvaluateCpu(*f, o);
+        out.push_back(std::move(o));
+    }
+}
+
 std::vector<std::string> UpscalerBackends() {
 #ifdef DLSSVID_WITH_TENSORRT
-    return {"dlss", "nis", "bicubic", "trt"};
+    return {"dlss", "nis", "bicubic", "trt", "worker"};
 #else
-    return {"dlss", "nis", "bicubic"};
+    return {"dlss", "nis", "bicubic", "worker"};
 #endif
 }
 
@@ -43,22 +53,24 @@ std::vector<std::filesystem::path> NvidiaDllSearchPaths(const std::filesystem::p
 UpscalerAvailability UpscalerAvailable(const std::string& backend, const std::filesystem::path& dllDir) {
     if (backend == "bicubic" || backend == "nis") return {true, {}};
     if (backend == "dlss") return DlssUpscaler::Available(dllDir);
+    if (backend == "worker") return WorkerUpscaler::Available();
 #ifdef DLSSVID_WITH_TENSORRT
     if (backend == "trt") return TrtUpscaler::Available();
 #else
     if (backend == "trt") return {false, "this build has no TensorRT support (DLSSVID_WITH_TENSORRT)"};
 #endif
-    return {false, "unknown upscaler '" + backend + "' (dlss | nis | bicubic | trt)"};
+    return {false, "unknown upscaler '" + backend + "' (dlss | nis | bicubic | trt | worker)"};
 }
 
 std::unique_ptr<IUpscaler> CreateUpscaler(const std::string& backend) {
     if (backend == "bicubic") return std::make_unique<BicubicUpscaler>();
     if (backend == "nis") return std::make_unique<NisUpscaler>();
     if (backend == "dlss") return std::make_unique<DlssUpscaler>();
+    if (backend == "worker") return std::make_unique<WorkerUpscaler>();
 #ifdef DLSSVID_WITH_TENSORRT
     if (backend == "trt") return std::make_unique<TrtUpscaler>();
 #endif
-    Throw("unknown upscaler '" + backend + "' (dlss | nis | bicubic | trt)");
+    Throw("unknown upscaler '" + backend + "' (dlss | nis | bicubic | trt | worker)");
 }
 
 UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uint32_t targetW, uint32_t targetH, uint32_t maxW, uint32_t maxH) {
