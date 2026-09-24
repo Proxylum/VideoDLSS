@@ -111,13 +111,11 @@ TEST_CASE("ResolveUpscaleTarget keeps the aspect ratio, even sizes and the 4K ca
 }
 
 TEST_CASE("Upscaler factory and availability", "[upscale]") {
-    CHECK(UpscalerBackends().size() == 4);
+    CHECK(UpscalerBackends().size() == 3);
     CHECK(UpscalerAvailable("nis").available);
     CHECK(UpscalerAvailable("bicubic").available);
     CHECK(!UpscalerAvailable("nope").available);
-    const UpscalerAvailability vsr = UpscalerAvailable("rtxvsr");
-    CHECK(!vsr.available);
-    CHECK(vsr.reason.find("RTX_VIDEO_SDK_ROOT") != std::string::npos);
+    CHECK(!UpscalerAvailable("rtxvsr").available);  // the stub was removed (TASK-0021): unknown like any other name
     CHECK(CreateUpscaler("nis")->Name() == "nis");
     CHECK(CreateUpscaler("bicubic")->Name() == "bicubic");
     CHECK(CreateUpscaler("dlss")->WantsDepthAndMv());

@@ -7,7 +7,6 @@
 #include "stages/upscale/BicubicUpscaler.h"
 #include "stages/upscale/DlssUpscaler.h"
 #include "stages/upscale/NisUpscaler.h"
-#include "stages/upscale/RtxVsrUpscaler.h"
 #include "util/Error.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -15,7 +14,7 @@
 
 namespace dlssvid {
 
-std::vector<std::string> UpscalerBackends() { return {"dlss", "nis", "bicubic", "rtxvsr"}; }
+std::vector<std::string> UpscalerBackends() { return {"dlss", "nis", "bicubic"}; }
 
 std::vector<std::filesystem::path> NvidiaDllSearchPaths(const std::filesystem::path& override) {
     std::vector<std::filesystem::path> out;
@@ -32,17 +31,15 @@ std::vector<std::filesystem::path> NvidiaDllSearchPaths(const std::filesystem::p
 
 UpscalerAvailability UpscalerAvailable(const std::string& backend, const std::filesystem::path& dllDir) {
     if (backend == "bicubic" || backend == "nis") return {true, {}};
-    if (backend == "rtxvsr") return RtxVsrUpscaler::Available();
     if (backend == "dlss") return DlssUpscaler::Available(dllDir);
-    return {false, "unknown upscaler '" + backend + "' (rtxvsr | dlss | nis | bicubic)"};
+    return {false, "unknown upscaler '" + backend + "' (dlss | nis | bicubic)"};
 }
 
 std::unique_ptr<IUpscaler> CreateUpscaler(const std::string& backend) {
     if (backend == "bicubic") return std::make_unique<BicubicUpscaler>();
     if (backend == "nis") return std::make_unique<NisUpscaler>();
     if (backend == "dlss") return std::make_unique<DlssUpscaler>();
-    if (backend == "rtxvsr") return std::make_unique<RtxVsrUpscaler>();
-    Throw("unknown upscaler '" + backend + "' (rtxvsr | dlss | nis | bicubic)");
+    Throw("unknown upscaler '" + backend + "' (dlss | nis | bicubic)");
 }
 
 UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uint32_t targetW, uint32_t targetH, uint32_t maxW, uint32_t maxH) {

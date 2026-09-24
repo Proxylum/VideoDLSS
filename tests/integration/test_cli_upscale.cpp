@@ -54,9 +54,9 @@ TEST_CASE("dlssvid upscale --backend nis writes color_sr and a preview; compare 
     CHECK(j2["summary"]["psnr_rgb_mean"].get<double>() > 38.0);
     CHECK(j2["summary"]["size"][0] == 80);
 
-    // rtxvsr without the SDK: fallback works, --no-fallback fails with the instruction
-    REQUIRE(Run("upscale --backend rtxvsr --warp --frames 1 -i " + Q(clip) + " -o " + Q(dir / "vsr")) == 0);
-    CHECK(Run("upscale --backend rtxvsr --no-fallback --warp --frames 1 -i " + Q(clip) + " -o " + Q(dir / "vsr2")) != 0);
+    // dlss on WARP (no NVIDIA adapter): the fallback to nis works, --no-fallback fails with the reason
+    REQUIRE(Run("upscale --backend dlss --warp --frames 1 -i " + Q(clip) + " -o " + Q(dir / "vsr")) == 0);
+    CHECK(Run("upscale --backend dlss --no-fallback --warp --frames 1 -i " + Q(clip) + " -o " + Q(dir / "vsr2")) != 0);
     // errors
     CHECK(Run("upscale --backend nope --warp -i " + Q(clip) + " -o " + Q(dir / "x")) != 0);
     CHECK(Run("upscale --backend nis --format npz --warp -i " + Q(clip) + " -o " + Q(dir / "x")) != 0);

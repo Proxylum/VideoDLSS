@@ -170,7 +170,9 @@ TEST_CASE("UpscaleStage writes color_sr with nis on WARP, uploads it to the slot
     CHECK(m.psnrRgb > 26.0);  // chroma is 4:2:0 subsampled on a checkered synthetic pattern
 }
 
-TEST_CASE("UpscaleStage: rtxvsr falls back to nis, bicubic baseline, png16 output, 4K cap and slot upload", "[integration][upscale]") {
+// The fallback: dlss on WARP is unavailable deterministically (no DLL, or Init refuses a non-NVIDIA adapter before NGX).
+TEST_CASE("UpscaleStage: an unavailable backend (dlss on WARP) falls back to nis, bicubic baseline, png16 output, 4K cap and slot upload",
+          "[integration][upscale]") {
     ClipSpec spec;
     spec.frames = 2;
     spec.width = 40;
@@ -181,7 +183,7 @@ TEST_CASE("UpscaleStage: rtxvsr falls back to nis, bicubic baseline, png16 outpu
     {
         VideoDecoder dec(clip);
         UpscaleStageOptions o;
-        o.backend = "rtxvsr";
+        o.backend = "dlss";
         o.outputDir = dir / "vsr";
         const UpscaleRunResult r = RunUpscale(dec, dev, o);
         CHECK(r.stats.fellBack);
@@ -191,7 +193,7 @@ TEST_CASE("UpscaleStage: rtxvsr falls back to nis, bicubic baseline, png16 outpu
     {
         VideoDecoder dec(clip);
         UpscaleStageOptions o;
-        o.backend = "rtxvsr";
+        o.backend = "dlss";
         o.allowFallback = false;
         CHECK_THROWS(RunUpscale(dec, dev, o));
     }

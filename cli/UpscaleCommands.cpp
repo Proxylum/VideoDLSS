@@ -174,17 +174,17 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
 }  // namespace
 
 void UpscaleCommands::Register(CLI::App& app) {
-    upscale_ = app.add_subcommand("upscale", "upscale a video into the color_sr pass (dlss | nis | bicubic | rtxvsr)");
+    upscale_ = app.add_subcommand("upscale", "upscale a video into the color_sr pass (dlss | nis | bicubic)");
     upscale_->add_option("-i,--input", ua_.input, "input video file")->required()->check(CLI::ExistingFile);
     upscale_->add_option("-o,--output", ua_.output, "pass root folder (writes color_sr/)")->required();
-    upscale_->add_option("--backend", ua_.backend, "dlss (default; NGX, jitter emulation) | nis | bicubic | rtxvsr (optional: RTX Video SDK)")->default_val("rtxvsr");
+    upscale_->add_option("--backend", ua_.backend, "dlss (default; NGX, jitter emulation) | nis | bicubic")->default_val("dlss");
     upscale_->add_option("--scale", ua_.scale, "scale factor: 1.5 | 2 | 3 (output capped at 3840x2160)")->default_val(2.0);
     upscale_->add_option("--target", ua_.target, "explicit output size WxH (instead of --scale)");
     upscale_->add_option("--depth-dir", ua_.depthDir, "depth_dlss pass folder (dlss)");
     upscale_->add_option("--mv-dir", ua_.mvDir, "mv_dlss pass folder (dlss)");
     upscale_->add_option("--sharpness", ua_.sharpness, "nis sharpness 0..1")->default_val(0.5f);
     upscale_->add_option("--preset", ua_.preset, "dlss render preset: default | J | K | L | M")->default_val("default");
-    upscale_->add_flag("--artifact-reduction-only", ua_.artifactReductionOnly, "no scaling: rtxvsr artifact reduction / nis sharpen");
+    upscale_->add_flag("--artifact-reduction-only", ua_.artifactReductionOnly, "no scaling: nis sharpen (NVSharpen)");
     upscale_->add_flag("--no-jitter", ua_.noJitter, "dlss: feed frames without the jitter emulation");
     upscale_->add_option("--jitter-sign", ua_.jitterSign, "dlss: sign of the reported jitter offset (+1 | -1)")->default_val(1.f);
     upscale_->add_flag("--no-fallback", ua_.noFallback, "fail instead of falling back to nis when the backend is unavailable");

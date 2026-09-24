@@ -11,7 +11,7 @@ namespace dlssvid {
 // NVIDIA Image Scaling (NIS 1.0.3, MIT — third_party/nis): NVScaler for x1..x2 per pass (chained
 // twice above x2), NVSharpen when no scaling is requested («artifact reduction only» analogue).
 // Spatial only, deterministic, runs on WARP — the always-available backend and the fallback when
-// RTX VSR / DLSS are not usable.
+// DLSS is not usable.
 class NisUpscaler final : public IUpscaler {
 public:
     std::string_view Name() const override { return "nis"; }

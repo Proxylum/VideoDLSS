@@ -12,15 +12,15 @@
 
 namespace dlssvid {
 
-// One interface for every upscaler (ТЗ §3): RTX VSR (default), DLSS SR, NIS and the naive bicubic
+// One interface for every upscaler (ТЗ §3): DLSS SR (default), NIS and the naive bicubic
 // baseline. The stage prepares D3D12 textures; backends only record work into a command list.
 struct UpscalerConfig {
-    std::string backend;  // dlss | nis | bicubic | rtxvsr
+    std::string backend;  // dlss | nis | bicubic
     uint32_t inputWidth = 0, inputHeight = 0;
     uint32_t outputWidth = 0, outputHeight = 0;
     float sharpness = 0.5f;               // nis: 0..1 (NVScaler slider); dlss: unused (sharpening is deprecated in NGX)
     std::string preset = "default";       // dlss: default | J | K | L | M (NGX render preset hint)
-    bool artifactReductionOnly = false;   // no scaling: rtxvsr artifact reduction / nis NVSharpen
+    bool artifactReductionOnly = false;   // no scaling: nis NVSharpen
     bool useJitter = true;                // dlss: emulate camera jitter on the input (HACK, ТЗ §3)
     float jitterSign = 1.f;               // dlss: sign of the reported jitter relative to the resample shift
     std::filesystem::path dllDir;         // folder with nvngx_dlss.dll (empty: default search, see docs/dll-setup.md)
