@@ -83,7 +83,7 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         upscaler_->Init(*device_, cfg);
     } else {
         const auto known = UpscalerBackends();
-        if (std::find(known.begin(), known.end(), backend) == known.end()) Throw("upscale: unknown backend '" + backend + "' (rtxvsr | dlss | nis | bicubic)");
+        if (std::find(known.begin(), known.end(), backend) == known.end()) Throw("upscale: unknown backend '" + backend + "' (dlss | nis | bicubic)");
         const UpscalerAvailability avail = UpscalerAvailable(backend, options_.dllDir);
         if (!avail.available) {
             if (!options_.allowFallback || backend == "nis") Throw("upscale: " + avail.reason);

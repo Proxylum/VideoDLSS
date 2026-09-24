@@ -6,7 +6,7 @@
 
 namespace dlssvid::cli {
 
-// `dlssvid upscale` (stage 5: color_sr through dlss | nis | bicubic | rtxvsr) and `dlssvid compare`
+// `dlssvid upscale` (stage 5: color_sr through dlss | nis | bicubic) and `dlssvid compare`
 // (PSNR / SSIM between two videos or pass folders — the A/B tool of docs/benchmarks.md).
 class UpscaleCommands {
 public:
