@@ -30,6 +30,7 @@ add_executable(dlssvid_unit_tests
   unit/test_depth_postprocess.cpp
   unit/test_worker.cpp
   unit/test_trt_engine.cpp
+  unit/test_trt_upscaler.cpp
   unit/test_model_registry.cpp
   unit/test_warp.cpp
   unit/test_ofa.cpp

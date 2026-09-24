@@ -32,6 +32,9 @@ struct ParamSpec {
     double min = 0, max = 0, step = 0;  // Int / Float (max <= min: no range)
     std::vector<ParamChoice> choices;  // Enum, or a fixed set of numbers (Toggle over 1.5 / 2 / 3)
     bool advanced = false;             // engineer mode only (the JSON editor); validated all the same
+    // When set, the parameter belongs to these backends only: EffectiveStageParams drops it for the others, so a
+    // parameter added for one backend leaves the fingerprints of the other backends' passes untouched.
+    std::vector<std::string> backends;
 };
 
 struct StageSchema {

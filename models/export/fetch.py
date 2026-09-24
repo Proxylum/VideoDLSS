@@ -6,8 +6,9 @@
 """
 import argparse
 import sys
+from pathlib import Path
 
-from common import MODELS_DIR, hf_download, load_registry, sha256_file
+from common import MODELS_DIR, download_url, hf_download, load_registry, sha256_file
 
 
 def main():
@@ -17,14 +18,19 @@ def main():
     ap.add_argument("--cache", default=str(MODELS_DIR / "cache"))
     args = ap.parse_args()
     reg = load_registry()
-    ids = [m["id"] for m in reg["models"] if m.get("hf")] if args.all else args.ids
+    ids = [m["id"] for m in reg["models"] if m.get("hf") or m.get("url")] if args.all else args.ids
     if not ids:
         ap.error("give model ids or --all")
     rc = 0
     for mid in ids:
         entry = next((m for m in reg["models"] if m["id"] == mid), None)
+        if entry and entry.get("url") and not entry.get("hf"):  # plain URL (GitHub releases): sha256-checked when pinned
+            name = entry.get("file") or entry["url"].rsplit("/", 1)[1]
+            p = download_url(entry["url"], Path(args.cache) / name, entry.get("sha256", ""))
+            print(f"{mid}: {p} sha256 {sha256_file(p)[:16]} license {entry.get('license', '?')}")
+            continue
         if not entry or not entry.get("hf"):
-            print(f"{mid}: no HuggingFace source", file=sys.stderr)
+            print(f"{mid}: no HuggingFace or URL source", file=sys.stderr)
             rc = 1
             continue
         files = [entry["hf_file"]] if entry.get("hf_file") else ["config.json", "model.safetensors"]

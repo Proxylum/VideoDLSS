@@ -1,6 +1,6 @@
 {
   "$schema_version": 1,
-  "_comment": "Weights are fetched on first use into models/cache/ (git-ignored) by models/export scripts (HuggingFace) and exported to ONNX for the exact input geometry; TensorRT engines are cached next to them. No weights are committed. `params` are read by core/stages/depth/TrtDepthEstimator and depth_worker/worker.py.",
+  "_comment": "Weights are fetched on first use into models/cache/ (git-ignored) by models/export scripts (HuggingFace) and exported to ONNX for the exact input geometry; TensorRT engines are cached next to them. No weights are committed. `params` are read by core/stages/depth/TrtDepthEstimator and depth_worker/worker.py. Upscale models (family realesrgan) are exported by models/export/export_realesrgan.py with dynamic H/W; core/stages/upscale/TrtUpscaler builds one engine per tile size.",
   "models": [
     {
       "id": "da3metric-large",
@@ -304,6 +304,71 @@
         "output": "output",
         "ensemble": true,
         "scale": 1
+      }
+    },
+    {
+      "id": "realesrgan-x2plus",
+      "role": "primary (quality, x2)",
+      "stage": "upscale",
+      "source": "https://github.com/xinntao/Real-ESRGAN",
+      "format": "pytorch",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
+      "sha256": "49fafd45f8fd7aa8d31ab2a22d14d91b536c34494a5cfe31eb5d89c2fa266abb",
+      "params": {
+        "family": "realesrgan",
+        "arch": "rrdb",
+        "scale": 2,
+        "num_feat": 64,
+        "num_block": 23,
+        "num_grow_ch": 32,
+        "tile": 512,
+        "tile_pad": 16,
+        "input_name": "image",
+        "output_name": "upscaled"
+      }
+    },
+    {
+      "id": "realesrgan-x4plus",
+      "role": "quality, x4",
+      "stage": "upscale",
+      "source": "https://github.com/xinntao/Real-ESRGAN",
+      "format": "pytorch",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+      "sha256": "4fa0d38905f75ac06eb49a7951b426670021be3018265fd191d2125df9d682f1",
+      "params": {
+        "family": "realesrgan",
+        "arch": "rrdb",
+        "scale": 4,
+        "num_feat": 64,
+        "num_block": 23,
+        "num_grow_ch": 32,
+        "tile": 384,
+        "tile_pad": 16,
+        "input_name": "image",
+        "output_name": "upscaled"
+      }
+    },
+    {
+      "id": "realesr-general-x4v3",
+      "role": "fast, x4 (compact SRVGG)",
+      "stage": "upscale",
+      "source": "https://github.com/xinntao/Real-ESRGAN",
+      "format": "pytorch",
+      "license": "BSD-3-Clause",
+      "url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth",
+      "sha256": "8dc7edb9ac80ccdc30c3a5dca6616509367f05fbc184ad95b731f05bece96292",
+      "params": {
+        "family": "realesrgan",
+        "arch": "srvgg",
+        "scale": 4,
+        "num_feat": 64,
+        "num_conv": 32,
+        "tile": 512,
+        "tile_pad": 16,
+        "input_name": "image",
+        "output_name": "upscaled"
       }
     }
   ]

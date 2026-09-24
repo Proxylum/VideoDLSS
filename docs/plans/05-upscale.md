@@ -81,3 +81,11 @@ PSNR/SSIM к 4K-даунскейл-эталону в `docs/benchmarks.md`).
    которой у покадровых моделей нет): 2–3 MR, окна кадров, кэш пассов как у остальных стадий.
 3. NR после нейросетевого апскейла оставить выключаемым: Real-ESRGAN уже усиливает резкость, двойное усиление даёт
    ореолы.
+
+### Статус шага 1 (2026-09-24, TASK-0022)
+
+Сделано: бэкенд `trt` (`core/stages/upscale/TrtUpscaler`, `Tiling`), три модели Real-ESRGAN в `models/registry.json`
+(веса по URL с sha256, `export_realesrgan.py`, `realesrgan_loader.py` без basicsr), CPU-путь стадии с пересемплированием
+родного масштаба к цели, параметры `model` / `tile` / `models_dir` в схеме (только для `trt`), CLI, карточка стадии,
+тесты на крошечной модели `tiny-sr` и юнит-тест тайлинга. Замеры — `docs/benchmarks.md`, раздел «Real-ESRGAN через
+TensorRT». Шаг 2 (RealBasicVSR через PyTorch-воркер) — TASK-0023.

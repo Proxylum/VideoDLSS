@@ -1,5 +1,7 @@
 #include "stages/ParamSchema.h"
 
+#include <algorithm>
+
 #include <cmath>
 #include <cstdio>
 
@@ -49,6 +51,11 @@ ParamSpec Flag(const char* key, const char* label, bool def, const char* hint = 
     s.hint = hint;
     s.def = def;
     s.advanced = advanced;
+    return s;
+}
+
+ParamSpec OnlyFor(ParamSpec s, std::vector<std::string> backends) {
+    s.backends = std::move(backends);
     return s;
 }
 
@@ -136,7 +143,16 @@ std::vector<StageSchema> Build() {
             Enum("backend", "Метод", "dlss",
                  {{"dlss", "DLSS SR", "NGX, нужна nvngx_dlss.dll и RTX"},
                   {"nis", "NIS (без GPU)", "NVIDIA Image Scaling, любой D3D12"},
-                  {"bicubic", "бикубик", "эталон без нейросети"}}),
+                  {"bicubic", "бикубик", "эталон без нейросети"},
+                  {"trt", "Нейросеть (TensorRT)", "Real-ESRGAN и другие ONNX-модели из models/registry.json"}}),
+            OnlyFor(Enum("model", "Модель", "realesrgan-x2plus",
+                         {{"realesrgan-x2plus", "Real-ESRGAN ×2 — качество", "RRDBNet, 23 блока, BSD-3"},
+                          {"realesr-general-x4v3", "Real-ESRGAN general ×4 — быстро", "компактная сеть, ×4 затем к цели"},
+                          {"realesrgan-x4plus", "Real-ESRGAN ×4 — качество", "RRDBNet ×4: для ×3 и 4K"}},
+                         ParamWidget::Select, "нейросеть метода «Нейросеть (TensorRT)»"),
+                    {"trt"}),
+            OnlyFor(Number("tile", "Тайл", ParamType::Int, 0, 0, 1024, 64, ParamWidget::Spin, "окно нейросети в px, 0 = как в реестре (512)", true), {"trt"}),
+            OnlyFor(Text("models_dir", "Папка моделей", ""), {"trt"}),
             Number("sharpness", "Резкость NIS", ParamType::Float, 0.5, 0.0, 1.0, 0.05, ParamWidget::Slider, "", true),
             Text("preset", "Пресет DLSS", "default"),
             Flag("jitter", "Джиттер DLSS", true),
@@ -291,9 +307,20 @@ std::vector<std::string> ValidateStageParams(const std::string& stage, const nlo
 
 nlohmann::json EffectiveStageParams(const std::string& stage, const nlohmann::json& params) {
     nlohmann::json out = params.is_object() ? params : nlohmann::json::object();
-    if (const StageSchema* schema = FindStageSchema(stage))
-        for (const auto& p : schema->params)
+    if (const StageSchema* schema = FindStageSchema(stage)) {
+        std::string backend;
+        if (const ParamSpec* b = schema->Find("backend")) {
+            if (out.contains("backend") && out["backend"].is_string()) backend = out["backend"].get<std::string>();
+            else if (b->def.is_string()) backend = b->def.get<std::string>();
+        }
+        for (const auto& p : schema->params) {
+            if (!p.backends.empty() && std::find(p.backends.begin(), p.backends.end(), backend) == p.backends.end()) {
+                out.erase(p.key);  // another backend's parameter: the same run whatever it says
+                continue;
+            }
             if (!out.contains(p.key)) out[p.key] = p.def;
+        }
+    }
     return out;
 }
 

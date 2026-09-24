@@ -17,6 +17,7 @@
 #include "stages/upscale/IUpscaler.h"
 #include "stages/upscale/Jitter.h"
 #include "stages/upscale/NisUpscaler.h"
+#include "stages/upscale/Tiling.h"
 #include "util/Half.h"
 
 using namespace dlssvid;
@@ -111,7 +112,11 @@ TEST_CASE("ResolveUpscaleTarget keeps the aspect ratio, even sizes and the 4K ca
 }
 
 TEST_CASE("Upscaler factory and availability", "[upscale]") {
+#ifdef DLSSVID_WITH_TENSORRT
+    CHECK(UpscalerBackends().size() == 4);  // dlss, nis, bicubic, trt
+#else
     CHECK(UpscalerBackends().size() == 3);
+#endif
     CHECK(UpscalerAvailable("nis").available);
     CHECK(UpscalerAvailable("bicubic").available);
     CHECK(!UpscalerAvailable("nope").available);
@@ -271,4 +276,34 @@ TEST_CASE("NIS and bicubic upscalers on WARP", "[upscale][nis][gpu]") {
     const PassImage flatUp = run("nis", 2 * w, 2 * h);
     for (uint32_t y = 2; y + 2 < flatUp.height; ++y)
         for (uint32_t x = 2; x + 2 < flatUp.width; ++x) CHECK(std::fabs(flatUp.Get(x, y, 1) - 0.6f) < 0.01f);
+}
+
+// TASK-0022: the tiling behind the TensorRT upscaler — a translation-invariant "model" (nearest x2) must give the same
+// frame whatever the tile size: overlapping windows, shifted last windows, frames smaller than a window (reflection).
+TEST_CASE("UpscaleTiled reassembles a frame exactly from padded windows", "[upscale]") {
+    const auto nearest2 = [](int T) {
+        return [T](const float* in, float* out) {
+            const int TS = T * 2;
+            for (int c = 0; c < 3; ++c)
+                for (int y = 0; y < TS; ++y)
+                    for (int x = 0; x < TS; ++x) out[(static_cast<size_t>(c) * TS + y) * TS + x] = in[(static_cast<size_t>(c) * T + y / 2) * T + x / 2];
+        };
+    };
+    const auto pattern = [](uint32_t x, uint32_t y) { return std::array<float, 3>{static_cast<float>(x * 7 % 13) / 13.f, static_cast<float>(y * 5 % 11) / 11.f, static_cast<float>((x + y) % 17) / 17.f}; };
+    struct Case { uint32_t w, h; int tile, pad; };
+    for (const Case c : {Case{37, 23, 16, 2}, Case{10, 7, 16, 4}, Case{64, 64, 32, 8}, Case{33, 17, 8, 1}, Case{1, 1, 16, 2}}) {
+        const PassImage rgb = MakeRgb(c.w, c.h, pattern);
+        const PassImage up = UpscaleTiled(rgb, 2, c.tile, c.pad, nearest2(c.tile));
+        REQUIRE(up.width == c.w * 2);
+        REQUIRE(up.height == c.h * 2);
+        size_t bad = 0;
+        for (uint32_t y = 0; y < up.height; ++y)
+            for (uint32_t x = 0; x < up.width; ++x)
+                for (size_t ch = 0; ch < 3; ++ch)
+                    if (std::abs(up.Get(x, y, ch) - rgb.Get(x / 2, y / 2, ch)) > 1e-6f) ++bad;
+        INFO("frame " << c.w << "x" << c.h << " tile " << c.tile << " pad " << c.pad);
+        CHECK(bad == 0);
+    }
+    const PassImage rgb = MakeRgb(8, 8, pattern);
+    CHECK_THROWS(UpscaleTiled(rgb, 2, 8, 4, nearest2(8)));  // the padding leaves nothing to own
 }

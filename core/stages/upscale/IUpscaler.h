@@ -12,10 +12,16 @@
 
 namespace dlssvid {
 
-// One interface for every upscaler (ТЗ §3): DLSS SR (default), NIS and the naive bicubic
-// baseline. The stage prepares D3D12 textures; backends only record work into a command list.
+struct PassImage;
+
+// The `trt` backend's model when the project names none (models/registry.json, family realesrgan).
+constexpr const char* kTrtDefaultUpscaleModel = "realesrgan-x2plus";
+
+// One interface for every upscaler (ТЗ §3): DLSS SR (default), NIS, the naive bicubic baseline and open-source
+// models through TensorRT (`trt`). GPU backends record into a command list; CPU-side ones take the frame as an image.
+// The stage prepares D3D12 textures; GPU backends only record work into a command list.
 struct UpscalerConfig {
-    std::string backend;  // dlss | nis | bicubic
+    std::string backend;  // dlss | nis | bicubic | trt
     uint32_t inputWidth = 0, inputHeight = 0;
     uint32_t outputWidth = 0, outputHeight = 0;
     float sharpness = 0.5f;               // nis: 0..1 (NVScaler slider); dlss: unused (sharpening is deprecated in NGX)
@@ -48,6 +54,11 @@ public:
     virtual void Evaluate(ID3D12GraphicsCommandList* cl, const UpscaleInputs& in, ID3D12Resource* output) = 0;
     virtual bool WantsJitter() const { return false; }
     virtual bool WantsDepthAndMv() const { return false; }
+    // CPU-side backends (TensorRT models): the stage hands the RGBA16F frame over on the CPU and takes the result back
+    // at the model's native scale (NativeScale), resampling to the target itself; Evaluate is not called for them.
+    virtual bool ProcessesOnCpu() const { return false; }
+    virtual int NativeScale() const { return 0; }
+    virtual void EvaluateCpu(const PassImage& rgbaIn, PassImage& rgbaOut);
     virtual nlohmann::json Describe() const = 0;
     virtual void Shutdown() {}
 };
