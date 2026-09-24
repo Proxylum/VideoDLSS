@@ -157,6 +157,21 @@ AppModel (Qt) ── ViewportWindow / панели ── TaskQueue (dlssvid <st
   не подменяется, точный вытесняет подмену), `test_viewport_renderer.cpp` (Stale — без плашки),
   `test_app_model.cpp` (Stale у модели; воспроизведение проходит все кадры, и каждый загружен в момент показа).
   Корень медленного декода — CPU-путь `LoadVideo` (см. таблицу технического долга): NVDEC → D3D12 без CPU — этап 5.
+- **Открытые апскейлеры через TensorRT (TASK-0022, 2026-09-24).** Бэкенд `trt` (`core/stages/upscale/TrtUpscaler`):
+  модель из `models/registry.json` (семейство `realesrgan`: `realesrgan-x2plus` по умолчанию, `realesr-general-x4v3`
+  — быстрая компактная сеть, `realesrgan-x4plus`), веса с GitHub-релизов Real-ESRGAN по URL с sha256 (BSD-3),
+  сети переписаны на чистом PyTorch без basicsr (`models/export/realesrgan_loader.py`, `torch.load(weights_only)`),
+  ONNX с динамическими H/W (`export_realesrgan.py`, проверка ORT против torch), один engine на размер тайла
+  (профиль TensorRT = тайл, ключ кэша включает форму). Стадия получила CPU-путь бэкендов (`IUpscaler::ProcessesOnCpu`,
+  `EvaluateCpu`, `NativeScale`): кадр RGBA16F режется на окна `tile`×`tile` с `tile_pad` пикселей контекста
+  (`Tiling.h`: последнее окно сдвигается к краю, кадр меньше окна отражается, окно пишет только свою часть кадра),
+  результат в родном масштабе модели заливается в текстуру и при несовпадении с целью (×1.5, ×3, потолок 4K)
+  пересемплируется Catmull-Rom на GPU. Параметры схемы `model` / `tile` / `models_dir` привязаны к бэкенду
+  (`ParamSpec::backends`): `EffectiveStageParams` не подставляет и удаляет их у других бэкендов — отпечатки
+  существующих пассов DLSS/NIS не изменились; карточка стадии показывает такие поля только для своего бэкенда.
+  Тесты: `UpscaleTiled` на nearest ×2 собирает кадр без единого расхождения (окна, сдвиг последнего, отражение),
+  `TrtUpscaler` и стадия на крошечной ONNX-модели `tiny-sr` (`tests/data/tiny_sr.onnx`, nearest ×2) — точное
+  совпадение с исходником и пересемплирование к ×1.5, CLI с `--models-dir`; схема — область параметров.
 - **Экран проекта (этап 9, MR D).** `core/stages/ParamSchema` — одно описание параметров каждой стадии (тип, диапазон,
   варианты с человеческими подписями, умолчание, `advanced`): `ValidateStageParams` проверяет параметры до запуска в
   `ProcessRunner::Prepare` (CLI `--param nr.intensity=9` → ошибка с текстом), `EffectiveStageParams` подставляет умолчания
@@ -258,7 +273,7 @@ UpscaleStage ── YUV420P ─▶ Yuv420pToRgba16f ─▶ input RGBA16F ─┬�
    depth_dlss / mv_dlss (слот кэша или папки пассов) ─▶ IUpscaler::Evaluate(cmdlist) ─▶ output RGBA16F (UAV)
                                                               ▼
                                       readback ─▶ color_sr (EXR half / PNG16) + слот кэша + [--video через RgbToYuv420p]
-IUpscaler: dlss (NGX, по умолчанию) | nis (NVScaler / NVSharpen, fallback) | bicubic (Catmull-Rom); заглушка rtxvsr удалена 2026-09-24 (TASK-0021)
+IUpscaler: dlss (NGX, по умолчанию) | trt (ONNX-модели через TensorRT: Real-ESRGAN; тайлы с перекрытием на CPU, TASK-0022) | nis (NVScaler / NVSharpen, fallback) | bicubic (Catmull-Rom); заглушка rtxvsr удалена 2026-09-24 (TASK-0021)
 ```
 
 - `ComputeKernel` — общий compute-помощник (root CBV + таблицы SRV/UAV + статические сэмплеры, кольца

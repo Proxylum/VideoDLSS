@@ -126,6 +126,7 @@ ToolInfo ToolForStage(const std::string& stage, const nlohmann::json& p) {
     const std::filesystem::path dllDir = Str(p, "dll_dir", "");
     if (stage == "depth" && (t.backend == "da3" || t.backend == "vda")) t.model = model.empty() ? TrtDepthEstimator::DefaultModel(t.backend) : model;
     else if (stage == "flow" && t.backend == "searaft") t.model = model.empty() ? TrtFlowEstimator::DefaultModel("searaft") : model;
+    else if (stage == "upscale" && t.backend == "trt") t.model = model.empty() ? std::string(kTrtDefaultUpscaleModel) : model;
     else if (!model.empty()) t.model = model;  // worker depth, rife
     if (!t.model.empty()) t.modelHash = RegistryHash(t.model, Str(p, "models_dir", ""));
     std::filesystem::path dll;

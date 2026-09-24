@@ -51,6 +51,38 @@ def hf_download(repo, filename, cache_dir, log=print):
     return dest
 
 
+def download_url(url, dest, sha256="", log=print):
+    """Download `url` to `dest` (atomic: .part then rename) unless it exists; verify the sha256 when one is pinned,
+    otherwise print the hash so it can be pinned in models/registry.json. Returns the path."""
+    import urllib.request
+
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if not dest.exists():
+        log(f"downloading {url} ...")
+        part = dest.with_suffix(dest.suffix + ".part")
+        req = urllib.request.Request(url, headers={"User-Agent": "dlssvid-models-export"})
+        with urllib.request.urlopen(req, timeout=120) as r, open(part, "wb") as f:
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                if total:
+                    log(f"  {done * 100 // total}% of {total / 1e6:.1f} MB", ) if done % (16 << 20) < (1 << 20) else None
+        part.replace(dest)
+    got = sha256_file(dest)
+    if sha256 and got != sha256:
+        dest.unlink()
+        raise RuntimeError(f"{dest.name}: sha256 {got} does not match the registry ({sha256}); the file was removed")
+    if not sha256:
+        log(f"{dest.name}: sha256 {got} (not pinned in the registry yet)")
+    return dest
+
+
 def model_input_size(w, h, input_size=518, multiple=14, max_aspect=1.78):
     """Same rule as core/stages/depth/DepthPreprocess.cpp::ComputeModelInputSize."""
     ratio = max(w, h) / min(w, h)

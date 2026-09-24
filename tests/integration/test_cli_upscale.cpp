@@ -9,6 +9,10 @@
 #include <string>
 
 #include "TestClips.h"
+#ifdef DLSSVID_WITH_TENSORRT
+#include "gpu/D3D12Device.h"
+#include "ml/TrtLoader.h"
+#endif
 #include "passes/PassSequence.h"
 
 using namespace dlssvid;
@@ -62,3 +66,30 @@ TEST_CASE("dlssvid upscale --backend nis writes color_sr and a preview; compare 
     CHECK(Run("upscale --backend nis --format npz --warp -i " + Q(clip) + " -o " + Q(dir / "x")) != 0);
     CHECK(Run("compare --ref " + Q(clip) + " --test " + Q(out / "color_sr")) != 0);  // sizes differ
 }
+
+#ifdef DLSSVID_WITH_TENSORRT
+TEST_CASE("CLI upscale --backend trt runs a registry model from --models-dir", "[cli][upscale][trt][gpu]") {
+    std::string reason;
+    if (!trt::Available(&reason)) SKIP("TensorRT unavailable: " << reason);
+    {
+        D3D12Device dev;
+        if (dev.IsWarp() || !dev.IsNvidia()) SKIP("no NVIDIA GPU");
+    }
+    const auto dir = TempDir() / "cli_upscale_trt";
+    std::filesystem::remove_all(dir);
+    const auto models = dir / "models";
+    std::filesystem::create_directories(models / "cache");
+    std::filesystem::copy_file(std::filesystem::path(DLSSVID_SOURCE_DIR) / "tests" / "data" / "tiny_sr.onnx", models / "cache" / "tiny-sr.onnx");
+    std::ofstream(models / "registry.json") << R"({"$schema_version": 1, "models": [{"id": "tiny-sr", "stage": "upscale", "role": "test",
+ "source": "tests/data/make_tiny_sr_onnx.py", "format": "onnx", "url": "", "sha256": "", "license": "test",
+ "params": {"family": "onnx", "scale": 2, "tile": 16, "tile_pad": 2, "input_name": "image", "output_name": "upscaled"}}]})";
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 40;
+    spec.height = 24;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    REQUIRE(Run("upscale --backend trt --model tiny-sr --tile 16 --models-dir " + Q(models) + " --frames 1 -i " + Q(clip) + " -o " + Q(dir / "out")) == 0);
+    CHECK(std::filesystem::exists(dir / "out" / "color_sr" / "manifest.json"));
+    CHECK(Run("upscale --backend trt --model nope --models-dir " + Q(models) + " --no-fallback --frames 1 -i " + Q(clip) + " -o " + Q(dir / "bad")) != 0);
+}
+#endif

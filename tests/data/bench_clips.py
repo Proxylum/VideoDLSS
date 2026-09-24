@@ -7,7 +7,8 @@ Sections (docs/benchmarks.md):
   flow     — OFA vs SEA-RAFT: warp-PSNR (mean / min), mean |v|, ms/frame            (stage 3)
   depth    — DA3 vs VDA: metric scale (mean / median depth of depth_raw), TAE with motion compensation
              (--mv-dir from the OFA run), ms/frame                                    (stage 2)
-  upscale  — A/B ×2 against the clip itself: NIS / bicubic / DLSS (jitter emulation) / DLSS + guides
+  upscale  — A/B ×2 against the clip itself: NIS / bicubic / DLSS (jitter emulation) / DLSS + guides /
+             Real-ESRGAN x2plus and general-x4v3 through TensorRT (trt)
              (depth + MV estimated on the half-resolution input), PSNR Y / RGB, SSIM Y (stage 5 methodology)
   fg       — clips at >= 48 fps only: every other frame dropped, x2 generation (dlssg / rife / blend, with guides),
              generated frames compared with the dropped ones (stage 7 methodology)
@@ -180,6 +181,9 @@ def main() -> int:
                 "bicubic": ["--backend", "bicubic"],
                 "dlss": ["--backend", "dlss", "--no-fallback"],
                 "dlss+guides": ["--backend", "dlss", "--no-fallback", "--depth-dir", str(guides / "depth_dlss"), "--mv-dir", str(guides / "mv_dlss")],
+                # open-source models through TensorRT (TASK-0022): the ONNX is exported on first use, engines are cached
+                "trt-x2plus": ["--backend", "trt", "--model", "realesrgan-x2plus", "--no-fallback"],
+                "trt-general-x4v3": ["--backend", "trt", "--model", "realesr-general-x4v3", "--no-fallback"],
             }
             for key, extra in variants.items():
                 if done("upscale", key):

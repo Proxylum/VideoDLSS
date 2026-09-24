@@ -95,6 +95,7 @@ add_library(dlssvid_core STATIC
   stages/upscale/BicubicUpscaler.h stages/upscale/BicubicUpscaler.cpp
   stages/upscale/NisUpscaler.h stages/upscale/NisUpscaler.cpp
   stages/upscale/DlssUpscaler.h stages/upscale/DlssUpscaler.cpp
+  stages/upscale/Tiling.h stages/upscale/Tiling.cpp
   stages/upscale/UpscaleStage.h stages/upscale/UpscaleStage.cpp
   gpu/Ngx.h gpu/Ngx.cpp
   stages/tonemap/Tonemapper.h stages/tonemap/Tonemapper.cpp
@@ -131,7 +132,8 @@ if(DLSSVID_WITH_TENSORRT)
     ml/TrtLoader.h ml/TrtLoader.cpp
     ml/TrtEngine.h ml/TrtEngine.cpp
     stages/depth/TrtDepthEstimator.h stages/depth/TrtDepthEstimator.cpp
-    stages/flow/TrtFlowEstimator.h stages/flow/TrtFlowEstimator.cpp)
+    stages/flow/TrtFlowEstimator.h stages/flow/TrtFlowEstimator.cpp
+    stages/upscale/TrtUpscaler.h stages/upscale/TrtUpscaler.cpp)
   target_include_directories(dlssvid_core PUBLIC ${TENSORRT_INCLUDE_DIR})
 endif()
 

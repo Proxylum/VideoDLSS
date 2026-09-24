@@ -27,6 +27,9 @@ void UpscaleStage::ApplyParams(const nlohmann::json& p) {
     if (p.contains("jitter_sign")) options_.jitterSign = p["jitter_sign"].get<float>();
     if (p.contains("target_width")) options_.targetWidth = p["target_width"].get<uint32_t>();
     if (p.contains("target_height")) options_.targetHeight = p["target_height"].get<uint32_t>();
+    if (p.contains("model")) options_.model = p["model"].get<std::string>();
+    if (p.contains("tile")) options_.tile = p["tile"].get<int>();
+    if (p.contains("models_dir")) options_.modelsDir = p["models_dir"].get<std::string>();
 }
 
 void UpscaleStage::Init(const StageConfig& config, D3D12Device& device) {
@@ -72,6 +75,9 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
     cfg.useJitter = options_.useJitter;
     cfg.jitterSign = options_.jitterSign;
     cfg.dllDir = options_.dllDir;
+    if (!options_.model.empty()) cfg.extra["model"] = options_.model;
+    if (options_.tile > 0) cfg.extra["tile"] = options_.tile;
+    if (!options_.modelsDir.empty()) cfg.extra["models_dir"] = options_.modelsDir;
     if (mvReader_) {
         cfg.extra["mv_width"] = mvReader_->Man().width;
         cfg.extra["mv_height"] = mvReader_->Man().height;
@@ -83,7 +89,7 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         upscaler_->Init(*device_, cfg);
     } else {
         const auto known = UpscalerBackends();
-        if (std::find(known.begin(), known.end(), backend) == known.end()) Throw("upscale: unknown backend '" + backend + "' (dlss | nis | bicubic)");
+        if (std::find(known.begin(), known.end(), backend) == known.end()) Throw("upscale: unknown backend '" + backend + "' (dlss | nis | bicubic | trt)");
         const UpscalerAvailability avail = UpscalerAvailable(backend, options_.dllDir);
         if (!avail.available) {
             if (!options_.allowFallback || backend == "nis") Throw("upscale: " + avail.reason);
@@ -118,6 +124,18 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
     if (upscaler_->WantsJitter()) {
         jittered_ = device_->CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
         resampler_ = std::make_unique<Resampler>(*device_);
+    }
+    native_.Reset();
+    nativeW_ = nativeH_ = 0;
+    if (upscaler_->ProcessesOnCpu()) {  // the model's fixed factor, then Catmull-Rom to the target when they differ
+        const uint32_t s = static_cast<uint32_t>(std::max(1, upscaler_->NativeScale()));
+        nativeW_ = w * s;
+        nativeH_ = h * s;
+        if (nativeW_ != t.width || nativeH_ != t.height) {
+            native_ = device_->CreateTexture2D(nativeW_, nativeH_, DXGI_FORMAT_R16G16B16A16_FLOAT);
+            if (!resampler_) resampler_ = std::make_unique<Resampler>(*device_);
+            Log()->info("upscale: {} works at x{} ({}x{}), resampled to the target {}x{}", backend, s, nativeW_, nativeH_, t.width, t.height);
+        }
     }
 
     if (!options_.outputDir.empty()) {
@@ -185,15 +203,32 @@ void UpscaleStage::Process(FrameContext& ctx) {
     in.jitterY = j.y;
 
     const auto t0 = std::chrono::steady_clock::now();
-    device_->ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) {
-        if (jitter) {
-            resampler_->Run(cl, input_.Get(), inW_, inH_, jittered_.Get(), inW_, inH_, -j.x, -j.y, Resampler::Filter::CatmullRom);
-            in.color = jittered_.Get();
+    if (upscaler_->ProcessesOnCpu()) {
+        // CPU-side model (TensorRT): the frame at the model's native scale, then to the target on the GPU when they differ
+        PassImage native;
+        upscaler_->EvaluateCpu(rgba, native);
+        if (native.width != nativeW_ || native.height != nativeH_ || native.ChannelCount() != 4 || native.type != PixelType::F16)
+            Throw("upscale: backend '" + std::string(upscaler_->Name()) + "' returned " + std::to_string(native.width) + "x" + std::to_string(native.height) + ", expected " +
+                  std::to_string(nativeW_) + "x" + std::to_string(nativeH_) + " RGBA16F");
+        if (native_) {
+            device_->UploadTexture2D(native_.Get(), native.data.data(), native.RowBytes());
+            device_->ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) {
+                resampler_->Run(cl, native_.Get(), nativeW_, nativeH_, output_.Get(), outW_, outH_, 0.f, 0.f, Resampler::Filter::CatmullRom);
+            });
         } else {
-            in.color = input_.Get();
+            device_->UploadTexture2D(output_.Get(), native.data.data(), native.RowBytes());
         }
-        upscaler_->Evaluate(cl, in, output_.Get());
-    });
+    } else {
+        device_->ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) {
+            if (jitter) {
+                resampler_->Run(cl, input_.Get(), inW_, inH_, jittered_.Get(), inW_, inH_, -j.x, -j.y, Resampler::Filter::CatmullRom);
+                in.color = jittered_.Get();
+            } else {
+                in.color = input_.Get();
+            }
+            upscaler_->Evaluate(cl, in, output_.Get());
+        });
+    }
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
     // readback RGBA16F -> RGB half pass image
@@ -247,6 +282,7 @@ void UpscaleStage::Shutdown() {
     input_.Reset();
     jittered_.Reset();
     output_.Reset();
+    native_.Reset();
     initialized_ = false;
 }
 

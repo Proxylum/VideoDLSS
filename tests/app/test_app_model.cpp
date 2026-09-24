@@ -5,6 +5,8 @@
 
 #include <QApplication>
 #include <QElapsedTimer>
+#include <QFormLayout>
+#include <QLabel>
 #include <QComboBox>
 #include <QDir>
 #include <QScrollArea>
@@ -35,6 +37,7 @@
 #include "ProcessingPanel.h"
 #include "RecentPreviews.h"
 #include "ResultBar.h"
+#include "StageCard.h"
 #include "StartPage.h"
 #include "Theme.h"
 #include "TaskQueue.h"
@@ -1049,4 +1052,36 @@ TEST_CASE("StartPage lays the recents out as cards with a preview, a state and a
     CHECK(opened[0][0].toString() == Q(clip));
     model.clearRecents();
     CHECK(page.cardTitles().isEmpty());
+}
+
+// TASK-0022: parameters scoped to a backend (`ParamSpec::backends`) are rows of the stage card only while that backend
+// is chosen — the model of the TensorRT upscaler hides under DLSS and appears with «Нейросеть (TensorRT)».
+TEST_CASE("StageCard shows backend-scoped parameters only for their backend", "[app][card]") {
+    App();
+    const auto d = Dir("card");
+    Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    dlssvid::StageCard card(model, "upscale");
+    auto* form = card.findChild<QFormLayout*>();
+    REQUIRE(form);
+    int modelRow = -1, backendRow = -1;
+    for (int r = 0; r < form->rowCount(); ++r) {
+        QLayoutItem* item = form->itemAt(r, QFormLayout::LabelRole);
+        auto* label = item ? qobject_cast<QLabel*>(item->widget()) : nullptr;
+        if (!label) continue;
+        if (label->text() == QString::fromUtf8("Модель")) modelRow = r;
+        if (label->text() == QString::fromUtf8("Метод")) backendRow = r;
+    }
+    REQUIRE(modelRow >= 0);
+    REQUIRE(backendRow >= 0);
+    card.refresh();
+    CHECK(form->isRowVisible(backendRow));
+    CHECK(!form->isRowVisible(modelRow));  // the project's backend is dlss
+    model.setStageParam("upscale", "backend", "trt");
+    card.refresh();
+    CHECK(form->isRowVisible(modelRow));
+    model.setStageParam("upscale", "backend", "nis");
+    card.refresh();
+    CHECK(!form->isRowVisible(modelRow));
 }

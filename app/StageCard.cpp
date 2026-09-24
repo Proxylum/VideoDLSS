@@ -90,6 +90,16 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
             QWidget* w = MakeParamWidget(spec);
             w->setToolTip(QString::fromStdString(spec.hint.empty() ? spec.key : spec.hint + " (" + spec.key + ")"));
             form->addRow(QString::fromStdString(spec.label), w);
+            if (!spec.backends.empty()) {  // shown for its backends only (the model of the TensorRT upscaler)
+                const int row = form->rowCount() - 1;
+                pull_.push_back([this, spec, form, row] {
+                    const StageEntry* e = model_.stageEntry(stage_);
+                    std::string backend;
+                    if (e && e->params.contains("backend") && e->params["backend"].is_string()) backend = e->params["backend"].get<std::string>();
+                    else if (const ParamSpec* b = schema_->Find("backend"); b && b->def.is_string()) backend = b->def.get<std::string>();
+                    form->setRowVisible(row, std::find(spec.backends.begin(), spec.backends.end(), backend) != spec.backends.end());
+                });
+            }
         }
     grid->addWidget(form_, 0, 2, 2, 1);
 

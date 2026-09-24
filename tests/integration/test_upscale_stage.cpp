@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 
 #include "TestClips.h"
 #include "convert/ColorConvert.h"
@@ -17,6 +18,9 @@
 #include "gpu/GpuFrameCache.h"
 #include "pipeline/Pipeline.h"
 #include "stages/upscale/UpscaleStage.h"
+#ifdef DLSSVID_WITH_TENSORRT
+#include "ml/TrtLoader.h"
+#endif
 
 using namespace dlssvid;
 using namespace dlssvid::test;
@@ -300,3 +304,71 @@ TEST_CASE("DLSS SR upscales a downscaled clip back to the reference (jitter emul
     CHECK(dlssPlus > dlssNoJitter);    // the emulation adds information
     CHECK(nis > 20.0);
 }
+
+#ifdef DLSSVID_WITH_TENSORRT
+// TASK-0022: the trt backend inside the stage — the tiny nearest-x2 model of tests/data stands in for Real-ESRGAN.
+TEST_CASE("UpscaleStage: the trt backend runs a TensorRT model at its native x2 and resamples to x1.5", "[integration][upscale][trt][gpu]") {
+    std::string reason;
+    if (!trt::Available(&reason)) SKIP("TensorRT unavailable: " << reason);
+    D3D12Device dev;
+    if (dev.IsWarp() || !dev.IsNvidia()) SKIP("no NVIDIA GPU");
+    const auto dir = Dir("trt");
+    const auto models = dir / "models";
+    std::filesystem::create_directories(models / "cache");
+    std::filesystem::copy_file(std::filesystem::path(DLSSVID_SOURCE_DIR) / "tests" / "data" / "tiny_sr.onnx", models / "cache" / "tiny-sr.onnx");
+    std::ofstream(models / "registry.json") << R"({"$schema_version": 1, "models": [{"id": "tiny-sr", "stage": "upscale", "role": "test",
+ "source": "tests/data/make_tiny_sr_onnx.py", "format": "onnx", "url": "", "sha256": "", "license": "test",
+ "params": {"family": "onnx", "scale": 2, "tile": 16, "tile_pad": 2, "input_name": "image", "output_name": "upscaled"}}]})";
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 40;
+    spec.height = 24;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    {
+        VideoDecoder dec(clip);
+        UpscaleStageOptions o;
+        o.backend = "trt";
+        o.model = "tiny-sr";
+        o.modelsDir = models.string();
+        o.tile = 16;
+        o.outputDir = dir / "x2";
+        const UpscaleRunResult r = RunUpscale(dec, dev, o);
+        CHECK(r.stats.backend == "trt");
+        CHECK(!r.stats.fellBack);
+        CHECK(r.stats.frames == 2);
+        CHECK(r.stats.outputWidth == 80);
+        CHECK(r.stats.outputHeight == 48);
+        const PassReader reader = PassReader::Open(r.outDir);
+        CHECK(reader.Man().stageParams["model"] == "tiny-sr");
+        CHECK(reader.Man().stageParams["model_scale"] == 2);
+        CHECK(reader.Man().stageParams["fallback"] == false);
+        // the pass is the nearest x2 of the frame the stage converted (the model copies pixels): the CPU round trip is lossless
+        VideoDecoder again(clip);
+        CpuFrame f;
+        REQUIRE(again.NextFrame(f));
+        const PassImage rgba = Yuv420pToRgba16f(f, ColorInfoFromStream(again.Info()));
+        const PassImage pass = reader.ReadFrame(0);
+        REQUIRE(pass.width == 80);
+        size_t bad = 0;
+        for (uint32_t y = 0; y < 48; ++y)
+            for (uint32_t x = 0; x < 80; ++x)
+                for (size_t c = 0; c < 3; ++c)
+                    if (std::abs(pass.Get(x, y, c) - rgba.Get(x / 2, y / 2, c)) > 2e-3f) ++bad;
+        CHECK(bad == 0);
+    }
+    {
+        VideoDecoder dec(clip);
+        UpscaleStageOptions o;
+        o.backend = "trt";
+        o.model = "tiny-sr";
+        o.modelsDir = models.string();
+        o.tile = 16;
+        o.scale = 1.5;
+        o.outputDir = dir / "x15";
+        const UpscaleRunResult r = RunUpscale(dec, dev, o);
+        CHECK(r.stats.outputWidth == 60);
+        CHECK(r.stats.outputHeight == 36);
+        CHECK(PassReader::Open(r.outDir).Man().width == 60);
+    }
+}
+#endif

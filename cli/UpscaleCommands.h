@@ -6,7 +6,7 @@
 
 namespace dlssvid::cli {
 
-// `dlssvid upscale` (stage 5: color_sr through dlss | nis | bicubic) and `dlssvid compare`
+// `dlssvid upscale` (stage 5: color_sr through dlss | nis | bicubic | trt) and `dlssvid compare`
 // (PSNR / SSIM between two videos or pass folders — the A/B tool of docs/benchmarks.md).
 class UpscaleCommands {
 public:
@@ -30,6 +30,9 @@ public:
         int64_t frames = -1;
         bool warp = false;
         std::string dllDir;
+        std::string model;      // trt: registry id
+        int tile = 0;           // trt: tile size
+        std::string modelsDir;  // trt: folder with registry.json
     };
     struct CompareArgs {
         std::string ref, test;

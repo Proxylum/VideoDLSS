@@ -104,3 +104,27 @@ TEST_CASE("EffectiveStageParams fills the defaults: an explicit default and an a
     CHECK(ParamValueLabel(*FindStageSchema("nr")->Find("guides"), true) == "да");
     CHECK(ParamValueLabel(*FindStageSchema("depth")->Find("model"), "da3mono-large") == "da3mono-large");
 }
+
+// TASK-0022: parameters scoped to a backend (the TensorRT upscaler's model / tile) exist for that backend only — other
+// backends neither get their defaults nor keep a stale value, so their passes' fingerprints did not change.
+TEST_CASE("EffectiveStageParams keeps backend-scoped parameters for their backend only", "[unit][schema]") {
+    const nlohmann::json dlss = EffectiveStageParams("upscale", {{"backend", "dlss"}, {"model", "realesrgan-x2plus"}, {"tile", 256}});
+    CHECK(!dlss.contains("model"));
+    CHECK(!dlss.contains("tile"));
+    CHECK(!dlss.contains("models_dir"));
+    CHECK(dlss["backend"] == "dlss");
+    const nlohmann::json bare = EffectiveStageParams("upscale", nlohmann::json::object());  // the default backend is dlss
+    CHECK(!bare.contains("model"));
+    const nlohmann::json trt = EffectiveStageParams("upscale", {{"backend", "trt"}});
+    CHECK(trt["model"] == "realesrgan-x2plus");
+    CHECK(trt["tile"] == 0);
+    CHECK(trt["models_dir"] == "");
+    const nlohmann::json chosen = EffectiveStageParams("upscale", {{"backend", "trt"}, {"model", "realesr-general-x4v3"}});
+    CHECK(chosen["model"] == "realesr-general-x4v3");
+    // the scoping is declared on the specs themselves
+    const StageSchema* s = FindStageSchema("upscale");
+    REQUIRE(s);
+    REQUIRE(s->Find("model"));
+    CHECK(s->Find("model")->backends == std::vector<std::string>{"trt"});
+    CHECK(s->Find("backend")->backends.empty());
+}
