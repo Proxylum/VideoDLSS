@@ -184,6 +184,8 @@ def main() -> int:
                 # open-source models through TensorRT (TASK-0022): the ONNX is exported on first use, engines are cached
                 "trt-x2plus": ["--backend", "trt", "--model", "realesrgan-x2plus", "--no-fallback"],
                 "trt-general-x4v3": ["--backend", "trt", "--model", "realesr-general-x4v3", "--no-fallback"],
+                # RealBasicVSR in the PyTorch worker (TASK-0023): windows of 15 frames, overlap 3
+                "worker-realbasicvsr": ["--backend", "worker", "--no-fallback"],
             }
             for key, extra in variants.items():
                 if done("upscale", key):

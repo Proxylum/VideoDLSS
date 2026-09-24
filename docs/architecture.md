@@ -172,6 +172,18 @@ AppModel (Qt) ── ViewportWindow / панели ── TaskQueue (dlssvid <st
   Тесты: `UpscaleTiled` на nearest ×2 собирает кадр без единого расхождения (окна, сдвиг последнего, отражение),
   `TrtUpscaler` и стадия на крошечной ONNX-модели `tiny-sr` (`tests/data/tiny_sr.onnx`, nearest ×2) — точное
   совпадение с исходником и пересемплирование к ×1.5, CLI с `--models-dir`; схема — область параметров.
+- **RealBasicVSR через PyTorch-воркер (TASK-0023, 2026-09-24).** Бэкенд `worker` (`core/stages/upscale/WorkerUpscaler`)
+  — клиент `sr_worker/worker.py` по протоколу depth_worker (JSON-строки, кадры `.npz` в scratch-папке). Сеть
+  RealBasicVSR (модуль очистки + BasicVSR: SPyNet-поток, двунаправленное распространение признаков с warp по потоку,
+  ×4 через pixel shuffle) переписана на чистом PyTorch без mmcv/mmagic (`models/export/realbasicvsr_loader.py`) с
+  именами атрибутов MMEditing, официальный чекпоинт `RealBasicVSR_x4.pth` (зеркало HF `akhaliq/RealBasicVSR_x4`, sha256
+  в реестре, Apache-2.0) загружается строго; на тесте используется EMA-генератор, как в MMEditing. Окна кадров:
+  `IUpscaler::WindowSize / WindowOverlap / EvaluateCpuWindow`, стадия копит кадры (`pending_`), прогоняет окно,
+  перекрытие следующего окна смешивает линейной рампой (как `DepthStage`), хвост сбрасывает в `Finish`; воркер сам
+  приводит ×4 к размеру цели (антиалиасный бикубик), поэтому `NativeScale() == 0` и стадия не пересемплирует. Общий
+  `Emit` (пасс, слот кэша по индексу, превью, статистика) для GPU- и CPU-путей. Параметры `window` / `overlap` — только
+  для `worker` (`ParamSpec::backends`). Тесты: стадия с worker-`stub` (nearest ×4 → цель) — окна 4/1, каждый кадр
+  ровно один раз и точно, ×2 от воркера; RealBasicVSR на GPU при закэшированном чекпоинте; CLI; схема.
 - **Экран проекта (этап 9, MR D).** `core/stages/ParamSchema` — одно описание параметров каждой стадии (тип, диапазон,
   варианты с человеческими подписями, умолчание, `advanced`): `ValidateStageParams` проверяет параметры до запуска в
   `ProcessRunner::Prepare` (CLI `--param nr.intensity=9` → ошибка с текстом), `EffectiveStageParams` подставляет умолчания
@@ -273,7 +285,7 @@ UpscaleStage ── YUV420P ─▶ Yuv420pToRgba16f ─▶ input RGBA16F ─┬�
    depth_dlss / mv_dlss (слот кэша или папки пассов) ─▶ IUpscaler::Evaluate(cmdlist) ─▶ output RGBA16F (UAV)
                                                               ▼
                                       readback ─▶ color_sr (EXR half / PNG16) + слот кэша + [--video через RgbToYuv420p]
-IUpscaler: dlss (NGX, по умолчанию) | trt (ONNX-модели через TensorRT: Real-ESRGAN; тайлы с перекрытием на CPU, TASK-0022) | nis (NVScaler / NVSharpen, fallback) | bicubic (Catmull-Rom); заглушка rtxvsr удалена 2026-09-24 (TASK-0021)
+IUpscaler: dlss (NGX, по умолчанию) | trt (ONNX-модели через TensorRT: Real-ESRGAN; тайлы с перекрытием на CPU, TASK-0022) | worker (RealBasicVSR в PyTorch-воркере sr_worker/, окна кадров, TASK-0023) | nis (NVScaler / NVSharpen, fallback) | bicubic (Catmull-Rom); заглушка rtxvsr удалена 2026-09-24 (TASK-0021)
 ```
 
 - `ComputeKernel` — общий compute-помощник (root CBV + таблицы SRV/UAV + статические сэмплеры, кольца

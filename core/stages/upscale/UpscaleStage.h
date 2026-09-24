@@ -21,7 +21,7 @@ namespace dlssvid {
 // depth and flow stages run in the same pipeline, or from pass folders. Writes the pass folder,
 // uploads the result into the cache slot and can encode a preview video.
 struct UpscaleStageOptions {
-    std::string backend = "dlss";          // dlss (default) | nis | bicubic | trt
+    std::string backend = "dlss";          // dlss (default) | nis | bicubic | trt | worker
     bool allowFallback = true;             // backend unavailable -> nis with a warning (ТЗ §4: a missing SDK must not crash)
     double scale = 2.0;                    // x1.5 / x2 / x3
     uint32_t targetWidth = 0, targetHeight = 0;  // explicit target instead of `scale`
@@ -34,7 +34,8 @@ struct UpscaleStageOptions {
     std::filesystem::path dllDir;          // nvngx_dlss.dll folder override
     std::string model;                     // trt: registry id (default realesrgan-x2plus)
     int tile = 0;                          // trt: tile size in px (0 = the model's registry default)
-    std::string modelsDir;                 // trt: folder with registry.json (default: auto)
+    std::string modelsDir;                 // trt / worker: folder with registry.json (default: auto)
+    int window = 0, overlap = 0;           // worker: frames per pass and re-estimated overlap (0 = the model's registry defaults)
     std::filesystem::path outputDir;       // pass root: <outputDir>/color_sr (empty: no files)
     FileFormat format = FileFormat::Exr;   // exr (half) | png (16-bit)
     std::filesystem::path depthDir, mvDir; // depth_dlss / mv_dlss pass folders (optional)
@@ -76,6 +77,9 @@ public:
 private:
     void Setup(uint32_t w, uint32_t h);
     void ApplyParams(const nlohmann::json& params);
+    void PlaceCpuResult(const PassImage& native);  // a CPU backend's frame -> output_ (resampled when its size is not the target)
+    void Emit(int64_t index, double ms);           // output_ -> pass file, cache slot, preview, stats
+    void RunCpuWindow(bool flush);                 // windowed CPU backends: a window of pending frames through the model, overlap blended
 
     UpscaleStageOptions options_;
     std::unique_ptr<IUpscaler> upscaler_;
@@ -85,6 +89,13 @@ private:
     ComPtr<ID3D12Resource> input_, jittered_, output_;
     ComPtr<ID3D12Resource> native_;  // CPU backends: the model's native-scale frame when it is not the target size
     uint32_t nativeW_ = 0, nativeH_ = 0;
+    struct Pending {
+        int64_t index;
+        PassImage rgba;
+    };
+    std::vector<Pending> pending_;                             // frames waiting for a full window (worker)
+    std::vector<std::pair<int64_t, PassImage>> overlapPrev_;   // the previous window's tail, blended into the next
+    GpuFrameCache* cache_ = nullptr;
     uint32_t inW_ = 0, inH_ = 0, outW_ = 0, outH_ = 0;
     int phases_ = 8;
     bool first_ = true;

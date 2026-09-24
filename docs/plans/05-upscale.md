@@ -89,3 +89,11 @@ PSNR/SSIM к 4K-даунскейл-эталону в `docs/benchmarks.md`).
 родного масштаба к цели, параметры `model` / `tile` / `models_dir` в схеме (только для `trt`), CLI, карточка стадии,
 тесты на крошечной модели `tiny-sr` и юнит-тест тайлинга. Замеры — `docs/benchmarks.md`, раздел «Real-ESRGAN через
 TensorRT». Шаг 2 (RealBasicVSR через PyTorch-воркер) — TASK-0023.
+
+### Статус шага 2 (2026-09-24, TASK-0023)
+
+Сделано: бэкенд `worker` (`core/stages/upscale/WorkerUpscaler`) — RealBasicVSR через `sr_worker/worker.py` по протоколу
+depth_worker; сеть на чистом PyTorch (`models/export/realbasicvsr_loader.py`), чекпоинт с зеркала HF по sha256; окна
+кадров с перекрытием в стадии (`IUpscaler::EvaluateCpuWindow`), воркер приводит ×4 к цели; параметры `window` /
+`overlap` в схеме, CLI, отпечаток; тесты с worker-stub и с самой моделью на GPU. Замеры — `docs/benchmarks.md`,
+раздел «RealBasicVSR через PyTorch-воркер». Оба шага плана открытых апскейлеров закрыты.

@@ -17,7 +17,9 @@
 #include "passes/PassSequence.h"
 #include "gpu/GpuFrameCache.h"
 #include "pipeline/Pipeline.h"
+#include "ml/ModelRegistry.h"
 #include "stages/upscale/UpscaleStage.h"
+#include "stages/upscale/WorkerUpscaler.h"
 #ifdef DLSSVID_WITH_TENSORRT
 #include "ml/TrtLoader.h"
 #endif
@@ -372,3 +374,117 @@ TEST_CASE("UpscaleStage: the trt backend runs a TensorRT model at its native x2 
     }
 }
 #endif
+
+// TASK-0023: the PyTorch worker backend inside the stage — the worker's `stub` (nearest x4, then the target size) stands
+// in for RealBasicVSR: windows of frames with an overlap the stage blends, every frame written once, in order.
+TEST_CASE("UpscaleStage: the worker backend runs windows of frames with overlap and writes every frame once", "[integration][upscale][worker]") {
+    const UpscalerAvailability a = WorkerUpscaler::Available();
+    if (!a.available) SKIP("sr_worker unavailable: " << a.reason);
+    const auto dir = Dir("worker");
+    ClipSpec spec;
+    spec.frames = 7;
+    spec.width = 40;
+    spec.height = 24;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    D3D12Device dev({true, false});
+    {
+        VideoDecoder dec(clip);
+        UpscaleStageOptions o;
+        o.backend = "worker";
+        o.model = "stub";  // the worker's test backend
+        o.window = 4;
+        o.overlap = 1;
+        o.scale = 4;
+        o.outputDir = dir / "x4";
+        const UpscaleRunResult r = RunUpscale(dec, dev, o);
+        CHECK(r.stats.backend == "worker");
+        CHECK(!r.stats.fellBack);
+        CHECK(r.stats.frames == 7);
+        CHECK(r.stats.outputWidth == 160);
+        CHECK(r.stats.outputHeight == 96);
+        const PassReader reader = PassReader::Open(r.outDir);
+        CHECK(reader.Man().stageParams["worker_backend"] == "stub");
+        CHECK(reader.Man().stageParams["window"] == 4);
+        // every frame present once, equal to nearest x4 of the converted frame (the stub copies pixels; overlap blends equal frames)
+        VideoDecoder again(clip);
+        CpuFrame f;
+        for (int64_t i = 0; i < 7; ++i) {
+            REQUIRE(again.NextFrame(f));
+            REQUIRE(reader.HasFrame(i));
+            const PassImage rgba = Yuv420pToRgba16f(f, ColorInfoFromStream(again.Info()));
+            const PassImage pass = reader.ReadFrame(i);
+            REQUIRE(pass.width == 160);
+            size_t bad = 0;
+            for (uint32_t y = 0; y < 96; ++y)
+                for (uint32_t x = 0; x < 160; ++x)
+                    for (size_t c = 0; c < 3; ++c)
+                        if (std::abs(pass.Get(x, y, c) - rgba.Get(x / 4, y / 4, c)) > 2e-3f) ++bad;
+            INFO("frame " << i);
+            CHECK(bad == 0);
+        }
+        CHECK(!reader.HasFrame(7));
+    }
+    {
+        VideoDecoder dec(clip);
+        UpscaleStageOptions o;
+        o.backend = "worker";
+        o.model = "stub";
+        o.window = 3;
+        o.overlap = 0;
+        o.scale = 2;  // the worker resizes x4 -> the target itself
+        o.outputDir = dir / "x2";
+        const UpscaleRunResult r = RunUpscale(dec, dev, o);
+        CHECK(r.stats.frames == 7);
+        CHECK(r.stats.outputWidth == 80);
+        CHECK(r.stats.outputHeight == 48);
+        CHECK(PassReader::Open(r.outDir).Man().width == 80);
+    }
+}
+
+// RealBasicVSR itself, when its checkpoint is already in the cache (no downloads in tests): a short window on the GPU.
+TEST_CASE("UpscaleStage: RealBasicVSR through the worker upscales a window of frames", "[integration][upscale][worker][gpu][model]") {
+    const UpscalerAvailability a = WorkerUpscaler::Available();
+    if (!a.available) SKIP("sr_worker unavailable: " << a.reason);
+    const auto ckpt = ModelRegistry::DefaultRegistryPath().parent_path() / "cache" / "akhaliq__RealBasicVSR_x4__RealBasicVSR_x4.pth";
+    if (!std::filesystem::exists(ckpt)) SKIP("RealBasicVSR checkpoint not cached: " << ckpt.string());
+    {
+        D3D12Device probe;
+        if (probe.IsWarp() || !probe.IsNvidia()) SKIP("no NVIDIA GPU");
+    }
+    const auto dir = Dir("realbasicvsr");
+    ClipSpec spec;
+    spec.frames = 6;
+    spec.width = 96;
+    spec.height = 64;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    D3D12Device dev;
+    VideoDecoder dec(clip);
+    UpscaleStageOptions o;
+    o.backend = "worker";
+    o.window = 6;
+    o.overlap = 0;
+    o.scale = 4;
+    o.outputDir = dir / "x4";
+    const UpscaleRunResult r = RunUpscale(dec, dev, o);
+    CHECK(r.stats.frames == 6);
+    CHECK(r.stats.outputWidth == 384);
+    const PassReader reader = PassReader::Open(r.outDir);
+    CHECK(reader.Man().stageParams["model"] == "realbasicvsr");
+    // finite, in range and close to a plain x4 of the frame (the model refines, it does not repaint)
+    VideoDecoder again(clip);
+    CpuFrame f;
+    REQUIRE(again.NextFrame(f));
+    const PassImage rgba = Yuv420pToRgba16f(f, ColorInfoFromStream(again.Info()));
+    const PassImage pass = reader.ReadFrame(0);
+    double diff = 0.0;
+    size_t n = 0;
+    for (uint32_t y = 0; y < pass.height; ++y)
+        for (uint32_t x = 0; x < pass.width; ++x)
+            for (size_t c = 0; c < 3; ++c) {
+                const float v = pass.Get(x, y, c);
+                REQUIRE(std::isfinite(v));
+                diff += std::abs(v - rgba.Get(x / 4, y / 4, c));
+                ++n;
+            }
+    CHECK(diff / static_cast<double>(n) < 0.15);
+}

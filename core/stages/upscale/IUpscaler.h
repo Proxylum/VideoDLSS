@@ -16,12 +16,14 @@ struct PassImage;
 
 // The `trt` backend's model when the project names none (models/registry.json, family realesrgan).
 constexpr const char* kTrtDefaultUpscaleModel = "realesrgan-x2plus";
+// The `worker` backend's model when the project names none (sr_worker/worker.py, family realbasicvsr).
+constexpr const char* kWorkerDefaultUpscaleModel = "realbasicvsr";
 
 // One interface for every upscaler (ТЗ §3): DLSS SR (default), NIS, the naive bicubic baseline and open-source
 // models through TensorRT (`trt`). GPU backends record into a command list; CPU-side ones take the frame as an image.
 // The stage prepares D3D12 textures; GPU backends only record work into a command list.
 struct UpscalerConfig {
-    std::string backend;  // dlss | nis | bicubic | trt
+    std::string backend;  // dlss | nis | bicubic | trt | worker
     uint32_t inputWidth = 0, inputHeight = 0;
     uint32_t outputWidth = 0, outputHeight = 0;
     float sharpness = 0.5f;               // nis: 0..1 (NVScaler slider); dlss: unused (sharpening is deprecated in NGX)
@@ -59,6 +61,11 @@ public:
     virtual bool ProcessesOnCpu() const { return false; }
     virtual int NativeScale() const { return 0; }
     virtual void EvaluateCpu(const PassImage& rgbaIn, PassImage& rgbaOut);
+    // Video models take a window of frames at once (WindowSize > 1); the next window re-estimates the last
+    // WindowOverlap frames and the stage blends them. NativeScale() == 0: the backend returns the target size itself.
+    virtual int WindowSize() const { return 1; }
+    virtual int WindowOverlap() const { return 0; }
+    virtual void EvaluateCpuWindow(const std::vector<const PassImage*>& rgbaIn, uint32_t targetW, uint32_t targetH, std::vector<PassImage>& rgbaOut);
     virtual nlohmann::json Describe() const = 0;
     virtual void Shutdown() {}
 };

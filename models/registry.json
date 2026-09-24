@@ -1,6 +1,6 @@
 {
   "$schema_version": 1,
-  "_comment": "Weights are fetched on first use into models/cache/ (git-ignored) by models/export scripts (HuggingFace) and exported to ONNX for the exact input geometry; TensorRT engines are cached next to them. No weights are committed. `params` are read by core/stages/depth/TrtDepthEstimator and depth_worker/worker.py. Upscale models (family realesrgan) are exported by models/export/export_realesrgan.py with dynamic H/W; core/stages/upscale/TrtUpscaler builds one engine per tile size.",
+  "_comment": "Weights are fetched on first use into models/cache/ (git-ignored) by models/export scripts (HuggingFace) and exported to ONNX for the exact input geometry; TensorRT engines are cached next to them. No weights are committed. `params` are read by core/stages/depth/TrtDepthEstimator and depth_worker/worker.py. Upscale models (family realesrgan) are exported by models/export/export_realesrgan.py with dynamic H/W; core/stages/upscale/TrtUpscaler builds one engine per tile size. The RealBasicVSR checkpoint (family realbasicvsr) runs in sr_worker/worker.py (PyTorch), see sr_worker/README.md.",
   "models": [
     {
       "id": "da3metric-large",
@@ -369,6 +369,28 @@
         "tile_pad": 16,
         "input_name": "image",
         "output_name": "upscaled"
+      }
+    },
+    {
+      "id": "realbasicvsr",
+      "stage": "upscale",
+      "role": "video quality: temporal propagation, x4, PyTorch worker",
+      "source": "https://github.com/ckkelvinchan/RealBasicVSR",
+      "hf": "akhaliq/RealBasicVSR_x4",
+      "hf_file": "RealBasicVSR_x4.pth",
+      "format": "pytorch",
+      "url": "",
+      "sha256": "f2d73c0fe3e33869c812f608be77cbdbfc356443b718b78c9a6cb97027ce5de7",
+      "license": "Apache-2.0",
+      "params": {
+        "family": "realbasicvsr",
+        "scale": 4,
+        "window": 15,
+        "overlap": 3,
+        "mid_channels": 64,
+        "num_propagation_blocks": 20,
+        "num_cleaning_blocks": 20,
+        "dynamic_refine_thres": 255
       }
     }
   ]

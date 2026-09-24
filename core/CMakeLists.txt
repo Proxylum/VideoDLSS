@@ -96,6 +96,7 @@ add_library(dlssvid_core STATIC
   stages/upscale/NisUpscaler.h stages/upscale/NisUpscaler.cpp
   stages/upscale/DlssUpscaler.h stages/upscale/DlssUpscaler.cpp
   stages/upscale/Tiling.h stages/upscale/Tiling.cpp
+  stages/upscale/WorkerUpscaler.h stages/upscale/WorkerUpscaler.cpp
   stages/upscale/UpscaleStage.h stages/upscale/UpscaleStage.cpp
   gpu/Ngx.h gpu/Ngx.cpp
   stages/tonemap/Tonemapper.h stages/tonemap/Tonemapper.cpp
