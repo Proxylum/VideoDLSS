@@ -6,6 +6,7 @@
 #include <QApplication>
 #include <QElapsedTimer>
 #include <QComboBox>
+#include <QDir>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalSpy>
@@ -1028,6 +1029,9 @@ TEST_CASE("StartPage lays the recents out as cards with a preview, a state and a
     CHECK(page.cardTitles()[1] == "clip");
     CHECK(page.cardMetas()[0].contains(QString::fromUtf8("1 из 5 стадий")));
     CHECK(page.cardMetas()[1].contains(QString::fromUtf8("есть проект")));
+    // the third line is the file's path (native separators); the tooltip carries the title, the path and the state
+    CHECK(page.cardPaths()[0] == QDir::toNativeSeparators(Q(d / "clip.dlssvid.json")));
+    CHECK(page.cardPaths()[1] == QDir::toNativeSeparators(Q(clip)));
     // the previews arrive from the worker: the size line in front of the meta and the frame
     Pump([&] { return page.cardHasPreview(0) && page.cardHasPreview(1); }, 15000);
     CHECK(page.cardHasPreview(0));
