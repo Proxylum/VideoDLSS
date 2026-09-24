@@ -88,6 +88,7 @@ private:
     QMenu* recentMenu_ = nullptr;
     std::array<QLabel*, 4> cellLabels_{};
     QLabel* zoomLabel_;
+    QWidget* startStatus_;  // the start screen's footer («Готов» · «Пассы по умолчанию: рядом с видео»)
     QByteArray workState_;  // the dock layout of the work area (kept while the start page hides the docks)
     bool docksSized_ = false;
     QSystemTrayIcon* tray_ = nullptr;

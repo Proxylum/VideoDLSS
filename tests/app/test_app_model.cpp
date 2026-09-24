@@ -9,6 +9,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalSpy>
+#include <QTest>
 #include <QPalette>
 #include <QStyle>
 #include <QVBoxLayout>
@@ -31,7 +32,9 @@
 #include "AppModel.h"
 #include "SourceNames.h"
 #include "ProcessingPanel.h"
+#include "RecentPreviews.h"
 #include "ResultBar.h"
+#include "StartPage.h"
 #include "Theme.h"
 #include "TaskQueue.h"
 #include "TestClips.h"
@@ -493,6 +496,12 @@ TEST_CASE("AppModel remembers recents and dialog folders, tracks unsaved changes
     CHECK(model.recents()[0].isProject);
     CHECK(model.recents()[0].exists);
     CHECK(model.recents()[0].info.startsWith(QString::fromUtf8("1 пасс")));
+    // the start screen's card: «proj — глубина посчитана» over «1 из 5 стадий · сегодня …»; no source video, no preview
+    CHECK(model.recents()[0].state == QString::fromUtf8("глубина посчитана"));
+    CHECK(model.recents()[0].progress == QString::fromUtf8("1 из 5 стадий"));
+    CHECK(!model.recents()[0].when.isEmpty());
+    CHECK(model.recents()[0].video.isEmpty());
+    CHECK(model.recents()[0].result.isEmpty());
     CHECK(recentsSpy.count() == 1);
 
     // edits mark the project unsaved, a view change does not, saving cleans it
@@ -524,6 +533,9 @@ TEST_CASE("AppModel remembers recents and dialog folders, tracks unsaved changes
     CHECK(!model.recents()[0].isProject);
     CHECK(model.recents()[0].title == "clip");
     CHECK(model.recents()[0].info.startsWith(QString::fromUtf8("видео · не обработан")));
+    CHECK(model.recents()[0].video == Q(clip));  // the card previews the video itself
+    CHECK(model.recents()[0].state.isEmpty());
+    CHECK(model.recents()[0].progress == QString::fromUtf8("не обработан"));
     REQUIRE(model.saveProject());
     CHECK(!model.dirty());
     model.openVideo(Q(clip));  // the project file next to the video is picked up: clean
@@ -943,4 +955,94 @@ TEST_CASE("AppModel reports held frames as stale and plays only over resident fr
     for (int64_t f = 1; f < 40; ++f) expected.push_back(f);
     CHECK(visited == expected);
     CHECK(resident);
+}
+
+TEST_CASE("RecentPreviews makes a 96x40 frame and the size line of a clip and caches them", "[app][previews]") {
+    App();
+    const auto d = Dir("previews");
+    RecentPreviews::SetCacheDir(Q(d / "cache"));
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    ClipSpec big;
+    big.frames = 2;
+    big.width = 96;
+    big.height = 64;
+    big.fpsNum = 48;
+    const auto result = WriteClip(d / "result.mkv", big);
+    const RecentPreviews::Preview p = RecentPreviews::Make(Q(clip));
+    CHECK(p.meta == QString::fromUtf8("48×32 24 fps"));
+    REQUIRE(!p.image.isNull());
+    CHECK(p.image.width() == RecentPreviews::kWidth * RecentPreviews::kScale);
+    CHECK(p.image.height() == RecentPreviews::kHeight * RecentPreviews::kScale);
+    CHECK(std::filesystem::exists(std::filesystem::path(RecentPreviews::CacheFile(Q(clip), {}).toStdWString())));
+    // the cached copy carries the same line
+    const RecentPreviews::Preview again = RecentPreviews::Make(Q(clip));
+    CHECK(again.meta == p.meta);
+    CHECK(again.image.size() == p.image.size());
+    // with a result: «→ …» and the result's frame
+    const RecentPreviews::Preview both = RecentPreviews::Make(Q(clip), Q(result));
+    CHECK(both.meta == QString::fromUtf8("48×32 24 fps → 96×64 48 fps"));
+    CHECK(!both.image.isNull());
+    // an unreadable file: no line, no image, nothing cached
+    const RecentPreviews::Preview none = RecentPreviews::Make(Q(d / "nope.mp4"));
+    CHECK(none.meta.isEmpty());
+    CHECK(none.image.isNull());
+    CHECK(!std::filesystem::exists(std::filesystem::path(RecentPreviews::CacheFile(Q(d / "nope.mp4"), {}).toStdWString())));
+    // asynchronously: nothing at first, then previewReady on the caller's thread
+    RecentPreviews previews;
+    QSignalSpy ready(&previews, &RecentPreviews::previewReady);
+    CHECK(!previews.get(Q(clip)).has_value());
+    Pump([&] { return ready.count() > 0; }, 10000);
+    REQUIRE(ready.count() == 1);
+    REQUIRE(previews.get(Q(clip)).has_value());
+    CHECK(previews.get(Q(clip))->meta == p.meta);
+    CHECK(ready.count() == 1);  // a second get() is served from memory
+}
+
+// The start screen after the mockup «1 · Стартовый экран»: the recents on the right as cards — a 96×40 preview, «face —
+// результат готов» and «1920×800 24 fps → 3840×1600 48 fps · вчера»; the size line and the frame arrive from a worker.
+TEST_CASE("StartPage lays the recents out as cards with a preview, a state and a size line", "[app][start]") {
+    App();
+    QSettings().clear();
+    const auto d = Dir("startpage");
+    RecentPreviews::SetCacheDir(Q(d / "cache"));
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    WriteDepth(d / "passes" / "depth_raw", 2);
+    Project p = Project::Create(clip, d / "passes");
+    p.Save(d / "clip.dlssvid.json");  // next to the video: the video's card says «есть проект»
+    AppModel model(true);
+    dlssvid::StartPage page(model);  // qualified: <windows.h> has a GDI StartPage()
+    CHECK(page.cardTitles().isEmpty());
+    CHECK(page.readinessText().contains("WARP"));
+    model.addRecent(Q(clip));
+    model.addRecent(Q(d / "clip.dlssvid.json"));  // newest first
+    REQUIRE(page.cardTitles().size() == 2);
+    CHECK(page.cardTitles()[0] == QString::fromUtf8("clip — глубина посчитана"));
+    CHECK(page.cardTitles()[1] == "clip");
+    CHECK(page.cardMetas()[0].contains(QString::fromUtf8("1 из 5 стадий")));
+    CHECK(page.cardMetas()[1].contains(QString::fromUtf8("есть проект")));
+    // the previews arrive from the worker: the size line in front of the meta and the frame
+    Pump([&] { return page.cardHasPreview(0) && page.cardHasPreview(1); }, 15000);
+    CHECK(page.cardHasPreview(0));
+    CHECK(page.cardHasPreview(1));
+    CHECK(page.cardMetas()[0].startsWith(QString::fromUtf8("48×32 24 fps · 1 из 5 стадий · ")));
+    CHECK(page.cardMetas()[1].startsWith(QString::fromUtf8("48×32 24 fps · есть проект · ")));
+    // a click on a card asks the window to open that file; «очистить» empties the list
+    QSignalSpy opened(&page, &dlssvid::StartPage::openPathRequested);
+    std::vector<QFrame*> cards;
+    for (QFrame* f : page.findChildren<QFrame*>())
+        if (f->property("role").toString() == "recent") cards.push_back(f);
+    REQUIRE(cards.size() == 2);
+    QTest::mouseClick(cards[1], Qt::LeftButton);
+    REQUIRE(opened.count() == 1);
+    CHECK(opened[0][0].toString() == Q(clip));
+    model.clearRecents();
+    CHECK(page.cardTitles().isEmpty());
 }

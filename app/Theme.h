@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QColor>
 #include <QIcon>
 #include <QString>
 
@@ -16,7 +17,8 @@ namespace dlssvid {
 // Variants are chosen with the `role` property (SetRole): "primary", "primary-big", "start", "start-primary", "small",
 // "tall", "quiet" for buttons; "segment", "chip", "icon" for tool buttons; "segments" for a group frame; "card",
 // "card-dashed" for frames; "muted", "hint", "title", "h1", "h2", "mono", "ok", "warn", "danger", "accent", "version",
-// "cell-label" for labels.
+// "cell-label" for labels. The start screen (TASK-0020) adds "section", "text-13", "hint-13", "dropzone-title",
+// "dot-ok" / "dot-warn" / "dot-danger", "recent-title", "recent-meta", "preview" for labels and "recent" for a card.
 void ApplyTheme(QApplication& app);
 QString ThemeStyleSheet();
 void SetRole(QWidget* widget, const char* role);  // sets the property and repolishes when the widget is already styled
@@ -24,8 +26,10 @@ void SetRole(QWidget* widget, const char* role);  // sets the property and repol
 // changing the value: a wheel over the project panel used to switch stage backends by accident. Controls outside a
 // scroll area (the timeline's frame box) keep the wheel. Installed by ApplyTheme.
 void InstallWheelGuard(QApplication& app);
-// Playback glyphs drawn in the theme's text colour (Fusion's standard media icons are dark on the dark bar).
-enum class Glyph { ToStart, Prev, Play, Pause, Next, Loop };
-QIcon ThemeIcon(Glyph glyph);
+// Playback glyphs drawn in the theme's text colour (Fusion's standard media icons are dark on the dark bar), and
+// the drop zone's upload arrow; `color` overrides the ink (the drop zone draws it in the accent).
+enum class Glyph { ToStart, Prev, Play, Pause, Next, Loop, Upload };
+QIcon ThemeIcon(Glyph glyph, const QColor& color = QColor());
+QColor ThemeAccent();
 
 }  // namespace dlssvid

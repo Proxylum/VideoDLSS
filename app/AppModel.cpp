@@ -735,6 +735,37 @@ void AppModel::rememberDir(const QString& key, const QString& file) {
     if (!file.isEmpty()) QSettings().setValue("dialogs/" + key, QFileInfo(file).absolutePath());
 }
 
+namespace {
+
+// The stage a pass folder belongs to and how the recents name it: «глубина посчитана», «векторы посчитаны».
+struct StageWord {
+    const char* stage;
+    const char* name;
+    const char* done;
+};
+constexpr StageWord kStageWords[] = {{"depth", "глубина", "посчитана"},
+                                     {"flow", "векторы", "посчитаны"},
+                                     {"upscale", "апскейл", "посчитан"},
+                                     {"nr", "NR", "посчитан"},
+                                     {"fg", "генерация кадров", "посчитана"}};
+
+std::string StageOfPass(const std::string& pass) {
+    if (pass.rfind("depth_", 0) == 0) return "depth";
+    if (pass.rfind("mv_", 0) == 0) return "flow";
+    if (pass == "color_sr") return "upscale";
+    if (pass == "color_nr") return "nr";
+    if (pass == "color_fg") return "fg";
+    return {};
+}
+
+bool DlssSrDllPresent() {
+    for (const auto& dir : NvidiaDllSearchPaths())
+        if (std::filesystem::exists(dir / "nvngx_dlss.dll")) return true;
+    return false;
+}
+
+}  // namespace
+
 std::vector<AppModel::Recent> AppModel::recents() const {
     std::vector<Recent> out;
     for (const QString& path : QSettings().value("recent/files").toStringList()) {
@@ -751,18 +782,55 @@ std::vector<AppModel::Recent> AppModel::recents() const {
         } else if (r.isProject) {
             try {
                 const Project p = Project::Load(std::filesystem::path(path.toStdWString()));
-                const int passes = static_cast<int>(FrameStore::DiscoverPasses(p.passesRoot).size());
-                if (!p.resultVideo.empty() && std::filesystem::exists(p.resultVideo)) r.info = tr("результат готов");
-                else if (passes > 0) r.info = Plural(passes, tr("пасс"), tr("пасса"), tr("пассов"));
+                const auto passes = FrameStore::DiscoverPasses(p.passesRoot);
+                if (!p.sourceVideo.empty() && std::filesystem::exists(p.sourceVideo)) r.video = QString::fromStdWString(p.sourceVideo.wstring());
+                const bool ready = !p.resultVideo.empty() && std::filesystem::exists(p.resultVideo);
+                if (ready) r.result = QString::fromStdWString(p.resultVideo.wstring());
+                // stages with a pass on disk, in the project's order: «глубина и NR посчитаны», «2 из 5 стадий»
+                std::vector<std::string> computed;
+                for (const auto& s : passes) {
+                    const std::string stage = StageOfPass(s.name);
+                    if (!stage.empty() && std::find(computed.begin(), computed.end(), stage) == computed.end()) computed.push_back(stage);
+                }
+                int enabled = 0, done = 0;
+                QStringList names;
+                QString participle;
+                for (const StageEntry& st : p.stages) {
+                    if (st.enabled) ++enabled;
+                    if (std::find(computed.begin(), computed.end(), st.name) == computed.end()) continue;
+                    if (st.enabled) ++done;
+                    for (const StageWord& w : kStageWords)
+                        if (st.name == w.stage) {
+                            names << tr(w.name);
+                            participle = tr(w.done);
+                        }
+                }
+                if (ready) r.info = tr("результат готов");
+                else if (!passes.empty()) r.info = Plural(static_cast<int>(passes.size()), tr("пасс"), tr("пасса"), tr("пассов"));
                 else r.info = tr("не обработан");
+                if (ready) {
+                    r.state = tr("результат готов");
+                } else if (!names.isEmpty()) {
+                    const QString list = names.size() == 1 ? names[0] : names.mid(0, names.size() - 1).join(", ") + tr(" и ") + names.last();
+                    r.state = list + " " + (names.size() == 1 ? participle : tr("посчитаны"));
+                    r.progress = tr("%1 из %2 стадий").arg(done).arg(enabled);
+                } else {
+                    r.progress = tr("не обработан");
+                }
             } catch (const std::exception&) {
                 r.info = tr("проект не читается");
+                r.state = r.info;
             }
         } else {
             const bool hasProject = QFileInfo::exists(QString::fromStdWString(std::filesystem::path(path.toStdWString()).replace_extension(".dlssvid.json").wstring()));
             r.info = hasProject ? tr("видео · есть проект") : tr("видео · не обработан");
+            r.video = path;
+            r.progress = hasProject ? tr("есть проект") : tr("не обработан");
         }
-        if (r.exists) r.info += " · " + HumanWhen(FileTimeIso8601(std::filesystem::path(path.toStdWString())));
+        if (r.exists) {
+            r.when = HumanWhen(FileTimeIso8601(std::filesystem::path(path.toStdWString())));
+            r.info += " · " + r.when;
+        }
         out.push_back(std::move(r));
     }
     return out;
@@ -784,17 +852,26 @@ void AppModel::clearRecents() {
 }
 
 QString AppModel::readiness() const {
-    const QString adapter = QString::fromStdString(device_->AdapterName());
+    QString adapter = QString::fromStdString(device_->AdapterName());
     if (device_->IsWarp()) return tr("%1 (WARP, программный рендер) — без NVIDIA GPU доступны NIS, бикубик и смешивание кадров").arg(adapter);
+    if (adapter.startsWith("NVIDIA GeForce ")) adapter.remove(0, 15);  // mockup: «RTX 4070 Ti SUPER · драйвер 616.92 · …»
     QStringList parts{adapter};
     const std::string driver = NvidiaDriverFromUmd(device_->UmdDriverVersion()).ToString();
     if (!driver.empty()) parts << tr("драйвер %1").arg(QString::fromStdString(driver));
-    bool sr = false;
-    for (const auto& dir : NvidiaDllSearchPaths()) sr = sr || std::filesystem::exists(dir / "nvngx_dlss.dll");
-    parts << (sr ? tr("DLSS SR ✓") : tr("DLSS SR ✗ (нет nvngx_dlss.dll)"));
-    parts << (!FindNrDll().empty() ? tr("Neural Rendering ✓") : tr("Neural Rendering ✗ (нет nvngx_dlssnr.dll)"));
-    parts << (!FindDlssgDll().empty() ? tr("генерация кадров ✓") : tr("генерация кадров ✗ (нет nvngx_dlssg.dll)"));
+    const bool sr = DlssSrDllPresent(), nr = !FindNrDll().empty(), fg = !FindDlssgDll().empty();
+    if (sr && nr && fg) {
+        parts << tr("DLSS SR, Neural Rendering и генерация кадров доступны");
+    } else {  // what is missing, by its DLL
+        parts << (sr ? tr("DLSS SR ✓") : tr("DLSS SR ✗ (нет nvngx_dlss.dll)"));
+        parts << (nr ? tr("Neural Rendering ✓") : tr("Neural Rendering ✗ (нет nvngx_dlssnr.dll)"));
+        parts << (fg ? tr("генерация кадров ✓") : tr("генерация кадров ✗ (нет nvngx_dlssg.dll)"));
+    }
     return parts.join(" · ");
+}
+
+AppModel::Readiness AppModel::readinessLevel() const {
+    if (device_->IsWarp()) return Readiness::Software;
+    return DlssSrDllPresent() && !FindNrDll().empty() && !FindDlssgDll().empty() ? Readiness::Ready : Readiness::Partial;
 }
 
 void AppModel::setEngineerMode(bool on) {
