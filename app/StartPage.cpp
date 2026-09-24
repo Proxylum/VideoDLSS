@@ -1,5 +1,6 @@
 #include "StartPage.h"
 
+#include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileInfo>
@@ -27,13 +28,15 @@ bool IsOpenablePath(const QString& path) {
     return false;
 }
 
-// A label that elides its text at its width instead of being clipped by the card's edge; keeps the full text.
+// A label that elides its text at its width instead of being clipped by the card's edge; keeps the full text
+// (the card's tooltip shows it — a tooltip of the label's own would hide the card's).
 class ElidedLabel : public QLabel {
 public:
-    explicit ElidedLabel(QWidget* parent) : QLabel(parent) { setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); }
+    explicit ElidedLabel(QWidget* parent, Qt::TextElideMode mode = Qt::ElideRight) : QLabel(parent), mode_(mode) {
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    }
     void setFullText(const QString& text) {
         full_ = text;
-        setToolTip(text);
         elide();
     }
     QString fullText() const { return full_; }
@@ -45,7 +48,8 @@ protected:
     }
 
 private:
-    void elide() { setText(fontMetrics().elidedText(full_, Qt::ElideRight, std::max(16, width()))); }
+    void elide() { setText(fontMetrics().elidedText(full_, mode_, std::max(16, width()))); }
+    Qt::TextElideMode mode_;
     QString full_;
 };
 
@@ -64,7 +68,6 @@ public:
     RecentCard(const AppModel::Recent& recent, QWidget* parent) : QFrame(parent), recent_(recent) {
         SetRole(this, "recent");
         setAttribute(Qt::WA_Hover);
-        setToolTip(recent.path + "\n" + recent.info);
         if (recent.exists) setCursor(Qt::PointingHandCursor);
         auto* row = new QHBoxLayout(this);
         row->setContentsMargins(12, 10, 12, 10);
@@ -81,14 +84,20 @@ public:
         SetRole(title_, recent.exists ? "recent-title" : "recent-title-missing");
         meta_ = new ElidedLabel(this);
         SetRole(meta_, "recent-meta");
+        path_ = new ElidedLabel(this, Qt::ElideMiddle);  // the file's path, its name kept visible
+        SetRole(path_, "hint");
+        path_->setFullText(QDir::toNativeSeparators(recent.path));
         text->addWidget(title_);
         text->addWidget(meta_);
+        text->addWidget(path_);
         row->addLayout(text, 1);
         setMeta({});
+        setToolTip(title_->fullText() + "\n" + path_->fullText() + "\n" + recent.info);
     }
     const AppModel::Recent& recent() const { return recent_; }
     QString title() const { return title_->fullText(); }
     QString meta() const { return meta_->fullText(); }
+    QString path() const { return path_->fullText(); }
     bool hasPreview() const { return hasPreview_; }
 
     // «<size line> · <progress> · <when>»: the size line comes with the preview, the rest is known at once.
@@ -133,6 +142,7 @@ private:
     QLabel* preview_;
     ElidedLabel* title_;
     ElidedLabel* meta_;
+    ElidedLabel* path_;
     bool hasPreview_ = false;
 };
 
@@ -298,6 +308,12 @@ QStringList StartPage::cardTitles() const {
 QStringList StartPage::cardMetas() const {
     QStringList out;
     for (const RecentCard* c : cards_) out << c->meta();
+    return out;
+}
+
+QStringList StartPage::cardPaths() const {
+    QStringList out;
+    for (const RecentCard* c : cards_) out << c->path();
     return out;
 }
 
