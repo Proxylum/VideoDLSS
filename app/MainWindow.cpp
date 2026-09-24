@@ -10,6 +10,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGridLayout>
+#include <QHBoxLayout>
 #include <QImage>
 #include <QMenuBar>
 #include <QMessageBox>
@@ -103,6 +104,16 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
 
     zoomLabel_ = new QLabel(this);
     statusBar()->addPermanentWidget(zoomLabel_);
+    startStatus_ = new QWidget(this);  // mockup «1 · Стартовый экран»: the footer is the status bar
+    auto* startStatusRow = new QHBoxLayout(startStatus_);
+    startStatusRow->setContentsMargins(6, 0, 0, 0);
+    startStatusRow->setSpacing(18);
+    for (const QString& text : {tr("Готов"), tr("Пассы по умолчанию: рядом с видео")}) {
+        auto* label = new QLabel(text, startStatus_);
+        SetRole(label, "hint");
+        startStatusRow->addWidget(label);
+    }
+    statusBar()->addWidget(startStatus_);
     connect(&model_, &AppModel::message, this, [this](const QString& m) { statusBar()->showMessage(m, 5000); });
     connect(viewport_, &ViewportWindow::zoomChanged, this, [this](float z) { zoomLabel_->setText(QString("%1 %").arg(static_cast<int>(std::lround(z * 100)))); });
     connect(&model_, &AppModel::stateChanged, this, &MainWindow::updateCellLabels);
@@ -267,6 +278,7 @@ void MainWindow::saveProjectDialog(bool forceDialog) {
 
 void MainWindow::updatePage() {
     const bool project = model_.hasProject();
+    startStatus_->setVisible(!project);
     if (project) {
         pages_->setCurrentWidget(processingActive_ ? static_cast<QWidget*>(processing_) : workArea_);
         if (!workState_.isEmpty()) {

@@ -103,9 +103,18 @@ public:
         QString info;   // «результат готов · вчера 14:02», «3 пасса · сегодня 10:12», «не обработан», «файл не найден»
         bool exists = true;
         bool isProject = false;
+        // The start screen's card (mockup «1 · Стартовый экран»): «face — результат готов» over «1920×800 24 fps →
+        // 3840×1600 48 fps · вчера 14:02»; the size lines and the frame come from RecentPreviews.
+        QString state;     // «результат готов», «глубина и NR посчитаны»; empty when nothing was computed
+        QString progress;  // «2 из 5 стадий», «не обработан», «есть проект»; empty when the result is ready
+        QString when;      // «вчера 14:02»
+        QString video;     // the source video (its preview and size line); empty when it does not exist
+        QString result;    // the result video when it exists (its size line after «→», its frame as the preview)
     };
     std::vector<Recent> recents() const;  // newest first (QSettings recent/files, at most 10)
     QString readiness() const;            // the GPU, the driver and which DLSS features have their DLL
+    enum class Readiness { Ready, Partial, Software };  // every DLL in place / some missing / WARP
+    Readiness readinessLevel() const;
     bool dirty() const { return dirty_; }
     enum class CloseAction { Nothing, AutoSave, Ask };
     CloseAction closeAction() const;      // nothing to save | save into the project's file | ask (no file yet)

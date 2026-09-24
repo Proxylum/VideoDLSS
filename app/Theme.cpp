@@ -160,6 +160,23 @@ QFrame[role="card-dashed"] { background: @dim; border: 1px dashed @border; borde
 QFrame[role="dropzone"] { border: 1.5px dashed @accent; border-radius: 10px; background: #1a1d21; }
 QFrame[role="dropzone"]:hover { background: @card; }
 QWidget[role="bar"] { border-bottom: 1px solid @border; }
+
+/* the start screen (mockup «1 · Стартовый экран») */
+QLabel[role="section"] { font-size: 15px; font-weight: 600; }
+QLabel[role="text-13"] { font-size: 13px; }
+QLabel[role="hint-13"] { font-size: 13px; color: @muted; }
+QLabel[role="dropzone-title"] { font-size: 16px; font-weight: 500; }
+QLabel[role="dot-ok"], QLabel[role="dot-warn"], QLabel[role="dot-danger"] { min-width: 9px; max-width: 9px; min-height: 9px; max-height: 9px; border-radius: 4px; }
+QLabel[role="dot-ok"] { background: #5fbf7a; }
+QLabel[role="dot-warn"] { background: #e0a84f; }
+QLabel[role="dot-danger"] { background: #ff7a7a; }
+QFrame[role="recent"] { background: @card; border: 1px solid @border; border-radius: 6px; }
+QFrame[role="recent"]:hover { border-color: @control; background: #24272c; }
+QLabel[role="recent-title"] { font-size: 14px; font-weight: 500; }
+QLabel[role="recent-title-missing"] { font-size: 14px; font-weight: 500; color: @disabled; }
+QLabel[role="recent-meta"] { font-size: 12px; color: @muted; font-family: "Consolas", "Cascadia Mono", monospace; }
+QLabel[role="preview"] { background: @border; border-radius: 3px; }
+QScrollArea#recentsScroll, QScrollArea#recentsScroll > QWidget > QWidget { background: transparent; }
 )";
     css.replace("@accent-hover", kAccentHover)
         .replace("@accent-pressed", kAccentPressed)
@@ -216,14 +233,16 @@ void InstallWheelGuard(QApplication& app) {
     app.installEventFilter(guard);
 }
 
-QIcon ThemeIcon(Glyph glyph) {
+QColor ThemeAccent() { return QColor(kAccent); }
+
+QIcon ThemeIcon(Glyph glyph, const QColor& color) {
     QIcon icon;
-    for (int size : {16, 20, 24, 32, 48}) {
+    for (int size : {16, 20, 24, 32, 34, 48}) {
         QPixmap pm(size, size);
         pm.fill(Qt::transparent);
         QPainter p(&pm);
         p.setRenderHint(QPainter::Antialiasing);
-        const QColor ink(kText);
+        const QColor ink = color.isValid() ? color : QColor(kText);
         p.setPen(Qt::NoPen);
         p.setBrush(ink);
         const qreal s = size;
@@ -265,6 +284,29 @@ QIcon ThemeIcon(Glyph glyph) {
                 head.lineTo(cx - s * 0.12, cy + s * 0.02);
                 head.closeSubpath();
                 p.drawPath(head);
+                break;
+            }
+            case Glyph::Upload: {  // an arrow up out of a tray: the mockup's 24-unit stroke icon
+                QPen pen(ink, std::max(1.2, s * 0.07));
+                pen.setCapStyle(Qt::RoundCap);
+                pen.setJoinStyle(Qt::RoundJoin);
+                p.setPen(pen);
+                p.setBrush(Qt::NoBrush);
+                const qreal u = s / 24.0;
+                p.drawLine(QPointF(12 * u, 16 * u), QPointF(12 * u, 4 * u));
+                QPainterPath arrow;
+                arrow.moveTo(7 * u, 9 * u);
+                arrow.lineTo(12 * u, 4 * u);
+                arrow.lineTo(17 * u, 9 * u);
+                p.drawPath(arrow);
+                QPainterPath tray;
+                tray.moveTo(4 * u, 16 * u);
+                tray.lineTo(4 * u, 19 * u);
+                tray.quadTo(4 * u, 20 * u, 5 * u, 20 * u);
+                tray.lineTo(19 * u, 20 * u);
+                tray.quadTo(20 * u, 20 * u, 20 * u, 19 * u);
+                tray.lineTo(20 * u, 16 * u);
+                p.drawPath(tray);
                 break;
             }
         }

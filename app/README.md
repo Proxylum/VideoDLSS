@@ -18,6 +18,7 @@
 | `ResultBar` | the result line (TASK-0013): what the result video is and «Сохранить как…» / «Открыть папку» / «Экспорт пассов…» / «Другое видео» |
 | `Theme` | the look after the mockups (TASK-0017): Fusion + dark palette + one stylesheet; widgets pick variants through the `role` property (`SetRole`) |
 | `LogPanel` | spdlog sink |
+| `StartPage`, `RecentPreviews` | the start screen after the mockup «1 · Стартовый экран»: two centred columns — the drop zone, «Открыть видео…» / «Открыть проект…», the readiness card with a status dot; the recents on the right as cards with a 96×40 preview frame (decoded on a worker thread, PNG-cached by path, size and mtime), «face — результат готов» / «глубина и NR посчитаны» and «1920×800 24 fps → 3840×1600 48 fps · вчера»; the footer lives in the status bar |
 | `MainWindow` | docks, menus, hotkeys (1..9 sources, F fit, Ctrl+0 1:1, W wipe, Space play, ,/. step), PNG screenshot with cell labels; stage 9: start page / work area / processing page, QSettings, recents, «До | После» after a run, tray notification when the window is minimised or in the background |
 
 Build: `-DDLSSVID_BUILD_APP=ON` (default) with `QT_ROOT` pointing at `.../Qt/6.8.x/msvc2022_64`;

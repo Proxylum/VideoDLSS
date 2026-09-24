@@ -198,8 +198,10 @@ card (stored in the project; the bitrate is «Авто» — chosen from the res
 `core/io/EncodeDefaults` — or a preset in Mbit/s or a custom value, with the rough file size) and the pass versions on disk
 («Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»). The look follows the mockups of `docs/ux-guidelines.md`
 (`app/Theme`: dark palette, control sizes and paddings, the accent for the one primary action).
-Without a project the window shows the start page (stage 9): drop a video on it, «Открыть видео…» / «Открыть проект…»,
-the GPU / driver / DLL readiness line and the recent files with their state; the window remembers its size, the dock
+Without a project the window shows the start page (stage 9, laid out as the mockup «1 · Стартовый экран»): drop a video on it,
+«Открыть видео…» / «Открыть проект…», the GPU / driver / DLL readiness card and, on the right, the recent files as cards
+with a preview frame, their state («результат готов», «глубина и NR посчитаны») and «1920×800 24 fps → 3840×1600 48 fps ·
+вчера»; the window remembers its size, the dock
 layout and the dialog folders (QSettings), opens maximised the first time, brings a closed panel back from «Вид», marks
 unsaved changes with «*» in the title and saves the project next to the video on close. Stages are started from the project panel
 (`dlssvid depth|flow|upscale|nr` as a task with progress) and their passes appear in the viewport when finished; the
