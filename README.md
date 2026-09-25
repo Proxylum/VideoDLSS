@@ -5,7 +5,7 @@ Offline DLSS video pipeline for Windows + NVIDIA RTX: a video file goes through
 Rendering → DLSS Frame Generation → encode`, every intermediate **pass** (depth, motion
 vectors, masks, colour stages) can be exported, imported and inspected in a viewport.
 
-Version **0.2.0** ([CHANGELOG.md](CHANGELOG.md)): stages 0–9 are done — stage 9 is the operator UI
+Version **0.3.0** ([CHANGELOG.md](CHANGELOG.md)): stages 0–9 are done — stage 9 is the operator UI
 ([docs/plans/09-ui-ux.md](docs/plans/09-ui-ux.md): start page, project screen, processing page, «До | После», pass fingerprints
 and versions); release procedure in [docs/release.md](docs/release.md). Stage 8 — release (see [docs/plans/08-release.md](docs/plans/08-release.md); earlier:
 [00-skeleton](docs/plans/00-skeleton.md), [01-passes](docs/plans/01-passes.md), [02-depth](docs/plans/02-depth.md),
@@ -40,7 +40,58 @@ reports the warp-PSNR test; `dlssvid depth` (stage 2) gives `depth_raw` / `depth
 Depth Anything through TensorRT or the PyTorch worker, now with motion-compensated TAE (`--mv-dir`). Stage 1 gave
 passes as file sequences + `manifest.json` and the raw ↔ DLSS conventions ([docs/conventions.md](docs/conventions.md)).
 
+## Contents
+
+- [Quick start (binary package)](#quick-start-binary-package)
+- [Requirements](#requirements)
+- [Install](#install)
+- [NVIDIA runtimes](#nvidia-runtimes)
+- [Models](#models)
+- [Build from source](#build-from-source)
+- [Use](#use)
+- [Layout](#layout)
+- [Tests](#tests)
+- [Licences and third-party components](#licences-and-third-party-components)
+
+## Quick start (binary package)
+
+1. Download `dlss-video-<version>-win64.zip` from the releases page (or build it yourself: `scripts\package.cmd`,
+   [Build from source](#build-from-source)) and unzip it into a folder you can write to — not `Program Files`: models
+   and TensorRT engines are cached next to the executables (`models\cache\`, or wherever `DLSSVID_MODELS_DIR` points).
+2. Install the [NVIDIA runtimes](#nvidia-runtimes) you need: the CUDA 12 runtime and TensorRT 10.16 for the neural
+   stages (depth, motion vectors, Real-ESRGAN, RIFE), the DLSS DLLs in `bin\nvidia\` for DLSS Super Resolution,
+   Frame Generation and Neural Rendering.
+3. Create the Python environment ([Install → Python environment](#python-environment)): it exports the models to
+   ONNX on first use and runs the PyTorch workers (RealBasicVSR, the depth reference path).
+4. [Models](#models) download themselves on first use (`dlssvid models list` shows what is already there).
+5. Check the machine and go:
+
+```bat
+bin\dlssvid.exe info clip.mp4                         :: streams, GPU, NVENC encoders, TensorRT
+bin\dlssvid.exe nr --check                            :: Neural Rendering: driver >= 616.56, DLL, CreateFeature(18)
+bin\dlssvid.exe fg --check                            :: Frame Generation: DLL, MultiFrameCountMax
+bin\dlssvid-gui.exe                                   :: drop a video on the start page, «Обработать», «До | После»
+bin\dlssvid.exe process -i clip.mp4 -o result.mp4     :: depth -> flow -> upscale x2 -> nr -> fg x2 -> encode (+ audio)
+```
+
+Without an NVIDIA GPU the CLI and the viewport still work on the D3D12 software adapter (`--warp`) with the
+non-NVIDIA backends: NIS / bicubic upscale, the blend frame generator, the stub depth / NR backends.
+
 ## Requirements
+
+### To run
+
+| Component | Needed for | Notes |
+|---|---|---|
+| Windows 10/11 x64 | everything | the pipeline is D3D12 + CUDA, Windows only |
+| NVIDIA GPU | DLSS SR and NIS: RTX 20 and newer · DLSS Frame Generation: RTX 40 and newer (x3/x4 on RTX 50) · Neural Rendering: RTX 50 with the official DLL, RTX 20/30/40 with a patched copy · TensorRT models (depth, flow, Real-ESRGAN, RIFE): RTX 20 and newer | engines are built for your GPU on first use; other GPUs and the WARP software adapter run the non-NVIDIA backends only |
+| NVIDIA driver | ≥ 616.56 for Neural Rendering; any recent driver for the rest | `nvofapi64.dll` (Optical Flow) and NVDEC / NVENC come with the driver |
+| CUDA 12 runtime (`cudart64_12.dll`) | NVDEC frames on the GPU, TensorRT | from the CUDA Toolkit 12.x installer (on `PATH`) or bundled in the full package |
+| TensorRT 10.16 runtime (`nvinfer_10.dll`, `nvonnxparser_10.dll`, `nvinfer_plugin_10.dll`, builder resources) | depth (DA3, VDA), SEA-RAFT flow, Real-ESRGAN, RIFE | the pip package `tensorrt-cu12==10.16.1.11` in the Python environment is found by itself; or `DLSSVID_TENSORRT_DIR`; or `bin\tensorrt\` of the full package |
+| Python 3.12 + the venv of `models\export\requirements.txt` (PyTorch cu126) | ONNX export of every model on first use, `depth_worker` (DA3 / VDA in PyTorch), `sr_worker` (RealBasicVSR), `nr-patch` | found at `models\export\.venv\Scripts\python.exe` or `DLSSVID_PYTHON` |
+| Disk | models and engines: ~5 GB of ONNX plus TensorRT engines per GPU; passes: EXR sequences, GBs per minute of 4K | `DLSSVID_MODELS_DIR` moves the cache; the passes folder is chosen per project |
+
+### To build from source
 
 | Component | Version | Notes |
 |---|---|---|
@@ -48,20 +99,121 @@ passes as file sequences + `manifest.json` and the raw ↔ DLSS conventions ([do
 | Visual Studio 2022 or newer | MSVC 14.4x+, Windows SDK 10.0.22621+ | Desktop C++ workload (includes Ninja). Use the same VS instance that vcpkg picks (the newest one) — mixing toolsets breaks linking |
 | CMake | ≥ 3.28 | |
 | vcpkg | any 2026 checkout | `VCPKG_ROOT` must be set; manifest mode, baseline pinned in `vcpkg.json` |
-| CUDA Toolkit | 12.x | `CUDA_PATH_V12_4` (or pass `-DCUDAToolkit_ROOT`); optional — without it the build has no CUDA interop |
-| NVIDIA driver | ≥ 616.56 for NR (stage 6); any recent driver for stage 0 | |
-| Python | 3.12 | `models/export/.venv` with PyTorch cu126 + `tensorrt-cu12` (see [models/export/README.md](models/export/README.md)); used by `depth_worker` and by the ONNX export the TensorRT backend triggers on first use |
-| TensorRT | 10.16 headers (`TENSORRT_ROOT`, e.g. a checkout of NVIDIA/TensorRT tag v10.16) | DLLs come from the `tensorrt-cu12` pip package in the venv and are loaded at runtime — no import libraries |
-| Optical Flow SDK | headers (`NV_OPTICAL_FLOW_SDK_ROOT`, a checkout of NVIDIA/NVIDIAOpticalFlowSDK) | `nvofapi64.dll` ships with the driver (API 5.0 on 591.86); the public headers are API 2.0 and stay compatible |
+| CUDA Toolkit | 12.x | `CUDA_PATH_V12_4` (or pass `-DCUDAToolkit_ROOT`); optional — without it the build has no CUDA interop and no TensorRT backends |
+| TensorRT | 10.16 headers (`TENSORRT_ROOT`, e.g. a checkout of [NVIDIA/TensorRT](https://github.com/NVIDIA/TensorRT) tag v10.16) | DLLs come from the `tensorrt-cu12` pip package in the venv and are loaded at runtime — no import libraries |
+| Optical Flow SDK | headers (`NV_OPTICAL_FLOW_SDK_ROOT`, a checkout of [NVIDIA/NVIDIAOpticalFlowSDK](https://github.com/NVIDIA/NVIDIAOpticalFlowSDK)) | `nvofapi64.dll` ships with the driver (API 5.0); the public headers are API 2.0 and stay compatible |
+| DLSS SDK | clone of [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) (`DLSS_SDK_ROOT`): NGX headers, `nvsdk_ngx_d.lib`, `nvngx_dlss.dll` | DLSS SR, NR and FG (`DLSSVID_WITH_DLSS`, default ON when found). The build copies `nvngx_dlss.dll` / `nvngx_dlssg.dll` into `build\<preset>\bin\nvidia\` for development |
 | Qt | 6.8 (msvc2022_64), `QT_ROOT` = `.../Qt/6.8.x/msvc2022_64` | GUI only (`DLSSVID_BUILD_APP`, default ON; skipped with a warning when Qt is not found). `windeployqt` copies the runtime next to the executables |
 | DXC | vcpkg `directx-dxc` (automatic) | the viewport shaders are compiled at build time into headers (SM 6.0, runs on WARP) |
-| DLSS SDK | clone of [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) (`DLSS_SDK_ROOT`): NGX headers, `nvsdk_ngx_d.lib`, `nvngx_dlss.dll` | stage 5 `--backend dlss`; optional (`DLSSVID_WITH_DLSS`). `nvngx_dlss.dll` goes to `bin/nvidia/` next to the executables (the build copies it from the SDK for development) |
+| Python | 3.12 | the same venv as above (`models/export/README.md`); also used by the tests that need numpy |
 
-NVIDIA SDKs (DLSS/NGX, Streamline, RTX Video, Optical Flow) and Qt are needed from stage 4
-onwards — see [docs/dll-setup.md](docs/dll-setup.md). No NVIDIA binaries or model weights are
-committed to this repository.
+No NVIDIA binaries or model weights are committed to this repository; the environment variables are listed in
+[docs/dll-setup.md](docs/dll-setup.md).
 
-## Build
+## Install
+
+### Binary package
+
+`dlss-video-<version>-win64.zip` (what CI builds, [docs/release.md](docs/release.md)) unpacks to:
+
+```
+dlss-video-<version>-win64/
+  bin/                  dlssvid.exe, dlssvid-gui.exe, dlssvid_golden_tests.exe, the vcpkg DLLs (FFmpeg, OpenEXR, PNG, TIFF, spdlog),
+                        Qt 6 (Qt6*.dll, platforms/, imageformats/, ...), dxcompiler.dll, dxil.dll, nvngx.dll_dlssvid.dll (the NR forwarder)
+  bin/nvidia/           README.md — your NVIDIA DLLs go here (nvngx_dlss.dll, nvngx_dlssg.dll, nvngx_dlssnr.dll)
+  models/registry.json  the model registry; models/export/ — the ONNX export scripts and requirements.txt (make the venv here)
+  depth_worker/         PyTorch depth backends (DA3, VDA) behind a JSON-lines protocol
+  sr_worker/            PyTorch video super-resolution (RealBasicVSR)
+  tests/golden/         data of the golden tests (expected.json, ref/) — run them on the installed copy
+  docs/, README.md, CHANGELOG.md
+```
+
+Not inside, on purpose: NVIDIA binaries (`nvngx_*.dll`, TensorRT, cudart), model weights and ONNX files, TensorRT
+engines — see the next two sections. `scripts\package.cmd full` builds a self-contained package (TensorRT runtime,
+`cudart64_12.dll`, the ONNX models: several GB) for machines without CUDA / TensorRT / Python; it is not published.
+
+1. Unzip into a writable folder (models and engines are cached in `models\cache\` next to `registry.json`; set
+   `DLSSVID_MODELS_DIR` to keep them elsewhere). Paths longer than 260 characters are fine (`\\?\`).
+2. [NVIDIA runtimes](#nvidia-runtimes): the CUDA 12 runtime and TensorRT on `PATH` / in the venv, the DLSS DLLs in
+   `bin\nvidia\`.
+3. The [Python environment](#python-environment).
+4. `bin\dlssvid.exe info clip.mp4` (streams, GPU, encoders, TensorRT), `bin\dlssvid.exe nr --check`, `bin\dlssvid.exe fg --check`.
+5. Optional: the golden tests against the installed copy ([docs/release.md](docs/release.md)):
+
+```bat
+set DLSSVID_CLI=C:\dlss-video\bin\dlssvid.exe
+set DLSSVID_GOLDEN_DIR=C:\dlss-video\tests\golden
+C:\dlss-video\bin\dlssvid_golden_tests.exe "[golden]~[gpu]"   :: deterministic part (WARP); drop the filter for the GPU backends
+```
+
+### Python environment
+
+One virtual environment serves the ONNX export, `depth_worker`, `sr_worker` and `nr-patch`. Make it inside
+`models\export\` (the executables look there first; `DLSSVID_PYTHON` overrides):
+
+```bat
+cd models\export
+python -m venv .venv
+.venv\Scripts\pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+.venv\Scripts\pip install -r requirements.txt
+```
+
+`requirements.txt` pins `tensorrt-cu12==10.16.1.11`, so the TensorRT runtime DLLs land in the venv and the executables
+find them there. Two depth models need their upstream code next to the venv: DA3 —
+`pip install --no-deps -e <clone of ByteDance-Seed/Depth-Anything-3>`, VDA — a plain checkout of
+`DepthAnything/Video-Depth-Anything` in `VDA_REPO` ([models/export/README.md](models/export/README.md)).
+
+## NVIDIA runtimes
+
+The application never redistributes NVIDIA binaries; every file below comes from NVIDIA under its own licence
+(the DLSS SDK EULA for the SDK DLLs, the CUDA and TensorRT EULAs for the runtimes). Details and troubleshooting:
+[docs/dll-setup.md](docs/dll-setup.md).
+
+| Component | Where to get it | Where it goes | Used by |
+|---|---|---|---|
+| `cudart64_12.dll` (CUDA 12 runtime) | [CUDA Toolkit 12.x](https://developer.nvidia.com/cuda-downloads) — the installer puts it on `PATH` | `PATH`, or `bin\` (the full package bundles it) | NVDEC frames staying on the GPU, TensorRT |
+| TensorRT 10.16: `nvinfer_10.dll`, `nvonnxparser_10.dll`, `nvinfer_plugin_10.dll`, `nvinfer_builder_resource_*.dll` | `pip install tensorrt-cu12==10.16.1.11` (part of `requirements.txt`) or the [TensorRT](https://developer.nvidia.com/tensorrt) zip | the venv (found automatically), or `DLSSVID_TENSORRT_DIR`, or `bin\tensorrt\` | depth (`depth --backend da3|vda`), SEA-RAFT (`flow --backend searaft`), Real-ESRGAN (`upscale --backend trt`), RIFE (`fg --backend rife`) |
+| `nvngx_dlss.dll` | [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) → `lib/Windows_x86_64/rel/` | `bin\nvidia\` | DLSS Super Resolution (`upscale --backend dlss`, the default) |
+| `nvngx_dlssg.dll` | the same DLSS SDK folder | `bin\nvidia\` | DLSS Frame Generation (`fg`, RTX 40 and newer) |
+| `nvngx_dlssnr.dll` | your own copy from a driver or game with DLSS 5 — RTX 50: as is; RTX 20/30/40: patched on your machine with `dlssvid nr-patch` ([dlssnr-patcher](https://github.com/dev-camo/dlssnr-patcher) + the `ptxas` / `fatbinary` / `cuobjdump` tools of CUDA Toolkit 13.3) | `bin\nvidia\` (the patch leaves a sidecar `nvngx_dlssnr.dll.patch.json`) | Neural Rendering (`nr`; the GUI has a «Пропатчить DLL…» button) |
+| `nvofapi64.dll` | ships with the driver | nothing to do | Optical Flow Accelerator (`flow --backend ofa`) |
+| NVDEC / NVENC | ship with the driver | nothing to do | `--hwaccel cuda` decoding, `h264_nvenc` / `hevc_nvenc` encoding |
+
+`DLSSVID_NVIDIA_DLL_DIR` or `--dll-dir` points at another folder of DLSS DLLs; `bin\dlssvid.exe nr --check` and
+`fg --check` print which file was found, its SHA-256 and whether the feature can be created on this GPU / driver.
+
+## Models
+
+Weights are not in the repository. [models/registry.json](models/registry.json) lists every model with its stage,
+source, licence, download location and parameters; the files land in `models\cache\` (git-ignored;
+`DLSSVID_MODELS_DIR` moves the whole folder).
+
+```bat
+bin\dlssvid.exe models list                            :: what the registry knows and what is already cached
+bin\dlssvid.exe models fetch realesrgan-x2plus         :: models with a plain download URL (Real-ESRGAN): download + sha256 check
+models\export\.venv\Scripts\python models\export\fetch.py da3metric-large sea-raft-spring-m   :: HuggingFace models (needs the venv)
+models\export\.venv\Scripts\python models\export\fetch.py --all
+```
+
+Nothing has to be fetched in advance: the first run of a stage downloads its model, exports the ONNX for the input
+geometry (`models\export\export_*.py`, through the venv) and builds the TensorRT engine for your GPU — DA3 ≈ 2 min,
+VDA ≈ 4 min, SEA-RAFT ≈ 2.5 min, Real-ESRGAN ≈ 1 min per tile size; the engines are cached next to the ONNX and rebuilt
+only for another GPU or TensorRT version. RealBasicVSR is downloaded by `sr_worker` on first use.
+
+| Model (registry id) | Stage, backend | Source | Licence |
+|---|---|---|---|
+| Depth Anything 3 metric / mono large (`da3metric-large`, `da3mono-large`) | depth, `da3` | HuggingFace `depth-anything/DA3METRIC-LARGE`, `DA3MONO-LARGE` | Apache-2.0 |
+| Metric Video Depth Anything small (`metric-vda-small`, `vda-small`) | depth, `vda` | HuggingFace `depth-anything/Metric-Video-Depth-Anything-Small` | Apache-2.0 |
+| Metric Video Depth Anything large (`metric-vda-large`) | depth, `vda` (optional) | HuggingFace | CC-BY-NC-4.0 — research only |
+| SEA-RAFT Spring-M / S (`sea-raft-spring-m`, `-s`) | flow, `searaft` | HuggingFace mirror of the official weights | BSD-3-Clause code; confirm the weights' terms before commercial use |
+| RIFE 4.9 / 4.8 / 4.7 (`rife49`, …) | frame generation, `rife` (the baseline) | ONNX export by yuvraj108c (ComfyUI-Rife-Tensorrt) | MIT |
+| Real-ESRGAN x2plus, x4plus, general-x4v3 (`realesrgan-x2plus`, …) | upscale, `trt` | GitHub releases of xinntao/Real-ESRGAN, sha256-pinned | BSD-3-Clause |
+| RealBasicVSR (`realbasicvsr`) | upscale, `worker` (temporally consistent) | HuggingFace mirror `akhaliq/RealBasicVSR_x4` of the official checkpoint, sha256-pinned | Apache-2.0 |
+
+DLSS Super Resolution, Frame Generation and Neural Rendering need no model files: their networks live inside the
+NVIDIA DLLs above.
+
+## Build from source
 
 ```bat
 :: Developer Command Prompt for VS 2022 (or call vcvars64.bat), with VCPKG_ROOT set
@@ -72,7 +224,11 @@ ctest --preset release
 
 `scripts\build.cmd [debug|release]` does the three steps and sets up the MSVC environment itself.
 The first configure builds FFmpeg and friends through vcpkg (10–30 minutes); results are cached
-in `%LOCALAPPDATA%\vcpkg\archives`.
+in `%LOCALAPPDATA%\vcpkg\archives`. The executables land in `build\release\bin\` with the Qt runtime deployed
+next to them; put the DLSS DLLs into `build\release\bin\nvidia\` (the build copies `nvngx_dlss.dll` and
+`nvngx_dlssg.dll` there when `DLSS_SDK_ROOT` is set). The package: `scripts\package.cmd` → `build\release\dlss-video-<version>-win64.zip`
+(and an NSIS installer when `makensis` is on `PATH`); `scripts\package.cmd full` adds the TensorRT runtime, `cudart64_12.dll`
+and the ONNX models from `models\cache\`. Release steps: [docs/release.md](docs/release.md); CI: [docs/ci.md](docs/ci.md).
 
 ## Use
 
@@ -250,5 +406,17 @@ fg_worker/  README only: why there is no worker executable (DLSS-G runs through 
 bin/nvidia/ user-supplied NVIDIA DLLs (git-ignored)
 ```
 
-Tests: `ctest --preset release` (or run `dlssvid_unit_tests` / `dlssvid_integration_tests` directly;
+## Tests
+
+`ctest --preset release` (or run `dlssvid_unit_tests` / `dlssvid_integration_tests` directly;
 Catch2 tags: `[gpu]`, `[cuda]`, `[integration]`, `[cli]`, `[nvdec]`, `[passes]`, `[formats]`, `[convert]`). The NPZ ↔ numpy test needs `python` with numpy on PATH and skips otherwise. GPU-specific tests skip themselves when no NVIDIA GPU is present.
+
+## Licences and third-party components
+
+- The models are downloaded from their authors' releases and mirrors under their own licences (the table in
+  [Models](#models); `models/registry.json` is the source of truth) — check them before commercial use.
+- NVIDIA components (DLSS SDK DLLs, `nvngx_dlssnr.dll`, TensorRT, CUDA, the driver's NVDEC / NVENC / Optical Flow)
+  are not part of this repository or its packages and are used under NVIDIA's licences.
+- Vendored: [NVIDIA Image Scaling 1.0.3](third_party/nis/) (MIT). Build-time dependencies come from vcpkg
+  (FFmpeg, OpenEXR, libpng, libtiff, spdlog, nlohmann-json, CLI11, Catch2, DirectX Shader Compiler) and Qt 6 (LGPL 3,
+  dynamically linked, redeployed as is).
