@@ -149,7 +149,7 @@ Smoke-клип testsrc2 1280×720 (движущиеся элементы + ст�
 статичная камера, за окном пролетает дирижабль), `pan` (ToS, проезд камеры вдоль канала, параллакс, проезжающая машина),
 `face` (ToS, три живых лица средним планом, диалог), `foliage_hair` (Big Buck Bunny 1080p **60 fps**: трава, мох, шерсть
 кролика), `lowbitrate_720` (BBB 720p 1 Мбит/с как опубликован test-videos.co.uk). Все замеры — `python tests/data/bench_clips.py`
-(2026-09-20, RTX 4070 Ti SUPER — Ada, драйвер 616.92, TensorRT 10.16, DLSS SDK 310.9.1), результаты — `build/release/clipbench/results.json`.
+(2026-09-20, RTX 4070 Ti SUPER — Ada, драйвер 616.92, TensorRT 10.16, DLSS SDK 310.9.1), результаты — `results.json` в папке бенчмарка (с 2026-09-25 по умолчанию `Output/results/bench/` рабочего пространства, раньше `build/release/clipbench/`).
 мс/кадр — wall-время команды CLI на кадр, включая декодирование и запись пассов (EXR/NPZ), без сборки TensorRT-движков.
 
 ### Векторы движения (этап 3): OFA vs SEA-RAFT, warp-PSNR
