@@ -17,13 +17,14 @@ CPack собирает **ZIP** (переносимая раскладка) вс�
 ## Что внутри
 
 ```
-dlss-video/
+dlss-video-<версия>-win64/
   bin/                  dlssvid.exe, dlssvid-gui.exe, dlssvid_golden_tests.exe, DLL vcpkg (FFmpeg, OpenEXR, PNG, TIFF, spdlog),
                         Qt 6 (windeployqt: Qt6*.dll, platforms/, imageformats/, ...), dxcompiler.dll, dxil.dll,
                         nvngx.dll_dlssvid.dll (форвардер NR)
   bin/nvidia/           README.md — сюда пользователь кладёт nvngx_dlss.dll, nvngx_dlssg.dll, nvngx_dlssnr.dll (docs/dll-setup.md)
   models/registry.json  реестр моделей; models/export/ — скрипты экспорта ONNX (python, requirements.txt)
   depth_worker/         python-воркер глубины (ICDepth / PyTorch)
+  sr_worker/            python-воркер видео-апскейла (RealBasicVSR)
   tests/golden/         данные golden-тестов (expected.json, ref/)
   docs/, README.md
 ```
