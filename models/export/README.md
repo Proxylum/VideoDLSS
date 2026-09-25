@@ -7,8 +7,8 @@ cd models\export
 python -m venv .venv
 .venv\Scripts\pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 .venv\Scripts\pip install -r requirements.txt
-.venv\Scripts\pip install --no-deps -e D:\SDK\models\Depth-Anything-3     :: DA3 code (Apache-2.0)
-set VDA_REPO=D:\SDK\models\Video-Depth-Anything                            :: VDA code (Apache-2.0), plain checkout
+.venv\Scripts\pip install --no-deps -e <SDK>\models\Depth-Anything-3     :: DA3 code (Apache-2.0)
+set VDA_REPO=<SDK>\models\Video-Depth-Anything                            :: VDA code (Apache-2.0), plain checkout
 ```
 
 Scripts:

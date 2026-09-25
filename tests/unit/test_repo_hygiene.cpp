@@ -72,3 +72,20 @@ TEST_CASE("Docs link only to public hosts", "[hygiene]") {
     }
     CHECK(links > 0);
 }
+
+TEST_CASE("Docs carry no developer-machine paths", "[hygiene]") {
+    // SDK checkouts and user profiles of the development machine are written with placeholders (<SDK>, %LOCALAPPDATA%).
+    const std::regex machine(R"re([A-Za-z]:[\\/](SDK|Users)[\\/][^\s`'")]*)re");
+    std::string offenders;
+    int count = 0;
+    for (const auto& file : DocFiles()) {
+        if (!std::filesystem::exists(file)) continue;
+        const auto text = ReadAll(file);
+        for (auto it = std::sregex_iterator(text.begin(), text.end(), machine); it != std::sregex_iterator(); ++it) {
+            ++count;
+            offenders += file.lexically_relative(kRoot).generic_string() + ": " + it->str() + "\n";
+        }
+    }
+    INFO(offenders);
+    CHECK(count == 0);
+}

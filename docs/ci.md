@@ -19,7 +19,7 @@ scripts\package.cmd      :: сборка и cpack --preset release -> build\rele
 | Переменная | Значение | Зачем |
 |---|---|---|
 | `VSLANG` | `1033` | английские сообщения MSVC → ninja видит зависимости от заголовков (инцидент этапа 8) |
-| `VCPKG_ROOT`, `TENSORRT_ROOT`, `NV_OPTICAL_FLOW_SDK_ROOT`, `QT_ROOT`, `DLSS_SDK_ROOT` | `C:\vcpkg`, `D:\SDK\...` | configure (`docs/dll-setup.md`) |
+| `VCPKG_ROOT`, `TENSORRT_ROOT`, `NV_OPTICAL_FLOW_SDK_ROOT`, `QT_ROOT`, `DLSS_SDK_ROOT` | `C:\vcpkg`, `<SDK>\...` | configure (`docs/dll-setup.md`) |
 | `DLSSVID_NVIDIA_DLL_DIR` | `...\dlss-video\build\release\bin\nvidia` дерева разработчика | `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `nvngx_dlssnr.dll` — иначе GPU-тесты SR/FG/NR были бы SKIP |
 | `DLSSVID_MODELS_DIR` | `...\dlss-video\models` дерева разработчика | `registry.json` + `cache/` с весами, ONNX и TensorRT-движками — CI не качает модели и не собирает движки заново |
 | `DLSSVID_PYTHON` | `...\models\export\.venv\Scripts\python.exe` | воркеры/экспорт, если тесту всё же понадобится Python |

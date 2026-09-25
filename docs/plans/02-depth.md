@@ -14,7 +14,7 @@
 | Video Depth Anything | код Apache-2.0; `Metric-Video-Depth-Anything-{S,B,L}`, `Video-Depth-Anything-{S,L}`; окно 32 кадра, temporal-модуль | **Fallback / быстрый: `Metric-VDA-Small`** по умолчанию (лицензия и VRAM 16 ГБ), Large — опционально. ONNX-экспорт temporal-модели (окно 32×518) — пробуем; при неудаче VDA идёт через PyTorch-воркер, что фиксируется как отклонение от ТЗ |
 | ICDepth (arXiv 2607.01677) | статья есть, **публичного кода и весов нет** (GitHub-поиск пуст) | Бэкенд `icdepth` в воркере объявлен, но помечен `unavailable`; режим «Повышенное качество» в v1 **заблокирован до выхода кода**. Воркер и протокол реализуются и проверяются на reference-путях DA3/VDA (PyTorch) |
 | StableDPT | веса не подтверждены | вне v1 (ТЗ допускает) |
-| TensorRT | pip `tensorrt-cu12==10.16.1.11` (DLL) + заголовки OSS `NVIDIA/TensorRT` тег v10.16 (`D:\SDK\TensorRT\include`) | DLL грузятся в рантайме, import-библиотеки не нужны; ONNX-парсер — `nvonnxparser_10.dll` из того же пакета |
+| TensorRT | pip `tensorrt-cu12==10.16.1.11` (DLL) + заголовки OSS `NVIDIA/TensorRT` тег v10.16 (`<SDK>\TensorRT\include`) | DLL грузятся в рантайме, import-библиотеки не нужны; ONNX-парсер — `nvonnxparser_10.dll` из того же пакета |
 | PyTorch | 2.14+cu126 (драйвер 591.86 ≥ 560 — ок) | venv `models/export/.venv`; общий и для `depth_worker` |
 | Драйвер / VRAM | 591.86, 16 ГБ | VDA-L батч 32×518 ≈ 24 ГБ → по умолчанию Small; вход даунскейлится до ≤ 1080p (ТЗ §2) |
 
