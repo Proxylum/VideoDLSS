@@ -12,7 +12,8 @@ Sections (docs/benchmarks.md):
              (depth + MV estimated on the half-resolution input), PSNR Y / RGB, SSIM Y (stage 5 methodology)
   fg       — clips at >= 48 fps only: every other frame dropped, x2 generation (dlssg / rife / blend, with guides),
              generated frames compared with the dropped ones (stage 7 methodology)
-Results: <out>/results.json and the tables on stdout. Needs an NVIDIA GPU (OFA, TensorRT, DLSS) and ffmpeg on PATH.
+Results: <out>/results.json and the tables on stdout; <out> defaults to the workspace's Output/results/bench (else
+build/release/clipbench). Needs an NVIDIA GPU (OFA, TensorRT, DLSS) and ffmpeg on PATH.
 """
 from __future__ import annotations
 
@@ -30,6 +31,15 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 CLIPS = HERE / "clips"
+
+
+def default_out() -> Path:
+    """Results are deliverables: in the agent workspace (the project is Project/dlss-video next to Output/) they go to
+    Output/results/bench, outside it (CI, a bare clone) to build/release/clipbench."""
+    workspace = ROOT.parent.parent
+    if (workspace / "Output").is_dir() and ROOT.parent.name == "Project":
+        return workspace / "Output" / "results" / "bench"
+    return ROOT / "build" / "release" / "clipbench"
 
 
 def run(cmd: list[str], log: Path) -> str:
@@ -71,7 +81,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cli", default=str(ROOT / "build/release/bin/dlssvid.exe"))
     ap.add_argument("--clips", default=str(CLIPS))
-    ap.add_argument("--out", default=str(ROOT / "build/release/clipbench"))
+    ap.add_argument("--out", default=str(default_out()), help="results folder (default: the workspace's Output/results/bench when the project lives in one, else build/release/clipbench)")
     ap.add_argument("--sections", default="flow,depth,upscale,fg")
     ap.add_argument("--only", action="append", default=[])
     ap.add_argument("--frames", type=int, default=-1, help="frames per clip (default: all)")

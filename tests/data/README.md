@@ -45,4 +45,5 @@ audio only to exercise the pipeline's audio copy; they are test fixtures, not a 
 `python tests/data/bench_clips.py` runs the stage 2 / 3 / 5 / 7 measurements on every clip
 (OFA vs SEA-RAFT warp-PSNR, DA3 vs VDA scale and warped TAE, upscale A/B, frame-generation ground truth on the
 60 fps clip) and prints the markdown tables that live in `docs/benchmarks.md`; results also go to
-`build/release/clipbench/results.json`. It needs an NVIDIA GPU and the models in `models/cache/`.
+`<out>/results.json` — `Output/results/bench/` of the workspace when the project lives in one, else `build/release/clipbench/`
+(`--out` overrides). It needs an NVIDIA GPU and the models in `models/cache/`.

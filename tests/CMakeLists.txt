@@ -100,6 +100,9 @@ if(DLSSVID_BUILD_APP)
     DLSSVID_QT_PLUGINS="${DLSSVID_QT_BIN}/../plugins"
     DLSSVID_CLI_PATH="$<TARGET_FILE:dlssvid>")
   add_dependencies(dlssvid_app_tests dlssvid)
+  if(TARGET dlssvid-gui)  # both deploy Qt into bin/ in POST_BUILD: one after the other, or two windeployqt race (CI 2026-09-25)
+    add_dependencies(dlssvid_app_tests dlssvid-gui)
+  endif()
   dlssvid_deploy_qt(dlssvid_app_tests)
   # windeployqt deploys only the windows platform plugin: copy the offscreen one next to the executable
   add_custom_command(TARGET dlssvid_app_tests POST_BUILD
