@@ -26,7 +26,7 @@ dlss-video-<версия>-win64/
   depth_worker/         python-воркер глубины (ICDepth / PyTorch)
   sr_worker/            python-воркер видео-апскейла (RealBasicVSR)
   tests/golden/         данные golden-тестов (expected.json, ref/)
-  docs/, README.md
+  docs/, README.md, CHANGELOG.md, LICENSE
 ```
 
 Не входит (и не должно входить): бинарники NVIDIA (`nvngx_*.dll` из SDK, драйвера или игр), исходные веса моделей
@@ -88,7 +88,7 @@ C:\dlss-video\bin\dlssvid_golden_tests.exe "[golden]~[gpu]"   :: только д
    копии (`DLSSVID_CLI`, `DLSSVID_GOLDEN_DIR`; для `[gpu]`-части положить DLL NVIDIA в её `bin\nvidia`).
 3. MR → CI → слияние в `main` → аннотированный тег `vX.Y.Z` на merge-коммите → push тега: пайплайн тега собирает
    `dlss-video-X.Y.Z-win64.zip` (job `package`, артефакт хранится месяц) → GitLab Release на теге (API `releases`) с разделом
-   CHANGELOG и ссылкой на артефакт `https://git.krem.digital/ai/video-dlss/-/jobs/artifacts/vX.Y.Z/download?job=package`.
+   CHANGELOG и ссылкой на артефакт `https://<хост GitLab>/<группа>/<проект>/-/jobs/artifacts/vX.Y.Z/download?job=package`.
 4. Полный пакет (несколько ГБ) в CI не собирается — собирается на машине разработчика и выкладывается вручную.
 
 ## Полный прогон

@@ -11,10 +11,10 @@ scripts\package.cmd      :: сборка и cpack --preset release -> build\rele
 
 ## Раннер
 
-Раннер стоит на машине разработчика (RTX 4070 Ti SUPER) в `D:\GitLab-Runner` и зарегистрирован в проекте
-`ai/video-dlss` как project runner #11 с тегами `windows`, `rtx` (shell executor, Windows PowerShell 5.1).
-Всё, что ему нужно, задано в `D:\GitLab-Runner\config.toml` (`[[runners]] environment = [...]`), потому что в
-системном окружении этих переменных нет:
+Раннер стоит на машине с RTX (в примерах ниже — `D:\GitLab-Runner`, RTX 4070 Ti SUPER) и зарегистрирован в проекте
+как project runner с тегами `windows`, `rtx` (shell executor, Windows PowerShell 5.1). Всё, что ему нужно, задано
+в `D:\GitLab-Runner\config.toml` (`[[runners]] environment = [...]`), потому что в системном окружении этих
+переменных нет:
 
 | Переменная | Значение | Зачем |
 |---|---|---|
@@ -27,7 +27,7 @@ scripts\package.cmd      :: сборка и cpack --preset release -> build\rele
 
 Git на машине раннера должен уметь длинные пути (`git config --global core.longPaths true` — сделано; `.gitlab-ci.yml`
 дополнительно задаёт то же через `GIT_CONFIG_KEY_0/VALUE_0`): деревья сборки vcpkg длиннее MAX_PATH, и без этого
-`git clean` между job падает. Каталог сборки — `D:\GitLab-Runner\builds\<runner>\0\ai\video-dlss`: клон с `GIT_DEPTH=50`, перед каждым job
+`git clean` между job падает. Каталог сборки — `D:\GitLab-Runner\builds\<runner>\0\<группа>\<проект>`: клон с `GIT_DEPTH=50`, перед каждым job
 `git clean -ffdx` (значение `GIT_CLEAN_FLAGS` по умолчанию) удаляет и игнорируемые файлы, то есть `build/` —
 каждый job собирает проект с нуля (vcpkg восстанавливает пакеты из бинарного кэша пользователя). Это намеренно:
 чистая сборка ловит устаревшие объекты и пропущенные зависимости.
@@ -37,7 +37,7 @@ Git на машине раннера должен уметь длинные пу
 обновлятор NVIDIA `nvngx_update.exe -api update -feature …` (OTA), он наследует рабочую папку тестового процесса и живёт
 ещё до минуты после ctest. С рабочей папкой по умолчанию (`build/release/tests`) следующий job (`package` на `main`)
 не мог удалить её при `git clean` — «failed to remove build/release/tests: Permission denied», job падал ещё до
-скрипта (пайплайны 5881, 5886, 5892 от 2026-09-22; тот же симптом дважды вручную чинился во время MR D). Тесты
+скрипта (три пайплайна подряд 2026-09-22; тот же симптом дважды вручную чинился во время MR D). Тесты
 работают только с абсолютными путями (`DLSSVID_TEST_TMP`, `DLSSVID_CLI_PATH`, `DLSSVID_GOLDEN_DIR`), поэтому папка не
 важна. Отключить OTA можно только машинно (реестр `HKLM\SOFTWARE\NVIDIA Corporation\Global\NGXCore\EnableOTA`), в
 приложении такого переключателя у NGX нет.
@@ -58,8 +58,9 @@ D:\GitLab-Runner\gitlab-runner.exe run --config D:\GitLab-Runner\config.toml --w
 `powershell -ExecutionPolicy Bypass -File D:\GitLab-Runner\start-runner.ps1`. Служба (`gitlab-runner install`) не
 использована: нужны права администратора, а служба от `LocalSystem` не увидела бы кэш vcpkg и venv пользователя.
 
-Полное удаление раннера с машины (задача, процесс, регистрация в GitLab, файлы) описано в рабочем пространстве
-агента: `Output/gitlab-runner-removal.md`.
+Полное удаление раннера с машины: завершить процесс `gitlab-runner.exe`, удалить задачу планировщика,
+`D:\GitLab-Runner\gitlab-runner.exe unregister --config D:\GitLab-Runner\config.toml --all-runners` (снимает
+регистрацию в GitLab), удалить папку `D:\GitLab-Runner`.
 
 Проверка: `D:\GitLab-Runner\gitlab-runner.exe verify --config D:\GitLab-Runner\config.toml`; в GitLab —
 Settings → CI/CD → Runners (зелёная точка «online»).
@@ -68,8 +69,8 @@ Settings → CI/CD → Runners (зелёная точка «online»).
 
 1. Токен раннера: Settings → CI/CD → Runners → New project runner (теги `windows`, `rtx`) — или через API с
    personal access token со scope `api`: `POST /api/v4/user/runners` с `runner_type=project_type`,
-   `project_id=153`, `tag_list=windows,rtx`, `locked=true` (ответ содержит `token`).
-2. `gitlab-runner.exe register --non-interactive --url https://git.krem.digital --token <glrt-…> --executor shell
+   `project_id=<id проекта>`, `tag_list=windows,rtx`, `locked=true` (ответ содержит `token`).
+2. `gitlab-runner.exe register --non-interactive --url https://<хост GitLab> --token <glrt-…> --executor shell
    --shell powershell --builds-dir D:\GitLab-Runner\builds --cache-dir D:\GitLab-Runner\cache --config D:\GitLab-Runner\config.toml`.
 3. Добавить в `config.toml` строку `environment = [...]` из таблицы выше (пути под свою машину) и запустить.
 

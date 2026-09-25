@@ -125,7 +125,7 @@ dlss-video-<version>-win64/
   depth_worker/         PyTorch depth backends (DA3, VDA) behind a JSON-lines protocol
   sr_worker/            PyTorch video super-resolution (RealBasicVSR)
   tests/golden/         data of the golden tests (expected.json, ref/) — run them on the installed copy
-  docs/, README.md, CHANGELOG.md
+  docs/, README.md, CHANGELOG.md, LICENSE
 ```
 
 Not inside, on purpose: NVIDIA binaries (`nvngx_*.dll`, TensorRT, cudart), model weights and ONNX files, TensorRT
@@ -413,6 +413,8 @@ Catch2 tags: `[gpu]`, `[cuda]`, `[integration]`, `[cli]`, `[nvdec]`, `[passes]`,
 
 ## Licences and third-party components
 
+- This project is released under the MIT License ([LICENSE](LICENSE)); the package ships the file next to
+  README and CHANGELOG.
 - The models are downloaded from their authors' releases and mirrors under their own licences (the table in
   [Models](#models); `models/registry.json` is the source of truth) — check them before commercial use.
 - NVIDIA components (DLSS SDK DLLs, `nvngx_dlssnr.dll`, TensorRT, CUDA, the driver's NVDEC / NVENC / Optical Flow)
