@@ -293,7 +293,7 @@ Neural Rendering (stage 6): `color_nr` from `color_sr` (or the video) with `dept
 
 ```bat
 dlssvid nr --check                                                                    :: GPU, driver (>= 616.56), DLL + SHA-256, CreateFeature(18)
-dlssvid nr-patch --input C:\dlls\nvngx_dlssnr.dll --patcher D:\SDK\dlssnr-patcher --cuda-bin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
+dlssvid nr-patch --input C:\dlls\nvngx_dlssnr.dll --patcher <SDK>\dlssnr-patcher --cuda-bin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
 dlssvid nr -i input.mp4 -o passes                                                     :: color_sr + guides + masks under passes\ are picked up
 dlssvid nr -i input.mp4 -o passes --intensity 1.2 --style cinematic --passes 2 --model-scale 0.75 --temporal 0.4
 dlssvid nr -i input.mp4 -o passes --no-guides --video nr.mp4                          :: A/B without depth / MV, plus a preview video

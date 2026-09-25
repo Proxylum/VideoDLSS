@@ -16,15 +16,15 @@
 | `NV_OPTICAL_FLOW_SDK_ROOT` | клон [NVIDIA/NVIDIAOpticalFlowSDK](https://github.com/NVIDIA/NVIDIAOpticalFlowSDK) (заголовки) | 3 |
 | `TENSORRT_ROOT` | заголовки TensorRT 10.16: checkout `NVIDIA/TensorRT` тега `v10.16` (`include/`) или SDK zip. DLL (`nvinfer_10.dll`, `nvonnxparser_10.dll`) берутся в рантайме из `models/export/.venv/Lib/site-packages/tensorrt_libs` (pip `tensorrt-cu12==10.16.1.11`), либо из `DLSSVID_TENSORRT_DIR` / `TENSORRT_ROOT/lib`, либо из `bin\tensorrt` рядом с exe — так их кладёт полный пакет (`scripts\package.cmd full`, `docs/release.md`) | 2 |
 | `DLSSVID_PYTHON` | интерпретатор для `depth_worker` и ONNX-экспорта (по умолчанию `models/export/.venv/Scripts/python.exe`) | 2 |
-| `VDA_REPO` | checkout `DepthAnything/Video-Depth-Anything` (код VDA не является pip-пакетом; по умолчанию `D:\SDK\models\Video-Depth-Anything`) | 2 |
+| `VDA_REPO` | checkout `DepthAnything/Video-Depth-Anything` (код VDA не является pip-пакетом; без переменной ищется в `models\export\third_party\Video-Depth-Anything`) | 2 |
 | `HF_TOKEN` | необязательно: токен HuggingFace для быстрой загрузки весов | 2 |
 | `QT_ROOT` / `CMAKE_PREFIX_PATH` | Qt 6.8 msvc2022_64 | 4 |
 | `DLSSNR_PATCHER_ROOT` | клон [dev-camo/dlssnr-patcher](https://github.com/dev-camo/dlssnr-patcher) (`dlssnr_patcher.py`; или `--patcher`, или `tools/dlssnr-patcher` рядом с exe) | 6 |
 | `CUDA_PATH_V13_3` | CUDA Toolkit 13.3 (`bin/ptxas`, `fatbinary`, `cuobjdump` для патчера; или `--cuda-bin`) — отдельно от CUDA 12.4 сборки | 6 |
 
-Пример раскладки на машине разработки: `D:\SDK\DLSS`, `D:\SDK\Streamline`, `D:\SDK\OpticalFlowSDK`,
-`D:\SDK\Qt\6.8.3\msvc2022_64`, `D:\SDK\dlssnr-patcher`, `D:\SDK\TensorRT` (заголовки v10.16),
-`D:\SDK\models\Depth-Anything-3`, `D:\SDK\models\Video-Depth-Anything`.
+Пример раскладки (`<SDK>` — общий каталог для SDK и клонов): `<SDK>\DLSS`, `<SDK>\Streamline`, `<SDK>\OpticalFlowSDK`,
+`<SDK>\Qt\6.8.3\msvc2022_64`, `<SDK>\dlssnr-patcher`, `<SDK>\TensorRT` (заголовки v10.16),
+`<SDK>\models\Depth-Anything-3`, `<SDK>\models\Video-Depth-Anything`.
 
 ## Модели глубины (этап 2)
 
@@ -70,8 +70,8 @@ NIS (`--no-fallback` — ошибка вместо перехода). NGX пиш
    **CUDA Toolkit 13.3** — отдельная установка от CUDA 12.4, с которой собирается проект):
 
    ```bat
-   git clone https://github.com/dev-camo/dlssnr-patcher D:\SDK\dlssnr-patcher
-   dlssvid nr-patch --input C:\dlls\nvngx_dlssnr.dll --patcher D:\SDK\dlssnr-patcher --cuda-bin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
+   git clone https://github.com/dev-camo/dlssnr-patcher <SDK>\dlssnr-patcher
+   dlssvid nr-patch --input C:\dlls\nvngx_dlssnr.dll --patcher <SDK>\dlssnr-patcher --cuda-bin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
    ```
 
    Результат — `bin/nvidia/nvngx_dlssnr.dll` и сайдкар `nvngx_dlssnr.dll.patch.json` (SHA-256 входа и результата,

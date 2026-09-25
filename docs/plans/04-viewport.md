@@ -7,7 +7,7 @@ HLSL 6.6 через DXC, QDockWidget), §8 (этап 4: все режимы §6 
 ## Разведка (2026-09-18)
 | Что | Статус | Решение |
 |---|---|---|
-| Qt 6.8.3 | `D:\SDK\Qt\6.8.3\msvc2022_64` (aqtinstall), собран MSVC 14.39; наш toolset 14.51 — ABI-совместим; есть `windeployqt`, плагины `qwindows`, `qoffscreen` | `find_package(Qt6 COMPONENTS Widgets)` через `CMAKE_PREFIX_PATH`/`QT_ROOT`; сборка GUI — опция `DLSSVID_BUILD_APP` (OFF без Qt); тесты Qt-логики — `QT_QPA_PLATFORM=offscreen` |
+| Qt 6.8.3 | `<SDK>\Qt\6.8.3\msvc2022_64` (aqtinstall), собран MSVC 14.39; наш toolset 14.51 — ABI-совместим; есть `windeployqt`, плагины `qwindows`, `qoffscreen` | `find_package(Qt6 COMPONENTS Widgets)` через `CMAKE_PREFIX_PATH`/`QT_ROOT`; сборка GUI — опция `DLSSVID_BUILD_APP` (OFF без Qt); тесты Qt-логики — `QT_QPA_PLATFORM=offscreen` |
 | DXC | Windows SDK 10.0.26100 `dxc.exe` 1.8; vcpkg `directx-dxc` даёт `dxc.exe` + `dxcompiler.dll` и `DIRECTX_DXC_TOOL` | шейдеры компилируются на этапе сборки (`dxc -T ps_6_0 … -Fh`) в заголовки и встраиваются в exe; целевая модель SM 6.0 (работает на WARP для тестов), 6.6 не требуется |
 | Композитинг поверх нативного окна | Qt не рисует виджеты поверх дочернего нативного окна со swapchain | вьюпорт — `QWindow` в `createWindowContainer` со своим DXGI-swapchain на общем `D3D12Device`; подписи ячеек и пробник — виджеты Qt рядом с вьюпортом; в PNG-скриншот подписи вписывает `QPainter` |
 
