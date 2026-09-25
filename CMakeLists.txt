@@ -193,13 +193,14 @@ install(DIRECTORY models/export/ DESTINATION models/export PATTERN ".venv" EXCLU
 install(DIRECTORY depth_worker/ DESTINATION depth_worker PATTERN ".venv" EXCLUDE PATTERN "__pycache__" EXCLUDE)
 install(DIRECTORY sr_worker/ DESTINATION sr_worker PATTERN "__pycache__" EXCLUDE)
 install(DIRECTORY docs/ DESTINATION docs)
-install(FILES README.md CHANGELOG.md DESTINATION .)
+install(FILES README.md CHANGELOG.md LICENSE DESTINATION .)
 
 set(CPACK_PACKAGE_NAME "dlss-video")
 set(CPACK_PACKAGE_VENDOR "VideoDLSS")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
 set(CPACK_PACKAGE_FILE_NAME "dlss-video-${PROJECT_VERSION}-win64")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
 
 # ---- full package: TensorRT runtime + CUDA runtime + ONNX models, self-contained (scripts/package.cmd full) ----
 option(DLSSVID_PACKAGE_FULL "Package the TensorRT runtime, cudart64_12.dll and the ONNX models (dlss-video-<ver>-win64-full.zip)" OFF)
