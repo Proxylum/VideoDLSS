@@ -7,8 +7,10 @@ import torch.nn as nn
 
 from common import hf_download, registry_entry
 
-VDA_REPO = Path(__file__).resolve().parents[3] / "SDK" / "models" / "Video-Depth-Anything"  # D:/SDK/models/... when checked out next to DEV
-VDA_CANDIDATES = [Path(r"D:\SDK\models\Video-Depth-Anything"), VDA_REPO, Path(__file__).resolve().parent / "third_party" / "Video-Depth-Anything"]
+# VDA_REPO, else the workspace layout (<workspace>/SDK from scripts/setup_sdk.py), else build/sdk, else a checkout next to this file
+VDA_CANDIDATES = [Path(__file__).resolve().parents[4] / "SDK" / "models" / "Video-Depth-Anything",
+                  Path(__file__).resolve().parents[2] / "build" / "sdk" / "models" / "Video-Depth-Anything",
+                  Path(__file__).resolve().parent / "third_party" / "Video-Depth-Anything"]
 
 MODEL_CONFIGS = {
     "vits": {"encoder": "vits", "features": 64, "out_channels": [48, 96, 192, 384]},

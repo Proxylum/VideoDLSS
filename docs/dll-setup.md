@@ -26,6 +26,18 @@
 `<SDK>\Qt\6.8.3\msvc2022_64`, `<SDK>\dlssnr-patcher`, `<SDK>\TensorRT` (заголовки v10.16),
 `<SDK>\models\Depth-Anything-3`, `<SDK>\models\Video-Depth-Anything`.
 
+Эту раскладку создаёт `scripts/setup_sdk.py` — клоны на закреплённых ревизиях (те, с которыми проект разрабатывался), Qt через
+aqtinstall (`--qt`), референсные исходники (`--reference`), editable-установка Depth Anything 3 в venv экспорта:
+
+```bat
+python scripts\setup_sdk.py --root <SDK> --qt        :: клонирует, ставит Qt 6.8.3, пишет <SDK>\env.cmd с переменными окружения
+python scripts\setup_sdk.py --root <SDK> --check     :: сверяет папки и ревизии с закреплёнными (тест ctest `sdk.layout_check`)
+call <SDK>\env.cmd                                   :: DLSS_SDK_ROOT, NV_OPTICAL_FLOW_SDK_ROOT, TENSORRT_ROOT, QT_ROOT, DLSSNR_PATCHER_ROOT, VDA_REPO, SEARAFT_REPO
+```
+
+Без `--root` каталог — `<workspace>\SDK`, когда проект лежит в `<workspace>\Project\dlss-video` (раскладка рабочего пространства
+агента), иначе `build\sdk`. Загрузчики моделей ищут чекауты там же (`VDA_REPO` / `SEARAFT_REPO` имеют приоритет).
+
 ## Модели глубины (этап 2)
 
 Веса не входят в репозиторий: `models/registry.json` перечисляет id, источник на HuggingFace и лицензию;
