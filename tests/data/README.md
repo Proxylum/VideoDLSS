@@ -47,3 +47,9 @@ audio only to exercise the pipeline's audio copy; they are test fixtures, not a 
 60 fps clip) and prints the markdown tables that live in `docs/benchmarks.md`; results also go to
 `<out>/results.json` — `Output/results/bench/` of the workspace when the project lives in one, else `build/release/clipbench/`
 (`--out` overrides). It needs an NVIDIA GPU and the models in `models/cache/`.
+
+## README demo clips
+
+`scripts/readme_media.py` keeps four more sources in `cache/` (480p transcodes from Wikimedia Commons of public-domain films
+and a CC BY game recording, ~1 GB together) and cuts 4 s clips from them for the GIFs of the README; sources, licences and
+cut points are listed in `docs/media/README.md`. Nothing of that is committed except the GIFs and stills in `docs/media/`.
