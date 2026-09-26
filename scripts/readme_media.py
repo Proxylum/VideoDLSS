@@ -463,6 +463,8 @@ def contact_sheet(video: Path, out: Path, w: int, h: int, seconds: float) -> int
 def catalogue(work: Path, only: list[str] | None) -> None:
     out = work / "sources"
     out.mkdir(parents=True, exist_ok=True)
+    # rows of earlier runs are kept, so `--only` refreshes one source without dropping the others from the README
+    prev = {r["key"]: r for r in json.loads((out / "catalogue.json").read_text(encoding="utf-8"))} if (out / "catalogue.json").exists() else {}
     rows = []
     items = [(k, v, "commons") for k, v in CANDIDATES.items()] + [(k, v, "local") for k, v in LOCAL_SOURCES.items()]
     for key, c, kind in items:
@@ -501,6 +503,7 @@ def catalogue(work: Path, only: list[str] | None) -> None:
              "(`start`, `seconds`, `crop`) and run it for that key. Licences are as stated on the Wikimedia Commons file pages.", "",
              "| key | category | what | year | authors | licence | file (tests/data/cache) | size | resolution | fps | length | sheet |",
              "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    rows = list({**prev, **{r["key"]: r for r in rows}}.values())
     for r in sorted(rows, key=lambda r: (r["category"], r["key"])):
         page = f"[Commons]({r['page']})" if r["page"].startswith("http") else r["page"]
         if r.get("error"):
