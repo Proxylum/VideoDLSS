@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <regex>
@@ -56,7 +57,8 @@ TEST_CASE("Docs link only to public hosts", "[hygiene]") {
         "github.com",          "raw.githubusercontent.com", "huggingface.co",   "arxiv.org",       "developer.nvidia.com",
         "docs.nvidia.com",     "www.nvidia.com",            "download.pytorch.org", "pytorch.org", "pypi.org",
         "cmake.org",           "vcpkg.io",                  "doc.qt.io",        "www.qt.io",       "learn.microsoft.com",
-        "ffmpeg.org",          "opensource.org",            "nsis.sourceforge.io", "localhost"};
+        "ffmpeg.org",          "opensource.org",            "nsis.sourceforge.io", "localhost",
+        "commons.wikimedia.org", "upload.wikimedia.org",    "download.blender.org", "test-videos.co.uk"};
     // A placeholder host such as https://<host>/... has no host characters after :// and is not a link.
     const std::regex url(R"(https?://([A-Za-z0-9.-]+))");
     int links = 0;
@@ -71,6 +73,37 @@ TEST_CASE("Docs link only to public hosts", "[hygiene]") {
         }
     }
     CHECK(links > 0);
+}
+
+TEST_CASE("README media: every image the README embeds exists and stays small", "[hygiene]") {
+    // GIFs live in git forever: each embedded image is at most 4 MB and all of them together at most 30 MB.
+    const auto readme = ReadAll(kRoot / "README.md");
+    const std::regex img(R"re(!\[[^\]]*\]\(([^)\s]+)\))re");
+    std::uintmax_t total = 0;
+    int images = 0;
+    for (auto it = std::sregex_iterator(readme.begin(), readme.end(), img); it != std::sregex_iterator(); ++it) {
+        const std::string rel = (*it)[1].str();
+        if (rel.rfind("http", 0) == 0) continue;
+        const auto path = kRoot / rel;
+        INFO("README embeds " << rel);
+        REQUIRE(std::filesystem::exists(path));
+        const auto size = std::filesystem::file_size(path);
+        CHECK(size <= 4u * 1024 * 1024);
+        total += size;
+        ++images;
+    }
+    INFO("total size of the embedded images: " << total / 1024 << " KiB");
+    CHECK(total <= 30u * 1024 * 1024);
+    CHECK(images > 0);
+    // every media file has its provenance in docs/media/README.md
+    const auto credits = ReadAll(kRoot / "docs" / "media" / "README.md");
+    REQUIRE_FALSE(credits.empty());
+    for (const auto& e : std::filesystem::directory_iterator(kRoot / "docs" / "media")) {
+        const auto ext = e.path().extension().string();
+        if (ext != ".gif" && ext != ".png") continue;
+        INFO("docs/media/README.md mentions " << e.path().filename().string());
+        CHECK(credits.find(e.path().filename().string()) != std::string::npos);
+    }
 }
 
 TEST_CASE("Docs carry no developer-machine paths", "[hygiene]") {
