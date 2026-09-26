@@ -7,6 +7,11 @@
 
 ## Не выпущено
 
+- `scripts/setup_sdk.py`: сторонние SDK и чекауты кода моделей на закреплённых ревизиях (DLSS SDK 310.9.1, Optical Flow SDK,
+  заголовки TensorRT 10.16, dlssnr-patcher, Depth Anything 3, Video Depth Anything, SEA-RAFT; `--qt` — Qt 6.8.3 через aqtinstall;
+  `--reference` — Streamline, NIS, OptiScaler, ComfyUI-DLSS5-NR) в `<workspace>/SDK` или `build/sdk`, `env.cmd` с переменными
+  окружения; `--check` сверяет раскладку с закреплёнными ревизиями (тест ctest `sdk.layout_check`, SKIP без Python или SDK).
+  Загрузчики `vda_loader.py` / `searaft_loader.py` ищут чекауты там же вместо пути машины разработки.
 - README: раздел Demo — GIF «до / после» апскейла ×2 из 480p на четырёх открытых клипах (Steamboat Willie, Popeye, «Золотая
   лихорадка», SuperTuxKart) и GIF каждого пасса (сетка вьюпорта, глубина, векторы движения, NR, FG); `scripts/readme_media.py`
   делает их воспроизводимо (источники, лицензии и точки нарезки — `docs/media/README.md`); тест `[hygiene]` следит, что

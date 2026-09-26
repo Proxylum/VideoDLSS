@@ -139,3 +139,10 @@ if(CMAKE_GENERATOR MATCHES "Ninja")
   add_test(NAME build.ninja_header_deps
     COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DNINJA=${CMAKE_MAKE_PROGRAM} -P ${CMAKE_SOURCE_DIR}/tests/check_ninja_deps.cmake)
 endif()
+
+# ---- SDK layout: the machine's SDK checkouts match the pinned revisions of scripts/setup_sdk.py (skipped without Python or SDK env) ----
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME sdk.layout_check COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/setup_sdk.py --check --from-env)
+  set_tests_properties(sdk.layout_check PROPERTIES SKIP_RETURN_CODE 77 LABELS "sdk" TIMEOUT 120)
+endif()

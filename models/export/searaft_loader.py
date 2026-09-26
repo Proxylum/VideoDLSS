@@ -9,7 +9,10 @@ import torch.nn as nn
 
 from common import hf_download, registry_entry
 
-SEARAFT_CANDIDATES = [Path(r"D:\SDK\models\SEA-RAFT"), Path(__file__).resolve().parent / "third_party" / "SEA-RAFT"]
+# SEARAFT_REPO, else the workspace layout (<workspace>/SDK from scripts/setup_sdk.py), else a checkout next to this file
+SEARAFT_CANDIDATES = [Path(__file__).resolve().parents[4] / "SDK" / "models" / "SEA-RAFT",
+                      Path(__file__).resolve().parents[2] / "build" / "sdk" / "models" / "SEA-RAFT",
+                      Path(__file__).resolve().parent / "third_party" / "SEA-RAFT"]
 
 
 def _import_searaft():
