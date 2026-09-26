@@ -33,6 +33,14 @@ Accelerator) → DLSS SR ×2 → DLSS Neural Rendering → DLSS Frame Generation
 do not have. The frames and the full-size results stay in the work folder (`Output/results/readme-media/` in the agent's
 workspace, else `build/release/readme-media/`); only the GIFs and stills are committed.
 
+## More sources to pick from
+
+`scripts/readme_media.py --catalogue` downloads a pool of about forty more open sources of the same genres (silent-era
+comedies and cartoons in the public domain, the Blender open movies, recordings of open-source games, a few CC-licensed
+internet memes; `CANDIDATES` in the script) into `tests/data/cache/` and writes `<work>/sources/README.md` with a contact
+sheet per file (thumbnails with time stamps) for picking scenes by hand. To use one, add its cut to `SOURCES` (`start`,
+`seconds`, `crop`) and run the script for that key.
+
 ## Regenerating
 
 ```bat

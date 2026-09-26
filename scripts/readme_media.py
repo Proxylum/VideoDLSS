@@ -5,6 +5,7 @@
     python scripts/readme_media.py --only willie   # one clip
     python scripts/readme_media.py --stage gif     # re-encode the GIFs from the frames already on disk
     python scripts/readme_media.py --media-dir docs/media --out <work dir>
+    python scripts/readme_media.py --catalogue [--only key ...]   # the candidate pool: download + contact sheets for a manual pick
 
 Per clip: <work>/<clip>/in_480p.mp4 (the 480p input), after.mp4 (dlssvid process: depth -> flow -> DLSS SR x2 -> NR -> FG x2),
 after_passes/, frame dumps, and the GIF/PNG files copied into --media-dir (docs/media/ by default). Needs the dlssvid CLI
@@ -22,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -66,6 +68,66 @@ SOURCES = {
         file="supertuxkart_gp_480p.webm", sha256="", start=600.0, seconds=4.0, fps=30, crop=(430, 215, 240, 135),
         caption="game, 854x480",
     ),
+}
+
+
+# ---------------------------------------------------------------------------------------------- candidate pool (manual pick)
+# More open sources of the same genres, for choosing scenes by hand: `--catalogue` downloads every one of them (the 480p
+# transcode when the original is taller than 480 px or larger than 250 MB, else the original), probes it and writes
+# <work>/sources/README.md with a contact sheet per file. The licence is what the Commons file page states.
+CANDIDATES = {
+    # memes: silent-era classics in the public domain that live on as GIFs
+    "keaton_cops_2": dict(title="File:Keaton Cops pt2.ogv", category="meme", year=1922, authors="Buster Keaton, Edward F. Cline", license="Public domain", note="Cops — the chase, part 2"),
+    "keaton_cops_3": dict(title="File:Keaton Cops pt3.ogv", category="meme", year=1922, authors="Buster Keaton, Edward F. Cline", license="Public domain", note="Cops — the chase, part 3"),
+    "keaton_neighbors": dict(title="File:Neighbors (Edward F. Cline and Buster Keaton, 1920).webm", category="meme", year=1920, authors="Buster Keaton, Edward F. Cline", license="Public domain", note="Neighbors"),
+    "keaton_scarecrow": dict(title="File:The Scarecrow (Edward F. Cline and Buster Keaton, 1920).webm", category="meme", year=1920, authors="Buster Keaton, Edward F. Cline", license="Public domain", note="The Scarecrow"),
+    "keaton_balloonatic": dict(title="File:The Balloonatic (Edward F. Cline and Buster Keaton, 1923).webm", category="meme", year=1923, authors="Buster Keaton, Edward F. Cline", license="Public domain", note="The Balloonatic"),
+    "lloyd_safety_last": dict(title="File:Safety Last (1923).webm", category="meme", year=1923, authors="Harold Lloyd; Fred C. Newmeyer, Sam Taylor", license="Public domain", note="Safety Last! — the clock"),
+    "nosferatu": dict(title="File:Nosferatu (1922).webm", category="meme", year=1922, authors="F. W. Murnau", license="Public domain", note="Nosferatu"),
+    "skeleton_dance": dict(title="File:The Skeleton Dance (1929).webm", category="meme", year=1929, authors="Walt Disney, Ub Iwerks", license="Public domain", note="The Skeleton Dance (Silly Symphony)"),
+    "plane_crazy": dict(title="File:Plane Crazy (1929) with sound.webm", category="meme", year=1928, authors="Walt Disney, Ub Iwerks", license="Public domain", note="Plane Crazy — the first Mickey"),
+    "haunted_house": dict(title="File:The Haunted House (1929).webm", category="meme", year=1929, authors="Walt Disney, Ub Iwerks", license="Public domain", note="The Haunted House"),
+    "market_street_1906": dict(title="File:A Trip Down Market Street (High Res).webm", category="meme", year=1906, authors="Miles Brothers", license="Public domain", note="A Trip Down Market Street, live action"),
+    "lost_world_1925": dict(title="File:The Lost World (1925).webm", category="meme", year=1925, authors="Harry O. Hoyt; Willis O'Brien (effects)", license="Public domain", note="The Lost World — stop-motion dinosaurs"),
+    "wojak_chopin": dict(title="File:F.Chopin, Wojak, in Ukrainian.ogv", category="meme", year=2022, authors="Commons uploader", license="CC BY-SA 4.0", note="Wojak animation"),
+    "harlem_shake": dict(title="File:HARLEM SHAKE (Rolling Stone Indonesia Edition).webm", category="meme", year=2013, authors="Rolling Stone Indonesia", license="CC BY 3.0", note="Harlem Shake"),
+    "meme_67": dict(title="File:67 Meme Performance (6-7, 6 7).webm", category="meme", year=2025, authors="Commons uploader", license="CC0", note="6-7 meme, vertical"),
+    # cartoons in the public domain
+    "felix_forty_winks": dict(title="File:Felix The Cat In Forty Winks (1930) - Sleep Tight, Felix.webm", category="cartoon", year=1930, authors="Pat Sullivan, Otto Messmer", license="Public domain", note="Felix the Cat"),
+    "betty_blunderland": dict(title="File:Betty Boop - Betty in Blunderland (1934).webm", category="cartoon", year=1934, authors="Fleischer Studios", license="Public domain", note="Betty in Blunderland"),
+    "betty_no_no": dict(title="File:Betty Boop - No! No! A Thousand Times No!! (1935).webm", category="cartoon", year=1935, authors="Fleischer Studios", license="Public domain", note="No! No! A Thousand Times No!!"),
+    "superman_1941": dict(title="File:Superman (1941).webm", category="cartoon", year=1941, authors="Fleischer Studios", license="Public domain", note="Superman (The Mad Scientist)"),
+    "superman_arctic_giant": dict(title="File:The Arctic Giant (1942).webm", category="cartoon", year=1942, authors="Fleischer Studios", license="Public domain", note="Superman: The Arctic Giant"),
+    "superman_electric_earthquake": dict(title="File:Electric Earthquake (1942).webm", category="cartoon", year=1942, authors="Fleischer Studios", license="Public domain", note="Superman: Electric Earthquake"),
+    "looney_john_doughboy": dict(title="File:Meet John Doughboy 190611 LTGC.webm", category="cartoon", year=1941, authors="Warner Bros. (Bob Clampett)", license="Public domain", note="Looney Tunes: Meet John Doughboy"),
+    "gold_rush_daze": dict(title="File:Gold Rush Daze (1939, restored).webm", category="cartoon", year=1939, authors="Warner Bros. (Ben Hardaway, Cal Dalton)", license="Public domain", note="Merrie Melodies: Gold Rush Daze"),
+    "gulliver_1939": dict(title="File:Gulliver's Travels (1939).webm", category="cartoon", year=1939, authors="Fleischer Studios", license="Public domain", note="Gulliver's Travels, feature"),
+    "to_spring_1936": dict(title="File:To Spring (1936).webm", category="cartoon", year=1936, authors="MGM (Harman-Ising)", license="Public domain", note="To Spring"),
+    # Blender open movies (CC BY / CC BY-SA), modern CG cartoons
+    "sintel": dict(title="File:Sintel movie - Blender Fondation.ogv", category="cartoon", year=2010, authors="Blender Foundation", license="CC BY 3.0", note="Sintel"),
+    "elephants_dream": dict(title="File:Elephants Dream (2006) 1080p24.webm", category="cartoon", year=2006, authors="Blender Foundation", license="CC BY 2.5", note="Elephants Dream"),
+    "caminandes_llama_drama": dict(title="File:Caminandes- Llama Drama - Short Movie.ogv", category="cartoon", year=2013, authors="Blender Foundation (Pablo Vazquez)", license="CC BY 3.0", note="Caminandes 1: Llama Drama"),
+    "caminandes_gran_dillama": dict(title="File:Caminandes - Gran Dillama - Blender Foundation's new Open Movie.webm", category="cartoon", year=2013, authors="Blender Foundation", license="CC BY-SA 3.0", note="Caminandes 2: Gran Dillama"),
+    "caminandes_llamigos": dict(title="File:Caminandes 3 - Llamigos - Blender Animated Short.webm", category="cartoon", year=2016, authors="Blender Foundation", license="CC BY 3.0", note="Caminandes 3: Llamigos"),
+    "cosmos_laundromat": dict(title="File:Cosmos Laundromat - First Cycle - Official Blender Foundation release.webm", category="cartoon", year=2015, authors="Blender Foundation", license="CC BY-SA 3.0", note="Cosmos Laundromat"),
+    "spring": dict(title="File:Spring - Blender Open Movie.webm", category="cartoon", year=2019, authors="Blender Foundation", license="CC BY 4.0", note="Spring"),
+    # open-source games (recordings on Commons)
+    "zeroad_a27": dict(title="File:0 A. D. Empires Ascendant \u2014 Alpha 27 Agni Trailer.webm", category="game", year=2024, authors="Wildfire Games", license="CC BY-SA 3.0", note="0 A.D. Alpha 27 trailer"),
+    "zeroad_a23": dict(title="File:0 A D Alpha 23 Ken Wood Trailer - YouTube.webm", category="game", year=2018, authors="Wildfire Games", license="CC BY-SA 4.0", note="0 A.D. Alpha 23 trailer"),
+    "xonotic": dict(title="File:Xonotic 0-8-2 gameplay.webm", category="game", year=2017, authors="Xonotic team; recording by the uploader", license="GPLv3", note="Xonotic 0.8.2 gameplay"),
+    "tux_racer_daggers": dict(title="File:Tux Racer gameplay (Path of Daggers).webm", category="game", year=2020, authors="Tux Racer; recording by the uploader", license="GPL", note="Tux Racer gameplay"),
+    "red_eclipse": dict(title="File:Red Eclipse 1,5 Gameplay 1.webm", category="game", year=2015, authors="Red Eclipse team; recording by the uploader", license="CC BY 3.0", note="Red Eclipse 1.5 gameplay"),
+    "warzone_2100": dict(title="File:TheMouseMaster's Warzone 2100 - Beta-1.webm", category="game", year=2015, authors="Warzone 2100 project; recording by TheMouseMaster", license="CC BY 3.0", note="Warzone 2100 campaign"),
+    "mineclone2": dict(title="File:MineClone2 - Release 0.84 - The Very Nice Release.webm", category="game", year=2023, authors="MineClone2 team (Luanti/Minetest game)", license="CC BY 3.0", note="MineClone2 release video"),
+    "minetest_labyrinth": dict(title="File:Labyrinth Minetest 5.6.1 Labyrinth cave easy 2023.01.06 - 12.32.52.03.webm", category="game", year=2023, authors="Minetest; recording by the uploader", license="CC BY-SA 4.0", note="Minetest labyrinth"),
+    "veloren": dict(title="File:Gameplay Veloren 2023.02.09 - 16.17.16.03.webm", category="game", year=2023, authors="Veloren; recording by the uploader", license="GPLv3", note="Veloren gameplay"),
+}
+
+# Films already in tests/data/cache (tests/data/fetch.py), catalogued too
+LOCAL_SOURCES = {
+    "bbb_1080p60": dict(file="bbb_sunflower_1080p_60fps_normal.mp4", category="cartoon", year=2008, authors="Blender Foundation", license="CC BY 3.0", note="Big Buck Bunny (2013 re-render, 1080p60)"),
+    "tears_of_steel": dict(file="tears_of_steel_1080p.mov", category="live", year=2012, authors="Blender Foundation", license="CC BY 3.0", note="Tears of Steel"),
+    "sintel_trailer": dict(file="sintel_trailer-1080p.mp4", category="cartoon", year=2010, authors="Blender Foundation", license="CC BY 3.0", note="Sintel trailer"),
 }
 
 GIF_FPS = 10
@@ -348,6 +410,109 @@ def fg_media(key: str, src: dict, d: Path, media: Path, w: int, h: int, idx: lis
     encode_gif(d / "gif_fg", media / f"{key}_fg.gif", 6)
 
 
+# --------------------------------------------------------------------------------------------------------------- catalogue
+def commons_videoinfo(title: str) -> dict:
+    import urllib.parse
+    q = urllib.parse.urlencode({"action": "query", "titles": title, "prop": "videoinfo", "viprop": "url|size|dimensions|extmetadata|derivatives",
+                                "format": "json"})
+    req = urllib.request.Request("https://commons.wikimedia.org/w/api.php?" + q, headers={"User-Agent": UA})
+    for attempt in range(6):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                page = next(iter(json.load(r)["query"]["pages"].values()))
+            if "videoinfo" not in page:
+                raise RuntimeError(f"no such file on Commons: {title}")
+            return page["videoinfo"][0]
+        except urllib.error.HTTPError as e:
+            if e.code != 429:
+                raise
+            time.sleep(60)
+    raise RuntimeError(f"Commons API keeps answering 429 for {title}")
+
+
+def pick_download(vi: dict) -> tuple[str, str]:
+    """(url, extension): the 480p transcode when the original is taller than 480 px or heavier than 250 MB, else the original."""
+    ders = {d.get("transcodekey"): d["src"] for d in vi.get("derivatives", []) if d.get("transcodekey")}
+    big = (vi.get("height") or 0) > 480 or (vi.get("size") or 0) > 250e6
+    if big and "480p.vp9.webm" in ders:
+        return ders["480p.vp9.webm"], "480p.webm"
+    return vi["url"].split("?")[0], Path(vi["url"].split("?")[0]).suffix.lstrip(".")
+
+
+def contact_sheet(video: Path, out: Path, w: int, h: int, seconds: float) -> int:
+    n = int(min(20, max(6, seconds // 30)))
+    times = [seconds * (i + 0.5) / n for i in range(n)]
+    cw = 240
+    ch = max(1, round(h * cw / w))
+    cols = 4
+    rows = (n + cols - 1) // cols
+    sheet = Image.new("RGB", (cw * cols, ch * rows), (0, 0, 0))
+    d = ImageDraw.Draw(sheet)
+    f = font(13)
+    tmp = out.with_suffix(".tmp.png")
+    for i, t in enumerate(times):
+        r = subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{t:.2f}", "-i", str(video), "-frames:v", "1", str(tmp)], capture_output=True)
+        if r.returncode == 0 and tmp.exists():
+            sheet.paste(Image.open(tmp).convert("RGB").resize((cw, ch)), ((i % cols) * cw, (i // cols) * ch))
+            tmp.unlink()
+        d.text(((i % cols) * cw + 4, (i // cols) * ch + 3), f"{int(t // 60)}:{int(t % 60):02d}", fill=(255, 230, 0), font=f)
+    sheet.save(out, quality=82)
+    return n
+
+
+def catalogue(work: Path, only: list[str] | None) -> None:
+    out = work / "sources"
+    out.mkdir(parents=True, exist_ok=True)
+    rows = []
+    items = [(k, v, "commons") for k, v in CANDIDATES.items()] + [(k, v, "local") for k, v in LOCAL_SOURCES.items()]
+    for key, c, kind in items:
+        if only and key not in only:
+            continue
+        try:
+            if kind == "commons":
+                vi = commons_videoinfo(c["title"])
+                url, ext = pick_download(vi)
+                page = vi.get("descriptionurl", "")
+                src = dict(url=url, file=f"{key}.{ext}", sha256="")
+                video = fetch(key, src)
+                time.sleep(3)
+            else:
+                page = "tests/data/fetch.py"
+                video = CACHE / c["file"]
+                if not video.exists():
+                    print(f"  {key}: not in cache (run tests/data/fetch.py --sources-only)")
+                    continue
+            w, h, fps, n = probe(video)
+            seconds = n / fps if fps else 0
+            sheet = out / f"{key}_sheet.jpg"
+            if not sheet.exists():
+                contact_sheet(video, sheet, w, h, seconds)
+            rows.append(dict(key=key, category=c["category"], note=c["note"], year=c["year"], authors=c["authors"], license=c["license"],
+                             page=page, file=video.name, size_mb=round(video.stat().st_size / 1e6, 1), res=f"{w}x{h}", fps=round(fps, 3),
+                             seconds=round(seconds, 1), sheet=sheet.name))
+            print(f"  {key}: {w}x{h} @ {fps:g} fps, {seconds / 60:.1f} min, {video.stat().st_size / 1e6:.0f} MB")
+        except Exception as e:  # noqa: BLE001 — one bad entry must not stop the pool
+            print(f"  {key}: FAILED — {str(e)[:120]}")
+            rows.append(dict(key=key, category=c["category"], note=c["note"], year=c["year"], authors=c["authors"], license=c["license"],
+                             page=c.get("title", ""), file="", size_mb=0, res="", fps=0, seconds=0, sheet="", error=str(e)[:120]))
+    lines = ["# Candidate sources for the README demo (manual pick)", "",
+             "Downloaded by `scripts/readme_media.py --catalogue` into `tests/data/cache/` of the project (git-ignored). Each row has a contact",
+             "sheet (`<key>_sheet.jpg`, thumbnails with time stamps) to pick a scene by hand; then add the cut to `SOURCES` in the script",
+             "(`start`, `seconds`, `crop`) and run it for that key. Licences are as stated on the Wikimedia Commons file pages.", "",
+             "| key | category | what | year | authors | licence | file (tests/data/cache) | size | resolution | fps | length | sheet |",
+             "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in sorted(rows, key=lambda r: (r["category"], r["key"])):
+        page = f"[Commons]({r['page']})" if r["page"].startswith("http") else r["page"]
+        if r.get("error"):
+            lines.append(f"| `{r['key']}` | {r['category']} | {r['note']} | {r['year']} | {r['authors']} | {r['license']} | FAILED: {r['error']} | | | | | |")
+            continue
+        lines.append(f"| `{r['key']}` | {r['category']} | {r['note']} ({page}) | {r['year']} | {r['authors']} | {r['license']} | `{r['file']}` | "
+                     f"{r['size_mb']} MB | {r['res']} | {r['fps']:g} | {r['seconds'] / 60:.1f} min | ![{r['key']}]({r['sheet']}) |")
+    (out / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (out / "catalogue.json").write_text(json.dumps(rows, indent=1, ensure_ascii=False), encoding="utf-8")
+    print(f"catalogue: {len(rows)} sources -> {out / 'README.md'}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--only", nargs="*", default=None, help="clip keys (default: all)")
@@ -357,7 +522,11 @@ def main() -> int:
     ap.add_argument("--passes-for", default="stk", help="clip whose passes get the grid / depth / mv / fg GIFs")
     ap.add_argument("--nr-for", default="chaplin", help="clip for the NR GIF (film grain and skin show the stage best)")
     ap.add_argument("--mv-display", default="mv_arrows", choices=["mv_hsv", "mv_arrows", "mv_magnitude"])
+    ap.add_argument("--catalogue", action="store_true", help="download every candidate source (CANDIDATES) and write <out>/sources/README.md with contact sheets")
     args = ap.parse_args()
+    if args.catalogue:
+        catalogue(args.out, args.only)
+        return 0
     cli = find_cli()
     keys = args.only or list(SOURCES)
     args.out.mkdir(parents=True, exist_ok=True)
