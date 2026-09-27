@@ -25,7 +25,7 @@ std::vector<std::filesystem::path> DocFiles() {
     std::vector<std::filesystem::path> files = {kRoot / "README.md",
                                                 kRoot / "CHANGELOG.md",
                                                 kRoot / "LICENSE",
-                                                kRoot / ".gitlab-ci.yml",
+                                                kRoot / ".github" / "workflows" / "ci.yml",
                                                 kRoot / "app" / "README.md",
                                                 kRoot / "models" / "export" / "README.md",
                                                 kRoot / "sr_worker" / "README.md",

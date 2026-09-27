@@ -1,6 +1,6 @@
 @echo off
 rem CI / developer build: MSVC environment -> configure -> build -> tests (unit, integration, app, golden).
-rem Used by .gitlab-ci.yml on the self-hosted Windows runner (docs/ci.md) and runnable by hand from the repo root.
+rem Used by .github/workflows/ci.yml on the self-hosted Windows runner (docs/ci.md) and runnable by hand from the repo root.
 rem Environment expected: VCPKG_ROOT, CUDA_PATH_V12_4, TENSORRT_ROOT, NV_OPTICAL_FLOW_SDK_ROOT, QT_ROOT, DLSS_SDK_ROOT
 rem (see docs/dll-setup.md); DLSSVID_PRESET selects the CMake preset (default: release).
 setlocal
