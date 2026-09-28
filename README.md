@@ -96,7 +96,7 @@ hue = direction, saturation = magnitude) and the result after SR + NR.
 
 ## Quick start (binary package)
 
-1. Download `dlss-video-<version>-win64.zip` from the releases page (or build it yourself: `scripts\package.cmd`,
+1. Download `dlss-video-<version>-win64.zip` from the [releases page](https://github.com/Proxylum/VideoDLSS/releases) (or build it yourself: `scripts\package.cmd`,
    [Build from source](#build-from-source)) and unzip it into a folder you can write to — not `Program Files`: models
    and TensorRT engines are cached next to the executables (`models\cache\`, or wherever `DLSSVID_MODELS_DIR` points).
 2. Install the [NVIDIA runtimes](#nvidia-runtimes) you need: the CUDA 12 runtime and TensorRT 10.16 for the neural

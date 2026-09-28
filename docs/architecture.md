@@ -401,7 +401,7 @@ dlssvid process ── ProcessRunner::RunProcess ── depth ─▶ flow ─▶
   и ожиданиями (`expected.json`, `ref/`), плюс `[gpu]` прогон реальных бэкендов; `DLSSVID_CLI`/`DLSSVID_GOLDEN_DIR`
   направляют тест на установленную копию (`docs/release.md`).
 - Пакет: `install()` копирует `build/<preset>/bin` (без `*.pdb`, тестов и **без `bin/nvidia/*.dll`**), реестр и скрипты
-  моделей, `depth_worker`, документацию и golden-данные; CPack ZIP всегда, NSIS при наличии `makensis`; CI — `.gitlab-ci.yml`
+  моделей, `depth_worker`, документацию и golden-данные; CPack ZIP всегда, NSIS при наличии `makensis`; CI — `.github/workflows/ci.yml`
   + `scripts/ci-build.cmd` (`docs/ci.md`).
 - **Гигиена сборки (инцидент этапов 4 и 8):** ninja берёт зависимости от заголовков из строк `/showIncludes`, сверяя их с
   `msvc_deps_prefix`, который CMake записал при configure. У локализованного MSVC (русская VS без английского языкового

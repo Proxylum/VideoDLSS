@@ -7,6 +7,9 @@
 
 ## Не выпущено
 
+- Репозиторий переехал на GitHub (`Proxylum/VideoDLSS`, релизы — https://github.com/Proxylum/VideoDLSS/releases): CI — GitHub
+  Actions на self-hosted RTX-раннере (`.github/workflows/ci.yml` вместо `.gitlab-ci.yml`; `docs/ci.md`), на теге пакет
+  прикладывается к Release; процедура выпуска в `docs/release.md`.
 - `scripts/setup_sdk.py`: сторонние SDK и чекауты кода моделей на закреплённых ревизиях (DLSS SDK 310.9.1, Optical Flow SDK,
   заголовки TensorRT 10.16, dlssnr-patcher, Depth Anything 3, Video Depth Anything, SEA-RAFT; `--qt` — Qt 6.8.3 через aqtinstall;
   `--reference` — Streamline, NIS, OptiScaler, ComfyUI-DLSS5-NR) в `<workspace>/SDK` или `build/sdk`, `env.cmd` с переменными
