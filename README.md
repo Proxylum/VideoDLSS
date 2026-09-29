@@ -5,7 +5,7 @@ Offline DLSS video pipeline for Windows + NVIDIA RTX: a video file goes through
 Rendering → DLSS Frame Generation → encode`, every intermediate **pass** (depth, motion
 vectors, masks, colour stages) can be exported, imported and inspected in a viewport.
 
-Version **0.3.0** ([CHANGELOG.md](CHANGELOG.md)): stages 0–9 are done — stage 9 is the operator UI
+Version **0.3.1** ([CHANGELOG.md](CHANGELOG.md)): stages 0–9 are done — stage 9 is the operator UI
 ([docs/plans/09-ui-ux.md](docs/plans/09-ui-ux.md): start page, project screen, processing page, «До | После», pass fingerprints
 and versions); release procedure in [docs/release.md](docs/release.md). Stage 8 — release (see [docs/plans/08-release.md](docs/plans/08-release.md); earlier:
 [00-skeleton](docs/plans/00-skeleton.md), [01-passes](docs/plans/01-passes.md), [02-depth](docs/plans/02-depth.md),
