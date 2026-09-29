@@ -1,12 +1,12 @@
 # CI on a self-hosted Windows runner with an NVIDIA RTX GPU (labels: self-hosted, windows, rtx) — docs/ci.md.
-# build-test: configure -> build -> every test (unit, integration, app, golden, GPU) through scripts/ci-build.cmd.
-# package: on main and on version tags — scripts/package.cmd; on a tag the ZIP is attached to the GitHub Release.
+# build-test: configure -> build -> every test (unit, integration, app, golden, GPU) through scripts/ci-build.cmd,
+# on pushes to main, pull requests and manual runs. package: on main — scripts/package.cmd, the ZIP as an artifact.
+# Version tags are handled by release.yml (package only: the tagged merge commit was tested here already).
 name: CI
 
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -38,11 +38,9 @@ jobs:
 
   package:
     needs: build-test
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: [self-hosted, windows, rtx]
     timeout-minutes: 60
-    permissions:
-      contents: write   # attaching the package to the release of a tag
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,17 +53,3 @@ jobs:
           name: dlss-video-package-${{ github.ref_name }}
           path: build/release/dlss-video-*.zip
           retention-days: 30
-      - name: Attach to the release of the tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: pwsh
-        run: |
-          $tag = $env:GITHUB_REF_NAME
-          $zip = (Get-ChildItem build/release/dlss-video-*-win64.zip | Select-Object -First 1).FullName
-          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $zip --repo $env:GITHUB_REPOSITORY --clobber
-          } else {
-            gh release create $tag $zip --repo $env:GITHUB_REPOSITORY --title "dlss-video $($tag.TrimStart('v'))" --generate-notes --verify-tag
-          }

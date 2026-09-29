@@ -1,0 +1,39 @@
+# Release on a version tag: package only. The tagged commit is the merge commit that the pull-request and main runs of ci.yml
+# already built and tested; repeating build-test here would add 20+ minutes on the single self-hosted runner (docs/ci.md).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  package:
+    runs-on: [self-hosted, windows, rtx]
+    timeout-minutes: 60
+    permissions:
+      contents: write   # attaching the package to the release of the tag
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+          clean: true
+      - name: Package
+        run: cmd /c scripts\package.cmd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dlss-video-package-${{ github.ref_name }}
+          path: build/release/dlss-video-*.zip
+          retention-days: 30
+      - name: Attach to the release of the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: powershell   # Windows PowerShell 5.1: the runner has no pwsh (PowerShell 7)
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $zip = (Get-ChildItem build/release/dlss-video-*-win64.zip | Select-Object -First 1).FullName
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $zip --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $tag $zip --repo $env:GITHUB_REPOSITORY --title "dlss-video $($tag.TrimStart('v'))" --generate-notes --verify-tag
+          }

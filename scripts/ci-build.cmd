@@ -17,7 +17,7 @@ for %%v in (VCPKG_ROOT TENSORRT_ROOT NV_OPTICAL_FLOW_SDK_ROOT QT_ROOT DLSS_SDK_R
 call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 
 echo === configure (%DLSSVID_PRESET%)
-cmake --preset %DLSSVID_PRESET% || exit /b 1
+call "%~dp0configure.cmd" || exit /b 1
 echo === build
 cmake --build --preset %DLSSVID_PRESET% -- -k 0 || exit /b 1
 echo === tests
