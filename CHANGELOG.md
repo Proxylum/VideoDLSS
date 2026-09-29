@@ -7,6 +7,11 @@
 
 ## Не выпущено
 
+- Исправлено: `dlssvid process` (стадия `flow`) падал на источниках, которые NVDEC декодирует не в NV12 — HEVC 4:4:4 16 бит
+  (`yuv444p16le`), 10/12-бит (`p010`, `p016`): «NVDEC frame is not NV12». Теперь декодер отдаёт для таких потоков кадр на
+  хосте (8-бит 4:2:0 через swscale, предупреждение один раз), быстрый путь NVDEC → OFA отключается, OFA переходит на ABGR-
+  загрузку; регрессионные тесты `[nvdec][regression]` и `[cli][flow][gpu][regression]` на синтетическом HEVC 4:4:4 16 бит
+  (`ClipSpec::pixFmt`).
 - Репозиторий переехал на GitHub (`Proxylum/VideoDLSS`, релизы — https://github.com/Proxylum/VideoDLSS/releases): CI — GitHub
   Actions на self-hosted RTX-раннере (`.github/workflows/ci.yml` вместо `.gitlab-ci.yml`; `docs/ci.md`), на теге пакет
   прикладывается к Release; процедура выпуска в `docs/release.md`.

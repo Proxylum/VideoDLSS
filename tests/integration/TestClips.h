@@ -22,6 +22,9 @@ struct ClipSpec {
     int fpsDen = 1;
     bool audio = false;  // add a pcm_s16le sine tone track
     std::string codec = "ffv1";
+    // Encoder input layout the YUV420P frames are converted to: "yuv420p" (as is), "p010le" (10-bit 4:2:0) or
+    // "yuv444p16le" (16-bit 4:4:4, chroma replicated) — for sources that NVDEC does not decode into NV12.
+    std::string pixFmt = "yuv420p";
 };
 
 // Writes a lossless (ffv1 + optional pcm audio) clip with SyntheticFrame(i) as frame i.

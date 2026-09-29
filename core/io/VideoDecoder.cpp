@@ -174,13 +174,27 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
             av_frame_unref(hwKeep_);
             CheckAv(av_frame_ref(hwKeep_, frame_), "av_frame_ref");
             const auto* hwFrames = reinterpret_cast<const AVHWFramesContext*>(hwKeep_->hw_frames_ctx->data);
-            if (hwFrames->sw_format != AV_PIX_FMT_NV12) Throw("NVDEC frame is not NV12 (" + std::string(av_get_pix_fmt_name(hwFrames->sw_format)) + ")");
-            gpu->width = static_cast<uint32_t>(hwKeep_->width);
-            gpu->height = static_cast<uint32_t>(hwKeep_->height);
-            gpu->y = reinterpret_cast<uintptr_t>(hwKeep_->data[0]);
-            gpu->uv = reinterpret_cast<uintptr_t>(hwKeep_->data[1]);
-            gpu->pitch = static_cast<size_t>(hwKeep_->linesize[0]);
-            gpu->index = index;
+            if (hwFrames->sw_format == AV_PIX_FMT_NV12) {
+                gpu->width = static_cast<uint32_t>(hwKeep_->width);
+                gpu->height = static_cast<uint32_t>(hwKeep_->height);
+                gpu->y = reinterpret_cast<uintptr_t>(hwKeep_->data[0]);
+                gpu->uv = reinterpret_cast<uintptr_t>(hwKeep_->data[1]);
+                gpu->pitch = static_cast<size_t>(hwKeep_->linesize[0]);
+                gpu->index = index;
+            } else {
+                // NVDEC decodes 10/12-bit and 4:4:4 streams (p010, p016, yuv444p16 ...) into other layouts. The
+                // on-device NV12 fast path (OFA fed straight from NVDEC) is not available for them: hand the caller
+                // a CPU frame instead — the consumers fall back to their host paths (OFA re-initialises for ABGR
+                // uploads, the pass cache uploads from the CPU frame). Until stage 2+ keep high bit depth on the
+                // GPU, the CPU frame is 8-bit 4:2:0 (swscale, warned once).
+                *gpu = GpuFrame{};
+                cpu = true;
+                if (!warnedNonNv12_) {
+                    Log()->warn("NVDEC decodes this stream as {} (not NV12): the on-device fast path is off, frames go through the host",
+                                av_get_pix_fmt_name(hwFrames->sw_format) ? av_get_pix_fmt_name(hwFrames->sw_format) : "?");
+                    warnedNonNv12_ = true;
+                }
+            }
         }
         if (!cpu) {
             out.desc = FrameDesc{static_cast<uint32_t>(frame_->width), static_cast<uint32_t>(frame_->height), PixelFormat::Yuv420p};
