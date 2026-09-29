@@ -75,7 +75,9 @@ public:
     // Next decoded frame in presentation order. Returns false at end of stream.
     // `gpu` (optional): filled with the on-device NV12 frame when decoding with NVDEC; it is
     // valid until the next NextFrame() call. `cpu = false` skips the device->host copy (the
-    // CpuFrame then only carries index/pts/desc) — only allowed when gpu is requested.
+    // CpuFrame then only carries index/pts/desc) — only allowed when gpu is requested. When NVDEC
+    // yields a layout other than NV12 (10/12-bit, 4:4:4), `gpu` stays invalid and the CpuFrame is
+    // always filled (8-bit 4:2:0 through swscale), whatever `cpu` says.
     bool NextFrame(CpuFrame& out, GpuFrame* gpu = nullptr, bool cpu = true);
 
     // Random access: positions the decoder so that the next NextFrame() returns `index`
@@ -110,6 +112,7 @@ private:
     bool eofSent_ = false;
     bool drained_ = false;
     bool warnedConversion_ = false;
+    bool warnedNonNv12_ = false;  // NVDEC layout other than NV12: the GPU fast path is off for this stream
     bool seeked_ = false;  // indices come from pts after a seek
     VideoStreamInfo info_;
     AudioPacketSink audioSink_;

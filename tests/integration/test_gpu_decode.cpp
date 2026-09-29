@@ -127,3 +127,51 @@ TEST_CASE("NVDEC still opens after the CUDA runtime created the primary context 
     CHECK((flags & cudaDeviceScheduleMask) == cudaDeviceScheduleBlockingSync);
 }
 #endif
+
+// Regression (2026-09-29): a 4:4:4 16-bit HEVC source made `dlssvid process` fail in the flow stage with
+// "NVDEC frame is not NV12 (yuv444p16le)". NVDEC decodes such streams into other layouts; the decoder must hand the
+// caller a host frame instead of throwing, and the GPU fast path just stays off for that stream.
+TEST_CASE("NVDEC frames that are not NV12 (HEVC 4:4:4 16-bit) go through the host instead of failing", "[integration][gpu][nvdec][regression]") {
+    D3D12Device dev;
+    std::string reason;
+    if (dev.IsWarp() || !dev.IsNvidia() || !CudaInterop::Available(&reason)) SKIP("no NVIDIA GPU / CUDA: " << reason);
+    if (!VideoEncoder::EncoderAvailable("hevc_nvenc")) SKIP("hevc_nvenc unavailable");
+    ClipSpec spec;
+    spec.frames = 8;
+    spec.width = 320;
+    spec.height = 192;
+    spec.codec = "hevc_nvenc";
+    spec.pixFmt = "yuv444p16le";
+    std::filesystem::path clip;
+    try {
+        clip = WriteClip(TempDir() / "gpu_src_444_16.mp4", spec);
+    } catch (const std::exception& e) {
+        SKIP("hevc_nvenc cannot encode yuv444p16le on this GPU: " << e.what());
+    }
+
+    VideoDecoder hw(clip, VideoDecoder::Options{HwAccel::Cuda});
+    if (!hw.UsingHwAccel()) SKIP("CUDA hwaccel not available");
+    VideoDecoder sw(clip);
+    CpuFrame cpu, ref;
+    GpuFrame gpu;
+    int n = 0;
+    while (hw.NextFrame(cpu, &gpu, true)) {
+        REQUIRE(sw.NextFrame(ref));
+        CHECK_FALSE(gpu.Valid());          // no NV12 planes to hand out
+        REQUIRE_FALSE(cpu.data.empty());   // the host frame is there instead
+        CHECK(cpu.desc.width == spec.width);
+        CHECK(cpu.desc.height == spec.height);
+        CHECK(cpu.index == ref.index);
+        CHECK(cpu.data == ref.data);       // same swscale conversion of the same decoded samples
+        ++n;
+    }
+    CHECK(n == spec.frames);
+
+    // `cpu = false` (a consumer that wanted only the device frame) still gets the host frame: there is nothing else
+    VideoDecoder hw2(clip, VideoDecoder::Options{HwAccel::Cuda});
+    CpuFrame cpu2;
+    GpuFrame gpu2;
+    REQUIRE(hw2.NextFrame(cpu2, &gpu2, false));
+    CHECK_FALSE(gpu2.Valid());
+    CHECK_FALSE(cpu2.data.empty());
+}

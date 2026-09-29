@@ -67,11 +67,16 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     AVCodecContext* vctx = avcodec_alloc_context3(venc);
     vctx->width = static_cast<int>(spec.width);
     vctx->height = static_cast<int>(spec.height);
-    vctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    const AVPixelFormat encFmt = spec.pixFmt == "p010le"       ? AV_PIX_FMT_P010LE
+                                 : spec.pixFmt == "yuv444p16le" ? AV_PIX_FMT_YUV444P16LE
+                                 : spec.pixFmt == "yuv420p"     ? AV_PIX_FMT_YUV420P
+                                                                : AV_PIX_FMT_NONE;
+    if (encFmt == AV_PIX_FMT_NONE) Throw("test clip pixel format not supported: " + spec.pixFmt);
+    vctx->pix_fmt = encFmt;
     vctx->time_base = AVRational{spec.fpsDen, spec.fpsNum};
     vctx->framerate = AVRational{spec.fpsNum, spec.fpsDen};
     if (fmt->oformat->flags & AVFMT_GLOBALHEADER) vctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-    CheckAv(avcodec_open2(vctx, venc, nullptr), "open ffv1");
+    CheckAv(avcodec_open2(vctx, venc, nullptr), ("open " + spec.codec + " (" + spec.pixFmt + ")").c_str());
     AVStream* vs = avformat_new_stream(fmt, nullptr);
     vs->time_base = vctx->time_base;
     vs->avg_frame_rate = vctx->framerate;
@@ -116,14 +121,33 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     for (int i = 0; i < spec.frames; ++i) {
         const CpuFrame src = frameFn(i);
         av_frame_unref(frame);
-        frame->format = AV_PIX_FMT_YUV420P;
+        frame->format = encFmt;
         frame->width = vctx->width;
         frame->height = vctx->height;
         CheckAv(av_frame_get_buffer(frame, 0), "frame buffer");
-        for (size_t p = 0; p < 3; ++p) {
-            const size_t rowBytes = src.desc.PlaneWidth(p), rows = src.desc.PlaneHeight(p);
-            for (size_t r = 0; r < rows; ++r)
-                std::memcpy(frame->data[p] + static_cast<ptrdiff_t>(r) * frame->linesize[p], src.Plane(p) + r * rowBytes, rowBytes);
+        const size_t W = spec.width, H = spec.height, cw = src.desc.PlaneWidth(1);
+        auto row16 = [&](int plane, size_t r) { return reinterpret_cast<uint16_t*>(frame->data[plane] + static_cast<ptrdiff_t>(r) * frame->linesize[plane]); };
+        if (encFmt == AV_PIX_FMT_YUV420P) {
+            for (size_t p = 0; p < 3; ++p) {
+                const size_t rowBytes = src.desc.PlaneWidth(p), rows = src.desc.PlaneHeight(p);
+                for (size_t r = 0; r < rows; ++r)
+                    std::memcpy(frame->data[p] + static_cast<ptrdiff_t>(r) * frame->linesize[p], src.Plane(p) + r * rowBytes, rowBytes);
+            }
+        } else {
+            // 8-bit samples into the top bits of 16-bit words (exact for the decoder round trip: value >> 8 gives them back)
+            for (size_t r = 0; r < H; ++r)
+                for (size_t x = 0; x < W; ++x) row16(0, r)[x] = static_cast<uint16_t>(src.Plane(0)[r * W + x] << 8);
+            if (encFmt == AV_PIX_FMT_P010LE) {
+                for (size_t r = 0; r < H / 2; ++r)
+                    for (size_t x = 0; x < W / 2; ++x) {
+                        row16(1, r)[2 * x] = static_cast<uint16_t>(src.Plane(1)[r * cw + x] << 8);
+                        row16(1, r)[2 * x + 1] = static_cast<uint16_t>(src.Plane(2)[r * cw + x] << 8);
+                    }
+            } else {  // yuv444p16le: chroma replicated to full resolution
+                for (int p = 1; p <= 2; ++p)
+                    for (size_t r = 0; r < H; ++r)
+                        for (size_t x = 0; x < W; ++x) row16(p, r)[x] = static_cast<uint16_t>(src.Plane(static_cast<size_t>(p))[(r / 2) * cw + x / 2] << 8);
+            }
         }
         frame->pts = i;
         CheckAv(avcodec_send_frame(vctx, frame), "send video frame");
