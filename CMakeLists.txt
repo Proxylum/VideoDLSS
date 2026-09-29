@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(dlss-video
-  VERSION 0.3.0
+  VERSION 0.3.1
   DESCRIPTION "Offline DLSS video pipeline (SR / NR / FG) for Windows + NVIDIA RTX"
   LANGUAGES CXX)
 
