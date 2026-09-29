@@ -26,6 +26,7 @@ std::vector<std::filesystem::path> DocFiles() {
                                                 kRoot / "CHANGELOG.md",
                                                 kRoot / "LICENSE",
                                                 kRoot / ".github" / "workflows" / "ci.yml",
+                                                kRoot / ".github" / "workflows" / "release.yml",
                                                 kRoot / "app" / "README.md",
                                                 kRoot / "models" / "export" / "README.md",
                                                 kRoot / "sr_worker" / "README.md",

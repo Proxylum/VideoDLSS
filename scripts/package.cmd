@@ -16,7 +16,7 @@ call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 
 set PKG_FULL=OFF
 if /i "%~1"=="full" set PKG_FULL=ON
-cmake --preset %DLSSVID_PRESET% -DDLSSVID_PACKAGE_FULL=%PKG_FULL% || exit /b 1
+call "%~dp0configure.cmd" -DDLSSVID_PACKAGE_FULL=%PKG_FULL% || exit /b 1
 cmake --build --preset %DLSSVID_PRESET% || exit /b 1
 cpack --preset %DLSSVID_PRESET% || exit /b 1
 echo === package written to build\%DLSSVID_PRESET%\

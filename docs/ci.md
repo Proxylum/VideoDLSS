@@ -1,13 +1,17 @@
 # CI: GitHub Actions на self-hosted Windows-раннере с RTX
 
-Пайплайн — `.github/workflows/ci.yml`: job `build-test` (configure → build → все тесты, включая GPU-тесты и golden) на
-каждый push в `main`, pull request и вручную (`workflow_dispatch`); job `package` (CPack ZIP / NSIS) — на push в `main` и
-на теги `v*`, на теге пакет прикладывается к GitHub Release. Оба выполняются скриптами из `scripts/`, которые можно
-запускать и вручную из корня репозитория:
+Два workflow. `.github/workflows/ci.yml`: job `build-test` (configure → build → все тесты, включая GPU-тесты и golden) на
+каждый push в `main`, pull request и вручную (`workflow_dispatch`); job `package` (CPack ZIP / NSIS) — на push в `main`,
+ZIP как артефакт. `.github/workflows/release.yml`: на теги `v*` — только `package`, пакет прикладывается к GitHub Release
+тега (build-test не повторяется: тегируется merge-коммит, который уже прошёл тесты в pull request и на `main`; на одном
+раннере это экономит 20+ минут на релиз). Все job выполняются скриптами из `scripts/`, которые можно запускать и вручную
+из корня репозитория:
 
 ```bat
-scripts\ci-build.cmd     :: то же, что делает раннер: cmake --preset release, сборка, ctest (+ test-report.xml)
+scripts\ci-build.cmd     :: то же, что делает раннер: configure, сборка, ctest (+ test-report.xml)
 scripts\package.cmd      :: сборка и cpack --preset release -> build\release\dlss-video-<версия>-win64.zip
+scripts\configure.cmd    :: cmake --preset release с повтором до 3 раз (vcpkg install тянет реестр с GitHub, и с раннера
+                         :: это время от времени срывается — «Fetching registry information … failed»; повтор проходит)
 ```
 
 Раннер — машина с NVIDIA RTX (labels `self-hosted`, `windows`, `rtx`): GPU-тесты, DLSS SR / NR / FG, TensorRT-движки идут
@@ -79,4 +83,4 @@ D:\actions-runner\run.cmd
 - `ctest --preset release` — все тесты (unit, integration, app, golden); тесты, требующие DLL/модели, при их отсутствии
   помечаются SKIP и не валят сборку;
 - `test-report.xml` (JUnit) и `LastTest.log` прикладываются к job как артефакт `test-report-<номер запуска>`;
-- `package` — артефакт `dlss-video-package-<ref>` с `dlss-video-<версия>-win64.zip`; на теге тот же ZIP в Release.
+- `package` — артефакт `dlss-video-package-<ref>` с `dlss-video-<версия>-win64.zip`; на теге (release.yml) тот же ZIP в Release.
