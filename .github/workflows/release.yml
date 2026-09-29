@@ -27,7 +27,7 @@ jobs:
       - name: Attach to the release of the tag
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: pwsh
+        shell: powershell   # Windows PowerShell 5.1: the runner has no pwsh (PowerShell 7)
         run: |
           $tag = $env:GITHUB_REF_NAME
           $zip = (Get-ChildItem build/release/dlss-video-*-win64.zip | Select-Object -First 1).FullName
