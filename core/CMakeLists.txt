@@ -66,6 +66,7 @@ add_library(dlssvid_core STATIC
   io/VideoDecoder.h io/VideoDecoder.cpp
   io/VideoEncoder.h io/VideoEncoder.cpp
   io/EncodeDefaults.h io/EncodeDefaults.cpp
+  io/OutputFormat.h io/OutputFormat.cpp
   stages/passthrough/PassthroughStage.h stages/passthrough/PassthroughStage.cpp
   passes/PassImage.h passes/PassImage.cpp
   passes/Manifest.h passes/Manifest.cpp
@@ -79,6 +80,7 @@ add_library(dlssvid_core STATIC
   convert/DepthConvert.h convert/DepthConvert.cpp
   convert/MvConvert.h convert/MvConvert.cpp
   convert/ColorConvert.h convert/ColorConvert.cpp
+  convert/YuvConvert.h convert/YuvConvert.cpp
   convert/Warp.h convert/Warp.cpp
   gpu/GpuFrame.h
   stages/flow/IFlowEstimator.h

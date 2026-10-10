@@ -150,7 +150,7 @@ TEST_CASE("FrameStore seeks into a video and matches a software decode", "[integ
         const LayerTexture& t = tex.at("source");
         CHECK(t.kind == TextureKind::Color);
         CHECK(t.width == 48);
-        const PassImage rgb = Yuv420pToRgb(ref[static_cast<size_t>(f)], ci, PixelType::F16);
+        const PassImage rgb = YuvToRgb(ref[static_cast<size_t>(f)], ci, PixelType::F16);
         for (auto [x, y] : {std::pair<uint32_t, uint32_t>{5, 7}, {30, 20}, {47, 31}}) {
             const auto v = r.ReadTexel(t, x, y);
             CHECK(v[0] == rgb.Get(x, y, 0));

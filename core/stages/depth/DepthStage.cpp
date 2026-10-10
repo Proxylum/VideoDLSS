@@ -69,7 +69,7 @@ void DepthStage::Process(FrameContext& ctx) {
     if (!initialized_) Throw("DepthStage::Process before Init");
     Pending p;
     p.index = ctx.frame.index;
-    p.rgb = Yuv420pToRgb(ctx.frame, options_.color, PixelType::F32);
+    p.rgb = YuvToRgb(ctx.frame, options_.color, PixelType::F32);
     p.cache = &ctx.cache;
     p.device = &ctx.device;
     pending_.push_back(std::move(p));

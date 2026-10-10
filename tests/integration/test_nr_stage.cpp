@@ -102,7 +102,7 @@ TEST_CASE("NrStage writes color_nr with the stub on WARP, encodes a preview and 
     const ColorInfo ci = ColorInfoFromStream(dec2.Info());
     CpuFrame f;
     REQUIRE(dec2.NextFrame(f));
-    const ImageMetrics m = CompareImages(Yuv420pToRgb(f, ci, PixelType::F32), rd.ReadFrame(0));
+    const ImageMetrics m = CompareImages(YuvToRgb(f, ci, PixelType::F32), rd.ReadFrame(0));
     CHECK(m.psnrY < 60.0);
     CHECK(m.psnrY > 15.0);
     const PassImage out0 = rd.ReadFrame(0);
@@ -285,7 +285,7 @@ TEST_CASE("Neural Rendering (NGX Feature 18) produces color_nr on an NVIDIA GPU 
     const ColorInfo ci = ColorInfoFromStream(dec2.Info());
     CpuFrame f;
     REQUIRE(dec2.NextFrame(f));
-    const ImageMetrics m = CompareImages(Yuv420pToRgb(f, ci, PixelType::F32), rd.ReadFrame(0));
+    const ImageMetrics m = CompareImages(YuvToRgb(f, ci, PixelType::F32), rd.ReadFrame(0));
     CHECK(m.psnrY > 12.0);  // the model edits the frame but does not destroy it
     const PassImage out0 = rd.ReadFrame(0);
     for (uint32_t y = 0; y < out0.height; y += 9)

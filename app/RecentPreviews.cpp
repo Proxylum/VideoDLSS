@@ -51,7 +51,7 @@ QImage FirstFrame(const QString& file) {
         const ColorInfo color = ColorInfoFromStream(dec.Info());
         CpuFrame f;
         for (int i = 0; i < 12 && dec.NextFrame(f); ++i) {
-            const PassImage rgb = Yuv420pToRgb(f, color, PixelType::U8);
+            const PassImage rgb = YuvToRgb(f, color, PixelType::U8);
             if (rgb.width == 0 || rgb.ChannelCount() != 3) break;
             last = QImage(rgb.data.data(), static_cast<int>(rgb.width), static_cast<int>(rgb.height), static_cast<qsizetype>(rgb.RowBytes()),
                           QImage::Format_RGB888)

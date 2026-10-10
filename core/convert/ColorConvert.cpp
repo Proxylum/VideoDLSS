@@ -25,47 +25,72 @@ ColorInfo ColorInfoFromStream(const VideoStreamInfo& info) {
 std::string_view ToString(ColorMatrix m) { return m == ColorMatrix::Bt709 ? "bt709" : "bt601"; }
 std::string_view ToString(ColorRange r) { return r == ColorRange::Full ? "full" : "limited"; }
 
-PassImage Yuv420pToRgb(const CpuFrame& frame, const ColorInfo& info, PixelType outType) {
-    if (frame.desc.format != PixelFormat::Yuv420p) Throw("Yuv420pToRgb: frame is not yuv420p");
-    const uint32_t w = frame.desc.width, h = frame.desc.height;
-    PassImage out = MakePassImage(PassKind::ColorSource, w, h, outType);
+namespace {
 
+// Y'CbCr <-> R'G'B' constants for a matrix, a range and a bit depth. For 8 bits these are the numbers the 8-bit
+// converter always used (16 / 219 / 128 / 224); limited range scales with the depth (SMPTE / ITU: 64..940 at 10 bits).
+struct YuvCoeffs {
+    float yOff, yScale, cOff, cScale;  // (Y - yOff) * yScale, (C - cOff) * cScale
+    float yCode, cCode;                // the inverse: code values per unit (219 / 224 at 8 bits limited, maxv full)
+    float kr, kb, kg;
+    float crR, cbB, cbG, crG;
+    float maxv;  // the code value of 1.0 in full range (255, 1023, 4095, 65535)
+};
+
+YuvCoeffs Coeffs(const ColorInfo& info, int bitDepth) {
+    YuvCoeffs k;
     const bool full = info.range == ColorRange::Full;
-    const float yScale = full ? 1.f / 255.f : 1.f / 219.f;
-    const float yOff = full ? 0.f : 16.f;
-    const float cScale = full ? 1.f / 255.f : 1.f / 224.f;
-    // Y'CbCr -> R'G'B' coefficients
-    const float kr = info.matrix == ColorMatrix::Bt709 ? 0.2126f : 0.299f;
-    const float kb = info.matrix == ColorMatrix::Bt709 ? 0.0722f : 0.114f;
-    const float kg = 1.f - kr - kb;
-    const float crR = 2.f * (1.f - kr);
-    const float cbB = 2.f * (1.f - kb);
-    const float cbG = -2.f * kb * (1.f - kb) / kg;
-    const float crG = -2.f * kr * (1.f - kr) / kg;
-
-    const uint8_t* Y = frame.Plane(0);
-    const uint8_t* U = frame.Plane(1);
-    const uint8_t* V = frame.Plane(2);
-    const size_t cw = frame.desc.PlaneWidth(1);
-    const float scaleOut = outType == PixelType::U16 ? 65535.f : (outType == PixelType::U8 ? 255.f : 1.f);
-
-    for (uint32_t y = 0; y < h; ++y)
-        for (uint32_t x = 0; x < w; ++x) {
-            const float yy = (static_cast<float>(Y[static_cast<size_t>(y) * w + x]) - yOff) * yScale;
-            const size_t ci = static_cast<size_t>(y / 2) * cw + x / 2;
-            const float cb = (static_cast<float>(U[ci]) - 128.f) * cScale;
-            const float cr = (static_cast<float>(V[ci]) - 128.f) * cScale;
-            const float r = std::clamp(yy + crR * cr, 0.f, 1.f);
-            const float g = std::clamp(yy + cbG * cb + crG * cr, 0.f, 1.f);
-            const float b = std::clamp(yy + cbB * cb, 0.f, 1.f);
-            out.Set(x, y, 0, r * scaleOut);
-            out.Set(x, y, 1, g * scaleOut);
-            out.Set(x, y, 2, b * scaleOut);
-        }
-    return out;
+    const int extra = bitDepth - 8;
+    k.maxv = static_cast<float>((1u << bitDepth) - 1u);
+    k.yCode = full ? k.maxv : static_cast<float>(219 << extra);
+    k.cCode = full ? k.maxv : static_cast<float>(224 << extra);
+    k.yScale = 1.f / k.yCode;
+    k.yOff = full ? 0.f : static_cast<float>(16 << extra);
+    k.cOff = static_cast<float>(128 << extra);
+    k.cScale = 1.f / k.cCode;
+    k.kr = info.matrix == ColorMatrix::Bt709 ? 0.2126f : 0.299f;
+    k.kb = info.matrix == ColorMatrix::Bt709 ? 0.0722f : 0.114f;
+    k.kg = 1.f - k.kr - k.kb;
+    k.crR = 2.f * (1.f - k.kr);
+    k.cbB = 2.f * (1.f - k.kb);
+    k.cbG = -2.f * k.kb * (1.f - k.kb) / k.kg;
+    k.crG = -2.f * k.kr * (1.f - k.kr) / k.kg;
+    return k;
 }
 
-namespace {
+// Walks every pixel of a planar frame, replicating chroma per block, and hands `emit(x, y, r, g, b)` the clamped
+// display-referred RGB in [0, 1]. The arithmetic is the one the 8-bit 4:2:0 converter always used.
+template <typename T, typename Emit>
+void ForEachRgb(const CpuFrame& frame, const YuvCoeffs& k, Emit emit) {
+    const uint32_t w = frame.desc.width, h = frame.desc.height;
+    const int sx = ChromaShiftX(frame.desc.format), sy = ChromaShiftY(frame.desc.format);
+    const T* Y = reinterpret_cast<const T*>(frame.Plane(0));
+    const T* U = reinterpret_cast<const T*>(frame.Plane(1));
+    const T* V = reinterpret_cast<const T*>(frame.Plane(2));
+    const size_t cw = frame.desc.PlaneCols(1);
+    for (uint32_t y = 0; y < h; ++y) {
+        const T* yr = Y + static_cast<size_t>(y) * w;
+        const T* ur = U + static_cast<size_t>(y >> sy) * cw;
+        const T* vr = V + static_cast<size_t>(y >> sy) * cw;
+        for (uint32_t x = 0; x < w; ++x) {
+            const float yy = (static_cast<float>(yr[x]) - k.yOff) * k.yScale;
+            const float cb = (static_cast<float>(ur[x >> sx]) - k.cOff) * k.cScale;
+            const float cr = (static_cast<float>(vr[x >> sx]) - k.cOff) * k.cScale;
+            const float r = std::clamp(yy + k.crR * cr, 0.f, 1.f);
+            const float g = std::clamp(yy + k.cbG * cb + k.crG * cr, 0.f, 1.f);
+            const float b = std::clamp(yy + k.cbB * cb, 0.f, 1.f);
+            emit(x, y, r, g, b);
+        }
+    }
+}
+
+template <typename Emit>
+void ForEachRgbOf(const CpuFrame& frame, const ColorInfo& info, Emit emit) {
+    if (frame.data.size() < frame.desc.ByteSize()) Throw("YuvToRgb: frame has no data");
+    const YuvCoeffs k = Coeffs(info, frame.desc.HighBitDepth() ? frame.desc.bitDepth : 8);
+    if (frame.desc.HighBitDepth()) ForEachRgb<uint16_t>(frame, k, emit);
+    else ForEachRgb<uint8_t>(frame, k, emit);
+}
 
 // 4 floats -> 4 halves (round to nearest even), F16C or the portable routine.
 inline void StoreHalf4(uint16_t* d, float r, float g, float b, float a, bool f16c) {
@@ -82,6 +107,18 @@ inline void StoreHalf4(uint16_t* d, float r, float g, float b, float a, bool f16
 
 }  // namespace
 
+PassImage YuvToRgb(const CpuFrame& frame, const ColorInfo& info, PixelType outType) {
+    const uint32_t w = frame.desc.width, h = frame.desc.height;
+    PassImage out = MakePassImage(PassKind::ColorSource, w, h, outType);
+    const float scaleOut = outType == PixelType::U16 ? 65535.f : (outType == PixelType::U8 ? 255.f : 1.f);
+    ForEachRgbOf(frame, info, [&](uint32_t x, uint32_t y, float r, float g, float b) {
+        out.Set(x, y, 0, r * scaleOut);
+        out.Set(x, y, 1, g * scaleOut);
+        out.Set(x, y, 2, b * scaleOut);
+    });
+    return out;
+}
+
 bool HasF16C() {
     static const bool has = [] {
         int r[4] = {0, 0, 0, 0};
@@ -91,90 +128,76 @@ bool HasF16C() {
     return has;
 }
 
-PassImage Yuv420pToRgba16f(const CpuFrame& frame, const ColorInfo& info) {
-    if (frame.desc.format != PixelFormat::Yuv420p) Throw("Yuv420pToRgba16f: frame is not yuv420p");
+PassImage YuvToRgba16f(const CpuFrame& frame, const ColorInfo& info) {
     const uint32_t w = frame.desc.width, h = frame.desc.height;
     PassImage out;
     out.Allocate(w, h, PixelType::F16, {"R", "G", "B", "A"});
-
-    const bool full = info.range == ColorRange::Full;
-    const float yScale = full ? 1.f / 255.f : 1.f / 219.f;
-    const float yOff = full ? 0.f : 16.f;
-    const float cScale = full ? 1.f / 255.f : 1.f / 224.f;
-    const float kr = info.matrix == ColorMatrix::Bt709 ? 0.2126f : 0.299f;
-    const float kb = info.matrix == ColorMatrix::Bt709 ? 0.0722f : 0.114f;
-    const float kg = 1.f - kr - kb;
-    const float crR = 2.f * (1.f - kr);
-    const float cbB = 2.f * (1.f - kb);
-    const float cbG = -2.f * kb * (1.f - kb) / kg;
-    const float crG = -2.f * kr * (1.f - kr) / kg;
-
-    const uint8_t* Y = frame.Plane(0);
-    const uint8_t* U = frame.Plane(1);
-    const uint8_t* V = frame.Plane(2);
-    const size_t cw = frame.desc.PlaneWidth(1);
     const bool f16c = HasF16C();
     uint16_t* dst = out.As<uint16_t>();
-    for (uint32_t y = 0; y < h; ++y) {
-        const uint8_t* yr = Y + static_cast<size_t>(y) * w;
-        const uint8_t* ur = U + static_cast<size_t>(y / 2) * cw;
-        const uint8_t* vr = V + static_cast<size_t>(y / 2) * cw;
-        uint16_t* d = dst + static_cast<size_t>(y) * w * 4;
-        for (uint32_t x = 0; x < w; ++x, d += 4) {
-            const float yy = (static_cast<float>(yr[x]) - yOff) * yScale;
-            const float cb = (static_cast<float>(ur[x / 2]) - 128.f) * cScale;
-            const float cr = (static_cast<float>(vr[x / 2]) - 128.f) * cScale;
-            const float r = std::clamp(yy + crR * cr, 0.f, 1.f);
-            const float g = std::clamp(yy + cbG * cb + crG * cr, 0.f, 1.f);
-            const float b = std::clamp(yy + cbB * cb, 0.f, 1.f);
-            StoreHalf4(d, r, g, b, 1.f, f16c);
-        }
-    }
+    ForEachRgbOf(frame, info, [&](uint32_t x, uint32_t y, float r, float g, float b) {
+        StoreHalf4(dst + (static_cast<size_t>(y) * w + x) * 4, r, g, b, 1.f, f16c);
+    });
     return out;
 }
 
-void RgbToYuv420p(const PassImage& rgb, const ColorInfo& info, CpuFrame& out) {
-    if (rgb.channels.size() < 3) Throw("RgbToYuv420p: needs an RGB image");
+namespace {
+
+template <typename T>
+void RgbToYuvPlanar(const PassImage& rgb, const YuvCoeffs& k, CpuFrame& out) {
     const uint32_t w = rgb.width, h = rgb.height;
-    out.Allocate(FrameDesc{w, h, PixelFormat::Yuv420p});
-    const bool full = info.range == ColorRange::Full;
-    const float kr = info.matrix == ColorMatrix::Bt709 ? 0.2126f : 0.299f;
-    const float kb = info.matrix == ColorMatrix::Bt709 ? 0.0722f : 0.114f;
-    const float kg = 1.f - kr - kb;
+    const int sx = ChromaShiftX(out.desc.format), sy = ChromaShiftY(out.desc.format);
     const float scale = rgb.type == PixelType::U8 ? 1.f / 255.f : rgb.type == PixelType::U16 ? 1.f / 65535.f : 1.f;
-    const float yScale = full ? 255.f : 219.f, yOff = full ? 0.f : 16.f, cScale = full ? 255.f : 224.f;
-    uint8_t* Y = out.Plane(0);
-    uint8_t* U = out.Plane(1);
-    uint8_t* V = out.Plane(2);
-    const size_t cw = out.desc.PlaneWidth(1), ch = out.desc.PlaneHeight(1);
+    // the code value ranges: full range maps 1.0 to maxv, limited to 219 / 224 steps above the offsets
+    const float yScale = k.yCode, yOff = k.yOff, cScale = k.cCode, cOff = k.cOff;
+    T* Y = reinterpret_cast<T*>(out.Plane(0));
+    T* U = reinterpret_cast<T*>(out.Plane(1));
+    T* V = reinterpret_cast<T*>(out.Plane(2));
+    const size_t cw = out.desc.PlaneCols(1), ch = out.desc.PlaneHeight(1);
+    const long maxv = static_cast<long>(k.maxv);
     std::vector<float> cb(static_cast<size_t>(w) * h), cr(static_cast<size_t>(w) * h);
-    auto q = [](float v) { return static_cast<uint8_t>(std::clamp(std::lround(v), 0L, 255L)); };
+    auto q = [maxv](float v) { return static_cast<T>(std::clamp(std::lround(v), 0L, maxv)); };
     for (uint32_t y = 0; y < h; ++y)
         for (uint32_t x = 0; x < w; ++x) {
             const float r = std::clamp(rgb.Get(x, y, 0) * scale, 0.f, 1.f);
             const float g = std::clamp(rgb.Get(x, y, 1) * scale, 0.f, 1.f);
             const float b = std::clamp(rgb.Get(x, y, 2) * scale, 0.f, 1.f);
-            const float yy = kr * r + kg * g + kb * b;
+            const float yy = k.kr * r + k.kg * g + k.kb * b;
             Y[static_cast<size_t>(y) * w + x] = q(yOff + yScale * yy);
-            cb[static_cast<size_t>(y) * w + x] = (b - yy) / (2.f * (1.f - kb));
-            cr[static_cast<size_t>(y) * w + x] = (r - yy) / (2.f * (1.f - kr));
+            cb[static_cast<size_t>(y) * w + x] = (b - yy) / (2.f * (1.f - k.kb));
+            cr[static_cast<size_t>(y) * w + x] = (r - yy) / (2.f * (1.f - k.kr));
         }
+    const uint32_t bw = 1u << sx, bh = 1u << sy;
     for (size_t cy = 0; cy < ch; ++cy)
         for (size_t cx = 0; cx < cw; ++cx) {
             float sb = 0.f, sr = 0.f;
             int n = 0;
-            for (uint32_t dy = 0; dy < 2; ++dy)
-                for (uint32_t dx = 0; dx < 2; ++dx) {
-                    const uint32_t x = std::min<uint32_t>(static_cast<uint32_t>(cx * 2 + dx), w - 1);
-                    const uint32_t y = std::min<uint32_t>(static_cast<uint32_t>(cy * 2 + dy), h - 1);
+            for (uint32_t dy = 0; dy < bh; ++dy)
+                for (uint32_t dx = 0; dx < bw; ++dx) {
+                    const uint32_t x = std::min<uint32_t>(static_cast<uint32_t>(cx * bw + dx), w - 1);
+                    const uint32_t y = std::min<uint32_t>(static_cast<uint32_t>(cy * bh + dy), h - 1);
                     sb += cb[static_cast<size_t>(y) * w + x];
                     sr += cr[static_cast<size_t>(y) * w + x];
                     ++n;
                 }
-            U[cy * cw + cx] = q(128.f + cScale * sb / static_cast<float>(n));
-            V[cy * cw + cx] = q(128.f + cScale * sr / static_cast<float>(n));
+            U[cy * cw + cx] = q(cOff + cScale * sb / static_cast<float>(n));
+            V[cy * cw + cx] = q(cOff + cScale * sr / static_cast<float>(n));
         }
 }
+
+}  // namespace
+
+void RgbToYuv(const PassImage& rgb, const ColorInfo& info, FrameDesc target, CpuFrame& out) {
+    if (rgb.channels.size() < 3) Throw("RgbToYuv: needs an RGB image");
+    target.width = rgb.width;
+    target.height = rgb.height;
+    if (!target.HighBitDepth()) target.bitDepth = 8;
+    out.Allocate(target);
+    const YuvCoeffs k = Coeffs(info, target.HighBitDepth() ? target.bitDepth : 8);
+    if (target.HighBitDepth()) RgbToYuvPlanar<uint16_t>(rgb, k, out);
+    else RgbToYuvPlanar<uint8_t>(rgb, k, out);
+}
+
+void RgbToYuv420p(const PassImage& rgb, const ColorInfo& info, CpuFrame& out) { RgbToYuv(rgb, info, FrameDesc{rgb.width, rgb.height, PixelFormat::Yuv420p}, out); }
 
 PassImage ToRgba16f(const PassImage& img) {
     const uint32_t w = img.width, h = img.height;

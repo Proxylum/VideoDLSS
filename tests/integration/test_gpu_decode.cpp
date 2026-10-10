@@ -161,8 +161,11 @@ TEST_CASE("NVDEC frames that are not NV12 (HEVC 4:4:4 16-bit) go through the hos
         REQUIRE_FALSE(cpu.data.empty());   // the host frame is there instead
         CHECK(cpu.desc.width == spec.width);
         CHECK(cpu.desc.height == spec.height);
+        CHECK(cpu.desc.format == PixelFormat::Yuv444p16);  // the stream is 10-bit 4:4:4: kept as it is, not reduced to 8-bit 4:2:0
+        CHECK(cpu.desc.bitDepth == 10);
         CHECK(cpu.index == ref.index);
-        CHECK(cpu.data == ref.data);       // same swscale conversion of the same decoded samples
+        CHECK(cpu.desc == ref.desc);
+        CHECK(cpu.data == ref.data);       // NVDEC's MSB-aligned 16-bit words shifted down equal the software decoder's 10-bit samples
         ++n;
     }
     CHECK(n == spec.frames);

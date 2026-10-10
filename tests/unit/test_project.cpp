@@ -150,3 +150,30 @@ TEST_CASE("Project caches the source hash by size and time and keeps the encoder
     CHECK(defaults.codecOptions.empty());
     CHECK(defaults.sourceHash.empty());
 }
+
+// TASK-0034: the result's bit depth and chroma live in the project next to the codec.
+TEST_CASE("Project keeps the output bit depth and chroma; older files mean auto", "[viewport][project]") {
+    const auto d = Dir("format");
+    Project p = Project::Create(d / "clip.mp4", d / "passes");
+    CHECK(p.outputFormat == OutputFormatRequest{});  // auto / auto
+    p.codec = "prores_ks";
+    p.outputFormat.bitDepth = 10;
+    p.outputFormat.chroma = "444";
+    p.Save(d / "p.dlssvid.json");
+    const Project q = Project::Load(d / "p.dlssvid.json");
+    CHECK(q.codec == "prores_ks");
+    CHECK(q.outputFormat.bitDepth == 10);
+    CHECK(q.outputFormat.chroma == "444");
+    const nlohmann::json j = p.ToJson(d);
+    CHECK(j["encode"]["bit_depth"] == "10");
+    CHECK(j["encode"]["chroma"] == "444");
+    // a project written before the fields: auto; a number for the depth is accepted too
+    const Project old = Project::FromJson(nlohmann::json::parse(R"({"schema_version": 1, "encode": {"codec": "hevc_nvenc", "options": {}}})"), d);
+    CHECK(old.outputFormat.bitDepth == 0);
+    CHECK(old.outputFormat.chroma == "auto");
+    const Project num = Project::FromJson(nlohmann::json::parse(R"({"schema_version": 1, "encode": {"codec": "ffv1", "bit_depth": 12, "chroma": "422"}})"), d);
+    CHECK(num.outputFormat.bitDepth == 12);
+    CHECK(num.outputFormat.chroma == "422");
+    CHECK_THROWS(Project::FromJson(nlohmann::json::parse(R"({"schema_version": 1, "encode": {"codec": "ffv1", "bit_depth": "9"}})"), d));
+    CHECK_THROWS(Project::FromJson(nlohmann::json::parse(R"({"schema_version": 1, "encode": {"codec": "ffv1", "chroma": "411"}})"), d));
+}

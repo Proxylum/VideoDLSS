@@ -43,6 +43,7 @@ add_executable(dlssvid_unit_tests
   unit/test_param_schema.cpp
   unit/test_estimates.cpp
   unit/test_encode_defaults.cpp
+  unit/test_output_format.cpp
   unit/test_paths.cpp
   unit/test_upscale.cpp
   unit/test_tonemap.cpp
@@ -61,6 +62,7 @@ add_executable(dlssvid_integration_tests
   integration/TestClips.h
   integration/TestClips.cpp
   integration/test_passthrough.cpp
+  integration/test_formats.cpp
   integration/test_cli.cpp
   integration/test_pass_sequence.cpp
   integration/test_cli_passes.cpp

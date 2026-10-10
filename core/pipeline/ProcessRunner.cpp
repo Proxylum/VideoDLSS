@@ -9,6 +9,7 @@
 #include "convert/ColorConvert.h"
 #include "gpu/D3D12Device.h"
 #include "io/EncodeDefaults.h"
+#include "io/OutputFormat.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
 #include "pipeline/PassFingerprint.h"
@@ -118,6 +119,7 @@ std::filesystem::path ExistingPass(const std::filesystem::path& root, std::initi
 struct RunContext {
     std::filesystem::path root;
     std::string sourceHash;
+    std::string sourceFormat;  // the layout the source decodes into (FrameDesc::Name()): part of the fingerprints
     int64_t needed = -1;  // source frames the run covers (-1: unknown)
     bool skipExisting = true;
     std::set<std::string> force;  // stages recomputed on request
@@ -199,10 +201,13 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             if (state.ran.count(cand)) inputsRan.push_back(cand);
             break;
         }
-    const PassFingerprint fp = ComputeFingerprint(name, ctx.sourceHash, p, d.inputs, ToolForStage(name, p));
+    const PassFingerprint fp = ComputeFingerprint(name, ctx.sourceHash, p, d.inputs, ToolForStage(name, p), ctx.sourceFormat);
     d.fingerprint = fp.value;
+    d.sourceFormat = ctx.sourceFormat;
     d.params = fp.params;
     d.tool = fp.tool.ToJson();
+    // the layout a pass on disk was made from: manifests from before the field come from the 8-bit 4:2:0 decode
+    const std::string sourceFormatNow = ctx.sourceFormat.empty() ? kLegacySourceFormat : ctx.sourceFormat;
 
     Manifest m;
     bool have = false;
@@ -255,12 +260,15 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         }
         return d;
     }
+    const std::string madeFrom = m.sourceFormat.empty() ? kLegacySourceFormat : m.sourceFormat;
     if (m.fingerprint.empty()) {  // made before fingerprints (or by a standalone `dlssvid <stage>`)
         if (!inputsRan.empty()) {
             d.diff["inputs"] = inputsRan;
             run("input_changed", "input recomputed: " + Join(inputsRan), true);
         } else if (m.sourceHash != ctx.sourceHash) {
             run("source_changed", m.sourceHash.empty() ? "the pass has no source hash" : "the pass was made from another source", true);
+        } else if (madeFrom != sourceFormatNow) {
+            run("source_changed", "the pass was made from the source decoded as " + madeFrom + " (now " + sourceFormatNow + ")", true);
         } else if (!complete) {
             run("incomplete", incomplete, false);
         } else {
@@ -274,6 +282,10 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     if (restore()) return d;
     if (m.sourceHash != ctx.sourceHash) {
         run("source_changed", "the pass was made from another source", true);
+        return d;
+    }
+    if (madeFrom != sourceFormatNow) {
+        run("source_changed", "the pass was made from the source decoded as " + madeFrom + " (now " + sourceFormatNow + ")", true);
         return d;
     }
     const nlohmann::json oldP = CanonicalizeJson(m.paramsCanonical);
@@ -337,6 +349,7 @@ void StampPass(const std::filesystem::path& dir, const StageDecision& d, const s
     m.inputs = d.inputs;
     m.tool = d.tool;
     m.paramsCanonical = d.params;
+    m.sourceFormat = d.sourceFormat;
     m.created = created;
     m.Save(dir);
 }
@@ -377,6 +390,7 @@ Prepared Prepare(const ProcessOptions& options) {
             Throw("process: --force: unknown stage '" + f + "' (depth | flow | upscale | nr | fg)");
     r.sourceFile = options.input.filename().string();
     r.ctx.sourceHash = options.sourceHash.rfind("sha256:", 0) == 0 ? options.sourceHash : "sha256:" + Sha256FileCached(options.input);
+    r.ctx.sourceFormat = r.info.decoded.Name();
     return r;
 }
 
@@ -398,13 +412,15 @@ nlohmann::json ProcessResult::ToJson() const {
     nlohmann::json st = nlohmann::json::array();
     for (const auto& s : stages) st.push_back(s.ToJson());
     return {{"stages", st},         {"final_pass", finalPass.string()}, {"output", output.string()}, {"frames_in", framesIn}, {"frames_out", framesOut},
-            {"output_fps", outputFps.ToDouble()}, {"audio", audio},   {"seconds", seconds}};
+            {"output_fps", outputFps.ToDouble()}, {"audio", audio},   {"seconds", seconds},
+            {"output_format", {{"codec", codec}, {"pix_fmt", outputPixelFormat}, {"name", outputFormat.Name()}, {"bit_depth", outputFormat.HighBitDepth() ? outputFormat.bitDepth : 8},
+                               {"chroma", std::string(ChromaName(outputFormat.format))}, {"description", outputFormat.Describe()}}}};
 }
 
 nlohmann::json StageDecision::ToJson() const {
     return {{"name", name},       {"action", action},   {"kind", kind},         {"detail", detail},   {"diff", diff},
-            {"fingerprint", fingerprint}, {"current", current}, {"current_fingerprint", currentFingerprint}, {"version", version}, {"outputs", outputs},
-            {"out_dir", outDir.string()}, {"frames", frames}, {"retire", retire}, {"params", params}, {"inputs", inputs}, {"tool", tool}};
+            {"fingerprint", fingerprint}, {"source_format", sourceFormat}, {"current", current}, {"current_fingerprint", currentFingerprint}, {"version", version},
+            {"outputs", outputs}, {"out_dir", outDir.string()}, {"frames", frames}, {"retire", retire}, {"params", params}, {"inputs", inputs}, {"tool", tool}};
 }
 
 nlohmann::json ProcessPlan::ToJson() const {
@@ -465,9 +481,18 @@ bool PassComplete(const std::filesystem::path& dir, int64_t neededFrames, const 
     }
 }
 
-EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::filesystem::path& source, const std::filesystem::path& output, const std::string& codec,
-                               const std::map<std::string, std::string>& codecOptions, int64_t maxSourceFrames, const std::function<void(int64_t, int64_t)>& progress,
-                               const std::string& hwaccel) {
+ColorTags ColorTagsFor(const ColorInfo& ci, const VideoStreamInfo& info) {
+    ColorTags t;
+    t.range = ci.range == ColorRange::Full ? 2 : 1;  // AVCOL_RANGE_JPEG / MPEG
+    if (ci.matrix == ColorMatrix::Bt709) t.matrix = 1;  // AVCOL_SPC_BT709
+    else t.matrix = info.colorSpace == 5 ? 5 : 6;        // BT.601: BT470BG as the source said, else SMPTE170M
+    t.primaries = info.colorPrimaries;
+    t.transfer = info.colorTrc;
+    return t;
+}
+
+EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::filesystem::path& source, const std::filesystem::path& output, const EncodeSettings& encode,
+                               int64_t maxSourceFrames, const std::function<void(int64_t, int64_t)>& progress, const std::string& hwaccel) {
     const auto t0 = Clock::now();
     const PassReader pass = PassReader::Open(passDir);
     const Manifest& m = pass.Man();
@@ -480,25 +505,34 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     Rational fps = m.fps.num > 0 ? m.fps : sourceFps;
     int mult = 1;
     if (sourceFps.num > 0 && fps.num > 0) mult = std::max(1, static_cast<int>(std::lround(fps.ToDouble() / sourceFps.ToDouble())));
+    const OutputFormat of = ResolveOutputFormat(encode.codec, encode.format, info.decoded);
+    FrameDesc target = of.desc;
+    target.width = m.width;
+    target.height = m.height;
+    const ColorInfo ci = ColorInfoFromStream(info);
     VideoEncoder::Options eo;
-    eo.codec = codec;
+    eo.codec = encode.codec;
     eo.frameRate = fps.num > 0 ? fps : Rational{30, 1};
     eo.timeBase = Rational{eo.frameRate.den, eo.frameRate.num};
+    eo.color = ColorTagsFor(ci, info);
     // no `b` given: the bitrate for this output (NVENC's own default is far too low for 4K)
-    eo.codecOptions = EffectiveCodecOptions(codec, codecOptions, m.width, m.height, eo.frameRate.ToDouble());
-    if (!codecOptions.count("b") && eo.codecOptions.count("b"))
+    eo.codecOptions = EffectiveCodecOptions(encode.codec, encode.codecOptions, m.width, m.height, eo.frameRate.ToDouble());
+    if (!encode.codecOptions.count("b") && eo.codecOptions.count("b"))
         Log()->info("encode: bitrate {} chosen for {}x{} at {:.3g} fps ({}); --codec-opt b=... overrides", eo.codecOptions.at("b"), m.width, m.height,
-                    eo.frameRate.ToDouble(), codec);
-    VideoEncoder encoder(output, FrameDesc{m.width, m.height, PixelFormat::Yuv420p}, eo);
+                    eo.frameRate.ToDouble(), encode.codec);
+    VideoEncoder encoder(output, target, eo);
+    Log()->info("encode: {} as {} ({}) from a {} source{}", encode.codec, target.Describe(), encoder.PixelFormatName(), info.decoded.Describe(),
+                of.reason.empty() ? "" : " — " + of.reason);
     EncodeReport r;
     r.fps = eo.frameRate;
+    r.format = target;
+    r.pixelFormat = encoder.PixelFormatName();
     if (decoder.HasAudio()) {
         encoder.AddAudioStreamCopy(decoder.AudioCodecParameters(), decoder.AudioTimeBase());
         decoder.SetAudioPacketSink([&encoder](AVPacket* pkt) { encoder.WriteAudioPacket(pkt); });
         r.audio = true;
     }
     encoder.Open();
-    const ColorInfo ci = ColorInfoFromStream(info);
     const int64_t total = maxSourceFrames > 0 ? std::min<int64_t>(maxSourceFrames, info.frameCount) : info.frameCount;
     CpuFrame src;
     int64_t s = 0;
@@ -508,7 +542,7 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
             if (!pass.HasFrame(m.firstFrame + idx)) break;
             const PassImage rgb = pass.ReadFrame(m.firstFrame + idx);
             CpuFrame yuv;
-            RgbToYuv420p(rgb, ci, yuv);
+            RgbToYuv(rgb, ci, target, yuv);
             yuv.index = idx;
             yuv.pts = idx;
             encoder.WriteFrame(yuv);
@@ -571,7 +605,17 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         eopt.frameRate = info.frameRate;
         eopt.timeBase = info.timeBase;
         eopt.codecOptions = EffectiveCodecOptions(options.codec, options.codecOptions, info.width, info.height, info.frameRate.ToDouble());
-        VideoEncoder encoder(options.output, FrameDesc{info.width, info.height, PixelFormat::Yuv420p}, eopt);
+        eopt.color = ColorTagsFor(ColorInfoFromStream(info), info);
+        const OutputFormat of = ResolveOutputFormat(options.codec, options.outputFormat, info.decoded);
+        FrameDesc target = of.desc;
+        target.width = info.width;
+        target.height = info.height;
+        VideoEncoder encoder(options.output, target, eopt);
+        Log()->info("passthrough: {} as {} ({}) from a {} source{}{}", options.codec, target.Describe(), encoder.PixelFormatName(), info.decoded.Describe(),
+                    target == info.decoded ? ", bit-exact" : ", converted", of.reason.empty() ? "" : " — " + of.reason);
+        result.codec = options.codec;
+        result.outputFormat = target;
+        result.outputPixelFormat = encoder.PixelFormatName();
         D3D12Device device({options.warp, false});
         Pipeline pipeline(device, 4);
         StageConfig cfg;
@@ -781,8 +825,15 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         result.framesIn = r.framesIn;
         result.outputFps = r.outputFps;
         result.audio = r.audio;
+        result.codec = r.codec;
+        result.outputFormat = r.outputFormat;
+        result.outputPixelFormat = r.outputPixelFormat;
     } else {
-        const EncodeReport r = EncodePassToVideo(result.finalPass, options.input, options.output, options.codec, options.codecOptions, options.frames,
+        EncodeSettings es;
+        es.codec = options.codec;
+        es.codecOptions = options.codecOptions;
+        es.format = options.outputFormat;
+        const EncodeReport r = EncodePassToVideo(result.finalPass, options.input, options.output, es, options.frames,
                                                  [&](int64_t n, int64_t total) {
                                                      if (options.progress) options.progress("encode", n, total);
                                                  },
@@ -798,13 +849,17 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         result.framesIn = r.sourceFrames;
         result.outputFps = r.fps;
         result.audio = r.audio;
+        result.codec = options.codec;
+        result.outputFormat = r.format;
+        result.outputPixelFormat = r.pixelFormat;
     }
+    enc.details = {{"codec", result.codec}, {"pix_fmt", result.outputPixelFormat}, {"format", result.outputFormat.Describe()}};
     enc.seconds = Seconds(t0);
     enc.msPerFrame = enc.frames ? 1000.0 * enc.seconds / static_cast<double>(enc.frames) : 0.0;
     result.stages.push_back(enc);
     result.seconds = Seconds(tAll);
-    Log()->info("process: {} -> {} ({} frames at {:.3f} fps{}) in {:.1f} s", options.input.filename().string(), options.output.string(), result.framesOut,
-                result.outputFps.ToDouble(), result.audio ? ", audio copied" : "", result.seconds);
+    Log()->info("process: {} -> {} ({} frames at {:.3f} fps, {} {}{}) in {:.1f} s", options.input.filename().string(), options.output.string(), result.framesOut,
+                result.outputFps.ToDouble(), result.codec, result.outputFormat.Describe(), result.audio ? ", audio copied" : "", result.seconds);
     return result;
 }
 

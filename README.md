@@ -218,7 +218,7 @@ The application never redistributes NVIDIA binaries; every file below comes from
 | `nvngx_dlssg.dll` | the same DLSS SDK folder | `bin\nvidia\` | DLSS Frame Generation (`fg`, RTX 40 and newer) |
 | `nvngx_dlssnr.dll` | your own copy from a driver or game with DLSS 5 — RTX 50: as is; RTX 20/30/40: patched on your machine with `dlssvid nr-patch` ([dlssnr-patcher](https://github.com/dev-camo/dlssnr-patcher) + the `ptxas` / `fatbinary` / `cuobjdump` tools of CUDA Toolkit 13.3) | `bin\nvidia\` (the patch leaves a sidecar `nvngx_dlssnr.dll.patch.json`) | Neural Rendering (`nr`; the GUI has a «Пропатчить DLL…» button) |
 | `nvofapi64.dll` | ships with the driver | nothing to do | Optical Flow Accelerator (`flow --backend ofa`) |
-| NVDEC / NVENC | ship with the driver | nothing to do | `--hwaccel cuda` decoding, `h264_nvenc` / `hevc_nvenc` encoding |
+| NVDEC / NVENC | ship with the driver | nothing to do | `--hwaccel cuda` decoding, `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` encoding (10-bit HEVC Main 10 / 4:4:4 and AV1 on RTX 40 and newer) |
 
 `DLSSVID_NVIDIA_DLL_DIR` or `--dll-dir` points at another folder of DLSS DLLs; `bin\dlssvid.exe nr --check` and
 `fg --check` print which file was found, its SHA-256 and whether the feature can be created on this GPU / driver.
@@ -374,7 +374,28 @@ dlssvid passes use color_nr 20260922-140200 --passes result_passes              
 dlssvid passes gc --project clip.dlssvid.json [--keep 2] [--dry-run]                  :: drop old versions beyond the newest N per pass (versions other passes list as inputs stay)
 dlssvid bench -i input.mp4 --frames 30 --json bench.json                              :: ms/frame per stage (ТЗ §9)
 dlssvid process -i input.mp4 -o out.mp4 --passthrough --codec ffv1                    :: stage 0: decode -> GPU -> encode
+dlssvid process -i input10.mov -o out.mp4 --codec hevc_nvenc                          :: a 10-bit source -> 10-bit HEVC (Main 10, 4:2:0) by itself
+dlssvid process -i input10.mov -o out.mp4 --codec hevc_nvenc --chroma 444             :: ... 4:4:4 10-bit (Rext), like a 4:4:4 source
+dlssvid process -i input10.mov -o out.mov --codec prores_ks                           :: ProRes 422 HQ (4444 for a 4:4:4 source): 10-bit, .mov
+dlssvid process -i input10.mov -o out.mkv --codec ffv1 --bit-depth 12                 :: lossless at a chosen depth
 ```
+
+**Bit depth and chroma.** The decoder keeps a source's own layout — 8, 10, 12 or 16 bits, 4:2:0 / 4:2:2 / 4:4:4 (HEVC
+Main 10 and Rext, AV1 10-bit, ProRes, FFV1, DNxHR …), with NVDEC and software decoding bit-exact to each other — and
+every stage converts it to RGBA16F without a stop at 8 bits; `dlssvid info` prints what a file decodes into. The
+result's bit depth and chroma are «auto» unless `--bit-depth 8|10|12` / `--chroma 420|422|444` (or the encoder card of
+the GUI, stored in the project) say otherwise: auto takes the source's bit depth within what the codec does and 4:2:0
+for the NVENC codecs, 4:2:2 for ProRes (4:4:4 when the source is), the source's own subsampling for FFV1. The stream is
+tagged with the matrix and range used (BT.709 / BT.601, limited / full) and the source's primaries and transfer; HEVC in
+MP4 / MOV gets the `hvc1` sample entry. HDR (PQ / HLG) stays out of scope: such sources are treated as SDR.
+
+| Encoder | Bit depth | Chroma | Container | Note |
+|---|---|---|---|---|
+| `h264_nvenc` | 8 | 4:2:0, 4:4:4 | .mp4 | NVENC encodes H.264 in 8-bit only: a 10-bit source is reduced |
+| `hevc_nvenc` | 8, 10 | 4:2:0, 4:4:4 | .mp4 | Main 10 (`p010le`) / Rext 4:4:4 (`yuv444p16le`) |
+| `av1_nvenc` | 8, 10 | 4:2:0 | .mp4 | RTX 40 and newer |
+| `prores_ks` | 10 | 4:2:2, 4:4:4 | .mov | 422 HQ / 4444, the rate comes from the profile (no bitrate option) |
+| `ffv1` | 8, 10, 12, 16 | 4:2:0, 4:2:2, 4:4:4 | .mkv | lossless |
 
 GUI keys: `1`…`9` source, `Ctrl+1/2/3` single / overlay / grid, wheel = zoom to cursor (25–800 %), middle drag = pan,
 `F` fit, `Ctrl+0` 1:1, `W` wipe (left drag moves it), click a 2x2 cell = expand, `Space` play, `,`/`.` step,
@@ -393,8 +414,10 @@ The project panel (stage 9) shows the source (frame, sound, passes, hash and whe
 card per stage with a form built from the stage schema (backend list, scale / multiplier toggles, intensity slider; the
 advanced keys in the JSON editor of the engineer mode) and what the plan does with it («переиспользуется», «пересчёт:
 Интенсивность 1 → 1.4», «будет посчитано», a warning when NR / FG would run without depth and vectors), the encoder
-card (stored in the project; the bitrate is «Авто» — chosen from the result's size, rate and codec, see
-`core/io/EncodeDefaults` — or a preset in Mbit/s or a custom value, with the rough file size) and the pass versions on disk
+card (stored in the project: the codec — H.264 / HEVC / AV1 NVENC, ProRes, FFV1 — the bit depth and chroma, «Авто» = the
+source's within the codec, and the bitrate, «Авто» — chosen from the result's size, rate and codec, see
+`core/io/EncodeDefaults` — or a preset in Mbit/s or a custom value, with the rough file size; the result's extension
+follows the codec: .mp4, .mov for ProRes, .mkv for FFV1) and the pass versions on disk
 («Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»). The look follows the mockups of `docs/ux-guidelines.md`
 (`app/Theme`: dark palette, control sizes and paddings, the accent for the one primary action).
 Without a project the window shows the start page (stage 9, laid out as the mockup «1 · Стартовый экран»): drop a video on it,

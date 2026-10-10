@@ -34,17 +34,30 @@ struct VideoStreamInfo {
     int64_t frameCount = 0;  // from container; 0 if unknown
     int64_t durationUs = 0;  // container duration in microseconds; 0 if unknown
     std::string codecName;
-    std::string pixelFormat;  // source pixel format name
+    std::string pixelFormat;  // source pixel format name (FFmpeg: "yuv420p", "yuv444p10le", ...)
+    int bitDepth = 8;         // bits per sample of the source pixel format
+    std::string chroma = "420";  // chroma subsampling of the source: "420" | "422" | "444" | "other"
+    FrameDesc decoded;        // the CpuFrame layout NextFrame() yields for this stream (width/height set): the native
+                              // planar YUV layout at the source's bit depth, or 8-bit 4:2:0 for formats that go through swscale
     int colorSpace = 2;       // AVColorSpace (2 = unspecified)
     int colorRange = 0;       // AVColorRange (0 = unspecified, 1 = limited/MPEG, 2 = full/JPEG)
+    int colorPrimaries = 2;   // AVColorPrimaries (2 = unspecified)
+    int colorTrc = 2;         // AVColorTransferCharacteristic (2 = unspecified)
     bool hasAudio = false;
     std::string audioCodecName;
 };
 
-// FFmpeg demuxer + video decoder producing tightly packed YUV420P CpuFrames.
-// With HwAccel::Cuda the stream is decoded by NVDEC; the NV12 frame stays in CUDA memory
-// (primary context) and is exposed as a GpuFrame, and the CPU copy is made only when asked
-// for (bit-exact NV12 -> YUV420P). Audio packets are handed to the sink untouched for stream copy.
+// The CpuFrame layout a stream's pixel format decodes into (VideoStreamInfo::decoded for a format name): planar YUV
+// 4:2:0 / 4:2:2 / 4:4:4 at 8, 10, 12 or 16 bits stays as it is, everything else (RGB, 4:1:1, gray ...) becomes 8-bit
+// 4:2:0 through swscale. `width` / `height` are left at 0.
+FrameDesc DecodedFrameDescFor(const std::string& pixelFormat);
+
+// FFmpeg demuxer + video decoder producing tightly packed planar YUV CpuFrames in the source's own layout: 8-bit
+// 4:2:0 sources as before (bit-exact with FFmpeg), 10 / 12 / 16-bit and 4:2:2 / 4:4:4 sources in the matching 16-bit
+// or 8-bit planar format of Frame.h (MSB-aligned decoder outputs such as P010 are shifted to LSB alignment, so NVDEC
+// and software decoding agree bit for bit). With HwAccel::Cuda the stream is decoded by NVDEC; an NV12 frame stays in
+// CUDA memory (primary context) and is exposed as a GpuFrame, and the CPU copy is made only when asked for (bit-exact
+// NV12 -> YUV420P). Audio packets are handed to the sink untouched for stream copy.
 class VideoDecoder {
 public:
     struct Options {
@@ -77,7 +90,7 @@ public:
     // valid until the next NextFrame() call. `cpu = false` skips the device->host copy (the
     // CpuFrame then only carries index/pts/desc) — only allowed when gpu is requested. When NVDEC
     // yields a layout other than NV12 (10/12-bit, 4:4:4), `gpu` stays invalid and the CpuFrame is
-    // always filled (8-bit 4:2:0 through swscale), whatever `cpu` says.
+    // always filled (in the source's own bit depth and chroma layout), whatever `cpu` says.
     bool NextFrame(CpuFrame& out, GpuFrame* gpu = nullptr, bool cpu = true);
 
     // Random access: positions the decoder so that the next NextFrame() returns `index`

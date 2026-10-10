@@ -129,11 +129,15 @@ public:
         double fps = 0.0;
         int64_t frames = 0;       // 0 when unknown
         bool audio = false;
+        std::string codec;        // "hevc" ... and the layout the file decodes into (TASK-0034)
+        FrameDesc format;
         QString modified;         // «сегодня 19:23»
         double runSeconds = 0.0;  // the run of this session that made it; 0 when none
     };
     ResultInfo resultInfo() const;
-    QString resultSummary() const;                      // «3840×1600 · 48 fps · 479 кадров · со звуком · обновлён сегодня 19:23 · готов за 11:22»; empty without a result
+    QString resultSummary() const;                      // «3840×1600 · 48 fps · 479 кадров · HEVC 10 бит 4:2:0 · со звуком · обновлён сегодня 19:23 · готов за 11:22»; empty without a result
+    // «HEVC 10 бит 4:2:0», «ProRes 10 бит 4:2:2»: a codec name and a frame layout in the words of the GUI (empty codec: the layout alone).
+    static QString formatLabel(const std::string& codec, const FrameDesc& format);
     std::vector<std::string> exportablePasses() const;  // current pass folders with a manifest, pipeline order
     unsigned long long freeSpace() const;               // bytes free on the volume of the passes root (0 when unknown)
 
@@ -168,7 +172,10 @@ public slots:
     void setStageParams(const std::string& stage, const nlohmann::json& params);
     void setForce(const std::string& stage, bool on);
     void clearForce();
-    void setEncode(const QString& codec, const std::map<std::string, std::string>& options);
+    void setEncode(const QString& codec, const std::map<std::string, std::string>& options);  // keeps the bit depth / chroma
+    // The result's encoder, its options and its bit depth / chroma (TASK-0034); the result file takes the container the codec
+    // needs (.mp4 / .mov / .mkv) and the plan is refreshed (the layout is part of it).
+    void setEncode(const QString& codec, const std::map<std::string, std::string>& options, const OutputFormatRequest& format);
     void setPassesRoot(const QString& dir);  // where the stages write and read their passes (the project's «passes»)
     void notifyStateChanged(bool structural = true);  // after direct edits of state(); structural ones (layers, modes) mark the project unsaved
     void markDirty();
@@ -216,6 +223,8 @@ private:
     std::map<std::string, int> history_;  // pass -> previous versions on disk
     QTimer planTimer_;
     bool resultAudio_ = false;  // the result video has a sound track (probed on reload)
+    std::string resultCodec_;   // the result video's codec and decoded layout (probed on reload)
+    FrameDesc resultFormat_;
     double lastRun_ = 0.0;      // seconds the last run of this session took
 };
 

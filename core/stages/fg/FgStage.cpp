@@ -156,7 +156,7 @@ void FgStage::Process(FrameContext& ctx) {
         cpuCur_ = ctx.cache.DownloadPass(*slot, "color_sr");
         source = "slot:color_sr";
     } else {
-        cpuCur_ = Yuv420pToRgb(frame, options_.color, PixelType::F16);
+        cpuCur_ = YuvToRgb(frame, options_.color, PixelType::F16);
         source = "video";
     }
     if (!setup_) {

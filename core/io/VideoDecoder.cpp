@@ -11,6 +11,7 @@ extern "C" {
 }
 
 #include <cmath>
+#include <optional>
 
 #ifdef DLSSVID_WITH_CUDA
 #include <cuda_runtime.h>
@@ -31,7 +32,57 @@ AVPixelFormat GetHwFormat(AVCodecContext*, const AVPixelFormat* formats) {
     return formats[0];
 }
 
+// How a decoded AVFrame layout maps onto a CpuFrame without swscale: planar YUV at 8 / 10 / 12 / 16 bits and
+// 4:2:0 / 4:2:2 / 4:4:4 (the alpha plane of yuva formats is dropped) and the 16-bit semi-planar layouts (P010, P016,
+// P210, P216, P410, P416 — what NVDEC and some decoders hand out). `streamDepth` is the bit depth of the stream's own
+// pixel format: a decoder that returns 16-bit words for a 10-bit stream (NVDEC's yuv444p16 for yuv444p10) keeps the
+// samples MSB-aligned, and the layout shifts them down to the stream's depth so NVDEC and software decoding agree.
+struct NativeLayout {
+    FrameDesc desc;      // width / height left at 0
+    int shiftRight = 0;  // MSB-aligned 16-bit words -> LSB-aligned `desc.bitDepth` bits
+    bool semiPlanar = false;
+};
+
+std::optional<NativeLayout> NativeLayoutFor(AVPixelFormat fmt, int streamDepth) {
+    const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(fmt);
+    if (!d || d->nb_components < 3) return std::nullopt;
+    if (d->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_BITSTREAM | AV_PIX_FMT_FLAG_HWACCEL | AV_PIX_FMT_FLAG_BE |
+                    AV_PIX_FMT_FLAG_BAYER))
+        return std::nullopt;
+    if (!(d->flags & AV_PIX_FMT_FLAG_PLANAR)) return std::nullopt;
+    if (d->log2_chroma_w > 1 || d->log2_chroma_h > 1 || (d->log2_chroma_h == 1 && d->log2_chroma_w == 0)) return std::nullopt;  // 4:4:0, 4:1:1 ...
+    const int depth = d->comp[0].depth, shift = d->comp[0].shift, step = d->comp[0].step;
+    for (int c = 1; c < 3; ++c)
+        if (d->comp[c].depth != depth || d->comp[c].shift != shift) return std::nullopt;
+    const bool semi = d->comp[1].plane == 1 && d->comp[2].plane == 1;
+    const bool planar = d->comp[0].plane == 0 && d->comp[1].plane == 1 && d->comp[2].plane == 2;
+    if (!semi && !planar) return std::nullopt;
+    const std::string chroma = d->log2_chroma_w == 0 ? "444" : (d->log2_chroma_h == 0 ? "422" : "420");
+    if (depth == 8) {
+        if (semi || shift != 0 || step != 1) return std::nullopt;  // NV12 has its own bit-exact path, NV16 / NV24 go through swscale
+        return NativeLayout{FrameDesc{0, 0, PixelFormatFor(chroma, 8), 8}, 0, false};
+    }
+    if (step != 2 || depth < 9 || depth > 16) return std::nullopt;
+    int bitDepth = depth, shiftRight = shift;  // P010: depth 10, shift 6 (the descriptor says how far above the LSB the value sits)
+    if (streamDepth > 8 && streamDepth < depth) {  // 16-bit words for a 10 / 12-bit stream: MSB-aligned
+        shiftRight += depth - streamDepth;
+        bitDepth = streamDepth;
+    }
+    if (bitDepth != 10 && bitDepth != 12 && bitDepth != 16) return std::nullopt;  // 9 / 14-bit: swscale
+    return NativeLayout{FrameDesc{0, 0, PixelFormatFor(chroma, bitDepth), static_cast<uint8_t>(bitDepth)}, shiftRight, semi};
+}
+
 }  // namespace
+
+FrameDesc DecodedFrameDescFor(const std::string& pixelFormat) {
+    const AVPixelFormat fmt = av_get_pix_fmt(pixelFormat.c_str());
+    if (fmt != AV_PIX_FMT_NONE) {
+        if (fmt == AV_PIX_FMT_NV12) return FrameDesc{0, 0, PixelFormat::Yuv420p, 8};
+        const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(fmt);
+        if (const auto lay = NativeLayoutFor(fmt, d ? d->comp[0].depth : 8)) return lay->desc;
+    }
+    return FrameDesc{0, 0, PixelFormat::Yuv420p, 8};
+}
 
 VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& options) {
     const std::string url = path.string();
@@ -92,18 +143,33 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     info_.frameCount = vs->nb_frames;
     info_.durationUs = fmt_->duration > 0 ? fmt_->duration : 0;
     info_.codecName = decoder->name;
-    const char* pixName = av_get_pix_fmt_name(static_cast<AVPixelFormat>(vs->codecpar->format));
+    const auto streamFmt = static_cast<AVPixelFormat>(vs->codecpar->format);
+    const char* pixName = av_get_pix_fmt_name(streamFmt);
     info_.pixelFormat = pixName ? pixName : "unknown";
+    if (const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(streamFmt)) {
+        info_.bitDepth = d->comp[0].depth;
+        info_.chroma = (d->flags & AV_PIX_FMT_FLAG_RGB) || d->nb_components < 3 ? "other"
+                       : d->log2_chroma_w == 0 && d->log2_chroma_h == 0        ? "444"
+                       : d->log2_chroma_w == 1 && d->log2_chroma_h == 0        ? "422"
+                       : d->log2_chroma_w == 1 && d->log2_chroma_h == 1        ? "420"
+                                                                               : "other";
+    }
+    info_.decoded = DecodedFrameDescFor(info_.pixelFormat);
+    info_.decoded.width = info_.width;
+    info_.decoded.height = info_.height;
     info_.colorSpace = static_cast<int>(vs->codecpar->color_space);
     info_.colorRange = static_cast<int>(vs->codecpar->color_range);
+    info_.colorPrimaries = static_cast<int>(vs->codecpar->color_primaries);
+    info_.colorTrc = static_cast<int>(vs->codecpar->color_trc);
     info_.hasAudio = audioStream_ >= 0;
     if (info_.hasAudio) {
         const AVCodecDescriptor* d = avcodec_descriptor_get(fmt_->streams[audioStream_]->codecpar->codec_id);
         info_.audioCodecName = d ? d->name : "unknown";
     }
 
-    Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "open {}: {}x{} {} {}/{} fps, {} frames{}{}", url, info_.width, info_.height,
-               info_.codecName, fr.num, fr.den, info_.frameCount, info_.hasAudio ? ", audio " + info_.audioCodecName : "", hwDevice_ ? ", NVDEC" : "");
+    Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "open {}: {}x{} {} {} ({}) {}/{} fps, {} frames{}{}", url, info_.width, info_.height,
+               info_.codecName, info_.pixelFormat, info_.decoded.Describe(), fr.num, fr.den, info_.frameCount,
+               info_.hasAudio ? ", audio " + info_.audioCodecName : "", hwDevice_ ? ", NVDEC" : "");
 }
 
 VideoDecoder::~VideoDecoder() {
@@ -185,19 +251,21 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
                 // NVDEC decodes 10/12-bit and 4:4:4 streams (p010, p016, yuv444p16 ...) into other layouts. The
                 // on-device NV12 fast path (OFA fed straight from NVDEC) is not available for them: hand the caller
                 // a CPU frame instead — the consumers fall back to their host paths (OFA re-initialises for ABGR
-                // uploads, the pass cache uploads from the CPU frame). Until stage 2+ keep high bit depth on the
-                // GPU, the CPU frame is 8-bit 4:2:0 (swscale, warned once).
+                // uploads, the pass cache uploads from the CPU frame). The CPU frame keeps the source's bit depth
+                // and chroma layout (ConvertFrame), so nothing is lost on the way.
                 *gpu = GpuFrame{};
                 cpu = true;
                 if (!warnedNonNv12_) {
-                    Log()->warn("NVDEC decodes this stream as {} (not NV12): the on-device fast path is off, frames go through the host",
-                                av_get_pix_fmt_name(hwFrames->sw_format) ? av_get_pix_fmt_name(hwFrames->sw_format) : "?");
+                    Log()->info("NVDEC decodes this stream as {} (not NV12): the on-device fast path is off, frames go through the host as {}",
+                                av_get_pix_fmt_name(hwFrames->sw_format) ? av_get_pix_fmt_name(hwFrames->sw_format) : "?", info_.decoded.Describe());
                     warnedNonNv12_ = true;
                 }
             }
         }
         if (!cpu) {
-            out.desc = FrameDesc{static_cast<uint32_t>(frame_->width), static_cast<uint32_t>(frame_->height), PixelFormat::Yuv420p};
+            out.desc = info_.decoded;
+            out.desc.width = static_cast<uint32_t>(frame_->width);
+            out.desc.height = static_cast<uint32_t>(frame_->height);
             out.data.clear();
             out.index = index;
             out.pts = pts;
@@ -209,7 +277,9 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         src = swFrame_;
     }
     if (!cpu) {  // software frame skipped by the caller (seeking): no conversion
-        out.desc = FrameDesc{static_cast<uint32_t>(src->width), static_cast<uint32_t>(src->height), PixelFormat::Yuv420p};
+        out.desc = info_.decoded;
+        out.desc.width = static_cast<uint32_t>(src->width);
+        out.desc.height = static_cast<uint32_t>(src->height);
         out.data.clear();
         out.index = index;
         out.pts = pts;
@@ -238,12 +308,24 @@ void VideoDecoder::ConvertFrame(AVFrame* f, CpuFrame& out) {
         Nv12ToYuv420p(f->data[0], f->linesize[0], f->data[1], f->linesize[1], w, h, out);
         return;
     }
+    // Planar YUV at 10 / 12 / 16 bits or 4:2:2 / 4:4:4 (and NVDEC's 16-bit layouts): copied as it is, bit-exact
+    if (const auto lay = NativeLayoutFor(fmt, info_.bitDepth)) {
+        FrameDesc desc = lay->desc;
+        desc.width = w;
+        desc.height = h;
+        if (lay->semiPlanar) {
+            SemiPlanar16ToPlanar(f->data[0], f->linesize[0], f->data[1], f->linesize[1], desc, out, lay->shiftRight);
+        } else {
+            const uint8_t* const planes[3] = {f->data[0], f->data[1], f->data[2]};
+            const int pitch[3] = {f->linesize[0], f->linesize[1], f->linesize[2]};
+            CopyPlanar(planes, pitch, desc, out, lay->shiftRight);
+        }
+        return;
+    }
 
-    // Anything else (10-bit, 4:2:2, RGB ...) is converted with swscale. Not bit-exact:
-    // stage 2+ will keep high bit depth on the GPU; stage 0 documents the limitation.
+    // Anything else (RGB, 4:1:1, 9 / 14-bit ...) is converted with swscale to 8-bit 4:2:0. Not bit-exact.
     if (!warnedConversion_) {
-        Log()->warn("source pixel format {} converted to yuv420p with swscale (lossy for >8-bit sources)",
-                    av_get_pix_fmt_name(fmt) ? av_get_pix_fmt_name(fmt) : "?");
+        Log()->warn("source pixel format {} converted to yuv420p with swscale (lossy)", av_get_pix_fmt_name(fmt) ? av_get_pix_fmt_name(fmt) : "?");
         warnedConversion_ = true;
     }
     sws_ = sws_getCachedContext(sws_, f->width, f->height, fmt, f->width, f->height, AV_PIX_FMT_YUV420P,

@@ -1,5 +1,7 @@
 #include "io/EncodeDefaults.h"
 
+#include "io/OutputFormat.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -50,7 +52,7 @@ double Nice(double mbps) {
 bool LossyCodec(const std::string& codec) { return codec != "ffv1"; }
 
 double RecommendedBitrateMbps(const std::string& codec, uint32_t width, uint32_t height, double fps) {
-    if (!LossyCodec(codec) || width == 0 || height == 0) return 0.0;
+    if (!LossyCodec(codec) || !HasBitrateControl(codec) || width == 0 || height == 0) return 0.0;  // ProRes: the profile sets the rate
     const double megapixels = static_cast<double>(width) * static_cast<double>(height) / 1e6;
     const double base = H264At30(megapixels) * FpsFactor(fps > 0.0 ? fps : 30.0) * CodecFactor(codec);
     return std::max(1.0, Nice(base));
@@ -83,7 +85,7 @@ std::string BitrateOption(double mbps) {
 std::map<std::string, std::string> EffectiveCodecOptions(const std::string& codec, const std::map<std::string, std::string>& options, uint32_t width,
                                                          uint32_t height, double fps) {
     std::map<std::string, std::string> out = options;
-    if (!LossyCodec(codec) || out.count("b")) return out;
+    if (!LossyCodec(codec) || !HasBitrateControl(codec) || out.count("b")) return out;
     const double mbps = RecommendedBitrateMbps(codec, width, height, fps);
     if (mbps > 0.0) out["b"] = BitrateOption(mbps);
     return out;

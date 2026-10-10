@@ -7,6 +7,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 }
 
 #include <cmath>
@@ -50,8 +51,55 @@ CpuFrame SyntheticFrame(int64_t index, uint32_t width, uint32_t height) {
     return f;
 }
 
+CpuFrame SyntheticFrame(int64_t index, const FrameDesc& desc) {
+    const CpuFrame base = SyntheticFrame(index, desc.width, desc.height);
+    if (desc == base.desc) return base;
+    CpuFrame f;
+    f.Allocate(desc);
+    f.index = index;
+    f.pts = index;
+    const int extra = desc.HighBitDepth() ? desc.bitDepth - 8 : 0;
+    const uint32_t lowMask = extra > 0 ? (1u << extra) - 1u : 0u;
+    const int sx = ChromaShiftX(desc.format), sy = ChromaShiftY(desc.format);
+    const size_t srcCw = base.desc.PlaneCols(1);
+    auto store = [&](size_t plane, size_t col, size_t row, uint32_t v8, uint32_t ramp) {
+        const uint32_t v = (v8 << extra) | (ramp & lowMask);
+        if (desc.HighBitDepth()) f.Plane16(plane)[row * desc.PlaneCols(plane) + col] = static_cast<uint16_t>(v);
+        else f.Plane(plane)[row * desc.PlaneCols(plane) + col] = static_cast<uint8_t>(v);
+    };
+    for (uint32_t r = 0; r < desc.height; ++r)
+        for (uint32_t c = 0; c < desc.width; ++c) store(0, c, r, base.Plane(0)[static_cast<size_t>(r) * desc.width + c], c + r + static_cast<uint32_t>(index));
+    const size_t cw = desc.PlaneCols(1), ch = desc.PlaneHeight(1);
+    for (size_t r = 0; r < ch; ++r)
+        for (size_t c = 0; c < cw; ++c) {
+            const size_t sc = (c << sx) >> 1, sr = (r << sy) >> 1;  // the 4:2:0 chroma sample under this one
+            store(1, c, r, base.Plane(1)[sr * srcCw + sc], static_cast<uint32_t>(c * 3 + r));
+            store(2, c, r, base.Plane(2)[sr * srcCw + sc], static_cast<uint32_t>(c + r * 5));
+        }
+    return f;
+}
+
+namespace {
+
+AVPixelFormat EncoderFormatFor(const std::string& pixFmt) {
+    const AVPixelFormat f = av_get_pix_fmt(pixFmt.c_str());
+    if (f == AV_PIX_FMT_NONE) Throw("test clip pixel format not supported: " + pixFmt);
+    return f;
+}
+
+}  // namespace
+
+FrameDesc FrameDescFor(const ClipSpec& spec) {
+    if (spec.pixFmt == "yuv420p" || spec.pixFmt == "p010le" || spec.pixFmt == "yuv444p16le") return FrameDesc{spec.width, spec.height, PixelFormat::Yuv420p, 8};
+    FrameDesc out = DecodedFrameDescFor(spec.pixFmt);
+    out.width = spec.width;
+    out.height = spec.height;
+    return out;
+}
+
 std::filesystem::path WriteClip(const std::filesystem::path& path, const ClipSpec& spec) {
-    return WriteClipWith(path, spec, [&](int64_t i) { return SyntheticFrame(i, spec.width, spec.height); });
+    const FrameDesc desc = FrameDescFor(spec);
+    return WriteClipWith(path, spec, [&, desc](int64_t i) { return SyntheticFrame(i, desc); });
 }
 
 std::filesystem::path WriteClipWith(const std::filesystem::path& path, const ClipSpec& spec, const std::function<CpuFrame(int64_t)>& frameFn) {
@@ -61,17 +109,15 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     AVFormatContext* fmt = nullptr;
     CheckAv(avformat_alloc_output_context2(&fmt, nullptr, nullptr, url.c_str()), "alloc output");
 
-    // --- video (ffv1, lossless) ---
+    // --- video (ffv1, lossless, unless the spec says otherwise) ---
     const AVCodec* venc = avcodec_find_encoder_by_name(spec.codec.c_str());
     if (!venc) Throw("test clip encoder not found: " + spec.codec);
     AVCodecContext* vctx = avcodec_alloc_context3(venc);
     vctx->width = static_cast<int>(spec.width);
     vctx->height = static_cast<int>(spec.height);
-    const AVPixelFormat encFmt = spec.pixFmt == "p010le"       ? AV_PIX_FMT_P010LE
-                                 : spec.pixFmt == "yuv444p16le" ? AV_PIX_FMT_YUV444P16LE
-                                 : spec.pixFmt == "yuv420p"     ? AV_PIX_FMT_YUV420P
-                                                                : AV_PIX_FMT_NONE;
-    if (encFmt == AV_PIX_FMT_NONE) Throw("test clip pixel format not supported: " + spec.pixFmt);
+    const AVPixelFormat encFmt = EncoderFormatFor(spec.pixFmt);
+    const bool legacyWide = encFmt == AV_PIX_FMT_P010LE || encFmt == AV_PIX_FMT_YUV444P16LE;  // 8-bit frames into the top bits
+    const FrameDesc expected = FrameDescFor(spec);
     vctx->pix_fmt = encFmt;
     vctx->time_base = AVRational{spec.fpsDen, spec.fpsNum};
     vctx->framerate = AVRational{spec.fpsNum, spec.fpsDen};
@@ -120,6 +166,7 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
 
     for (int i = 0; i < spec.frames; ++i) {
         const CpuFrame src = frameFn(i);
+        if (src.desc != expected) Throw("test clip: frame " + std::to_string(i) + " is " + src.desc.Name() + ", the clip takes " + expected.Name());
         av_frame_unref(frame);
         frame->format = encFmt;
         frame->width = vctx->width;
@@ -127,7 +174,7 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
         CheckAv(av_frame_get_buffer(frame, 0), "frame buffer");
         const size_t W = spec.width, H = spec.height, cw = src.desc.PlaneWidth(1);
         auto row16 = [&](int plane, size_t r) { return reinterpret_cast<uint16_t*>(frame->data[plane] + static_cast<ptrdiff_t>(r) * frame->linesize[plane]); };
-        if (encFmt == AV_PIX_FMT_YUV420P) {
+        if (!legacyWide) {  // the frame's own layout: rows copied as they are (8-bit or LSB-aligned 16-bit planes)
             for (size_t p = 0; p < 3; ++p) {
                 const size_t rowBytes = src.desc.PlaneWidth(p), rows = src.desc.PlaneHeight(p);
                 for (size_t r = 0; r < rows; ++r)
@@ -204,7 +251,20 @@ StreamSummary Summarize(const std::filesystem::path& path) {
     int audioIndex = -1;
     for (unsigned i = 0; i < fmt->nb_streams; ++i) {
         const AVCodecParameters* p = fmt->streams[i]->codecpar;
-        if (p->codec_type == AVMEDIA_TYPE_VIDEO) ++s.videoStreams;
+        if (p->codec_type == AVMEDIA_TYPE_VIDEO) {
+            if (s.videoStreams == 0) {
+                const AVCodecDescriptor* d = avcodec_descriptor_get(p->codec_id);
+                s.videoCodec = d ? d->name : "?";
+                const char* pix = av_get_pix_fmt_name(static_cast<AVPixelFormat>(p->format));
+                s.pixelFormat = pix ? pix : "?";
+                s.profile = p->profile;
+                s.colorRange = static_cast<int>(p->color_range);
+                s.colorSpace = static_cast<int>(p->color_space);
+                s.colorPrimaries = static_cast<int>(p->color_primaries);
+                s.colorTrc = static_cast<int>(p->color_trc);
+            }
+            ++s.videoStreams;
+        }
         if (p->codec_type == AVMEDIA_TYPE_AUDIO) {
             ++s.audioStreams;
             audioIndex = static_cast<int>(i);

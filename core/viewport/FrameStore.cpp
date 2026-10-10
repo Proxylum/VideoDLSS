@@ -550,7 +550,7 @@ std::vector<FrameStore::Loaded> FrameStore::LoadVideo(const Key& key, const View
     for (CpuFrame& f : kept) {
         Loaded l;
         l.key = Key{f.index, key.source};
-        l.image = Yuv420pToRgba16f(f, rt.color);
+        l.image = YuvToRgba16f(f, rt.color);
         l.kind = TextureKind::Color;
         Prepare(l.image, l.kind, l.minValue, l.maxValue, l.maxMagnitude);
         out.push_back(std::move(l));

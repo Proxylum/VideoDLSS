@@ -103,7 +103,7 @@ void FlowStage::Process(FrameContext& ctx) {
     Held cur;
     cur.index = ctx.frame.index;
     cur.cache = &ctx.cache;
-    if (!ctx.frame.data.empty()) cur.rgb = Yuv420pToRgb(ctx.frame, options_.color, PixelType::F32);
+    if (!ctx.frame.data.empty()) cur.rgb = YuvToRgb(ctx.frame, options_.color, PixelType::F32);
     const uint32_t w = ctx.frame.desc.width, h = ctx.frame.desc.height;
     if (stats_.frames == 0) estimator_->Init(options_.estimator, w, h);
     ++stats_.frames;

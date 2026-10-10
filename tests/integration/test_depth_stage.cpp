@@ -63,7 +63,7 @@ TEST_CASE("DepthStage writes depth_raw and depth_dlss for every frame", "[integr
     VideoDecoder dec2(clip);
     CpuFrame f;
     REQUIRE(dec2.NextFrame(f));
-    const PassImage rgb = Yuv420pToRgb(f, ColorInfoFromStream(dec2.Info()), PixelType::F32);
+    const PassImage rgb = YuvToRgb(f, ColorInfoFromStream(dec2.Info()), PixelType::F32);
     const PassImage expected = StubDepthEstimator::Expected(rgb);
     CHECK(PassImage::MaxAbsDiff(raw.ReadFrame(0), expected) < 1e-5);
 
@@ -131,7 +131,7 @@ TEST_CASE("DepthStage uploads depth into the GPU frame cache slot", "[integratio
     pipeline.Finish();
     REQUIRE(slot.passes.count("depth_raw") == 1);
     const PassImage back = pipeline.Cache().DownloadPass(slot, "depth_raw");
-    const PassImage rgb = Yuv420pToRgb(f, o.color, PixelType::F32);
+    const PassImage rgb = YuvToRgb(f, o.color, PixelType::F32);
     CHECK(PassImage::MaxAbsDiff(back, StubDepthEstimator::Expected(rgb)) < 1e-5);
     pipeline.Shutdown();
 }

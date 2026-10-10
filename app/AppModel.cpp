@@ -103,10 +103,14 @@ bool AppModel::saveProjectAs(const QString& file) {
 void AppModel::reloadSources() {
     store_->SetSources(project_.Sources());
     resultAudio_ = false;
+    resultCodec_.clear();
+    resultFormat_ = FrameDesc{};
     if (!project_.resultVideo.empty() && std::filesystem::exists(project_.resultVideo)) {
         try {
             VideoDecoder probe(project_.resultVideo, VideoDecoder::Probe());
             resultAudio_ = probe.HasAudio();
+            resultCodec_ = probe.Info().codecName;
+            resultFormat_ = probe.Info().decoded;
         } catch (const std::exception&) {
         }
     }
@@ -421,9 +425,14 @@ void AppModel::refreshPlan() {
     try {
         VideoDecoder probe(project_.sourceVideo, VideoDecoder::Probe());
         sourceInfo_.audio = probe.HasAudio();
+        sourceInfo_.codec = probe.Info().codecName;
+        sourceInfo_.decoded = probe.Info().decoded;
+        sourceInfo_.bitDepth = probe.Info().bitDepth;
+        sourceInfo_.chroma = probe.Info().chroma;
         ProcessOptions o;
         o.input = project_.sourceVideo;
-        o.output = project_.resultVideo.empty() ? project_.sourceVideo.parent_path() / (project_.sourceVideo.stem().string() + "_result.mp4") : project_.resultVideo;
+        o.output = project_.resultVideo.empty() ? project_.sourceVideo.parent_path() / (project_.sourceVideo.stem().string() + "_result" + ResultExtensionFor(project_.codec))
+                                                : project_.resultVideo;
         o.passesRoot = project_.passesRoot;
         o.stages = StagesFromProject(project_);
         o.keepVersions = project_.passVersionsKeep;
@@ -431,6 +440,12 @@ void AppModel::refreshPlan() {
         o.sourceHash = project_.SourceHash();
         plan_ = PlanProcess(o);
         outcome_ = EstimateRun(plan_, o.stages, sourceInfo_);
+        // the result's layout: the encoder card's choice against the codec and the source (an impossible pair is a plan error)
+        const OutputFormat of = ResolveOutputFormat(project_.codec, project_.outputFormat, sourceInfo_.decoded);
+        outcome_.codec = project_.codec;
+        outcome_.format = of.desc;
+        outcome_.format.width = outcome_.width;
+        outcome_.format.height = outcome_.height;
         for (const auto& v : ListPassVersions(project_.passesRoot))
             if (!v.current) ++history_[v.pass];
     } catch (const std::exception& e) {
@@ -481,11 +496,24 @@ void AppModel::clearForce() {
     schedulePlan();
 }
 
-void AppModel::setEncode(const QString& codec, const std::map<std::string, std::string>& options) {
-    project_.codec = codec.toStdString();
+void AppModel::setEncode(const QString& codec, const std::map<std::string, std::string>& options) { setEncode(codec, options, project_.outputFormat); }
+
+void AppModel::setEncode(const QString& codec, const std::map<std::string, std::string>& options, const OutputFormatRequest& format) {
+    const std::string name = codec.toStdString();
+    const bool same = project_.codec == name && project_.codecOptions == options && project_.outputFormat == format;
+    project_.codec = name;
     project_.codecOptions = options;
+    project_.outputFormat = format;
+    const std::filesystem::path result = ResultPathFor(project_.resultVideo, name);  // ProRes lives in .mov, FFV1 in .mkv
+    if (result != project_.resultVideo) {
+        project_.resultVideo = result;
+        reloadSources();  // a result under the old name is no longer the project's
+        emit message(tr("Результат: %1").arg(QString::fromStdWString(result.filename().wstring())));
+    }
+    if (same) return;
     markDirty();
     emit projectChanged();
+    schedulePlan();  // the layout and the container are part of the plan
 }
 
 void AppModel::setPassesRoot(const QString& dir) {
@@ -634,9 +662,24 @@ AppModel::ResultInfo AppModel::resultInfo() const {
     r.fps = store_->FpsOf("result");
     r.frames = src->lastFrame >= 0 ? src->lastFrame + 1 : 0;
     r.audio = resultAudio_;
+    r.codec = resultCodec_;
+    r.format = resultFormat_;
     r.modified = HumanWhen(FileTimeIso8601(project_.resultVideo));
     r.runSeconds = lastRun_;
     return r;
+}
+
+QString AppModel::formatLabel(const std::string& codec, const FrameDesc& format) {
+    QString name;
+    if (codec == "hevc" || codec == "hevc_nvenc") name = "HEVC";
+    else if (codec == "h264" || codec == "h264_nvenc") name = "H.264";
+    else if (codec == "av1" || codec == "av1_nvenc") name = "AV1";
+    else if (codec == "prores" || codec == "prores_ks") name = "ProRes";
+    else if (codec == "ffv1") name = "FFV1";
+    else if (!codec.empty()) name = QString::fromStdString(codec).toUpper();
+    const std::string_view chroma = ChromaName(format.format);
+    const QString layout = tr("%1 бит %2:%3:%4").arg(format.HighBitDepth() ? format.bitDepth : 8).arg(chroma[0]).arg(chroma[1]).arg(chroma[2]);
+    return name.isEmpty() ? layout : name + " " + layout;
 }
 
 QString AppModel::resultSummary() const {
@@ -646,6 +689,7 @@ QString AppModel::resultSummary() const {
     if (r.width > 0 && r.height > 0) parts << QString("%1×%2").arg(r.width).arg(r.height);
     if (r.fps > 0.0) parts << tr("%1 fps").arg(QString::number(r.fps, 'g', 4));
     if (r.frames > 0) parts << Plural(static_cast<int>(r.frames), tr("кадр"), tr("кадра"), tr("кадров"));
+    if (!r.codec.empty()) parts << formatLabel(r.codec, r.format);
     parts << (r.audio ? tr("со звуком") : tr("без звука"));
     if (!r.modified.isEmpty()) parts << tr("обновлён %1").arg(r.modified);
     if (r.runSeconds > 0.0) parts << tr("готов за %1").arg(FormatClock(r.runSeconds));

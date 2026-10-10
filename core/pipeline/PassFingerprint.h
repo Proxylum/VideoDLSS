@@ -47,8 +47,14 @@ struct PassFingerprint {
     ToolInfo tool;
     std::string Short() const;  // first 8 hex digits of the value
 };
+// `sourceFormat` is the layout the source decodes into (FrameDesc::Name(): "yuv444p10" ...): a stage reads different
+// samples from a 10-bit source than from its 8-bit 4:2:0 reduction, so it is part of the fingerprint — except the
+// legacy layout "yuv420p" (and an empty string), which leaves the fingerprints of every 8-bit source as they were.
 PassFingerprint ComputeFingerprint(const std::string& stage, const std::string& sourceHash, const nlohmann::json& params,
-                                   const std::map<std::string, std::string>& inputs, const ToolInfo& tool);
+                                   const std::map<std::string, std::string>& inputs, const ToolInfo& tool, const std::string& sourceFormat = {});
+// The source layout a fingerprint stands for when the manifest does not say: 8-bit 4:2:0, what every pass was made from
+// before the decoder kept the source's bit depth.
+constexpr const char* kLegacySourceFormat = "yuv420p";
 // First 8 hex digits of a "sha256:<hex>" value ("legacy" when empty).
 std::string ShortFingerprint(const std::string& fingerprint);
 

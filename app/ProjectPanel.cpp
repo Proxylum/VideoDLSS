@@ -10,7 +10,9 @@
 #include <QScrollArea>
 #include <QShortcut>
 #include <QSignalBlocker>
+#include <QStandardItemModel>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <cmath>
 #include <optional>
 #include <map>
@@ -21,6 +23,7 @@
 #include "Theme.h"
 #include "TaskQueue.h"
 #include "io/EncodeDefaults.h"
+#include "io/OutputFormat.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "stages/ParamSchema.h"
@@ -177,7 +180,23 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     codec_->addItem("H.264 NVENC", "h264_nvenc");
     codec_->addItem("HEVC NVENC", "hevc_nvenc");
     codec_->addItem("AV1 NVENC", "av1_nvenc");
+    codec_->addItem(tr("ProRes (422 HQ / 4444)"), "prores_ks");
     codec_->addItem(tr("FFV1 (без потерь)"), "ffv1");
+    codec_->setToolTip(tr("Кодер результата. H.264 NVENC — только 8 бит; HEVC и AV1 NVENC — до 10 бит; ProRes — 10 бит, 4:2:2 или 4:4:4, файл .mov; "
+                          "FFV1 — без потерь, любая разрядность, файл .mkv"));
+    bitDepth_ = new QComboBox(encodeCard);
+    bitDepth_->addItem(tr("Авто"), 0);
+    bitDepth_->addItem(tr("8 бит"), 8);
+    bitDepth_->addItem(tr("10 бит"), 10);
+    bitDepth_->addItem(tr("12 бит"), 12);
+    bitDepth_->setToolTip(tr("Разрядность результата. «Авто» — как у исходника в пределах кодека: 10-битный исходник даёт 10-битный HEVC / AV1 / ProRes / FFV1 "
+                             "и 8-битный H.264"));
+    chroma_ = new QComboBox(encodeCard);
+    chroma_->addItem(tr("Авто"), "auto");
+    chroma_->addItem("4:2:0", "420");
+    chroma_->addItem("4:2:2", "422");
+    chroma_->addItem("4:4:4", "444");
+    chroma_->setToolTip(tr("Цветовая субдискретизация результата. «Авто» — 4:2:0 для NVENC, 4:2:2 для ProRes (4:4:4 при 4:4:4-исходнике), как у исходника для FFV1"));
     bitrate_ = new QComboBox(encodeCard);
     bitrate_->addItem(tr("Авто"), -1);
     for (int mbps : {20, 35, 50, 80, 120, 200}) bitrate_->addItem(tr("%1 Мбит/с").arg(mbps), mbps);
@@ -195,9 +214,11 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     codec_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     codec_->setMinimumContentsLength(10);
     encodeForm->addWidget(codec_);
+    encodeForm->addWidget(bitDepth_);
+    encodeForm->addWidget(chroma_);
     encodeForm->addWidget(bitrate_);
     encodeForm->addWidget(bitrateCustom_);
-    encodeForm->addWidget(encodeAudio_, 1);  // «≈ 45 Мбит/с · файл ≈ 54 МБ · звук копируется»
+    encodeForm->addWidget(encodeAudio_, 1);  // «10 бит 4:2:0 · ≈ 45 Мбит/с · файл ≈ 54 МБ · звук копируется»
     eg->addLayout(encodeForm, 0, 1);
     encodeState_ = new QLabel(encodeCard);
     encodeState_->setWordWrap(true);
@@ -212,9 +233,19 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
         const int choice = bitrate_->currentData().toInt();  // -1 auto, 0 custom, else Mbit/s
         if (choice < 0) options.erase("b");
         else options["b"] = BitrateOption(choice > 0 ? choice : bitrateCustom_->value());
-        model_.setEncode(codec_->currentData().toString(), options);
+        OutputFormatRequest format;
+        format.bitDepth = bitDepth_->currentData().toInt();
+        format.chroma = chroma_->currentData().toString().toStdString();
+        // a choice the new codec cannot make falls back to «Авто» instead of a plan error
+        if (const CodecCaps* caps = FindCodecCaps(codec_->currentData().toString().toStdString())) {
+            if (format.bitDepth != 0 && std::find(caps->bitDepths.begin(), caps->bitDepths.end(), format.bitDepth) == caps->bitDepths.end()) format.bitDepth = 0;
+            if (format.chroma != "auto" && std::find(caps->chromas.begin(), caps->chromas.end(), format.chroma) == caps->chromas.end()) format.chroma = "auto";
+        }
+        model_.setEncode(codec_->currentData().toString(), options, format);
     };
     connect(codec_, qOverload<int>(&QComboBox::currentIndexChanged), this, [applyEncode](int) { applyEncode(); });
+    connect(bitDepth_, qOverload<int>(&QComboBox::currentIndexChanged), this, [applyEncode](int) { applyEncode(); });
+    connect(chroma_, qOverload<int>(&QComboBox::currentIndexChanged), this, [applyEncode](int) { applyEncode(); });
     connect(bitrate_, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, applyEncode](int) {
         bitrateCustom_->setVisible(bitrate_->currentData().toInt() == 0);
         applyEncode();
@@ -276,15 +307,20 @@ void ProjectPanel::refresh() {
     const bool hasSource = !p.sourceVideo.empty();
     sourceFile_->setText(hasSource ? QString::fromStdWString(p.sourceVideo.filename().wstring()) : tr("не задан — откройте видео (Ctrl+O)"));
     sourceFile_->setToolTip(hasSource ? QString::fromStdWString(p.sourceVideo.wstring()) : QString());
-    if (src.width > 0)
-        sourceFrame_->setText(tr("%1×%2 · %3 fps · %4 кадров · %5 с")
-                                  .arg(src.width)
-                                  .arg(src.height)
-                                  .arg(QString::number(src.fps, 'g', 5))
-                                  .arg(src.frames)
-                                  .arg(QString::number(src.fps > 0 ? src.frames / src.fps : 0.0, 'f', 1)));
-    else
+    if (src.width > 0) {
+        QString frame = tr("%1×%2 · %3 fps · %4 кадров · %5 с")
+                            .arg(src.width)
+                            .arg(src.height)
+                            .arg(QString::number(src.fps, 'g', 5))
+                            .arg(src.frames)
+                            .arg(QString::number(src.fps > 0 ? src.frames / src.fps : 0.0, 'f', 1));
+        if (!src.codec.empty()) frame += " · " + AppModel::formatLabel(src.codec, src.decoded);  // «HEVC 10 бит 4:4:4»
+        sourceFrame_->setText(frame);
+        sourceFrame_->setToolTip(src.codec.empty() ? QString() : tr("Поток: %1 бит %2; декодируется как %3").arg(src.bitDepth).arg(QString::fromStdString(src.chroma)).arg(QString::fromStdString(src.decoded.Name())));
+    } else {
         sourceFrame_->setText("—");
+        sourceFrame_->setToolTip(QString());
+    }
     sourceAudio_->setText(!hasSource ? "—" : src.audio ? tr("есть — будет скопирован") : tr("нет"));
     sourcePasses_->setText(hasSource ? QString::fromStdWString(p.passesRoot.wstring()) : "—");
     changePasses_->setEnabled(hasSource && !tasks_.busy());
@@ -293,7 +329,12 @@ void ProjectPanel::refresh() {
     sourceHash_->setToolTip(QString::fromStdString(hash));
 
     if (src.width > 0 && model_.planError().isEmpty()) {
-        outVideo_->setText(tr("%1×%2 · %3 fps · %4").arg(out.width).arg(out.height).arg(QString::number(out.fps, 'g', 5)).arg(out.audio ? tr("со звуком") : tr("без звука")));
+        outVideo_->setText(tr("%1×%2 · %3 fps · %4 · %5")
+                               .arg(out.width)
+                               .arg(out.height)
+                               .arg(QString::number(out.fps, 'g', 5))
+                               .arg(AppModel::formatLabel(out.codec, out.format))
+                               .arg(out.audio ? tr("со звуком") : tr("без звука")));
         outTime_->setText(tr("%1 · к запуску %2 из %3 (полный прогон — %4)")
                               .arg(FormatDuration(out.seconds))
                               .arg(out.stagesToRun)
@@ -316,9 +357,27 @@ void ProjectPanel::refresh() {
 
     for (StageCard* c : cards_) c->refresh();
     {
-        const QSignalBlocker b1(codec_), b2(bitrate_), b3(bitrateCustom_);
+        const QSignalBlocker b1(codec_), b2(bitrate_), b3(bitrateCustom_), b4(bitDepth_), b5(chroma_);
         const int idx = codec_->findData(QString::fromStdString(p.codec));
         codec_->setCurrentIndex(idx >= 0 ? idx : 0);
+        // bit depth and chroma: the project's choice; the items the codec cannot make are greyed out
+        const CodecCaps* caps = FindCodecCaps(p.codec);
+        auto enableItem = [](QComboBox* combo, int i, bool on) {
+            if (auto* m = qobject_cast<QStandardItemModel*>(combo->model()))
+                if (QStandardItem* item = m->item(i)) item->setEnabled(on);
+        };
+        for (int i = 0; i < bitDepth_->count(); ++i) {
+            const int d = bitDepth_->itemData(i).toInt();
+            enableItem(bitDepth_, i, d == 0 || !caps || std::find(caps->bitDepths.begin(), caps->bitDepths.end(), d) != caps->bitDepths.end());
+        }
+        for (int i = 0; i < chroma_->count(); ++i) {
+            const std::string c = chroma_->itemData(i).toString().toStdString();
+            enableItem(chroma_, i, c == "auto" || !caps || std::find(caps->chromas.begin(), caps->chromas.end(), c) != caps->chromas.end());
+        }
+        bitDepth_->setCurrentIndex(std::max(0, bitDepth_->findData(p.outputFormat.bitDepth)));
+        chroma_->setCurrentIndex(std::max(0, chroma_->findData(QString::fromStdString(p.outputFormat.chroma))));
+        bitDepth_->setEnabled(hasSource);
+        chroma_->setEnabled(hasSource);
         const auto b = p.codecOptions.find("b");
         const std::optional<double> mbps = b == p.codecOptions.end() ? std::nullopt : ParseBitrateMbps(b->second);
         int choice = -1;  // auto
@@ -331,15 +390,18 @@ void ProjectPanel::refresh() {
         bitrate_->setCurrentIndex(std::max(0, bitrate_->findData(choice)));
         bitrateCustom_->setVisible(choice == 0);
         const bool lossy = LossyCodec(p.codec);
-        bitrate_->setEnabled(lossy && hasSource);
-        bitrateCustom_->setEnabled(lossy && hasSource);
+        const bool rated = lossy && HasBitrateControl(p.codec);  // ProRes: the profile sets the rate
+        bitrate_->setEnabled(rated && hasSource);
+        bitrateCustom_->setEnabled(rated && hasSource);
         // what the run will use and roughly how big the file gets
         QString info;
-        if (!lossy) info = tr("без потерь");
+        if (hasSource && model_.planError().isEmpty() && out.width > 0) info = AppModel::formatLabel({}, out.format);  // «10 бит 4:2:0»
+        if (!lossy) info += (info.isEmpty() ? QString() : QString(" · ")) + tr("без потерь");
+        else if (!rated) info += (info.isEmpty() ? QString() : QString(" · ")) + tr("поток задаёт профиль");
         else if (hasSource && out.width > 0) {
             const double used = mbps ? *mbps : RecommendedBitrateMbps(p.codec, out.width, out.height, out.fps);
             const double seconds = src.fps > 0.0 ? static_cast<double>(src.frames) / src.fps : 0.0;
-            if (!mbps) info = tr("≈ %1 Мбит/с").arg(QString::number(used, 'g', 3));
+            if (!mbps) info += (info.isEmpty() ? QString() : QString(" · ")) + tr("≈ %1 Мбит/с").arg(QString::number(used, 'g', 3));
             if (seconds > 0.0 && used > 0.0) info += (info.isEmpty() ? QString() : QString(" · ")) + tr("файл ≈ %1").arg(HumanBytes(static_cast<unsigned long long>(used * 1e6 / 8.0 * seconds)));
         }
         const QString audio = src.audio ? tr("звук копируется") : (hasSource ? tr("без звука") : QString());
@@ -468,7 +530,7 @@ void ProjectPanel::refreshVersions() {
 void ProjectPanel::processAll() {
     Project& p = model_.project();
     if (p.sourceVideo.empty()) return;
-    if (p.resultVideo.empty()) p.resultVideo = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + "_result.mp4");
+    if (p.resultVideo.empty()) p.resultVideo = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + "_result" + ResultExtensionFor(p.codec));
     if (p.file.empty()) {
         const auto file = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + ".dlssvid.json");
         if (!model_.saveProjectAs(QString::fromStdWString(file.wstring()))) return;

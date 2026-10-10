@@ -174,7 +174,7 @@ void UpscaleStage::Process(FrameContext& ctx) {
     cache_ = &ctx.cache;
 
     // colour -> RGBA16F
-    const PassImage rgba = Yuv420pToRgba16f(frame, options_.color);
+    const PassImage rgba = YuvToRgba16f(frame, options_.color);
 
     if (upscaler_->ProcessesOnCpu()) {
         // CPU-side models: one frame at a time (TensorRT), or a window of frames for video models (the PyTorch worker)

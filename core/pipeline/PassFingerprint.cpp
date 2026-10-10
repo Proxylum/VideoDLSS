@@ -159,14 +159,15 @@ std::string ShortFingerprint(const std::string& fingerprint) {
 std::string PassFingerprint::Short() const { return ShortFingerprint(value); }
 
 PassFingerprint ComputeFingerprint(const std::string& stage, const std::string& sourceHash, const nlohmann::json& params,
-                                   const std::map<std::string, std::string>& inputs, const ToolInfo& tool) {
+                                   const std::map<std::string, std::string>& inputs, const ToolInfo& tool, const std::string& sourceFormat) {
     PassFingerprint f;
     f.stage = stage;
     f.sourceHash = sourceHash;
     f.params = CanonicalizeJson(params.is_null() ? nlohmann::json::object() : params);
     f.inputs = inputs;
     f.tool = tool;
-    const nlohmann::json j = {{"source", sourceHash}, {"stage", stage}, {"params", f.params}, {"inputs", inputs}, {"tool", tool.ToJson()}};
+    nlohmann::json j = {{"source", sourceHash}, {"stage", stage}, {"params", f.params}, {"inputs", inputs}, {"tool", tool.ToJson()}};
+    if (!sourceFormat.empty() && sourceFormat != kLegacySourceFormat) j["source_format"] = sourceFormat;
     const std::string s = CanonicalJson(j);
     f.value = "sha256:" + Sha256Hex(s.data(), s.size());
     return f;

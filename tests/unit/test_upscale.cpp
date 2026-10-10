@@ -134,7 +134,7 @@ TEST_CASE("RgbToYuv420p inverts Yuv420pToRgb on smooth images", "[upscale][conve
         RgbToYuv420p(rgb, info, yuv);
         CHECK(yuv.desc.width == 64);
         CHECK(yuv.desc.height == 48);
-        const PassImage back = Yuv420pToRgb(yuv, info, PixelType::F32);
+        const PassImage back = YuvToRgb(yuv, info, PixelType::F32);
         double maxDiff = 0.0;
         for (uint32_t y = 1; y < 47; ++y)
             for (uint32_t x = 1; x < 63; ++x)
