@@ -387,7 +387,9 @@ result's bit depth and chroma are «auto» unless `--bit-depth 8|10|12` / `--chr
 the GUI, stored in the project) say otherwise: auto takes the source's bit depth within what the codec does and 4:2:0
 for the NVENC codecs, 4:2:2 for ProRes (4:4:4 when the source is), the source's own subsampling for FFV1. The stream is
 tagged with the matrix and range used (BT.709 / BT.601, limited / full) and the source's primaries and transfer; HEVC in
-MP4 / MOV gets the `hvc1` sample entry. HDR (PQ / HLG) stays out of scope: such sources are treated as SDR.
+MP4 / MOV gets the `hvc1` sample entry. HDR (PQ / HLG) stays out of scope: such sources are treated as SDR. The NVIDIA
+passes keep the 10-bit gradations too: a shallow 10-bit ramp comes out of DLSS SR, NR and Frame Generation with one-code
+steps, no 8-bit staircase (measured, `docs/benchmarks.md`; the `[precision]` tests watch it).
 
 | Encoder | Bit depth | Chroma | Container | Note |
 |---|---|---|---|---|
