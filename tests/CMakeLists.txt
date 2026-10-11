@@ -63,6 +63,7 @@ add_executable(dlssvid_integration_tests
   integration/TestClips.cpp
   integration/test_passthrough.cpp
   integration/test_formats.cpp
+  integration/test_precision.cpp
   integration/test_cli.cpp
   integration/test_pass_sequence.cpp
   integration/test_cli_passes.cpp

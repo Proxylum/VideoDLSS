@@ -413,8 +413,10 @@ dlssvid process ── ProcessRunner::RunProcess ── depth ─▶ flow ─▶
   отпечатки 8-битных источников прежние; манифест хранит `source.format`, пасс от другой раскладки — `source_changed`).
   CLI: `--bit-depth`, `--chroma`, `--codec prores_ks`, `info` печатает `samples:`; отчёт `process` и JSON — `output_format`;
   GUI — карточка «Кодирование» (разрядность, цветность, ProRes), формат в «Источник», «Что получится» и строке результата.
-  Сам DLSS SR работает в LDR-режиме и квантует цвет до 8 бит (DLSS Programming Guide §3.1.2) — перевод в HDR-режим
-  отдельная задача.
+  DLSS SR создаётся в LDR-режиме; руководство (DLSS Programming Guide §3.1.2) пишет, что LDR-режим квантует цвет до
+  8 бит, но замер (TASK-0035, `docs/benchmarks.md` «Разрядность по пассам») этого не подтверждает: пологая 10-битная
+  рампа проходит SR, NR и FG с шагом в один 10-битный код, 8-битных ступеней нет — поэтому HDR-режим не включён;
+  тест `tests/integration/test_precision.cpp` сторожит это на каждом прогоне с GPU.
 - `dlssvid bench` — тот же `RunProcess` во временный корень без переиспользования, отчёт мс/кадр по стадиям + GPU /
   архитектура / драйвер (JSON) — `docs/benchmarks.md`.
 - GUI: кнопка «Обработать → result» (`ProjectPanel::processAll`) сохраняет проект и ставит `dlssvid process --project`
