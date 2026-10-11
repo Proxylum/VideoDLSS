@@ -280,7 +280,7 @@ void NrStage::Process(FrameContext& ctx) {
         h = pt.height;
         source = "slot";
     } else {
-        colorImg = Yuv420pToRgba16f(frame, options_.color);
+        colorImg = YuvToRgba16f(frame, options_.color);
         w = colorImg.width;
         h = colorImg.height;
         source = "video";

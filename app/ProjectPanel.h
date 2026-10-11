@@ -54,6 +54,8 @@ private:
     QPushButton* process_;
     std::vector<StageCard*> cards_;
     QComboBox* codec_;
+    QComboBox* bitDepth_;     // «Авто» | 8 | 10 | 12 бит (TASK-0034; items outside the codec's reach are disabled)
+    QComboBox* chroma_;       // «Авто» | 4:2:0 | 4:2:2 | 4:4:4
     QComboBox* bitrate_;      // «Авто» | presets in Mbit/s | «Свой…»
     QSpinBox* bitrateCustom_;  // the custom value, Mbit/s
     QLabel* encodeAudio_;

@@ -49,7 +49,7 @@ nlohmann::json Project::ToJson(const std::filesystem::path& relativeTo) const {
             {"result", Rel(resultVideo, relativeTo)},
             {"stages", st},
             {"pass_versions_keep", passVersionsKeep},
-            {"encode", {{"codec", codec}, {"options", codecOptions}}},
+            {"encode", {{"codec", codec}, {"options", codecOptions}, {"bit_depth", BitDepthChoiceName(outputFormat.bitDepth)}, {"chroma", outputFormat.chroma}}},
             {"source_hash", {{"value", sourceHash}, {"size", sourceSize}, {"mtime", sourceMtime}}},
             {"viewport", viewport.ToJson()}};
 }
@@ -73,6 +73,12 @@ Project Project::FromJson(const nlohmann::json& j, const std::filesystem::path& 
         p.codec = j["encode"].value("codec", "h264_nvenc");
         if (j["encode"].contains("options") && j["encode"]["options"].is_object())
             for (const auto& [k, v] : j["encode"]["options"].items()) p.codecOptions[k] = v.is_string() ? v.get<std::string>() : v.dump();
+        const nlohmann::json bd = j["encode"].value("bit_depth", nlohmann::json("auto"));
+        const auto depth = bd.is_number_integer() ? std::optional<int>(bd.get<int>()) : ParseBitDepthChoice(bd.is_string() ? bd.get<std::string>() : "auto");
+        if (!depth || (*depth != 0 && *depth != 8 && *depth != 10 && *depth != 12)) Throw("project: encode.bit_depth must be auto | 8 | 10 | 12");
+        p.outputFormat.bitDepth = *depth;
+        p.outputFormat.chroma = j["encode"].value("chroma", "auto");
+        if (!ValidChromaChoice(p.outputFormat.chroma)) Throw("project: encode.chroma must be auto | 420 | 422 | 444");
     }
     if (j.contains("source_hash") && j["source_hash"].is_object()) {
         p.sourceHash = j["source_hash"].value("value", "");

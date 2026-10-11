@@ -149,7 +149,7 @@ TEST_CASE("Colour export from a clip round-trips as EXR half and PNG16", "[integ
     const ColorInfo ci = ColorInfoFromStream(dec.Info());
     std::vector<PassImage> frames;
     CpuFrame f;
-    while (dec.NextFrame(f)) frames.push_back(Yuv420pToRgb(f, ci, PixelType::F16));
+    while (dec.NextFrame(f)) frames.push_back(YuvToRgb(f, ci, PixelType::F16));
     REQUIRE(frames.size() == 6);
 
     FrameSource src = [&](int64_t i, PassImage& out) {

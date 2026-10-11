@@ -26,6 +26,10 @@ struct SourceInfo {
     double fps = 0.0;
     int64_t frames = 0;
     bool audio = false;
+    std::string codec;        // "hevc", "prores" ... (VideoStreamInfo::codecName)
+    FrameDesc decoded;        // the layout the source decodes into (TASK-0034)
+    int bitDepth = 8;         // of the source's own pixel format
+    std::string chroma = "420";
 };
 
 struct StageEstimate {
@@ -48,6 +52,8 @@ struct RunOutcome {
     int stagesToRun = 0, stagesTotal = 0;  // the encode counts as a stage
     std::vector<StageEstimate> stages;
     std::vector<std::string> reused;  // stages the plan reuses (or restores)
+    std::string codec;                // the result's encoder and layout (filled by the caller from the project: AppModel::refreshPlan)
+    FrameDesc format;
 };
 
 // Combines the plan, the enabled stages' parameters and the source: resolution and rate after upscale / frame

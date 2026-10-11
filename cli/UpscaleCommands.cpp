@@ -120,7 +120,7 @@ public:
             if (!decoder_->NextFrame(f)) return false;
             ++decoded_;
         }
-        out = Yuv420pToRgb(f, color_, PixelType::F32);
+        out = YuvToRgb(f, color_, PixelType::F32);
         return true;
     }
 

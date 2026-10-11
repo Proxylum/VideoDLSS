@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "gpu/D3D12Device.h"
+#include "io/OutputFormat.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/nr/INrBackend.h"
@@ -39,7 +40,8 @@ std::vector<std::string> Split(const std::string& s, char sep) {
 void BuildStages(const std::string& projectFile, const std::string& stageList, const std::vector<std::string>& params, const std::string& depthBackend,
                  const std::string& flowBackend, const std::string& upscaleBackend, const std::string& nrBackend, const std::string& fgBackend, double scale,
                  int multiplier, ProcessOptions& o, std::filesystem::path* projectInput, std::filesystem::path* projectPasses, std::filesystem::path* projectResult,
-                 int* projectKeep = nullptr, std::string* projectCodec = nullptr, std::map<std::string, std::string>* projectCodecOptions = nullptr) {
+                 int* projectKeep = nullptr, std::string* projectCodec = nullptr, std::map<std::string, std::string>* projectCodecOptions = nullptr,
+                 OutputFormatRequest* projectFormat = nullptr) {
     if (!projectFile.empty()) {
         Project p = Project::Load(projectFile);
         o.stages = StagesFromProject(p);
@@ -50,6 +52,7 @@ void BuildStages(const std::string& projectFile, const std::string& stageList, c
         if (projectKeep) *projectKeep = p.passVersionsKeep;
         if (projectCodec) *projectCodec = p.codec;
         if (projectCodecOptions) *projectCodecOptions = p.codecOptions;
+        if (projectFormat) *projectFormat = p.outputFormat;
     } else {
         o.stages = DefaultProcessStages();
     }
@@ -100,6 +103,7 @@ void PrintReport(const ProcessResult& r) {
                     s.reason.c_str());
     std::printf("result:      %s (%lld frames at %.3f fps%s) in %.1f s\n", r.output.string().c_str(), static_cast<long long>(r.framesOut), r.outputFps.ToDouble(),
                 r.audio ? ", audio copied" : "", r.seconds);
+    std::printf("format:      %s %s (%s)\n", r.codec.c_str(), r.outputFormat.Describe().c_str(), r.outputPixelFormat.c_str());
 }
 
 int CmdProcess(const ProcessCommands::ProcessArgs& a) {
@@ -108,23 +112,34 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     int projectKeep = -1;
     std::string projectCodec;
     std::map<std::string, std::string> projectCodecOptions;
+    OutputFormatRequest projectFormat;
     BuildStages(a.project, a.stages, a.params, a.depthBackend, a.flowBackend, a.upscaleBackend, a.nrBackend, a.fgBackend, a.scale, a.multiplier, o, &projectInput,
-                &projectPasses, &projectResult, &projectKeep, &projectCodec, &projectCodecOptions);
+                &projectPasses, &projectResult, &projectKeep, &projectCodec, &projectCodecOptions, &projectFormat);
     o.keepVersions = a.keepVersions >= 0 ? a.keepVersions : (projectKeep >= 0 ? projectKeep : 2);
     for (const auto& name : Split(a.force, ',')) o.forceStages.insert(name);
     o.input = !a.input.empty() ? std::filesystem::path(a.input) : projectInput;
     if (o.input.empty()) Throw("process: -i/--input (or --project with a source video) is required");
+    o.codec = !a.codecGiven && !projectCodec.empty() ? projectCodec : a.codec;  // the project's encoder unless --codec says otherwise
     o.output = !a.output.empty() ? std::filesystem::path(a.output) : projectResult;
-    if (o.output.empty()) o.output = o.input.parent_path() / (o.input.stem().string() + "_result.mp4");
+    if (o.output.empty()) o.output = o.input.parent_path() / (o.input.stem().string() + "_result" + ResultExtensionFor(o.codec));
     o.passesRoot = !a.passes.empty() ? std::filesystem::path(a.passes) : projectPasses;
     o.skipExisting = !a.noSkipExisting;
     o.disableUnavailable = a.disableUnavailable;
-    o.codec = !a.codecGiven && !projectCodec.empty() ? projectCodec : a.codec;  // the project's encoder unless --codec says otherwise
     if (a.codecOptions.empty()) o.codecOptions = projectCodecOptions;
     for (const auto& kv : a.codecOptions) {
         const auto eq = kv.find('=');
         if (eq == std::string::npos) Throw("--codec-opt expects key=value, got: " + kv);
         o.codecOptions[kv.substr(0, eq)] = kv.substr(eq + 1);
+    }
+    o.outputFormat = projectFormat;  // the project's bit depth / chroma unless the flags say otherwise
+    if (!a.bitDepth.empty()) {
+        const auto depth = ParseBitDepthChoice(a.bitDepth);
+        if (!depth) Throw("--bit-depth must be auto | 8 | 10 | 12 (got '" + a.bitDepth + "')");
+        o.outputFormat.bitDepth = *depth;
+    }
+    if (!a.chroma.empty()) {
+        if (!ValidChromaChoice(a.chroma)) Throw("--chroma must be auto | 420 | 422 | 444 (got '" + a.chroma + "')");
+        o.outputFormat.chroma = a.chroma;
     }
     o.hwaccel = a.hwaccel;
     o.frames = a.frames;
@@ -203,8 +218,12 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_option("--multiplier", pa_.multiplier, "frame generation multiplier 2 | 3 | 4");
     process_->add_flag("--no-skip-existing,--no_skip_existing", pa_.noSkipExisting, "recompute every stage even when its pass is complete");
     process_->add_flag("--disable-unavailable,--disable_unavailable", pa_.disableUnavailable, "nr / fg without DLL or GPU: skip the stage instead of failing");
-    process_->add_option("--codec", pa_.codec, "video encoder: h264_nvenc | hevc_nvenc | av1_nvenc | ffv1")->default_val("h264_nvenc");
+    process_->add_option("--codec", pa_.codec, "video encoder: h264_nvenc | hevc_nvenc | av1_nvenc | prores_ks | ffv1 (default: the project's, else h264_nvenc)")
+        ->default_val("h264_nvenc");
     process_->add_option("--codec-opt", pa_.codecOptions, "encoder private option key=value (repeatable)");
+    process_->add_option("--bit-depth,--bit_depth", pa_.bitDepth,
+                         "result bit depth: auto | 8 | 10 | 12 (auto: the source's within the codec — 10-bit HEVC / AV1 / ProRes / FFV1, 8-bit H.264)");
+    process_->add_option("--chroma", pa_.chroma, "result chroma subsampling: auto | 420 | 422 | 444 (auto: 4:2:0 for NVENC, 4:2:2 for ProRes, the source's for FFV1)");
     process_->add_option("--hwaccel", pa_.hwaccel, "source decode for the encode / passthrough step: none | cuda")->default_val("none");
     process_->add_option("--frames", pa_.frames, "process at most N source frames")->default_val(-1);
     process_->add_flag("--warp", pa_.warp, "use the WARP software adapter");

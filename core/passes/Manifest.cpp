@@ -98,6 +98,7 @@ nlohmann::json Manifest::ToJson() const {
     j["convention"] = std::string(ToString(convention));
     j["model"] = {{"name", model}, {"version", modelVersion}};
     j["source"] = {{"file", sourceFile}, {"hash", sourceHash}};
+    if (!sourceFormat.empty()) j["source"]["format"] = sourceFormat;
     j["stage_params"] = stageParams;
     j["depth"] = {{"units", depth.units}, {"relative", depth.relative}, {"near", depth.zNear},
                   {"far", depth.zFar},     {"min", depth.minValue},      {"max", depth.maxValue}};
@@ -146,6 +147,7 @@ Manifest Manifest::FromJson(const nlohmann::json& j) {
     if (j.contains("source")) {
         m.sourceFile = j["source"].value("file", "");
         m.sourceHash = j["source"].value("hash", "");
+        m.sourceFormat = j["source"].value("format", "");
     }
     m.stageParams = j.value("stage_params", nlohmann::json::object());
     if (j.contains("depth")) {

@@ -119,7 +119,7 @@ double MeanPsnr(const std::filesystem::path& reference, const std::filesystem::p
     int n = 0;
     for (int i = 0; i < frames && i < static_cast<int>(ref.size()); ++i) {
         if (!sr.HasFrame(i)) break;
-        const ImageMetrics m = CompareImages(Yuv420pToRgb(ref[static_cast<size_t>(i)], ci, PixelType::F32), sr.ReadFrame(i));
+        const ImageMetrics m = CompareImages(YuvToRgb(ref[static_cast<size_t>(i)], ci, PixelType::F32), sr.ReadFrame(i));
         sum += m.psnrY;
         ++n;
     }
@@ -171,7 +171,7 @@ TEST_CASE("UpscaleStage writes color_sr with nis on WARP, uploads it to the slot
     CHECK(video[0].desc.width == 96);
     CHECK(video[0].desc.height == 64);
     VideoDecoder previewDec(dir / "sr.mkv");  // the preview is encoded with the input's colour matrix (BT.601 for a 32-line clip)
-    const ImageMetrics m = CompareImages(f0, Yuv420pToRgb(video[0], ColorInfoFromStream(previewDec.Info()), PixelType::F32));
+    const ImageMetrics m = CompareImages(f0, YuvToRgb(video[0], ColorInfoFromStream(previewDec.Info()), PixelType::F32));
     CHECK(m.psnrY > 38.0);    // luma survives the 8-bit round trip
     CHECK(m.psnrRgb > 26.0);  // chroma is 4:2:0 subsampled on a checkered synthetic pattern
 }
@@ -285,7 +285,7 @@ TEST_CASE("DLSS SR upscales a downscaled clip back to the reference (jitter emul
         double sum = 0.0;
         int n = 0;
         for (int i = 4; i < pair.frames; ++i) {
-            sum += CompareImages(Yuv420pToRgb(ref[static_cast<size_t>(i)], ci, PixelType::F32), sr.ReadFrame(i)).psnrY;
+            sum += CompareImages(YuvToRgb(ref[static_cast<size_t>(i)], ci, PixelType::F32), sr.ReadFrame(i)).psnrY;
             ++n;
         }
         const double psnr = sum / n;
@@ -348,7 +348,7 @@ TEST_CASE("UpscaleStage: the trt backend runs a TensorRT model at its native x2 
         VideoDecoder again(clip);
         CpuFrame f;
         REQUIRE(again.NextFrame(f));
-        const PassImage rgba = Yuv420pToRgba16f(f, ColorInfoFromStream(again.Info()));
+        const PassImage rgba = YuvToRgba16f(f, ColorInfoFromStream(again.Info()));
         const PassImage pass = reader.ReadFrame(0);
         REQUIRE(pass.width == 80);
         size_t bad = 0;
@@ -411,7 +411,7 @@ TEST_CASE("UpscaleStage: the worker backend runs windows of frames with overlap 
         for (int64_t i = 0; i < 7; ++i) {
             REQUIRE(again.NextFrame(f));
             REQUIRE(reader.HasFrame(i));
-            const PassImage rgba = Yuv420pToRgba16f(f, ColorInfoFromStream(again.Info()));
+            const PassImage rgba = YuvToRgba16f(f, ColorInfoFromStream(again.Info()));
             const PassImage pass = reader.ReadFrame(i);
             REQUIRE(pass.width == 160);
             size_t bad = 0;
@@ -474,7 +474,7 @@ TEST_CASE("UpscaleStage: RealBasicVSR through the worker upscales a window of fr
     VideoDecoder again(clip);
     CpuFrame f;
     REQUIRE(again.NextFrame(f));
-    const PassImage rgba = Yuv420pToRgba16f(f, ColorInfoFromStream(again.Info()));
+    const PassImage rgba = YuvToRgba16f(f, ColorInfoFromStream(again.Info()));
     const PassImage pass = reader.ReadFrame(0);
     double diff = 0.0;
     size_t n = 0;

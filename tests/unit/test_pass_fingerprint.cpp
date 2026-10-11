@@ -65,6 +65,14 @@ TEST_CASE("ComputeFingerprint changes with every component and only with them", 
     CHECK(ShortFingerprint("") == "legacy");
     CHECK(ShortFingerprint("sha256:0123456789abcdef") == "01234567");
     CHECK(ShortFingerprint("0123456789abcdef") == "01234567");
+    // TASK-0034: the decoded source layout is part of the fingerprint, except the legacy 8-bit 4:2:0 one (and an empty
+    // string), so every pass of an 8-bit source keeps the fingerprint it had before the decoder kept bit depths
+    CHECK(ComputeFingerprint("nr", "sha256:src", params, inputs, tool, kLegacySourceFormat).value == base.value);
+    CHECK(ComputeFingerprint("nr", "sha256:src", params, inputs, tool, "").value == base.value);
+    const PassFingerprint ten = ComputeFingerprint("nr", "sha256:src", params, inputs, tool, "yuv444p10");
+    CHECK(ten.value != base.value);
+    CHECK(ComputeFingerprint("nr", "sha256:src", params, inputs, tool, "yuv420p10").value != ten.value);
+    CHECK(ComputeFingerprint("nr", "sha256:src", params, inputs, tool, "yuv444p10").value == ten.value);
 }
 
 TEST_CASE("ToolInfo JSON round trip and ToolForStage from parameters", "[unit][fingerprint]") {

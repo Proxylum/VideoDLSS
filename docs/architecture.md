@@ -6,9 +6,9 @@
 ## Состояние после этапов 0–8
 
 ```
-VideoDecoder ──CpuFrame(YUV420P)──▶ Pipeline ──▶ VideoEncoder
-   FFmpeg                              │            FFmpeg + NVENC / ffv1
-   (sw | NVDEC→CPU)                    ▼            audio: stream copy
+VideoDecoder ──CpuFrame(planar YUV)──▶ Pipeline ──▶ VideoEncoder
+   FFmpeg      8 / 10 / 12 / 16 бит    │            FFmpeg + NVENC / ProRes / ffv1
+   (sw | NVDEC→CPU)  4:2:0/4:2:2/4:4:4 ▼            audio: stream copy
                               [ PassthroughStage ]
                                        │ upload / readback
                                        ▼
@@ -393,6 +393,28 @@ dlssvid process ── ProcessRunner::RunProcess ── depth ─▶ flow ─▶
 - `EncodePassToVideo`: кадры пасса с его fps; источник декодируется параллельно только ради аудио-пакетов
   (`SetAudioPacketSink` → `WriteAudioPacket`), `mult = round(passFps / sourceFps)` кадров пасса на кадр источника —
   видео и аудио пишутся вперемежку. Без цветовых стадий — passthrough (этап 0).
+- **Разрядность и цветность (TASK-0034).** `CpuFrame` хранит кадр в собственной раскладке источника: `PixelFormat`
+  yuv420p / yuv422p / yuv444p (8 бит) и их 16-битные варианты с `FrameDesc::bitDepth` 10 / 12 / 16 (слова LSB-aligned, как
+  `yuv4xxp10le` FFmpeg). `VideoDecoder::ConvertFrame` копирует планарные YUV-кадры как есть (альфа отбрасывается), 16-битные
+  полуплоскостные выходы NVDEC (`p010`, `p016`, `yuv444p16` для 10-битного потока) сдвигает к разрядности потока
+  (`NativeLayoutFor`: `comp.shift` дескриптора плюс разница глубин) — ПО-декод и NVDEC совпадают бит-в-бит; остальное
+  (RGB, 4:1:1, 9/14 бит) — swscale в 8-бит 4:2:0, как раньше. `VideoStreamInfo::decoded` говорит заранее, во что
+  декодируется поток. `ColorConvert`: `YuvToRgb` / `YuvToRgba16f` / `RgbToYuv` для любой раскладки, ограниченный диапазон
+  масштабируется с глубиной (64…940 при 10 битах), 8-битный путь арифметически тот же, что был (golden не меняются).
+  `VideoEncoder` берёт первый формат кодера, в который кадр ложится без потерь (`yuv420p10le` для FFV1 и ProRes, `p010le` /
+  `yuv444p16le` со сдвигом в старшие биты для NVENC), пишет цветовые теги (`ColorTags`: матрица и диапазон конверсии,
+  primaries и transfer источника) и тег `hvc1` для HEVC в MP4/MOV. Политика результата — `core/io/OutputFormat`:
+  `OutputFormatRequest` (разрядность auto / 8 / 10 / 12, цветность auto / 420 / 422 / 444) против таблицы кодеков
+  (`KnownCodecs`: H.264 NVENC — только 8 бит; HEVC NVENC — 8/10, 4:2:0 и 4:4:4; AV1 NVENC — 8/10, 4:2:0; ProRes — 10,
+  4:2:2 / 4:4:4; FFV1 — всё) и раскладки источника: «auto» — разрядность источника в пределах кодека, цветность 4:2:0 для
+  NVENC, 4:2:2 для ProRes (4:4:4 при 4:4:4-источнике), как у источника для FFV1; невозможное сочетание — ошибка с
+  подсказкой. Passthrough при несовпадении раскладок идёт через `YuvConverter` (swscale). Отпечатки пассов учитывают
+  раскладку декодированного источника (`source_format` в каноническом JSON — только когда это не 8-бит 4:2:0, так что
+  отпечатки 8-битных источников прежние; манифест хранит `source.format`, пасс от другой раскладки — `source_changed`).
+  CLI: `--bit-depth`, `--chroma`, `--codec prores_ks`, `info` печатает `samples:`; отчёт `process` и JSON — `output_format`;
+  GUI — карточка «Кодирование» (разрядность, цветность, ProRes), формат в «Источник», «Что получится» и строке результата.
+  Сам DLSS SR работает в LDR-режиме и квантует цвет до 8 бит (DLSS Programming Guide §3.1.2) — перевод в HDR-режим
+  отдельная задача.
 - `dlssvid bench` — тот же `RunProcess` во временный корень без переиспользования, отчёт мс/кадр по стадиям + GPU /
   архитектура / драйвер (JSON) — `docs/benchmarks.md`.
 - GUI: кнопка «Обработать → result» (`ProjectPanel::processAll`) сохраняет проект и ставит `dlssvid process --project`
@@ -457,7 +479,7 @@ PlanProcess / RunProcess ── для каждой включённой ста�
 | Где | Что | Почему | Когда убираем |
 |---|---|---|---|
 | `VideoDecoder::ReceiveFrame` | NVDEC-кадры скачиваются на CPU (`av_hwframe_transfer_data`) | этап 0 проверяет bit-exact путь, а не производительность | этап 2: NVDEC → CUDA → D3D12 без CPU |
-| `VideoDecoder::ConvertFrame` | не-8-бит-4:2:0 источники → swscale → yuv420p (lossy) | стадии работают в 8-бит 4:2:0 до появления GPU-конверсии | этап 2: RGBA16F на GPU |
+| `VideoDecoder::ConvertFrame` | источники вне планарного YUV 8/10/12/16 бит (RGB, 4:1:1, 9/14 бит) → swscale → yuv420p 8 бит | редкие раскладки; планарные YUV любой глубины и цветности копируются как есть (TASK-0034) | по запросу: прямой путь RGB → RGBA16F |
 | `PassthroughStage` | round-trip upload → readback каждого кадра | доказательство корректности пути GPU | остаётся как диагностический режим |
 | `MvConvert::InvertFlow` | инверсия flow сплэттингом с округлением до пикселя, дыры — BFS-заполнением | простая детерминированная инверсия без субпиксельного ресемплинга | этап 3: сравнить с backward-warp SEA-RAFT/OFA, при необходимости заменить |
 | `ColorConvert` | хрома 4:2:0 реплицируется (nearest), без интерполяции | детерминизм и обратимость поблочно | этап 3+: конверсия YUV → RGB на GPU с настраиваемым фильтром |

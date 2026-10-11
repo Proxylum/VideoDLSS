@@ -25,6 +25,8 @@ public:
         bool disableUnavailable = false;
         std::string codec = "h264_nvenc";
         std::vector<std::string> codecOptions;
+        std::string bitDepth;      // auto | 8 | 10 | 12 (empty: the project's, else auto)
+        std::string chroma;        // auto | 420 | 422 | 444 (empty: the project's, else auto)
         std::string hwaccel = "none";
         int64_t frames = -1;
         bool warp = false;

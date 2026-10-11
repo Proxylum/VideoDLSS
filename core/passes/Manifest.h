@@ -59,6 +59,8 @@ struct Manifest {
     std::string modelVersion;
     std::string sourceHash;  // "sha256:<hex>" of the source video, may be empty
     std::string sourceFile;
+    std::string sourceFormat;  // FrameDesc::Name() of the decoded source the pass was made from ("yuv444p10"); empty in
+                               // passes from before the decoder kept the source's bit depth (they come from 8-bit 4:2:0)
     nlohmann::json stageParams = nlohmann::json::object();
     DepthParams depth;
     MvParams mv;

@@ -38,7 +38,7 @@ std::vector<PassImage> DecodeRgb(const std::filesystem::path& clip) {
     const ColorInfo ci = ColorInfoFromStream(dec.Info());
     std::vector<PassImage> out;
     CpuFrame f;
-    while (dec.NextFrame(f)) out.push_back(Yuv420pToRgb(f, ci, PixelType::F32));
+    while (dec.NextFrame(f)) out.push_back(YuvToRgb(f, ci, PixelType::F32));
     return out;
 }
 

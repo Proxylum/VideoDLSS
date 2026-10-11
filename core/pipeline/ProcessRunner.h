@@ -8,11 +8,14 @@
 #include <string>
 #include <vector>
 
+#include "io/OutputFormat.h"
 #include "io/VideoDecoder.h"
+#include "io/VideoEncoder.h"
 
 namespace dlssvid {
 
 struct Project;
+struct ColorInfo;
 
 // The whole pipeline as one command (stage 8, ТЗ §4 / §7 / §9): the stages run one after another over the disk
 // cache of passes under `passesRoot` (depth -> flow -> upscale -> nr -> fg; each reads what the previous ones wrote),
@@ -37,6 +40,7 @@ struct ProcessOptions {
     bool disableUnavailable = false;   // nr / fg without DLL or GPU: skip with a message instead of failing
     std::string codec = "h264_nvenc";
     std::map<std::string, std::string> codecOptions;
+    OutputFormatRequest outputFormat;  // bit depth and chroma of the result (auto: the source's, within the codec)
     int64_t frames = -1;               // at most N source frames
     bool warp = false;
     std::string hwaccel = "none";      // source decode for the encode / passthrough step
@@ -72,6 +76,9 @@ struct ProcessResult {
     Rational outputFps{0, 1};
     bool audio = false;
     double seconds = 0.0;
+    std::string codec;              // the encoder used
+    FrameDesc outputFormat;         // the result's layout (bit depth, chroma)
+    std::string outputPixelFormat;  // the encoder's input format ("p010le", "yuv422p10le" ...)
     nlohmann::json ToJson() const;
 };
 
@@ -83,6 +90,7 @@ struct StageDecision {
     std::string detail;  // human-readable: "intensity: 1 -> 1.4", "input changed: color_nr", ...
     nlohmann::json diff = nlohmann::json::object();  // {"params": {key: [old, new]}, "inputs": [pass...], "tool": {field: [old, new]}}
     std::string fingerprint;                         // the pass this run needs ("sha256:<hex>")
+    std::string sourceFormat;                        // the decoded source layout the fingerprint stands for ("yuv444p10"; PassFingerprint.h)
     bool current = false;                            // a pass folder with a manifest is on disk
     std::string currentFingerprint;                  // its fingerprint (empty for a legacy pass)
     std::string version;                             // restore: the history id that becomes current
@@ -126,16 +134,28 @@ void ApplyParamSpec(std::vector<ProcessStage>& stages, const std::string& spec);
 bool PassComplete(const std::filesystem::path& dir, int64_t neededFrames, const std::string& sourceHash = {});
 
 // Encodes a colour pass (RGB frames, sRGB) into a video at the pass fps, copying the source's audio; pass frames
-// are paced against the source frames (mult = round(pass fps / source fps)) so audio stays interleaved.
+// are paced against the source frames (mult = round(pass fps / source fps)) so audio stays interleaved. The result's
+// bit depth and chroma come from ResolveOutputFormat (the request against the codec and the source's decoded layout);
+// the stream is tagged with the matrix and range the conversion used and the source's primaries and transfer.
+struct EncodeSettings {
+    std::string codec = "h264_nvenc";
+    std::map<std::string, std::string> codecOptions;
+    OutputFormatRequest format;
+};
 struct EncodeReport {
     int64_t frames = 0;
     int64_t sourceFrames = 0;  // source frames decoded while encoding (audio pacing)
     Rational fps{0, 1};
     double seconds = 0.0;
     bool audio = false;
+    FrameDesc format;         // the result's layout (width / height of the pass)
+    std::string pixelFormat;  // the encoder's input format
 };
-EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::filesystem::path& source, const std::filesystem::path& output, const std::string& codec,
-                               const std::map<std::string, std::string>& codecOptions = {}, int64_t maxSourceFrames = -1,
-                               const std::function<void(int64_t done, int64_t total)>& progress = {}, const std::string& hwaccel = "none");
+EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::filesystem::path& source, const std::filesystem::path& output,
+                               const EncodeSettings& encode, int64_t maxSourceFrames = -1, const std::function<void(int64_t done, int64_t total)>& progress = {},
+                               const std::string& hwaccel = "none");
+// Stream colour tags for a result made from `info` with the conversion `ci`: the matrix and range used, the source's
+// primaries and transfer passed through.
+ColorTags ColorTagsFor(const ColorInfo& ci, const VideoStreamInfo& info);
 
 }  // namespace dlssvid

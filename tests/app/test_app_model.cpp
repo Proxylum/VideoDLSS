@@ -474,6 +474,29 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     model.setEncode("hevc_nvenc", {{"b", "50M"}});
     CHECK(model.project().codec == "hevc_nvenc");
     CHECK(model.project().codecOptions.at("b") == "50M");
+    // TASK-0034: the result's bit depth and chroma, the container of the codec, the layout in the outcome
+    model.refreshPlan();
+    CHECK(model.sourceInfo().codec == "ffv1");
+    CHECK(model.sourceInfo().decoded == FrameDesc{48, 32, PixelFormat::Yuv420p, 8});
+    CHECK(model.outcome().codec == "hevc_nvenc");
+    CHECK(model.outcome().format.format == PixelFormat::Yuv420p);  // an 8-bit source: 8-bit 4:2:0
+    CHECK(model.outcome().format.width == 96);
+    CHECK(AppModel::formatLabel("hevc_nvenc", model.outcome().format) == QString::fromUtf8("HEVC 8 бит 4:2:0"));
+    model.setEncode("prores_ks", {}, OutputFormatRequest{0, "444"});
+    CHECK(model.project().outputFormat.chroma == "444");
+    CHECK(model.project().resultVideo.extension() == ".mov");  // ProRes lives in .mov
+    model.refreshPlan();
+    CHECK(model.planError().isEmpty());
+    CHECK(model.outcome().format == FrameDesc{96, 64, PixelFormat::Yuv444p16, 10});
+    CHECK(AppModel::formatLabel("prores_ks", model.outcome().format) == QString::fromUtf8("ProRes 10 бит 4:4:4"));
+    model.setEncode("h264_nvenc", {}, OutputFormatRequest{10, "auto"});  // what the codec cannot do is a plan error, not a failed run
+    CHECK(model.project().resultVideo.extension() == ".mp4");
+    model.refreshPlan();
+    CHECK(model.planError().contains("8-bit only"));
+    model.setEncode("ffv1", {}, OutputFormatRequest{});
+    CHECK(model.project().resultVideo.extension() == ".mkv");
+    model.refreshPlan();
+    CHECK(model.planError().isEmpty());
 }
 
 TEST_CASE("AppModel remembers recents and dialog folders, tracks unsaved changes and reports the GPU readiness", "[app][model][gpu]") {
@@ -771,8 +794,10 @@ TEST_CASE("AppModel result: summary and bar, export copy, exportable passes, chi
     CHECK(info.audio);
     CHECK(!info.modified.isEmpty());
     CHECK(info.runSeconds == 0.0);
+    CHECK(info.codec == "ffv1");
+    CHECK(info.format == FrameDesc{32, 16, PixelFormat::Yuv420p, 8});
     QString summary = model.resultSummary();
-    CHECK(summary.startsWith(QString::fromUtf8("32×16 · 48 fps · 8 кадров · со звуком · обновлён ")));
+    CHECK(summary.startsWith(QString::fromUtf8("32×16 · 48 fps · 8 кадров · FFV1 8 бит 4:2:0 · со звуком · обновлён ")));
     CHECK(!summary.contains(QString::fromUtf8("готов за")));
     model.setLastRun(683.0);
     summary = model.resultSummary();

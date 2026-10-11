@@ -1,5 +1,6 @@
 #include "pipeline/Pipeline.h"
 
+#include "convert/YuvConvert.h"
 #include "gpu/D3D12Device.h"
 #include "gpu/GpuFrameCache.h"
 #include "io/VideoDecoder.h"
@@ -57,14 +58,20 @@ RunStats RunPipeline(Pipeline& pipeline, VideoDecoder& decoder, VideoEncoder& en
     }
     encoder.Open();
 
-    CpuFrame frame;
+    CpuFrame frame, converted;
     GpuFrame gpu;
+    YuvConverter converter;  // the source's layout into the encoder's when they differ (a 4:4:4 10-bit source into 4:2:0)
     const bool wantGpu = decoder.UsingHwAccel();
     while (maxFrames < 0 || stats.framesIn < maxFrames) {
         if (!decoder.NextFrame(frame, wantGpu ? &gpu : nullptr, true)) break;
         ++stats.framesIn;
         pipeline.ProcessFrame(frame, wantGpu && gpu.Valid() ? &gpu : nullptr);
-        encoder.WriteFrame(frame);
+        if (frame.desc == encoder.Frame()) {
+            encoder.WriteFrame(frame);
+        } else {
+            converter.Convert(frame, encoder.Frame(), converted);
+            encoder.WriteFrame(converted);
+        }
         ++stats.framesOut;
         if (progress) progress(stats.framesOut);
     }
