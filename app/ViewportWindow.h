@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QPointF>
 #include <QTimer>
 #include <QWindow>
@@ -53,6 +54,8 @@ private:
     std::unique_ptr<ViewportRenderer> renderer_;
     QTimer pollTimer_;  // uploads finished loads and repaints while frames are arriving
     bool dirty_ = true;
+    QElapsedTimer playElapsed_;  // frames presented while playing: the real playback rate goes to the log
+    int64_t playFrames_ = 0;
     bool panning_ = false, wiping_ = false;
     QPointF lastMouse_;
     QPointF pressPos_;

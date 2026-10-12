@@ -408,7 +408,8 @@ GUI keys: `1`…`9` source, `Ctrl+1/2/3` single / overlay / grid, wheel = zoom t
 source and a 48 fps FG result stay in step, `,`/`.` step by the base layer's frame, the rate switch next to the timecode
 picks what the slider counts, and a cell whose frame is missing or still loading shows a plate and says so in its label.
 While a frame is still decoding, the cell keeps the source's last loaded frame (its label says «загрузка…»), and playback
-shows every frame: a decode slower than real time plays slower instead of skipping frames or flashing plates.
+shows every frame at the source's exact rate (a 48 fps FG result plays at 48 Hz): a decode slower than real time plays
+slower instead of skipping frames or flashing plates.
 Comparison is one action (stage 9): the bar above the viewport switches «До | После» (a wipe between the source and the
 result, `W`), «Только после» and «Сетка 2×2»; one chip per source with its human name («Исходник», «Глубина», «Апскейл»,
 «Улучшение», «Генерация», «Результат»; technical names in tooltips) picks the «after» side, chips with a history open a

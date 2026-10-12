@@ -262,12 +262,18 @@ Rational FrameStore::SourceFps(const std::string& source) const {
     return s && s->fps.num > 0 && s->fps.den > 0 ? s->fps : BaseFps();
 }
 
-double FrameStore::MaxFps(const std::vector<std::string>& sources) const {
-    double best = BaseFps().ToDouble();
+double FrameStore::MaxFps(const std::vector<std::string>& sources) const { return MaxRate(sources).ToDouble(); }
+
+Rational FrameStore::MaxRate(const std::vector<std::string>& sources) const {
+    Rational best = BaseFps();
+    auto consider = [&](const std::string& name) {
+        const Rational r = SourceFps(name);
+        if (r.ToDouble() > best.ToDouble()) best = r;
+    };
     if (sources.empty()) {
-        for (const auto& s : sources_) best = std::max(best, FpsOf(s.name));
+        for (const auto& s : sources_) consider(s.name);
     } else {
-        for (const auto& n : sources) best = std::max(best, FpsOf(n));
+        for (const auto& n : sources) consider(n);
     }
     return best;
 }

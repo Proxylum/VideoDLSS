@@ -1,10 +1,12 @@
 #pragma once
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -12,6 +14,7 @@
 #include <map>
 #include <set>
 
+#include "PlaybackClock.h"
 #include "gpu/D3D12Device.h"
 #include "pipeline/Estimates.h"
 #include "viewport/FrameStore.h"
@@ -155,7 +158,9 @@ public slots:
     void stepFrame(int delta);             // by frames of the base source
     void setTimelineFps(Rational fps);     // {0,1}: follow the base source
     void setPlaying(bool playing);
-    bool playing() const { return playTimer_.isActive(); }
+    bool playing() const { return playing_; }
+    // tests: the monotonic clock playback is paced by, in nanoseconds (default: QElapsedTimer)
+    void setPlaybackClock(std::function<int64_t()> nowNs);
     bool loop() const { return loop_; }              // playback wraps to the start at the end (QSettings view/loop)
     void setLoop(bool on);
     void setMode(ViewMode mode);
@@ -201,17 +206,20 @@ signals:
 
 private:
     void onPlayTick();
+    void schedulePlayTick();
     void requestFrames();
-    static constexpr double kPlayStallSeconds = 2.0;  // a frame not decoded within this is skipped by playback
     bool hasSource(const std::string& name) const;
 
     std::unique_ptr<D3D12Device> device_;
     std::unique_ptr<FrameStore> store_;
     Project project_;
-    QTimer playTimer_;
+    QTimer playTimer_;  // single shot, re-armed for the next frame's due time (PlaybackClock)
+    PlaybackClock clock_;
+    bool playing_ = false;
+    bool inPlayTick_ = false;  // setTime from playback itself, not a jump
+    QElapsedTimer monotonic_;
+    std::function<int64_t()> now_;
     Rational timelineFps_{0, 1};  // {0,1}: the base source's rate
-    double playStep_ = 1.0 / 24.0;
-    int playStalled_ = 0;  // ticks playback has waited for the next frame
     bool engineerMode_ = false;
     bool loop_ = false;
     bool dirty_ = false;

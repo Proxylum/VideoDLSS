@@ -35,6 +35,7 @@
 
 #include "AppModel.h"
 #include "SourceNames.h"
+#include "PlaybackClock.h"
 #include "ProcessingPanel.h"
 #include "RecentPreviews.h"
 #include "ResultBar.h"
@@ -263,11 +264,19 @@ TEST_CASE("AppModel time axis: 24 and 48 fps sources, steps by the base layer, t
     CHECK(model.baseSource() == "color_fg");
     CHECK(model.frameStates().size() == 2);
 
-    // playback runs at the fastest shown rate (48 fps) and stops where the base source ends
+    // playback runs at the fastest shown rate (48 fps), visits every color_fg frame and stops where the base source ends
     model.setTime(0.0);
+    std::vector<int64_t> visited;
+    const auto conn = QObject::connect(&model, &AppModel::timeChanged, [&] { visited.push_back(model.store().FrameAt("color_fg", model.time())); });
+    QElapsedTimer played;
+    played.start();
     model.setPlaying(true);
     Pump([&] { return !model.playing(); }, 5000);
+    const double seconds = static_cast<double>(played.nsecsElapsed()) / 1e9;
+    QObject::disconnect(conn);
     CHECK(!model.playing());
+    CHECK(visited == std::vector<int64_t>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10});  // steps of 1/48 s, not 1/24
+    CHECK(seconds >= 11.0 / 48.0 - 0.005);  // by the clock; the old 20 ms timer took 11 x 20 = 0.22 s
     CHECK(model.timelineFrame() == 10);  // the last color_fg frame; the timeline itself runs to 11 (0.25 s of color_sr)
     REQUIRE(model.saveProject());
     CHECK(std::abs(Project::Load(d / "proj.dlssvid.json").viewport.time - 10.0 / 48.0) < 1e-9);  // saved as a time
@@ -1180,4 +1189,92 @@ TEST_CASE("TaskQueue runs dlssvid process whose fg process crashes: fg failed, e
     CHECK(std::filesystem::exists(out));
     CHECK(DecodeAll(out).size() == 4);  // color_nr: 4 frames
     CHECK(std::any_of(output.begin(), output.end(), [](const QString& l) { return l.contains("process: fg failed"); }));
+}
+
+// Audit play-fg-rate (TASK-0038): playback is paced by a clock at the exact rational rate. Before, a QTimer of
+// floor(1000 / fps) ms advanced a frame per tick: 48 fps played at 50 Hz, 24 fps at 24.39 Hz.
+TEST_CASE("PlaybackClock paces frames at the exact rational rate: 48 fps is 48 Hz, not 50; 24 fps steps 1/24 s (regression: timer interval truncated to whole ms)",
+          "[app][playback][regression]") {
+    auto shownInOneSecond = [](Rational rate, const std::vector<int64_t>& stepsMs) {
+        PlaybackClock clock;
+        clock.Start(0, 0.0, rate);
+        int shown = 0;
+        size_t i = 0;
+        // up to 1 s plus the longest step: the frame due at exactly 1 s is shown by the first tick at or after it
+        for (int64_t now = 0; now <= 1'007'000'000;) {
+            if (clock.Decide(now, true) == PlaybackClock::Action::Show) {
+                ++shown;
+                clock.Advance(now);
+            }
+            now += stepsMs[i++ % stepsMs.size()] * 1'000'000;
+        }
+        return shown;
+    };
+    for (const std::vector<int64_t>& steps : {std::vector<int64_t>{1}, std::vector<int64_t>{1, 3, 7}}) {
+        CHECK(shownInOneSecond({48, 1}, steps) == 48);
+        CHECK(shownInOneSecond({24, 1}, steps) == 24);
+        CHECK(shownInOneSecond({50, 1}, steps) == 50);  // the test tells 48 from 50
+    }
+    PlaybackClock clock;
+    clock.Start(0, 0.0, {48, 1});
+    for (int k = 0; k < 5; ++k) {
+        CHECK(clock.NextTime() == Catch::Approx((k + 1) / 48.0));
+        clock.Advance(clock.DueNs());
+    }
+    clock.Start(0, 1.0 / 24.0 + 0.004, {48, 1});  // between two frames of the grid: snapped, the next is the following one
+    CHECK(clock.NextTime() == Catch::Approx(3.0 / 48.0));
+    PlaybackClock ntsc;
+    ntsc.Start(0, 0.0, {24000, 1001});
+    for (int k = 0; k < 1001; ++k) ntsc.Advance(ntsc.DueNs());
+    CHECK(std::llabs(ntsc.DueNs() - std::llround(1002.0 * 1e9 * 1001 / 24000)) <= 1);  // no drift over 1001 frames
+}
+
+TEST_CASE("PlaybackClock waits for a slow decode, skips after the stall limit and restarts the count instead of racing", "[app][playback]") {
+    PlaybackClock c;
+    c.Start(0, 0.0, {48, 1});
+    const int64_t period = c.PeriodNs();
+    const int64_t due = c.DueNs();
+    CHECK(due == period);
+    CHECK(c.Decide(due - 1, true) == PlaybackClock::Action::Wait);
+    CHECK(c.Decide(due, false) == PlaybackClock::Action::Wait);
+    CHECK(c.Decide(due + PlaybackClock::kStallNs - 1, false) == PlaybackClock::Action::Wait);
+    CHECK(c.Decide(due + PlaybackClock::kStallNs, false) == PlaybackClock::Action::Skip);
+    CHECK(c.Decide(due, true) == PlaybackClock::Action::Show);
+    c.Advance(due + 15'000'000);  // late by less than a period: the grid stays
+    CHECK(c.DueNs() == std::llround(2e9 / 48));
+    const int64_t now = c.DueNs() + 50'000'000;  // late by more than a period: count from now
+    c.Advance(now);
+    CHECK(c.DueNs() == now + period);
+    c.Restart(now + 1, 1.5);  // a jump while playing
+    CHECK(c.NextTime() == Catch::Approx(1.5 + 1.0 / 48.0));
+    CHECK(c.WakeNs(0) == c.DueNs());
+    CHECK(c.WakeNs(c.DueNs() + 5) == c.DueNs() + 5 + PlaybackClock::kPollNs);
+}
+
+TEST_CASE("AppModel plays at the real rate of the fastest shown source and shows every frame (regression: 20 ms timer made 48 fps play at 50 Hz)",
+          "[app][model][gpu][regression]") {
+    App();
+    for (const int fps : {48, 24}) {
+        INFO(fps << " fps");
+        const auto d = Dir(fps == 48 ? "rate48" : "rate24");
+        WritePassFps(d / "passes" / (fps == 48 ? "color_fg" : "color_sr"), fps == 48 ? PassKind::ColorFg : PassKind::ColorSr, 49, fps);
+        Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+        AppModel model(true);
+        model.openProject(Q(d / "proj.dlssvid.json"));
+        model.setSingleSource(fps == 48 ? "color_fg" : "color_sr");
+        model.setTime(0.0);
+        model.store().WaitForCurrent();
+        std::vector<int64_t> visited;
+        QObject::connect(&model, &AppModel::timeChanged, [&] { visited.push_back(model.baseFrame()); });
+        QElapsedTimer played;
+        played.start();
+        model.setPlaying(true);
+        Pump([&] { return !model.playing(); }, 6000);
+        const double seconds = static_cast<double>(played.nsecsElapsed()) / 1e9;
+        std::vector<int64_t> all(48);
+        for (int i = 0; i < 48; ++i) all[static_cast<size_t>(i)] = i + 1;
+        CHECK(visited == all);                 // every frame shown, none skipped
+        CHECK(seconds >= 49.0 / fps - 0.005);  // never faster than real time (the old timer: 49 x 20 ms = 0.98 s at 48 fps);
+                                               // no upper bound: a loaded CI machine may only make it slower
+    }
 }
