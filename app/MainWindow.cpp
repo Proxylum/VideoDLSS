@@ -37,6 +37,7 @@
 #include "TimelineWidget.h"
 #include "ViewportWindow.h"
 #include "util/Log.h"
+#include "viewport/ViewportProxy.h"
 
 namespace dlssvid {
 
@@ -203,6 +204,34 @@ void MainWindow::buildMenus() {
     view->addAction(tr("Только после"), this, [this] { model_.setCompareView(AppModel::CompareView::AfterOnly); });
     view->addAction(tr("Сравнить: Апскейл ↔ Улучшение"), this, [this] { model_.applyPreset(AppModel::ComparePreset::SrVsNr); });
     view->addAction(tr("Сравнить: Исходник ↔ Глубина"), this, [this] { model_.applyPreset(AppModel::ComparePreset::SourceVsDepth); });
+    view->addSeparator();
+    // scrubbing proxies (TASK-0040): built in the background after a project opens; on request beyond the size limit
+    auto* autoProxy = view->addAction(tr("Прокси для перемотки — строить автоматически"));
+    autoProxy->setCheckable(true);
+    autoProxy->setChecked(QSettings().value("view/autoProxy", true).toBool());
+    autoProxy->setToolTip(tr("Lossless-копия видео без длинных GOP в <пассы>/.proxy: случайные прыжки ≥ 30 fps на 1080p"));
+    connect(autoProxy, &QAction::toggled, this, [this](bool on) {
+        QSettings().setValue("view/autoProxy", on);
+        if (on) model_.startProxies();
+        else model_.cancelProxies();
+    });
+    view->addAction(tr("Построить прокси для перемотки"), this, [this] {
+        const double before = QSettings().value("view/proxyMaxGiB", 8.0).toDouble();
+        QSettings().setValue("view/proxyMaxGiB", 1e6);  // on request: no size limit (a quarter of the free disk still holds)
+        const bool was = QSettings().value("view/autoProxy", true).toBool();
+        QSettings().setValue("view/autoProxy", true);
+        model_.startProxies();
+        QSettings().setValue("view/autoProxy", was);
+        QSettings().setValue("view/proxyMaxGiB", before);
+    });
+    view->addAction(tr("Удалить прокси для перемотки"), this, [this] {
+        model_.cancelProxies();
+        RemoveProxy(model_.project().passesRoot, "source");
+        RemoveProxy(model_.project().passesRoot, "result");
+        model_.store().SetProxy("source", {});
+        model_.store().SetProxy("result", {});
+        statusBar()->showMessage(tr("Прокси для перемотки удалены"), 4000);
+    });
     view->addSeparator();
     // panels: a closed dock comes back from here (audit finding 6)
     for (auto [dock, text] : {std::pair<QDockWidget*, QString>{projectDock_, tr("Панель «Проект»")},

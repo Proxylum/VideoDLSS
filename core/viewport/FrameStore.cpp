@@ -1,11 +1,15 @@
 #include "viewport/FrameStore.h"
 
+#include <immintrin.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 
 #include "pipeline/PassVersions.h"
 #include "util/Error.h"
+#include "util/Half.h"
 #include "util/Log.h"
 
 namespace dlssvid {
@@ -38,6 +42,15 @@ DXGI_FORMAT FormatFor(TextureKind k) {
     }
 }
 
+// halves -> floats, four at a time with F16C (a 1080p depth pass: ~1 ms instead of ~7 ms through Get / Set)
+void HalvesToFloats(const uint16_t* src, float* dst, size_t n) {
+    static const bool f16c = HasF16C();
+    size_t i = 0;
+    if (f16c)
+        for (; i + 4 <= n; i += 4) _mm_storeu_ps(dst + i, _mm_cvtph_ps(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(src + i))));
+    for (; i < n; ++i) dst[i] = HalfToFloat(src[i]);
+}
+
 // Repack a pass image into the texture layout of its kind and compute statistics.
 void Prepare(PassImage& img, TextureKind kind, float& minV, float& maxV, float& maxMag) {
     minV = 0.f;
@@ -50,33 +63,44 @@ void Prepare(PassImage& img, TextureKind kind, float& minV, float& maxV, float& 
             break;
         }
         case TextureKind::Scalar: {
-            if (img.type != PixelType::F32 || img.channels.size() != 1) {
+            if (img.type == PixelType::F16 && img.channels.size() == 1) {  // EXR half: the common case, bulk
+                PassImage out;
+                out.Allocate(img.width, img.height, PixelType::F32, {"Z"});
+                HalvesToFloats(img.As<uint16_t>(), out.As<float>(), static_cast<size_t>(img.width) * img.height);
+                img = std::move(out);
+            } else if (img.type != PixelType::F32 || img.channels.size() != 1) {
                 PassImage out;
                 out.Allocate(img.width, img.height, PixelType::F32, {"Z"});
                 for (uint32_t y = 0; y < img.height; ++y)
                     for (uint32_t x = 0; x < img.width; ++x) out.Set(x, y, 0, img.Get(x, y, 0));
                 img = std::move(out);
             }
-            bool first = true;
+            // min / max of the finite samples: v - v is 0 only for a finite v (NaN and inf give NaN), no branch to mispredict
             const float* d = img.As<float>();
-            for (size_t i = 0; i < static_cast<size_t>(img.width) * img.height; ++i) {
-                if (!std::isfinite(d[i])) continue;
-                if (first) {
-                    minV = maxV = d[i];
-                    first = false;
-                } else {
-                    minV = std::min(minV, d[i]);
-                    maxV = std::max(maxV, d[i]);
-                }
+            const size_t n = static_cast<size_t>(img.width) * img.height;
+            float lo = std::numeric_limits<float>::infinity(), hi = -std::numeric_limits<float>::infinity();
+            for (size_t i = 0; i < n; ++i) {
+                const float v = d[i];
+                const bool finite = v - v == 0.f;
+                lo = finite && v < lo ? v : lo;
+                hi = finite && v > hi ? v : hi;
             }
-            if (first) {
+            if (lo <= hi) {
+                minV = lo;
+                maxV = hi;
+            } else {  // nothing finite
                 minV = 0.f;
                 maxV = 1.f;
             }
             break;
         }
         case TextureKind::Mv: {
-            if (img.type != PixelType::F32 || img.channels.size() != 2) {
+            if (img.type == PixelType::F16 && img.channels.size() == 2) {  // EXR half u, v interleaved: bulk
+                PassImage out;
+                out.Allocate(img.width, img.height, PixelType::F32, {"u", "v"});
+                HalvesToFloats(img.As<uint16_t>(), out.As<float>(), static_cast<size_t>(img.width) * img.height * 2);
+                img = std::move(out);
+            } else if (img.type != PixelType::F32 || img.channels.size() != 2) {
                 PassImage out;
                 out.Allocate(img.width, img.height, PixelType::F32, {"u", "v"});
                 for (uint32_t y = 0; y < img.height; ++y)
@@ -89,9 +113,10 @@ void Prepare(PassImage& img, TextureKind kind, float& minV, float& maxV, float& 
             const float* d = img.As<float>();
             float m = 0.f;
             for (size_t i = 0; i < static_cast<size_t>(img.width) * img.height; ++i) {
-                const float mag = std::hypot(d[2 * i], d[2 * i + 1]);
-                if (std::isfinite(mag)) m = std::max(m, mag);
+                const float mag2 = d[2 * i] * d[2 * i] + d[2 * i + 1] * d[2 * i + 1];  // the max of squares, one sqrt
+                if (std::isfinite(mag2)) m = std::max(m, mag2);
             }
+            m = std::sqrt(m);
             maxMag = std::max(m, 1e-3f);
             minV = 0.f;
             maxV = maxMag;
@@ -189,6 +214,8 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.width = info.width;
         s.height = info.height;
         s.fps = info.frameRate;
+        s.color = ColorInfoFromStream(info);
+        s.hasColor = true;
         return s;
     } catch (const std::exception& e) {
         Log()->warn("video {} not usable as source '{}': {}", file.string(), name, e.what());
@@ -209,6 +236,7 @@ FrameStore::~FrameStore() {
         stop_ = true;
     }
     cv_.notify_all();
+    loadedCv_.notify_all();
     for (auto& t : loaders_)
         if (t.joinable()) t.join();
 }
@@ -222,6 +250,9 @@ void FrameStore::SetSources(std::vector<ViewportSource> sources) {
     runtimes_.clear();
     for (const auto& s : sources_) runtimes_[s.name] = std::make_unique<SourceRuntime>();
     loaded_.clear();
+    kept_.clear();
+    freeTextures_.clear();
+    prefetchActive_ = 0;  // inFlight_ is empty here
     missing_.clear();
     entries_.clear();
     residentBytes_ = 0;
@@ -320,7 +351,7 @@ void FrameStore::SetCurrentTime(double time, const std::vector<std::string>& nee
         const ViewportSource* s = FindSource(name);
         if (!s || !s->HasFrame(f)) return;
         const Key k{f, name};
-        if (entries_.count(k) || missing_.count(k) || queued_.count(k)) return;
+        if (entries_.count(k) || missing_.count(k) || queued_.count(k) || kept_.count(k)) return;
         queue_.push_back(k);
         queued_.insert(k);
     };
@@ -340,9 +371,13 @@ void FrameStore::SetCurrentFrame(int64_t frame, const std::vector<std::string>& 
 
 bool FrameStore::Wanted(const Key& key) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    return WantedLocked(key);
+}
+
+bool FrameStore::WantedLocked(const Key& key) const {
     if (!InWindow(key)) return false;
     if (std::find(needed_.begin(), needed_.end(), key.source) == needed_.end()) return false;
-    if (entries_.count(key) || missing_.count(key)) return false;
+    if (entries_.count(key) || missing_.count(key) || kept_.count(key)) return false;
     for (const auto& l : loaded_)
         if (l.key.frame == key.frame && l.key.source == key.source) return false;
     return true;
@@ -357,7 +392,7 @@ FrameStore::Status FrameStore::StatusLocked(const Key& k) const {
     const int64_t frame = k.frame;
     const std::string& source = k.source;
     if (entries_.count(k)) return Status::Ready;
-    if (inFlight_.count(k)) return Status::Loading;
+    if (inFlight_.count(k) || kept_.count(k)) return Status::Loading;
     for (const auto& l : loaded_)
         if (l.key.frame == frame && l.key.source == source) return l.missing ? Status::Missing : Status::Loading;
     if (queued_.count(k)) return Status::Queued;
@@ -426,39 +461,97 @@ size_t FrameStore::ResidentCount() const {
 void FrameStore::LoaderMain() {
     for (;;) {
         Key key;
+        bool prefetch = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [&] { return stop_ || !queue_.empty(); });
+            // the frame of the current time at once; prefetch only when no current frame is loading and with loaders to
+            // spare (a jump finds a free loader and a free proxy decoder: TASK-0040)
+            const int maxPrefetch = std::max(1, static_cast<int>(loaders_.size()) - 2);
+            cv_.wait(lock, [&] {
+                return stop_ || (!queue_.empty() && (IsCurrentLocked(queue_.front()) || (!CurrentPendingLocked() && prefetchActive_ < maxPrefetch)));
+            });
             if (stop_) return;
             key = queue_.front();
             queue_.pop_front();
             inFlight_.insert(key);
+            prefetch = !IsCurrentLocked(key);
+            if (prefetch) ++prefetchActive_;
         }
-        std::vector<Loaded> results;
+        LoadResult result;
         try {
-            results = LoadOne(key);
+            result = LoadOne(key);
         } catch (const std::exception& e) {
             Log()->warn("frame {} of '{}' failed to load: {}", key.frame, key.source, e.what());
             Loaded l;
             l.key = key;
             l.missing = true;
-            results.push_back(std::move(l));
+            result.loaded.push_back(std::move(l));
         }
+        for (auto& l : result.loaded) Publish(std::move(l));
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            for (auto& l : results) loaded_.push_back(std::move(l));
             inFlight_.erase(key);
+            if (prefetch) --prefetchActive_;
+            cv_.notify_all();  // a current frame done: the prefetch waiting for it may start
+            if (result.aborted) {
+                // dropped before decoding (TASK-0040). In the same critical section as the erase: if the time came back to
+                // this frame meanwhile, SetCurrentTime skipped it (it was in flight) - queue it again, or nobody loads it
+                queued_.erase(key);
+                if (WantedLocked(key)) {
+                    queue_.push_front(key);
+                    queued_.insert(key);
+                    cv_.notify_one();
+                }
+            }
         }
         idleCv_.notify_all();
     }
 }
 
-std::vector<FrameStore::Loaded> FrameStore::LoadOne(const Key& key) {
+void FrameStore::Publish(Loaded&& l) {
+    if (!l.missing && !l.image.Empty() && !l.staged.texture) {
+        // on the loader thread: the texture and the copy of the rows into an upload buffer (Update only records copies)
+        l.bytes = l.image.ByteSize();
+        const auto t0 = std::chrono::steady_clock::now();
+        const DXGI_FORMAT format = FormatFor(l.kind);
+        ComPtr<ID3D12Resource> reuse;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (auto it = freeTextures_.begin(); it != freeTextures_.end(); ++it) {
+                const D3D12_RESOURCE_DESC d = (*it)->GetDesc();
+                if (d.Width == l.image.width && d.Height == l.image.height && d.Format == format) {
+                    reuse = std::move(*it);
+                    freeTextures_.erase(it);
+                    break;
+                }
+            }
+        }
+        l.staged = device_.StageTexture2D(l.image.width, l.image.height, format, l.image.data.data(), l.image.RowBytes(), std::move(reuse));
+        if (Log()->should_log(spdlog::level::debug))
+            Log()->debug("viewport stage {} {}: {:.1f} ms", l.key.source, l.key.frame, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        l.image.data.clear();
+        l.image.data.shrink_to_fit();
+    }
+    bool current = false;
+    std::function<void()> callback;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        kept_.erase(l.key);
+        current = !l.missing && IsCurrentLocked(l.key);
+        loaded_.push_back(std::move(l));
+        if (current) callback = onCurrentLoaded_;
+    }
+    loadedCv_.notify_all();
+    if (current) cv_.notify_all();
+    if (callback) callback();
+}
+
+FrameStore::LoadResult FrameStore::LoadOne(const Key& key) {
     ViewportSource src;
     SourceRuntime* rt = nullptr;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (entries_.count(key)) {  // arrived meanwhile (frame kept on the way to another one)
+        if (entries_.count(key) || kept_.count(key)) {  // arrived meanwhile (frame kept on the way to another one)
             queued_.erase(key);
             return {};
         }
@@ -470,15 +563,17 @@ std::vector<FrameStore::Loaded> FrameStore::LoadOne(const Key& key) {
             Loaded l;
             l.key = key;
             l.missing = true;
-            return {std::move(l)};
+            LoadResult r;
+            r.loaded.push_back(std::move(l));
+            return r;
         }
         src = *s;
         rt = it->second.get();
     }
     if (src.isVideo) return LoadVideo(key, src, *rt);
-    std::vector<Loaded> out;
-    out.push_back(LoadPass(key, src, *rt));
-    return out;
+    LoadResult r;
+    r.loaded.push_back(LoadPass(key, src, *rt));
+    return r;
 }
 
 FrameStore::Loaded FrameStore::LoadPass(const Key& key, const ViewportSource& src, SourceRuntime& rt) {
@@ -494,94 +589,284 @@ FrameStore::Loaded FrameStore::LoadPass(const Key& key, const ViewportSource& sr
         l.missing = true;
         return l;
     }
+    const auto t0 = std::chrono::steady_clock::now();
     l.image = reader->ReadFrame(key.frame);
+    const auto t1 = std::chrono::steady_clock::now();
     l.kind = src.kind;
     Prepare(l.image, l.kind, l.minValue, l.maxValue, l.maxMagnitude);
+    if (Log()->should_log(spdlog::level::debug))
+        Log()->debug("viewport load {} {}: read {:.1f} ms, prepare {:.1f} ms", key.source, key.frame,
+                     std::chrono::duration<double, std::milli>(t1 - t0).count(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count());
     return l;
 }
 
-std::vector<FrameStore::Loaded> FrameStore::LoadVideo(const Key& key, const ViewportSource& src, SourceRuntime& rt) {
-    std::vector<Loaded> out;
+bool FrameStore::DecodeTo(VideoDecoder& dec, const Key& key, int64_t walkLimit, std::vector<CpuFrame>& kept, bool& missing) {
+    // the time may have moved on while this load waited for the decoder: drop it before decoding anything
+    if (!Wanted(key)) return false;
+    std::set<int64_t> seen;
+    auto keep = [&](const CpuFrame& f) {
+        if (!seen.insert(f.index).second) return;
+        kept.push_back(f);
+        if (f.index != key.frame) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            kept_.insert(Key{f.index, key.source});  // visible as pending: no second load walks the GOP for it
+        }
+    };
+    // A short distance ahead is decoded through; otherwise seek to the keyframe before the target.
+    const int64_t next = dec.NextIndex();
+    bool afterSeek = false;
+    if (dec.Drained() || !dec.PositionKnown() || key.frame < next || key.frame - next > walkLimit) {
+        if (!dec.SeekToKeyframeBefore(key.frame)) missing = true;
+        afterSeek = true;
+    }
+    // Walk forward. Frames on the way that the viewport wants (prefetch window) are kept: they are
+    // decoded anyway, so stepping backwards afterwards finds them resident.
+    CpuFrame f;
+    int retries = 0;
+    while (!missing) {
+        // right after a seek the index of the next frame is unknown; otherwise decide before decoding
+        const int64_t upcoming = dec.NextIndex();
+        const bool want = afterSeek || upcoming == key.frame || Wanted(Key{upcoming, key.source});
+        if (!dec.NextFrame(f, nullptr, want)) {  // end of stream before the target
+            missing = true;
+            break;
+        }
+        afterSeek = false;
+        if (f.index == key.frame) {
+            keep(f);
+            break;
+        }
+        if (f.index > key.frame) {
+            // landed after the target (timestamp rounding): retry from an earlier keyframe, then from the start
+            if (retries++ >= 2 || !dec.SeekToKeyframeBefore(retries == 1 ? std::max<int64_t>(0, key.frame - 1) : 0)) {
+                missing = true;
+                break;
+            }
+            afterSeek = true;
+            continue;
+        }
+        if (!f.data.empty() && Wanted(Key{f.index, key.source})) keep(f);
+    }
+    return true;
+}
+
+FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSource& src, SourceRuntime& rt) {
+    LoadResult result;
+    using Clock = std::chrono::steady_clock;
+    const auto tStart = Clock::now();
+    Clock::time_point tDecoder{}, tDecoded{};
+    const char* path = "original";
     std::vector<CpuFrame> kept;  // decoded frames to convert once the decoder is released
     bool missing = false;
-    if (!src.HasFrame(key.frame)) {
-        missing = true;
-    } else {
-        std::lock_guard<std::mutex> guard(rt.mutex);  // one decoder per video: its frames decode sequentially
+    ColorInfo color = src.color;
+    auto openOriginal = [&] {
         if (!rt.decoder) {
             rt.decoder = std::make_unique<VideoDecoder>(src.path);
             rt.color = ColorInfoFromStream(rt.decoder->Info());
         }
-        VideoDecoder& dec = *rt.decoder;
-        std::set<int64_t> seen;
-        auto keep = [&](const CpuFrame& f) {
-            if (seen.insert(f.index).second) kept.push_back(f);
-        };
-        // A short distance ahead is decoded through; otherwise seek to the keyframe before the target.
-        const int64_t next = dec.NextIndex();
-        bool afterSeek = false;
-        if (dec.Drained() || key.frame < next || key.frame - next > kWalkLimit) {
-            if (!dec.SeekToKeyframeBefore(key.frame)) missing = true;
-            afterSeek = true;
+        if (!src.hasColor) color = rt.color;
+    };
+    // frames marked in kept_ by DecodeTo leave it when published or dropped; an exception must not leave them "Loading"
+    struct KeptCleanup {
+        FrameStore& fs;
+        const std::string& source;
+        std::vector<CpuFrame>& frames;
+        bool armed = true;
+        ~KeptCleanup() {
+            if (!armed) return;
+            std::lock_guard<std::mutex> lock(fs.mutex_);
+            for (const auto& f : frames) fs.kept_.erase(Key{f.index, source});
         }
-        // Walk forward. Frames on the way that the viewport wants (prefetch window) are kept: they are
-        // decoded anyway, so stepping backwards afterwards finds them resident.
-        CpuFrame f;
-        int retries = 0;
-        while (!missing) {
-            // right after a seek the index of the next frame is unknown; otherwise decide before decoding
-            const int64_t upcoming = dec.NextIndex();
-            const bool want = afterSeek || upcoming == key.frame || Wanted(Key{upcoming, key.source});
-            if (!dec.NextFrame(f, nullptr, want)) {  // end of stream before the target
-                missing = true;
-                break;
+    } cleanup{*this, key.source, kept};
+    if (!src.HasFrame(key.frame)) {
+        missing = true;
+    } else {
+        bool done = false;
+        if (!src.proxy.empty()) {
+            // hybrid (TASK-0040): a step forward walks the original decoder that stands just before the target; a jump
+            // decodes one frame of the intra proxy - on its own decoder, so it does not wait for a walk in progress
+            std::unique_lock<std::mutex> guard(rt.mutex, std::try_to_lock);
+            if (guard.owns_lock() && rt.decoder && !rt.decoder->Drained() && rt.decoder->PositionKnown() && key.frame >= rt.decoder->NextIndex() &&
+                key.frame - rt.decoder->NextIndex() <= kWalkLimit) {
+                openOriginal();
+                tDecoder = Clock::now();
+                path = "walk";
+                if (!DecodeTo(*rt.decoder, key, kWalkLimit, kept, missing)) result.aborted = true;
+                tDecoded = Clock::now();
+                done = true;
             }
-            afterSeek = false;
-            if (f.index == key.frame) {
-                keep(f);
-                break;
-            }
-            if (f.index > key.frame) {
-                // landed after the target (timestamp rounding): retry from an earlier keyframe, then from the start
-                if (retries++ >= 2 || !dec.SeekToKeyframeBefore(retries == 1 ? std::max<int64_t>(0, key.frame - 1) : 0)) {
-                    missing = true;
-                    break;
+        }
+        if (!done && !src.proxy.empty()) {
+            // a free decoder of the pool, the one standing at the target first (the next frame of a walk: no seek)
+            SourceRuntime::ProxySlot* slot = nullptr;
+            std::unique_lock<std::mutex> held;
+            for (auto& s : rt.proxies) {
+                std::unique_lock<std::mutex> l(s.mutex, std::try_to_lock);
+                if (!l.owns_lock()) continue;
+                const bool positioned = s.decoder && s.opened == src.proxy && !s.decoder->Drained() && s.decoder->PositionKnown() &&
+                                        s.decoder->NextIndex() == key.frame;
+                if (!slot || positioned) {
+                    slot = &s;
+                    held = std::move(l);  // releases the slot taken before
                 }
-                afterSeek = true;
-                continue;
+                if (positioned) break;
             }
-            if (!f.data.empty() && Wanted(Key{f.index, key.source})) keep(f);
+            if (!slot) {
+                slot = &rt.proxies[static_cast<size_t>(key.frame) % rt.proxies.size()];
+                held = std::unique_lock<std::mutex>(slot->mutex);
+            }
+            if (!slot->decoder || slot->opened != src.proxy) {
+                VideoDecoder::Options po;
+                po.probe = true;  // logged at debug level: a pool of decoders, not news
+                po.sliceThreadsOnly = true;
+                po.indexRate = src.fps;  // the original's rate: the proxy's container may guess another
+                slot->decoder = std::make_unique<VideoDecoder>(src.proxy, po);
+                slot->opened = src.proxy;
+            }
+            if (!src.hasColor) {
+                std::lock_guard<std::mutex> g2(rt.mutex);
+                openOriginal();
+            }
+            ++rt.proxyLoads;
+            tDecoder = Clock::now();
+            path = "proxy";
+            if (!DecodeTo(*slot->decoder, key, 1, kept, missing)) result.aborted = true;
+            tDecoded = Clock::now();
+            done = true;
+        }
+        if (!done) {
+            std::lock_guard<std::mutex> guard(rt.mutex);  // one decoder per video: its frames decode sequentially
+            openOriginal();
+            tDecoder = Clock::now();
+            if (!DecodeTo(*rt.decoder, key, kWalkLimit, kept, missing)) result.aborted = true;
+            tDecoded = Clock::now();
         }
     }
+    if (result.aborted) {
+        ++rt.aborted;
+        return result;
+    }
+    // the target first, published as soon as it is converted; then the frames kept on the way, nearest first, each
+    // only while it is still wanted (a stale neighbour must not take the CPU from the next jump)
+    std::stable_sort(kept.begin(), kept.end(), [&](const CpuFrame& a, const CpuFrame& b) {
+        if ((a.index == key.frame) != (b.index == key.frame)) return a.index == key.frame;
+        return std::llabs(a.index - key.frame) < std::llabs(b.index - key.frame);
+    });
     for (CpuFrame& f : kept) {
+        const Key k{f.index, key.source};
+        const bool target = f.index == key.frame;
+        bool use = false;
+        {
+            // decided and dropped in one critical section: SetCurrentTime skips a key in kept_ (or the target, in flight),
+            // so a drop the time came back to meanwhile would lose it; dropped, the target is re-queued by LoaderMain
+            std::lock_guard<std::mutex> lock(mutex_);
+            bool done = entries_.count(k) || missing_.count(k);
+            for (const auto& l : loaded_) done = done || (l.key.frame == k.frame && l.key.source == k.source);
+            const bool needed = std::find(needed_.begin(), needed_.end(), k.source) != needed_.end();
+            // the target of a jump the time already left is still a stand-in for Update; a neighbour only in the window
+            use = needed && !done && (target || InWindow(k));
+            if (!use) {
+                kept_.erase(k);
+                if (target) result.aborted = true;
+            }
+        }
+        if (!use) continue;
         Loaded l;
-        l.key = Key{f.index, key.source};
-        l.image = YuvToRgba16f(f, rt.color);
+        l.key = k;
+        const auto tc = Clock::now();
+        l.image = YuvToRgba16f(f, color);
         l.kind = TextureKind::Color;
         Prepare(l.image, l.kind, l.minValue, l.maxValue, l.maxMagnitude);
-        out.push_back(std::move(l));
+        if (target && Log()->should_log(spdlog::level::debug)) {
+            const auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+            Log()->debug("viewport load {} {} via {}: wait {:.1f} ms, decode {:.1f} ms ({} kept), convert {:.1f} ms", key.source, key.frame, path,
+                         ms(tStart, tDecoder), ms(tDecoder, tDecoded), kept.size(), ms(tc, Clock::now()));
+        }
+        Publish(std::move(l));
     }
+    cleanup.armed = false;
+    if (result.aborted) ++rt.aborted;
     if (missing) {
         Loaded l;
         l.key = key;
         l.missing = true;
-        out.push_back(std::move(l));
+        result.loaded.push_back(std::move(l));
     }
-    return out;
+    return result;
 }
 
 // ---- render thread ----------------------------------------------------------------------------------
+
+bool FrameStore::CurrentPendingLocked() const {
+    for (const auto& name : needed_) {
+        const Key k{FrameAt(name, currentTime_), name};
+        if (entries_.count(k) || missing_.count(k)) continue;
+        if (!inFlight_.count(k) && !kept_.count(k)) continue;  // queued or not loadable: a loader takes it first anyway
+        bool published = false;
+        for (const auto& l : loaded_) published = published || (l.key.frame == k.frame && l.key.source == k.source);
+        if (!published) return true;
+    }
+    return false;
+}
+
+bool FrameStore::IsCurrentLocked(const Key& key) const {
+    return std::find(needed_.begin(), needed_.end(), key.source) != needed_.end() && key.frame == FrameAt(key.source, currentTime_);
+}
 
 bool FrameStore::Update() {
     std::vector<Loaded> batch;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (int i = 0; i < options_.uploadsPerUpdate && !loaded_.empty(); ++i) {
-            batch.push_back(std::move(loaded_.front()));
-            loaded_.pop_front();
+        // 1) frames of the current time and missing marks: alone, so the target of a jump is not held back
+        for (auto it = loaded_.begin(); it != loaded_.end();) {
+            if (it->missing || IsCurrentLocked(it->key)) {
+                batch.push_back(std::move(*it));
+                it = loaded_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        bool currentUploaded = false;
+        for (const auto& l : batch) currentUploaded = currentUploaded || !l.missing;
+        // 2) otherwise up to uploadsPerUpdate others: the window first; a frame outside it only as a better stand-in
+        //    than the resident one (fast drag without a proxy: the screen follows), the rest is dropped
+        if (!currentUploaded) {
+            int n = 0;
+            for (auto it = loaded_.begin(); it != loaded_.end() && n < options_.uploadsPerUpdate;) {
+                const Key& k = it->key;
+                const bool needed = std::find(needed_.begin(), needed_.end(), k.source) != needed_.end();
+                bool take = needed && InWindow(k);
+                if (!take && needed) {
+                    const int64_t target = FrameAt(k.source, currentTime_);
+                    const auto held = NearestResident(target, k.source);
+                    take = held == entries_.end() || std::llabs(k.frame - target) < std::llabs(held->first.frame - target);
+                    if (take)  // the closest of the finished ones of this source only
+                        for (const auto& o : loaded_)
+                            if (&o != &*it && !o.missing && o.key.source == k.source && std::llabs(o.key.frame - target) < std::llabs(k.frame - target)) take = false;
+                }
+                if (take) {
+                    batch.push_back(std::move(*it));
+                    it = loaded_.erase(it);
+                    ++n;
+                } else if (!needed || !InWindow(k)) {
+                    queued_.erase(k);
+                    it = loaded_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
         }
     }
     if (batch.empty()) return false;
+    const auto tUpload = std::chrono::steady_clock::now();
+    // one command list and one wait for the whole batch (the textures and upload buffers were made by the loaders)
+    std::vector<D3D12Device::StagedTexture*> copies;
+    for (Loaded& l : batch)
+        if (!l.missing && l.staged.texture) copies.push_back(&l.staged);
+    const auto tCopy = std::chrono::steady_clock::now();
+    device_.CopyStagedTextures(copies);
+    if (Log()->should_log(spdlog::level::debug) && !copies.empty())
+        Log()->debug("viewport copy {} texture(s): {:.1f} ms", copies.size(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tCopy).count());
     for (Loaded& l : batch) {
         if (l.missing) {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -591,14 +876,13 @@ bool FrameStore::Update() {
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (entries_.count(l.key)) {  // already resident (loaded twice): keep the first texture
+            if (entries_.count(l.key) || !l.staged.texture) {  // already resident (loaded twice): keep the first texture
                 queued_.erase(l.key);
                 continue;
             }
         }
         Entry e;
-        e.texture = device_.CreateTexture2D(l.image.width, l.image.height, FormatFor(l.kind));
-        device_.UploadTexture2D(e.texture.Get(), l.image.data.data(), l.image.RowBytes());
+        e.texture = l.staged.texture;
         e.desc.texture = e.texture.Get();
         e.desc.kind = l.kind;
         e.desc.width = l.image.width;
@@ -606,13 +890,15 @@ bool FrameStore::Update() {
         e.desc.minValue = l.minValue;
         e.desc.maxValue = l.maxValue;
         e.desc.maxMagnitude = l.maxMagnitude;
-        e.bytes = l.image.ByteSize();
+        e.bytes = l.bytes;
         std::lock_guard<std::mutex> lock(mutex_);
         e.lastUse = ++useCounter_;
         residentBytes_ += e.bytes;
         entries_[l.key] = std::move(e);
         queued_.erase(l.key);
     }
+    if (Log()->should_log(spdlog::level::debug))
+        Log()->debug("viewport upload {} frame(s) in {:.1f} ms", batch.size(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tUpload).count());
     Evict();
     return true;
 }
@@ -633,6 +919,7 @@ void FrameStore::Evict() {
         }
         if (victim == entries_.end()) break;
         residentBytes_ -= victim->second.bytes;
+        if (freeTextures_.size() < 8) freeTextures_.push_back(victim->second.texture);  // the next frames reuse it
         entries_.erase(victim);
     }
 }
@@ -641,20 +928,58 @@ void FrameStore::WaitForCurrent(uint32_t timeoutMs) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
     for (;;) {
         Update();
+        std::unique_lock<std::mutex> lock(mutex_);
         bool pending = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (const auto& name : needed_) {
-                const Key k{FrameAt(name, currentTime_), name};
-                const ViewportSource* s = FindSource(name);
-                if (!s || !s->HasFrame(k.frame) || missing_.count(k) || entries_.count(k)) continue;
-                pending = true;
-            }
+        for (const auto& name : needed_) {
+            const Key k{FrameAt(name, currentTime_), name};
+            const ViewportSource* s = FindSource(name);
+            if (!s || !s->HasFrame(k.frame) || missing_.count(k) || entries_.count(k)) continue;
+            pending = true;
         }
         if (!pending) return;
         if (std::chrono::steady_clock::now() > deadline) Throw("FrameStore::WaitForCurrent timed out");
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        // woken by Publish (TASK-0040: sleep_for(1 ms) is a 15.6 ms timer tick on Windows and quantised the benchmark)
+        loadedCv_.wait_for(lock, std::chrono::milliseconds(5), [&] { return stop_ || !loaded_.empty(); });
     }
+}
+
+void FrameStore::SetProxy(const std::string& source, const std::filesystem::path& proxy) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& s : sources_)
+        if (s.name == source && s.isVideo) s.proxy = proxy;  // the loaders open it lazily; resident frames stay (the same pixels)
+}
+
+void FrameStore::SetOnCurrentLoaded(std::function<void()> callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    onCurrentLoaded_ = std::move(callback);
+}
+
+FrameStore::SourceStats FrameStore::Stats(const std::string& source) const {
+    SourceStats st;
+    SourceRuntime* rt = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = runtimes_.find(source);
+        if (it == runtimes_.end()) return st;
+        rt = it->second.get();
+    }
+    {
+        std::lock_guard<std::mutex> g(rt->mutex);
+        if (rt->decoder) {
+            st.decodedFrames += rt->decoder->FramesDecoded();
+            st.seeks += rt->decoder->Seeks();
+        }
+    }
+    for (auto& slot : rt->proxies) {
+        std::lock_guard<std::mutex> g(slot.mutex);
+        if (slot.decoder) {
+            st.decodedFrames += slot.decoder->FramesDecoded();
+            st.seeks += slot.decoder->Seeks();
+        }
+    }
+    st.aborted = rt->aborted.load();
+    st.proxyLoads = rt->proxyLoads.load();
+    return st;
 }
 
 }  // namespace dlssvid

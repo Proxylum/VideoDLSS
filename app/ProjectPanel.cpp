@@ -554,6 +554,7 @@ void ProjectPanel::processAll() {
         s.reused = e.action != "run";
         plan.push_back(s);
     }
+    model_.cancelProxies();  // the run rewrites the result while the proxy would be reading it (started again afterwards)
     const int id = tasks_.enqueue(tr("Обработка"), model_.cliPath(), model_.processArgs(), plan);
     emit processQueued(id, QString("%1 → %2").arg(QString::fromStdWString(p.sourceVideo.filename().wstring()), QString::fromStdWString(p.resultVideo.filename().wstring())));
 }

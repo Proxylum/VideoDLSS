@@ -121,6 +121,7 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     vctx->pix_fmt = encFmt;
     vctx->time_base = AVRational{spec.fpsDen, spec.fpsNum};
     vctx->framerate = AVRational{spec.fpsNum, spec.fpsDen};
+    if (spec.gop > 0) vctx->gop_size = spec.gop;
     if (fmt->oformat->flags & AVFMT_GLOBALHEADER) vctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     CheckAv(avcodec_open2(vctx, venc, nullptr), ("open " + spec.codec + " (" + spec.pixFmt + ")").c_str());
     AVStream* vs = avformat_new_stream(fmt, nullptr);

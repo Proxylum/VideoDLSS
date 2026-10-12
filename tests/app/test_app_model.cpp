@@ -50,6 +50,7 @@
 #include "pipeline/PassVersions.h"
 #include "passes/PassSequence.h"
 #include "viewport/Project.h"
+#include "viewport/ViewportProxy.h"
 
 using namespace dlssvid;
 using namespace dlssvid::test;
@@ -1444,4 +1445,47 @@ TEST_CASE("AppModel playback goes on from a time changed behind its back", "[app
     model.setPlaying(false);
     CHECK(model.time() > 1.0);  // before: back to ~0.1 s, where the clock was
     CHECK(model.time() < 1.1);
+}
+
+// TASK-0040: the scrubbing proxy of a long-GOP source is built in the background by `dlssvid proxy` after the project
+// opens and taken by the store when it is done; closing the project stops a build; a scrub jump is timed until its
+// frames are on the GPU.
+TEST_CASE("AppModel builds the scrubbing proxy in the background and the store takes it", "[app][model][proxy]") {
+    App();
+    const auto d = Dir("proxy_bg");
+    ClipSpec spec;
+    spec.frames = 40;
+    spec.width = 96;
+    spec.height = 64;
+    spec.gop = 40;  // one keyframe: a proxy is needed
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    Project::Create(clip, d / "passes").Save(d / "proj.dlssvid.json");
+    QSettings().setValue("view/autoProxy", true);
+    AppModel model(true);
+    QSignalSpy proxies(&model, &AppModel::proxiesChanged);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    CHECK((model.proxyBuilding() || model.proxyState("source") == "ready"));
+    Pump([&] { return !model.proxyBuilding(); }, 60000);
+    CHECK(model.proxyState("source") == "ready");
+    CHECK(ValidProxy(clip, d / "passes", "source"));
+    CHECK(proxies.count() >= 1);
+    // the jumps are served by it and timed
+    for (const double t : {1.2, 0.3, 1.5}) {
+        model.setTime(t);
+        Pump([&] { return model.framesReadyAt(model.time()) && model.store().Update() == false; }, 10000);
+        model.notifyFramesUpdated();
+    }
+    CHECK(model.store().Stats("source").proxyLoads > 0);
+    CHECK(!model.scrubLatencies().empty());
+    // a reload with a valid proxy starts nothing; closing stops a build in progress
+    RemoveProxy(d / "passes", "source");
+    model.reloadSources();
+    CHECK(model.proxyBuilding());
+    model.closeProject();
+    CHECK_FALSE(model.proxyBuilding());
+    QSettings().setValue("view/autoProxy", false);
+    AppModel off(true);
+    off.openProject(Q(d / "proj.dlssvid.json"));
+    CHECK_FALSE(off.proxyBuilding());  // turned off in «Вид»
+    QSettings().remove("view/autoProxy");
 }

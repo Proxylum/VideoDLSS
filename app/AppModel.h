@@ -2,9 +2,11 @@
 
 #include <QElapsedTimer>
 #include <QObject>
+#include <QProcess>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -192,6 +194,17 @@ public slots:
     void clearRecents();
     void notifyFramesUpdated();  // the frame store uploaded something (the viewport's poll)
 
+    // Scrubbing proxies (TASK-0040): after the sources load, `dlssvid proxy --background` builds the missing ones of the
+    // source and result videos (long keyframe intervals only, within view/proxyMaxGiB and a quarter of the free disk);
+    // when it ends the store takes them. cancelProxies stops it (a run that rewrites the result, closing the project).
+    void startProxies();
+    void cancelProxies();
+    QString proxyState(const std::string& source) const;  // "ready" | "building" | "none"
+    bool proxyBuilding() const { return proxyProcess_ && proxyProcess_->state() != QProcess::NotRunning; }
+    // Scrubbing latency: a time set by the user (not playback) until the exact frames of every needed source are on
+    // the GPU; logged as p50 / p90 every 30 jumps («viewport scrub» in the log). The samples since the last log line.
+    const std::vector<double>& scrubLatencies() const { return scrubMs_; }
+
 signals:
     void projectChanged();
     void sourcesChanged();
@@ -207,8 +220,10 @@ signals:
     void dirtyChanged(bool dirty);
     void recentsChanged();
     void resultChanged();
+    void proxiesChanged();
 
 private:
+    void noteScrubReady();  // a scrub jump's frames are all on the GPU: one latency sample
     void onPlayTick();
     void schedulePlayTick();
     void requestFrames();
@@ -239,6 +254,11 @@ private:
     std::string resultCodec_;   // the result video's codec and decoded layout (probed on reload)
     FrameDesc resultFormat_;
     double lastRun_ = 0.0;      // seconds the last run of this session took
+    QProcess* proxyProcess_ = nullptr;
+    QStringList proxyArgs_;     // what it builds: a reload with the same targets does not restart it
+    std::atomic<bool> currentLoadedQueued_{false};
+    int64_t scrubStartNs_ = -1;
+    std::vector<double> scrubMs_;
 };
 
 }  // namespace dlssvid

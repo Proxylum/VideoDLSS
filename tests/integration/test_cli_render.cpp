@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <nlohmann/json.hpp>
 #include <string>
 
 #include "TestClips.h"
@@ -165,4 +166,40 @@ TEST_CASE("FrameStore seeks into a video and matches a software decode", "[integ
     store.SetCurrentFrame(12, {"source"});
     store.WaitForCurrent();
     CHECK(store.GetStatus(12, "source") == FrameStore::Status::Missing);
+}
+
+// TASK-0040: `dlssvid proxy` builds the scrubbing proxy of a long-GOP video (and reports one it does not need),
+// `render --bench` times only jumps into frames not resident and writes the misses' p50 / p90 to JSON.
+TEST_CASE("dlssvid proxy and render --bench with the proxy: misses timed, JSON report", "[integration][cli][viewport][proxy]") {
+    const auto dir = TempDir() / "cli_proxy";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    ClipSpec spec;
+    spec.frames = 40;
+    spec.width = 96;
+    spec.height = 64;
+    spec.gop = 40;  // one keyframe
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const auto passes = dir / "passes";
+    REQUIRE(Run("proxy --check -i " + Q(clip) + " --passes " + Q(passes)) == 0);
+    CHECK(!std::filesystem::exists(passes / ".proxy" / "source.mkv"));  // --check builds nothing
+    REQUIRE(Run("proxy -i " + Q(clip) + " --passes " + Q(passes) + " --sources source") == 0);
+    CHECK(std::filesystem::exists(passes / ".proxy" / "source.mkv"));
+    CHECK(std::filesystem::exists(passes / ".proxy" / "source.proxy.json"));
+    CHECK(Run("proxy -i " + Q(clip) + " --passes " + Q(passes) + " --sources depth") != 0);  // unknown source
+    const auto json = dir / "bench.json";
+    REQUIRE(Run("render --warp -i " + Q(clip) + " --passes " + Q(passes) + " --bench 8 --bench-mode random --bench-json " + Q(json)) == 0);
+    nlohmann::json j;
+    std::ifstream(json) >> j;
+    CHECK(j["proxy"]["source"] == true);
+    const auto& r = j["passes"]["random"];
+    CHECK(r["misses"] == 8);
+    CHECK(r["p90_ms"].get<double>() >= r["p50_ms"].get<double>());
+    CHECK(r["proxy_loads"].get<int>() > 0);
+    CHECK(!j["passes"].contains("cold"));  // --bench-mode random only
+    REQUIRE(Run("render --warp -i " + Q(clip) + " --passes " + Q(passes) + " --bench 4 --proxy off --bench-mode cold --bench-json " + Q(json)) == 0);
+    std::ifstream(json) >> j;
+    CHECK(j["proxy"]["source"] == false);
+    CHECK(j["passes"].contains("cold"));
+    CHECK(Run("render --warp -i " + Q(clip) + " --bench 2 --proxy maybe") != 0);
 }

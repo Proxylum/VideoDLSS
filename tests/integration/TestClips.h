@@ -30,6 +30,7 @@ struct ClipSpec {
     // "yuv422p10le", "yuv444p10le", "yuv444p12le" and the 8-bit "yuv422p" / "yuv444p" take frames of exactly that
     // layout (SyntheticFrame(index, desc) or WriteClipWith) and write them as they are — ffv1 and prores_ks keep them.
     std::string pixFmt = "yuv420p";
+    int gop = 0;  // keyframe interval of the encoder (0 = its default: 12 for ffv1); 1 = intra only (TASK-0040)
 };
 // The CpuFrame layout `WriteClip` feeds the encoder for a ClipSpec::pixFmt.
 FrameDesc FrameDescFor(const ClipSpec& spec);

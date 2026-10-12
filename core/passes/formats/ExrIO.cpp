@@ -6,8 +6,11 @@
 #include <OpenEXR/ImfInputFile.h>
 #include <OpenEXR/ImfOutputFile.h>
 #include <OpenEXR/ImfStringAttribute.h>
+#include <OpenEXR/ImfThreading.h>
 
 #include <algorithm>
+#include <mutex>
+#include <thread>
 
 #include "util/Error.h"
 
@@ -42,10 +45,19 @@ int ChannelRank(const std::string& c) {
     return 100;
 }
 
+// OpenEXR decodes and encodes the line blocks of a file on its global thread pool, which is empty by default: a 1080p
+// ZIP-compressed pass took 7-17 ms on one core - half the scrubbing budget of a 2x2 grid (TASK-0040). The blocks are
+// compressed alone, so the files are the same whatever the count.
+void EnsureExrThreads() {
+    static std::once_flag once;
+    std::call_once(once, [] { Imf::setGlobalThreadCount(std::clamp(static_cast<int>(std::thread::hardware_concurrency()) / 2, 1, 8)); });
+}
+
 }  // namespace
 
 void WriteExrLayers(const std::filesystem::path& path, const ExrLayers& layers) {
     if (layers.empty()) Throw("WriteExrLayers: no layers");
+    EnsureExrThreads();
     const uint32_t w = layers.front().second.width, h = layers.front().second.height;
     std::vector<PassImage> stored;
     stored.reserve(layers.size());
@@ -81,6 +93,7 @@ void WriteExr(const std::filesystem::path& path, const PassImage& img) { WriteEx
 
 std::map<std::string, PassImage> ReadExrLayers(const std::filesystem::path& path) {
     std::map<std::string, PassImage> out;
+    EnsureExrThreads();
     try {
         Imf::InputFile file(path.string().c_str());
         const Imf::Header& header = file.header();

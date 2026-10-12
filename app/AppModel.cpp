@@ -15,6 +15,7 @@
 #include "stages/nr/INrBackend.h"
 #include "stages/upscale/IUpscaler.h"
 #include "util/Log.h"
+#include "viewport/ViewportProxy.h"
 
 namespace dlssvid {
 
@@ -31,9 +32,22 @@ AppModel::AppModel(bool warp, QObject* parent) : QObject(parent) {
     planTimer_.setSingleShot(true);
     planTimer_.setInterval(250);
     connect(&planTimer_, &QTimer::timeout, this, &AppModel::refreshPlan);
+    // a frame of the current time is ready on a loader thread: upload it now instead of on the viewport's next poll
+    // (up to 16 ms later; TASK-0040). Coalesced: one queued call at a time.
+    store_->SetOnCurrentLoaded([this] {
+        if (currentLoadedQueued_.exchange(true)) return;
+        QMetaObject::invokeMethod(this, [this] {
+            currentLoadedQueued_ = false;
+            if (store_->Update()) notifyFramesUpdated();
+        }, Qt::QueuedConnection);
+    });
 }
 
-AppModel::~AppModel() = default;
+AppModel::~AppModel() {
+    cancelProxies();
+    store_->SetOnCurrentLoaded({});  // loaders may still finish a frame while the store shuts down
+    store_.reset();
+}
 
 QStringList AppModel::sourceNames() const {
     QStringList names;
@@ -105,6 +119,7 @@ bool AppModel::saveProjectAs(const QString& file) {
 
 void AppModel::reloadSources() {
     store_->SetSources(project_.Sources());
+    scrubStartNs_ = -1;
     resultAudio_ = false;
     resultCodec_.clear();
     resultFormat_ = FrameDesc{};
@@ -125,9 +140,87 @@ void AppModel::reloadSources() {
     requestFrames();
     emit stateChanged();
     refreshPlan();
+    startProxies();
 }
 
 void AppModel::requestFrames() { store_->SetCurrentTime(state().time, neededSources()); }
+
+void AppModel::startProxies() {
+    if (!hasProject() || project_.passesRoot.empty() || !std::filesystem::exists(project_.sourceVideo)) return;
+    if (!QSettings().value("view/autoProxy", true).toBool()) return;
+    QStringList names;
+    for (const char* name : {"source", "result"}) {
+        const std::filesystem::path video = std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo;
+        if (video.empty() || !std::filesystem::exists(video) || ValidProxy(video, project_.passesRoot, name)) continue;
+        names << name;
+    }
+    if (names.isEmpty()) return;
+    QStringList args{"proxy", "-i", QString::fromStdWString(project_.sourceVideo.wstring()), "--passes", QString::fromStdWString(project_.passesRoot.wstring()),
+                     "--sources", names.join(','), "--background", "--max-gb", QString::number(QSettings().value("view/proxyMaxGiB", 8.0).toDouble())};
+    if (!project_.resultVideo.empty()) args << "--result" << QString::fromStdWString(project_.resultVideo.wstring());
+    if (proxyBuilding() && args == proxyArgs_) return;  // the same targets: let it go on
+    cancelProxies();
+    proxyArgs_ = args;
+    proxyProcess_ = new QProcess(this);
+    proxyProcess_->setProcessChannelMode(QProcess::MergedChannels);
+    connect(proxyProcess_, &QProcess::finished, this, [this, p = proxyProcess_](int code, QProcess::ExitStatus status) {
+        const QString out = QString::fromLocal8Bit(p->readAll());
+        p->deleteLater();
+        if (proxyProcess_ == p) proxyProcess_ = nullptr;
+        if (status != QProcess::NormalExit || code != 0) {
+            Log()->warn("viewport proxy: dlssvid proxy failed ({}): {}", code, out.right(400).toStdString());
+            return;
+        }
+        QStringList ready;
+        for (const char* name : {"source", "result"}) {
+            const std::filesystem::path video = std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo;
+            if (const auto proxy = ValidProxy(video, project_.passesRoot, name)) {
+                store_->SetProxy(name, *proxy);
+                ready << HumanSourceName(name);
+            }
+        }
+        if (!ready.isEmpty()) emit message(tr("Прокси для перемотки готов: %1").arg(ready.join(", ")));
+        emit proxiesChanged();
+    });
+    Log()->info("viewport proxy: building {} in the background", names.join(", ").toStdString());
+    proxyProcess_->start(cliPath(), args);
+    emit proxiesChanged();
+}
+
+void AppModel::cancelProxies() {
+    if (!proxyProcess_) return;
+    QProcess* p = proxyProcess_;
+    proxyProcess_ = nullptr;
+    proxyArgs_.clear();
+    p->disconnect(this);
+    if (p->state() != QProcess::NotRunning) {
+        p->kill();  // its partial file is removed by the next build (BuildProxy starts with that)
+        p->waitForFinished(3000);
+    }
+    p->deleteLater();
+    emit proxiesChanged();
+}
+
+QString AppModel::proxyState(const std::string& source) const {
+    if (const ViewportSource* s = store_->FindSource(source); s && !s->proxy.empty()) return "ready";
+    if (proxyBuilding() && proxyArgs_.join(' ').contains(QString::fromStdString(source))) return "building";
+    return "none";
+}
+
+void AppModel::noteScrubReady() {
+    if (scrubStartNs_ < 0) return;
+    for (const auto& n : neededSources())
+        if (store_->StatusAt(state().time, n) != FrameStore::Status::Ready && store_->StatusAt(state().time, n) != FrameStore::Status::Missing) return;
+    scrubMs_.push_back(static_cast<double>(now_() - scrubStartNs_) / 1e6);
+    scrubStartNs_ = -1;
+    if (scrubMs_.size() >= 30) {
+        std::vector<double> v = scrubMs_;
+        std::sort(v.begin(), v.end());
+        Log()->info("viewport scrub: {} jumps, p50 {:.1f} ms, p90 {:.1f} ms, max {:.1f} ms (time set -> exact frames on the GPU)", v.size(), v[v.size() / 2],
+                    v[std::min(v.size() - 1, v.size() * 9 / 10)], v.back());
+        scrubMs_.clear();
+    }
+}
 
 // ---- time axis ----------------------------------------------------------------------------------
 
@@ -192,6 +285,7 @@ void AppModel::setTime(double seconds) {
         clock_.Restart(now_(), seconds);
         clockTime_ = seconds;
     }
+    if (!playing_) scrubStartNs_ = now_();  // a scrub: timed until its frames are on the GPU
     requestFrames();
     emit timeChanged(seconds);
     emit stateChanged();
@@ -325,7 +419,10 @@ void AppModel::markDirty() {
     emit dirtyChanged(true);
 }
 
-void AppModel::notifyFramesUpdated() { emit framesUpdated(); }
+void AppModel::notifyFramesUpdated() {
+    noteScrubReady();
+    emit framesUpdated();
+}
 
 // ---- comparison in one action ----------------------------------------------------------------------
 
@@ -823,6 +920,7 @@ bool AppModel::closeProject() {
     force_.clear();
     lastRun_ = 0.0;
     resultAudio_ = false;
+    cancelProxies();
     store_->SetSources({});
     dirty_ = false;
     emit dirtyChanged(false);

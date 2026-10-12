@@ -47,6 +47,16 @@ struct VideoStreamInfo {
     std::string audioCodecName;
 };
 
+// Keyframes of a video stream from its packets (demux only, no decoding; TASK-0040): the longest run of frames from
+// a keyframe to the next one or to the end - what a seek into the stream may have to decode.
+struct KeyframeScan {
+    int64_t frames = 0;           // video packets
+    int64_t keyframes = 0;
+    int64_t maxInterval = 0;      // frames from a keyframe up to the next keyframe (or the end), the longest
+    bool intraOnly() const { return frames > 0 && keyframes == frames; }
+};
+KeyframeScan ScanKeyframes(const std::filesystem::path& path);
+
 // The CpuFrame layout a stream's pixel format decodes into (VideoStreamInfo::decoded for a format name): planar YUV
 // 4:2:0 / 4:2:2 / 4:4:4 at 8, 10, 12 or 16 bits stays as it is, everything else (RGB, 4:1:1, gray ...) becomes 8-bit
 // 4:2:0 through swscale. `width` / `height` are left at 0.
@@ -63,6 +73,12 @@ public:
     struct Options {
         HwAccel hwaccel = HwAccel::None;
         bool probe = false;  // opened only to read Info(): logged at debug level, not as a second "open" of the file
+        // Slice threads only (an intra-only stream such as the scrubbing proxy): frame threads hold the first frame after
+        // a seek back by a few decodes, which is the whole cost of a jump in an intra stream (TASK-0040).
+        bool sliceThreadsOnly = false;
+        // Frame indices from pts at this rate instead of the stream's (a proxy written at the rate of its original:
+        // the container's guess of the rate may differ, the indices must not). {0, 1} = the stream's.
+        Rational indexRate{0, 1};
     };
     static Options Probe() {
         Options o;
@@ -104,8 +120,13 @@ public:
     // the caller walks forward with NextFrame() (frames carry their pts-derived index).
     // Returns false when the frame does not exist.
     bool SeekToKeyframeBefore(int64_t index);
+    // false from a seek until the first frame after it: NextIndex() is a placeholder then (TASK-0040).
+    bool PositionKnown() const { return !seeked_ || decodedSinceSeek_; }
+    int64_t FramesDecoded() const { return framesDecoded_; }  // frames received from the decoder, all of them
+    int64_t Seeks() const { return seeks_; }
 
 private:
+    Rational IndexRate() const { return indexRate_.num > 0 && indexRate_.den > 0 ? indexRate_ : info_.frameRate; }
     bool ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu);
     int64_t IndexFromPts(int64_t pts) const;
     bool DiscardFrames(int64_t upTo);  // decode and drop frames until nextIndex_ == upTo
@@ -127,6 +148,9 @@ private:
     bool warnedConversion_ = false;
     bool warnedNonNv12_ = false;  // NVDEC layout other than NV12: the GPU fast path is off for this stream
     bool seeked_ = false;  // indices come from pts after a seek
+    bool decodedSinceSeek_ = false;
+    int64_t framesDecoded_ = 0, seeks_ = 0;
+    Rational indexRate_{0, 1};
     VideoStreamInfo info_;
     AudioPacketSink audioSink_;
 };

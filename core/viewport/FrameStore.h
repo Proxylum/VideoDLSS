@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -37,6 +38,11 @@ struct ViewportSource {
     Rational fps{0, 1};
     std::string pass;             // pass folders: the pass name (the current version and its previous versions share it)
     std::string version;          // a previous version (PassVersions.h): its history id; empty for the current one
+    // Videos: the scrubbing proxy (ViewportProxy.h, bit for bit the same frames, intra) - jumps decode one frame of it;
+    // empty when there is none. The colour of the original (the proxy's tags are only a copy).
+    std::filesystem::path proxy;
+    ColorInfo color;
+    bool hasColor = false;
     // Pass folders: shared, sources are copied around freely (Manifest is ~0.5 KB + JSON).
     std::shared_ptr<const Manifest> manifest;
     bool HasFrame(int64_t f) const { return f >= firstFrame && (lastFrame < 0 || f <= lastFrame); }
@@ -104,8 +110,22 @@ public:
     void SetCurrentFrame(int64_t frame, const std::vector<std::string>& neededSources);
     int64_t CurrentFrame() const;
 
-    // Render thread: uploads finished loads, evicts, returns whether anything changed.
+    // Render thread: uploads finished loads, evicts, returns whether anything changed. Frames of the current time go
+    // first and alone (the target of a jump is not held back by the uploads of its neighbours); a finished frame
+    // outside the window is uploaded only when it stands in better than what is resident (fast drag without a proxy).
     bool Update();
+    // A video's scrubbing proxy appeared or went away (the frames are the same: nothing is evicted).
+    void SetProxy(const std::string& source, const std::filesystem::path& proxy);
+    // Called from a loader thread when a frame of the current time is ready for Update() (the GUI uploads it at once
+    // instead of on its next poll). Must not block; not called under the store's lock.
+    void SetOnCurrentLoaded(std::function<void()> callback);
+    struct SourceStats {
+        int64_t decodedFrames = 0;  // decoded by the original's and the proxy's decoders
+        int64_t seeks = 0;
+        int64_t aborted = 0;        // loads dropped before decoding because the time moved on
+        int64_t proxyLoads = 0;     // jumps served by the proxy
+    };
+    SourceStats Stats(const std::string& source) const;
     // Blocks until the current time's needed sources are ready (or missing), then uploads. CLI / tests.
     void WaitForCurrent(uint32_t timeoutMs = 60000);
 
@@ -133,10 +153,12 @@ private:
     };
     struct Loaded {
         Key key;
-        PassImage image;
+        PassImage image;  // the pixels are dropped once staged (only the size stays)
         TextureKind kind = TextureKind::None;
         float minValue = 0.f, maxValue = 1.f, maxMagnitude = 1.f;
         bool missing = false;
+        D3D12Device::StagedTexture staged;  // texture + upload buffer made by the loader thread (Publish)
+        size_t bytes = 0;
     };
     struct Entry {
         ComPtr<ID3D12Resource> texture;
@@ -150,13 +172,34 @@ private:
         std::unique_ptr<VideoDecoder> decoder;
         ColorInfo color;
         std::shared_ptr<const PassReader> reader;
+        // the proxy's decoders: jumps run on them while the original walks forward; a pool, so the target of a jump does
+        // not wait behind the prefetch of its neighbours (TASK-0040)
+        struct ProxySlot {
+            std::mutex mutex;
+            std::unique_ptr<VideoDecoder> decoder;
+            std::filesystem::path opened;
+        };
+        std::array<ProxySlot, 4> proxies;
+        std::atomic<int64_t> aborted{0}, proxyLoads{0};
+    };
+    struct LoadResult {
+        std::vector<Loaded> loaded;
+        bool aborted = false;  // not loaded because nobody wants it any more; not missing
     };
 
     void LoaderMain();
-    std::vector<Loaded> LoadOne(const Key& key);
-    std::vector<Loaded> LoadVideo(const Key& key, const ViewportSource& src, SourceRuntime& rt);
+    LoadResult LoadOne(const Key& key);
+    LoadResult LoadVideo(const Key& key, const ViewportSource& src, SourceRuntime& rt);
+    // Decodes the target (and keeps wanted frames on the way) with `dec`; false: dropped before decoding (not wanted).
+    bool DecodeTo(VideoDecoder& dec, const Key& key, int64_t walkLimit, std::vector<CpuFrame>& kept, bool& missing);
     Loaded LoadPass(const Key& key, const ViewportSource& src, SourceRuntime& rt);
+    void Publish(Loaded&& loaded);   // into loaded_ (and the current-frame callback)
     bool Wanted(const Key& key) const;  // needed by the viewport and not resident / known-missing
+    bool WantedLocked(const Key& key) const;
+    bool IsCurrentLocked(const Key& key) const;  // the needed frame of its source at the current time (mutex_ held)
+    // A frame of the current time is being decoded or converted (mutex_ held): prefetch waits for it, so the target of
+    // a jump gets the whole CPU (TASK-0040: four loaders decoding at once doubled its latency).
+    bool CurrentPendingLocked() const;
     Status StatusLocked(const Key& key) const;  // GetStatus with mutex_ held
     // Nearest resident frame of the source (the nearest earlier one, else the nearest later); end() when none (mutex_ held).
     std::map<Key, Entry>::const_iterator NearestResident(int64_t frame, const std::string& source) const;
@@ -176,9 +219,14 @@ private:
     mutable std::mutex mutex_;
     std::condition_variable cv_;        // loaders wait for work
     std::condition_variable idleCv_;    // SetSources waits for loads in flight
+    std::condition_variable loadedCv_;  // WaitForCurrent: something reached loaded_
+    std::set<Key> kept_;                // decoded on the way to another frame, converting: loaded, not queued
+    std::function<void()> onCurrentLoaded_;
+    std::vector<ComPtr<ID3D12Resource>> freeTextures_;  // evicted, reused by Publish for a frame of the same size and format
     std::deque<Key> queue_;             // pending loads (front = most urgent)
     std::set<Key> queued_;              // keys in queue_ or in flight
     std::set<Key> inFlight_;            // keys a loader is working on
+    int prefetchActive_ = 0;            // of them, not of the current time: at most loaders - 2, the rest stays free for a jump
     std::deque<Loaded> loaded_;         // finished loads awaiting upload
     std::set<Key> missing_;             // known-missing (frame outside range / read error)
     std::map<Key, Entry> entries_;      // GPU-resident

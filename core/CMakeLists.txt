@@ -90,6 +90,7 @@ add_library(dlssvid_core STATIC
   viewport/ViewportState.h viewport/ViewportState.cpp
   viewport/ViewportRenderer.h viewport/ViewportRenderer.cpp
   viewport/FrameStore.h viewport/FrameStore.cpp
+  viewport/ViewportProxy.h viewport/ViewportProxy.cpp
   viewport/Project.h viewport/Project.cpp
   gpu/ComputeKernel.h gpu/ComputeKernel.cpp
   passes/ImageMetrics.h passes/ImageMetrics.cpp

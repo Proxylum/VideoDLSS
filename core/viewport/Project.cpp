@@ -5,6 +5,7 @@
 #include "pipeline/PassFingerprint.h"
 #include "util/Error.h"
 #include "util/Log.h"
+#include "viewport/ViewportProxy.h"
 
 namespace dlssvid {
 
@@ -126,10 +127,13 @@ std::string Project::SourceHash() {
     return sourceHash;
 }
 
-std::vector<ViewportSource> Project::Sources() const {
+std::vector<ViewportSource> Project::Sources(bool useProxies) const {
     std::vector<ViewportSource> out;
     if (auto s = FrameStore::VideoSource("source", sourceVideo)) out.push_back(*s);
     if (auto r = FrameStore::VideoSource("result", resultVideo)) out.push_back(*r);
+    if (useProxies)
+        for (auto& v : out)
+            if (const auto proxy = ValidProxy(v.path, passesRoot, v.name)) v.proxy = *proxy;
     for (auto& p : FrameStore::DiscoverPasses(passesRoot)) {
         bool dup = false;
         for (const auto& e : out) dup = dup || e.name == p.name;
