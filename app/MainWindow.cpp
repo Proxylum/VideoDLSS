@@ -424,7 +424,15 @@ void MainWindow::onTaskFinished(int taskId, bool ok) {
     processTaskId_ = -1;
     const QString video = QString::fromStdWString(model_.project().sourceVideo.filename().wstring());
     const QString took = FormatClock(tasks_->progress(taskId).elapsed);
-    if (ok) {
+    const QStringList failedStages = ok ? tasks_->progress(taskId).failedStageTitles() : QStringList{};
+    if (ok && !failedStages.isEmpty()) {
+        // a stage failed and the result was encoded without it (fg in its own process, audit fg-2): the processing page
+        // stays and says so, «Показать результат» leads on
+        model_.setCompareView(AppModel::CompareView::BeforeAfter);
+        statusBar()->showMessage(tr("Обработка завершена за %1 без стадии «%2» — подробности на странице обработки").arg(took, failedStages.join(tr("», «"))),
+                                 15000);
+        if (inBackground()) notify(tr("Обработка завершена с ошибкой стадии"), tr("%1 — результат без стадии «%2»").arg(video, failedStages.join(tr("», «"))));
+    } else if (ok) {
         model_.setCompareView(AppModel::CompareView::BeforeAfter);  // the result against the source
         processingActive_ = false;
         updatePage();

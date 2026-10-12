@@ -180,3 +180,114 @@ TEST_CASE("dlssvid convert mv_raw -> mv_dlss shifts by one frame and scales", "[
     CHECK(rb.ReadFrame(1).Get(5, 5, 0) == 2.f);
     CHECK(rb.ReadFrame(2).Get(5, 5, 0) == 0.f);  // last frame: no next -> zero
 }
+
+// Audit pass-mv-yup (TASK-0038): a y-up motion-vector pass (another tool's convention) gives exactly what the same
+// vectors stored y down give - in convert, export --from-dir and import - and nothing dlssvid writes carries the flag.
+namespace {
+std::filesystem::path WriteMvFolder(const char* name, float v, bool markYUp) {
+    const auto dir = Dir(name);
+    ExportPass(dir, Manifest::ForPass(PassKind::MvRaw, 20, 10, FileFormat::Exr), [&](int64_t f, PassImage& out) {
+        if (f >= 3) return false;
+        out = MakePassImage(PassKind::MvRaw, 20, 10);
+        for (uint32_t y = 0; y < 10; ++y)
+            for (uint32_t x = 0; x < 20; ++x) {
+                out.Set(x, y, 0, 1.f + static_cast<float>(f));
+                out.Set(x, y, 1, v);
+            }
+        return true;
+    }, FrameRange{});
+    if (markYUp) {
+        Manifest m = Manifest::Load(dir);
+        m.mv.yUp = true;
+        m.Save(dir);
+    }
+    return dir;
+}
+
+void CheckSameFrames(const std::filesystem::path& got, const std::filesystem::path& want) {
+    const PassReader g = PassReader::Open(got);
+    const PassReader w = PassReader::Open(want);
+    CHECK_FALSE(g.Man().mv.yUp);
+    REQUIRE(g.Man().frameCount == w.Man().frameCount);
+    for (int64_t f = g.Man().firstFrame; f <= g.Man().lastFrame; ++f) CHECK(g.ReadFrame(f).data == w.ReadFrame(f).data);
+}
+}  // namespace
+
+TEST_CASE("dlssvid convert, export and import honour mv.y_up: a y-up pass gives the result of the same vectors y down",
+          "[integration][cli][passes][mv][y_up]") {
+    const auto down = WriteMvFolder("yup_down", +1.f, false);  // v = +1 px: moving down, y down
+    const auto up = WriteMvFolder("yup_up", -1.f, true);       // the same motion stored y up
+
+    SECTION("convert, at the source size and resampled") {
+        for (const std::string target : {"", " --target 40x20"}) {
+            INFO("target:" << target);
+            const auto a = Dir("yup_conv_a");
+            const auto b = Dir("yup_conv_b");
+            REQUIRE(Run("convert -i " + Q(down) + " -o " + Q(a) + " --to mv_dlss --dilate 0" + target) == 0);
+            REQUIRE(Run("convert -i " + Q(up) + " -o " + Q(b) + " --to mv_dlss --dilate 0" + target) == 0);
+            CheckSameFrames(b, a);
+            CHECK(PassReader::Open(b).ReadFrame(1).Get(5, 5, 1) == (target.empty() ? -1.f : -2.f));  // backward: moved down -> v < 0
+        }
+    }
+    SECTION("export --from-dir writes y down, without the flag (no second flip on the next read)") {
+        const auto e = Dir("yup_export");
+        REQUIRE(Run("export --from-dir " + Q(up) + " --format exr -o " + Q(e)) == 0);
+        CheckSameFrames(e, down);
+    }
+    SECTION("import --y-up of a folder without a manifest, then convert") {
+        const auto bare = Dir("yup_bare");
+        std::filesystem::copy(up, bare, std::filesystem::copy_options::recursive);
+        std::filesystem::remove(bare / Manifest::kFileName);
+        REQUIRE(Run("import -i " + Q(bare) + " --pass mv_raw --y-up --write-manifest") == 0);
+        CHECK(Manifest::Load(bare).mv.yUp);  // the manifest tells the truth about the files
+        const auto a = Dir("yup_bare_a");
+        const auto b = Dir("yup_bare_b");
+        REQUIRE(Run("convert -i " + Q(down) + " -o " + Q(a) + " --to mv_dlss --dilate 0") == 0);
+        REQUIRE(Run("convert -i " + Q(bare) + " -o " + Q(b) + " --to mv_dlss --dilate 0") == 0);
+        CheckSameFrames(b, a);
+    }
+    SECTION("export --from-dir --y-up of a folder without a manifest") {
+        const auto bare = Dir("yup_bare_export");
+        std::filesystem::copy(up, bare, std::filesystem::copy_options::recursive);
+        std::filesystem::remove(bare / Manifest::kFileName);
+        const auto e = Dir("yup_bare_export_out");
+        REQUIRE(Run("export --from-dir " + Q(bare) + " --scan-pass mv_raw --y-up --format exr -o " + Q(e)) == 0);
+        CheckSameFrames(e, down);
+    }
+    SECTION("--y-up on a folder whose manifest says y_up = false applies to the run only") {
+        const auto flagless = Dir("yup_flagless");
+        std::filesystem::copy(up, flagless, std::filesystem::copy_options::recursive);
+        Manifest m = Manifest::Load(flagless);
+        m.mv.yUp = false;
+        m.Save(flagless);
+        const auto a = Dir("yup_flagless_a");
+        const auto b = Dir("yup_flagless_b");
+        REQUIRE(Run("convert -i " + Q(down) + " -o " + Q(a) + " --to mv_dlss --dilate 0") == 0);
+        REQUIRE(Run("convert -i " + Q(flagless) + " -o " + Q(b) + " --to mv_dlss --dilate 0 --y-up") == 0);
+        CheckSameFrames(b, a);
+        CHECK_FALSE(Manifest::Load(flagless).mv.yUp);  // not rewritten
+    }
+    SECTION("a folder with a manifest keeps it under --pass: no scan, no overwrite (review of TASK-0038, yup-1)") {
+        const auto kept = Dir("yup_kept");
+        std::filesystem::copy(up, kept, std::filesystem::copy_options::recursive);
+        const std::string before = Manifest::Load(kept).ToJson().dump();
+        REQUIRE(Run("import -i " + Q(kept) + " --pass mv_raw --write-manifest") == 0);
+        CHECK(Manifest::Load(kept).ToJson().dump() == before);  // before: rescanned and overwritten, y_up lost
+        const auto a = Dir("yup_kept_a");
+        const auto b = Dir("yup_kept_b");
+        REQUIRE(Run("convert -i " + Q(down) + " -o " + Q(a) + " --to mv_dlss --dilate 0") == 0);
+        REQUIRE(Run("convert -i " + Q(kept) + " --pass mv_raw -o " + Q(b) + " --to mv_dlss --dilate 0") == 0);
+        CheckSameFrames(b, a);  // y_up of the manifest applied, as without --pass
+        CHECK(Run("import -i " + Q(kept) + " --pass depth_raw") != 0);  // the manifest names another pass
+    }
+    SECTION("convert refuses a pair that is not a conversion (review of TASK-0038, yup-3)") {
+        CHECK(Run("convert -i " + Q(up) + " -o " + Q(Dir("yup_same")) + " --to mv_raw --y-up") != 0);  // before: shifted, inverted garbage
+        CHECK(Run("convert -i " + Q(up) + " -o " + Q(Dir("yup_cross")) + " --to depth_dlss") != 0);
+    }
+    SECTION("--y-up is refused for passes that are not motion vectors") {
+        const auto depth = WriteDepthFolder("yup_depth", 8, 4, 2);
+        CHECK(Run("import -i " + Q(depth) + " --y-up") != 0);
+        CHECK(Run("export --from-dir " + Q(depth) + " --y-up --format exr -o " + Q(Dir("yup_depth_out"))) != 0);
+        CHECK(Run("convert -i " + Q(depth) + " -o " + Q(Dir("yup_depth_conv")) + " --to depth_dlss --y-up") != 0);
+    }
+}

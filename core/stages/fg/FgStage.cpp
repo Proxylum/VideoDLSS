@@ -270,7 +270,8 @@ void FgStage::Shutdown() {
     setup_ = false;
 }
 
-FgRunResult RunFg(VideoDecoder& decoder, D3D12Device& device, FgStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params) {
+FgRunResult RunFg(VideoDecoder& decoder, D3D12Device& device, FgStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params,
+                  const std::function<void(const FgRunResult&)>& onWritten) {
     const auto& info = decoder.Info();
     options.color = ColorInfoFromStream(info);
     options.fps = info.frameRate;
@@ -297,6 +298,7 @@ FgRunResult RunFg(VideoDecoder& decoder, D3D12Device& device, FgStageOptions opt
     r.outDir = raw->OutDir();
     r.backend = raw->Generator() ? raw->Generator()->Describe() : nlohmann::json::object();
     r.diagnostics = raw->Diagnostics() ? raw->Diagnostics()->ToJson() : nlohmann::json::object();
+    if (onWritten) onWritten(r);
     pipeline.Shutdown();
     return r;
 }

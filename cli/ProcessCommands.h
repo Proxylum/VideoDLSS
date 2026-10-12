@@ -37,6 +37,11 @@ public:
         bool codecGiven = false;   // --codec on the command line (else the project's encoder)
         int keepVersions = -1;     // -1: the project's pass_versions_keep or 2
         std::string json;
+        // hidden: FG runs in its own process unless --fg-in-process (debugging); hooks of the isolation tests
+        bool fgInProcess = false;
+        int64_t fgCrashAfter = -1;
+        bool fgCrashOnExit = false;
+        bool fgStall = false;
     };
     struct BenchArgs {
         std::string input, passes, output;

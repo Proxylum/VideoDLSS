@@ -557,16 +557,8 @@ void ProjectPanel::runStage(const std::string& stage) {
         if (s.name == stage) st = &s;
     if (!st || p.sourceVideo.empty()) return;
     QStringList args{QString::fromStdString(st->name), "-i", QString::fromStdWString(p.sourceVideo.wstring()), "-o", QString::fromStdWString(p.passesRoot.wstring())};
-    for (auto it = st->params.begin(); it != st->params.end(); ++it) {
-        const QString key = "--" + QString::fromStdString(it.key());
-        if (it.value().is_boolean()) {
-            if (it.value().get<bool>()) args << key;
-        } else if (it.value().is_string()) {
-            args << key << QString::fromStdString(it.value().get<std::string>());
-        } else {
-            args << key << QString::fromStdString(it.value().dump());
-        }
-    }
+    // one mapping of the schema keys to the command's options, checked against every command (tests/integration/test_cli.cpp)
+    for (const std::string& a : StageCliArgs(st->name, st->params)) args << QString::fromStdString(a);
     tasks_.enqueue(QString::fromStdString(st->name), model_.cliPath(), args);
 }
 

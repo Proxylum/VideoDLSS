@@ -1,5 +1,6 @@
 #include "ProcessCommands.h"
 
+#include <io.h>
 #include <windows.h>
 
 #include <cstdio>
@@ -13,6 +14,7 @@
 #include "stages/nr/INrBackend.h"
 #include "util/Error.h"
 #include "util/Log.h"
+#include "util/Paths.h"
 #include "viewport/Project.h"
 
 namespace dlssvid::cli {
@@ -21,11 +23,18 @@ namespace {
 
 void Progress(const std::string& stage, int64_t done, int64_t total) {
     if (done % 10 == 0 || done == total) {
-        if (total > 0) std::fprintf(stderr, "\r%s: %lld/%lld frames", stage.c_str(), static_cast<long long>(done), static_cast<long long>(total));
-        else std::fprintf(stderr, "\r%s: %lld frames", stage.c_str(), static_cast<long long>(done));
-        if (done == total) std::fprintf(stderr, "\n");
+        // A terminal gets one updating line; a pipe (the GUI's TaskQueue, tests) gets whole lines, so that a progress
+        // update never glues onto a log line such as "process: fg failed - ..." that the GUI parses.
+        static const bool tty = _isatty(_fileno(stderr)) != 0;
+        const char* lead = tty ? "\r" : "";
+        if (total > 0) std::fprintf(stderr, "%s%s: %lld/%lld frames", lead, stage.c_str(), static_cast<long long>(done), static_cast<long long>(total));
+        else std::fprintf(stderr, "%s%s: %lld frames", lead, stage.c_str(), static_cast<long long>(done));
+        if (!tty || done == total) std::fprintf(stderr, "\n");
     }
 }
+
+// Reports carry paths and log text that may not be valid UTF-8 (ACP paths, a child's log): never fail on them.
+std::string DumpJson(const nlohmann::json& j) { return j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace); }
 
 std::vector<std::string> Split(const std::string& s, char sep) {
     std::vector<std::string> out;
@@ -104,6 +113,7 @@ void PrintReport(const ProcessResult& r) {
     std::printf("result:      %s (%lld frames at %.3f fps%s) in %.1f s\n", r.output.string().c_str(), static_cast<long long>(r.framesOut), r.outputFps.ToDouble(),
                 r.audio ? ", audio copied" : "", r.seconds);
     std::printf("format:      %s %s (%s)\n", r.codec.c_str(), r.outputFormat.Describe().c_str(), r.outputPixelFormat.c_str());
+    for (const auto& w : r.warnings) std::printf("warning:     %s\n", w.c_str());
 }
 
 int CmdProcess(const ProcessCommands::ProcessArgs& a) {
@@ -147,15 +157,19 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     o.passthrough = a.passthrough;
     o.gpuRoundtrip = !a.noGpuRoundTrip;
     o.progress = &Progress;
+    o.fgExecutable = a.fgInProcess ? std::filesystem::path{} : CurrentExecutable();  // audit fg-2: FG in its own process
+    o.fgCrashAfter = a.fgCrashAfter;
+    o.fgCrashOnExit = a.fgCrashOnExit;
+    o.fgStall = a.fgStall;
     if (a.plan) {
         const ProcessPlan plan = PlanProcess(o);
         PrintPlan(plan);
-        if (!a.json.empty()) std::ofstream(a.json) << plan.ToJson().dump(2) << "\n";
+        if (!a.json.empty()) std::ofstream(a.json) << DumpJson(plan.ToJson()) << "\n";
         return 0;
     }
     const ProcessResult r = RunProcess(o);
     PrintReport(r);
-    if (!a.json.empty()) std::ofstream(a.json) << r.ToJson().dump(2) << "\n";
+    if (!a.json.empty()) std::ofstream(a.json) << DumpJson(r.ToJson()) << "\n";
     return 0;
 }
 
@@ -174,6 +188,7 @@ int CmdBench(const ProcessCommands::BenchArgs& a) {
     o.frames = a.frames;
     o.warp = a.warp;
     o.progress = &Progress;
+    o.fgExecutable = CurrentExecutable();  // as `process`: the fg timing includes its process, start-up reported apart
     std::string gpu, arch, driver;
     {
         D3D12Device device({a.warp, false});
@@ -190,7 +205,7 @@ int CmdBench(const ProcessCommands::BenchArgs& a) {
         j["gpu"] = gpu;
         j["architecture"] = arch;
         j["driver"] = driver;
-        std::ofstream(a.json) << j.dump(2) << "\n";
+        std::ofstream(a.json) << DumpJson(j) << "\n";
     }
     if (!a.keep && a.passes.empty()) {
         std::error_code ec;
@@ -217,7 +232,8 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_option("--scale", pa_.scale, "upscale factor 1.5 | 2 | 3");
     process_->add_option("--multiplier", pa_.multiplier, "frame generation multiplier 2 | 3 | 4");
     process_->add_flag("--no-skip-existing,--no_skip_existing", pa_.noSkipExisting, "recompute every stage even when its pass is complete");
-    process_->add_flag("--disable-unavailable,--disable_unavailable", pa_.disableUnavailable, "nr / fg without DLL or GPU: skip the stage instead of failing");
+    process_->add_flag("--disable-unavailable,--disable_unavailable", pa_.disableUnavailable,
+                       "nr / fg without DLL or GPU, or an fg process that fails: skip the stage (fg: encode color_nr) instead of failing");
     process_->add_option("--codec", pa_.codec, "video encoder: h264_nvenc | hevc_nvenc | av1_nvenc | prores_ks | ffv1 (default: the project's, else h264_nvenc)")
         ->default_val("h264_nvenc");
     process_->add_option("--codec-opt", pa_.codecOptions, "encoder private option key=value (repeatable)");
@@ -235,6 +251,13 @@ void ProcessCommands::Register(CLI::App& app) {
                          "pass versions kept per pass after the run, the current one included; 0 = keep all (default: the project's pass_versions_keep or 2)")
         ->default_val(-1);
     process_->add_option("--json", pa_.json, "write the stage report (or the plan with --plan) to this JSON file");
+    // hidden: debugging and the isolation tests of the fg process (audit fg-2)
+    process_->add_flag("--fg-in-process,--fg_in_process", pa_.fgInProcess, "debugging: run FG in this process, without isolation")->group("");
+    process_->add_option("--fg-crash-after,--fg_crash_after", pa_.fgCrashAfter, "isolation test: the fg process terminates itself after N real frames")
+        ->default_val(-1)
+        ->group("");
+    process_->add_flag("--fg-crash-on-exit,--fg_crash_on_exit", pa_.fgCrashOnExit, "isolation test: the fg process terminates itself after its result")->group("");
+    process_->add_flag("--fg-stall,--fg_stall", pa_.fgStall, "isolation test: the fg process hangs before reading the input")->group("");
 
     bench_ = app.add_subcommand("bench", "run the pipeline on N frames into a scratch folder and print ms/frame per stage (ТЗ §9)");
     bench_->add_option("-i,--input", ba_.input, "input video file")->required()->check(CLI::ExistingFile);

@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <thread>
 
@@ -13,6 +14,7 @@
 #include "viewport/FrameStore.h"
 #include "viewport/Project.h"
 #include "viewport/ViewportState.h"
+#include "util/Half.h"
 
 using namespace dlssvid;
 using Catch::Approx;
@@ -316,4 +318,47 @@ TEST_CASE("FrameStore holds the nearest resident frame while the exact one loads
     store.WaitForCurrent();
     CHECK(!store.HeldFrameAt(t(8), "depth_raw").has_value());
     CHECK(store.TexturesAt(t(8)).at("depth_raw").minValue == 80.f);
+}
+
+// Audit pass-mv-yup (TASK-0038): the viewport (and its pixel probe, which reads the texture) shows a y-up mv pass in the
+// DLSS convention, like every other reader - FrameStore loads frames through PassReader::ReadFrame.
+TEST_CASE("FrameStore shows a y_up mv_dlss pass in the DLSS convention", "[viewport][store][gpu][mv][y_up]") {
+    const auto root = Root("yup");
+    {
+        PassWriter writer(root / "mv_dlss", Manifest::ForPass(PassKind::MvDlss, 8, 4, FileFormat::Exr));
+        PassImage img = MakePassImage(PassKind::MvDlss, 8, 4);
+        for (uint32_t y = 0; y < 4; ++y)
+            for (uint32_t x = 0; x < 8; ++x) {
+                img.Set(x, y, 0, 2.f);
+                img.Set(x, y, 1, -1.f);  // stored y up: the motion is +1 px down
+            }
+        writer.WriteFrame(0, img);
+        writer.Finish();
+    }
+    Manifest m = Manifest::Load(root / "mv_dlss");
+    m.mv.yUp = true;
+    m.Save(root / "mv_dlss");
+
+    D3D12Device dev({true, false});
+    FrameStore store(dev, {});
+    store.SetSources(FrameStore::DiscoverPasses(root));
+    store.SetCurrentFrame(0, {"mv_dlss"});
+    store.WaitForCurrent();
+    const FrameTextures tex = store.Textures(0);
+    REQUIRE(tex.count("mv_dlss") == 1);
+    size_t texel = 0;
+    const std::vector<uint8_t> bytes = dev.ReadbackTexel(tex.at("mv_dlss").texture, 3, 2, texel);
+    float uv[2] = {};
+    if (texel == 8) {
+        std::memcpy(uv, bytes.data(), 8);
+    } else {
+        REQUIRE(texel == 4);  // RG16F
+        uint16_t h[2];
+        std::memcpy(h, bytes.data(), 4);
+        uv[0] = HalfToFloat(h[0]);
+        uv[1] = HalfToFloat(h[1]);
+    }
+    CHECK(uv[0] == 2.f);
+    CHECK(uv[1] == 1.f);  // before the fix the viewport showed the stored -1
+    store.SetSources({});
 }

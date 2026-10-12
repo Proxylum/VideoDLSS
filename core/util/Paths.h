@@ -12,4 +12,7 @@ namespace dlssvid {
 // folder pushed the file path past 260, so the engine was built and then could not be written.
 std::filesystem::path Win32LongPath(const std::filesystem::path& p);
 
+// The running executable (GetModuleFileNameW; paths longer than MAX_PATH included). Throws dlssvid::Error on failure.
+std::filesystem::path CurrentExecutable();
+
 }  // namespace dlssvid

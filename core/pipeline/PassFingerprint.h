@@ -10,8 +10,14 @@ namespace dlssvid {
 
 // The «app» part of the tool in a pass fingerprint. It is NOT the release version (DLSSVID_VERSION): a release that
 // changes nothing in what a stage writes must not invalidate every pass on disk. Bump it only when a stage's output
-// changes for the same parameters, inputs, model and DLL (a new tonemap, a different NIS, …).
+// changes for the same parameters, inputs, model and DLL (a new tonemap, a different NIS, …) in every stage; when one
+// stage changes, give it a revision in PassToolVersionFor instead - the passes of the other stages stay valid.
 constexpr const char* kPassToolVersion = "0.1.0";
+
+// The «app» of one stage's passes: kPassToolVersion plus "+<stage>.<revision>" for a stage whose own algorithm changed
+// for the same parameters. depth.2 (TASK-0038, audit depth-7): temporal alignment over a centred window of ±N frames,
+// auto = scale for metric models - only when stabilize != none (without alignment the depth is what it was).
+std::string PassToolVersionFor(const std::string& stage, const nlohmann::json& params);
 
 // Pass fingerprints (stage 9, MR A — docs/architecture.md «Отпечатки и версии пассов»). A pass is reused only when the
 // fingerprint of the run that would produce it equals the one stored in its manifest:
@@ -43,7 +49,7 @@ struct PassFingerprint {
     std::string sourceHash;                     // "sha256:<hex>" of the source video
     std::string stage;                          // depth | flow | upscale | nr | fg
     nlohmann::json params;                      // canonical stage parameters
-    std::map<std::string, std::string> inputs;  // input pass -> its fingerprint (legacy passes: "legacy:<hash>:<frames>")
+    std::map<std::string, std::string> inputs;  // input pass -> its fingerprint (legacy passes: "legacy:<hash>:<frames>[:y_up]")
     ToolInfo tool;
     std::string Short() const;  // first 8 hex digits of the value
 };

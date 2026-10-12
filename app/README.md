@@ -8,13 +8,13 @@
 
 | File | Role |
 |---|---|
-| `AppModel` | project + viewport state + FrameStore + playback timer; the panels only talk to it |
+| `AppModel` | project + viewport state + FrameStore + playback paced by `PlaybackClock` (the exact rational rate, every frame shown); the panels only talk to it |
 | `ViewportWindow` | `QWindow` with its own DXGI swapchain on the pipeline's device: zoom/pan, wipe drag, probe, cell click |
 | `TimelineWidget` | scrubber, frame number, play/pause, ±1 |
 | `ProjectPanel` | source, passes with status, stages with enable/params and «Запустить» (CLI via `TaskQueue`); «Обработать → result» saves the project and runs `dlssvid process --project` (stage 8); the `nr` stage adds «Пропатчить DLL…» — picks your `nvngx_dlssnr.dll` (and the patcher / CUDA 13.3 folders when `DLSSNR_PATCHER_ROOT` / `CUDA_PATH_V13_3` are unset) and queues `dlssvid nr-patch` (stage 6) |
 | `InspectorPanel` | layer stack and display settings, wipe, grid cell sources, pixel probe |
-| `TaskQueue` | sequential `dlssvid <stage>` processes with progress parsed from `stage: N/M frames`; stage 9: a plan per task (reused stages, estimates), the measured rate of the running stage, ETA, cancel (kill; queued tasks are dropped), «не запускается» for a program that fails to start |
-| `ProcessingPanel` | the processing page (stage 9): elapsed / left, overall and per-stage progress, «Отменить», «Свернуть в фон», log tail, «Показать результат» / «К проекту» |
+| `TaskQueue` | sequential `dlssvid <stage>` processes with progress parsed from `stage: N/M frames`; stage 9: a plan per task (reused stages, estimates), the measured rate of the running stage, ETA, cancel (kill; queued tasks are dropped), «не запускается» for a program that fails to start; `process: <stage> failed — …` (FG in its own process failed, the run went on) keeps that stage «ошибка» while the task succeeds (TASK-0038) |
+| `ProcessingPanel` | the processing page (stage 9): elapsed / left, overall and per-stage progress, «Отменить», «Свернуть в фон», log tail, «Показать результат» / «К проекту»; a stage that failed in a finished run: «Готово за … · без стадии «…»» and the page stays with «Показать результат» |
 | `ResultBar` | the result line (TASK-0013): what the result video is and «Сохранить как…» / «Открыть папку» / «Экспорт пассов…» / «Другое видео» |
 | `Theme` | the look after the mockups (TASK-0017): Fusion + dark palette + one stylesheet; widgets pick variants through the `role` property (`SetRole`) |
 | `LogPanel` | spdlog sink |

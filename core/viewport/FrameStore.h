@@ -88,6 +88,7 @@ public:
     Rational SourceFps(const std::string& source) const;  // the source's rate, else the base rate
     double FpsOf(const std::string& source) const { return SourceFps(source).ToDouble(); }
     double MaxFps(const std::vector<std::string>& sources = {}) const;  // fastest of these (all sources when empty)
+    Rational MaxRate(const std::vector<std::string>& sources = {}) const;  // the same, as the exact rational rate
     double Duration() const { return duration_; }   // seconds covered by the longest source
     int64_t FrameCount() const;                     // frames of the base rate over the duration
     int64_t FrameAt(const std::string& source, double time) const;  // round(time × fps); may lie outside the source

@@ -9,7 +9,8 @@ namespace dlssvid {
 // docs/conventions.md §3. Motion vectors are 2-channel (u, v) float images in pixels.
 //   mv_raw  : forward optical flow stored with frame t:   p(t+1) = p(t) + F_t(p(t))
 //   mv_dlss : backward vectors stored with frame t:       p(t-1) = p(t) + B_t(p(t))
-// Both use image coordinates (x right, y down) unless a manifest says y_up.
+// Both use image coordinates (x right, y down); a pass stored with y up (manifest mv.y_up) comes out of
+// PassReader::ReadFrame already negated, so the conversions below never see y-up vectors.
 
 struct MvConvertOptions {
     uint32_t targetWidth = 0;   // 0 = keep the input resolution
@@ -35,6 +36,8 @@ PassImage ScaleMv(const PassImage& mv, uint32_t targetWidth, uint32_t targetHeig
 // Each pixel takes the vector of the closest (smallest depth) pixel within `radius` if that
 // pixel is closer by more than `threshold` (relative). Mirrors the MV dilation DLSS expects at depth edges.
 PassImage DilateMvByDepth(const PassImage& mv, const PassImage& depth, int radius, float threshold);
+// Negates v (y up <-> y down) exactly; f16 / f32 only (integer samples throw).
+void FlipMvYInPlace(PassImage& mv);
 PassImage FlipMvY(const PassImage& mv);
 PassImage ZeroMv(uint32_t width, uint32_t height);
 

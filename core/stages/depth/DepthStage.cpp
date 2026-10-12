@@ -32,10 +32,49 @@ std::unique_ptr<IDepthEstimator> CreateDepthEstimator(const std::string& backend
     Throw("unknown depth backend '" + backend + "' (known: " + known + ")");
 }
 
+// ---- temporal alignment modes -----------------------------------------------------------
+
+DepthStabilize ParseDepthStabilize(const std::string& s) {
+    if (s == "auto" || s.empty()) return DepthStabilize::Auto;
+    if (s == "none") return DepthStabilize::None;
+    if (s == "scale") return DepthStabilize::Scale;
+    if (s == "scale_shift") return DepthStabilize::ScaleShift;
+    Throw("stabilize must be auto | none | scale | scale_shift (got '" + s + "')");
+}
+
+TemporalStabilizer::Mode ResolveStabilizeMode(DepthStabilize requested, bool metric) {
+    switch (requested) {
+        case DepthStabilize::None: return TemporalStabilizer::Mode::None;
+        case DepthStabilize::Scale: return TemporalStabilizer::Mode::ScaleOnly;
+        case DepthStabilize::ScaleShift: return TemporalStabilizer::Mode::ScaleShift;
+        case DepthStabilize::Auto: break;
+    }
+    return metric ? TemporalStabilizer::Mode::ScaleOnly : TemporalStabilizer::Mode::ScaleShift;
+}
+
+const char* StabilizeModeName(TemporalStabilizer::Mode mode) {
+    switch (mode) {
+        case TemporalStabilizer::Mode::None: return "none";
+        case TemporalStabilizer::Mode::ScaleOnly: return "scale";
+        case TemporalStabilizer::Mode::ScaleShift: return "scale_shift";
+    }
+    return "none";
+}
+
+const char* DepthStabilizeName(DepthStabilize s) {
+    switch (s) {
+        case DepthStabilize::Auto: return "auto";
+        case DepthStabilize::None: return "none";
+        case DepthStabilize::Scale: return "scale";
+        case DepthStabilize::ScaleShift: return "scale_shift";
+    }
+    return "auto";
+}
+
 // ---- stage -----------------------------------------------------------------------------
 
 DepthStage::DepthStage(DepthStageOptions options, std::unique_ptr<IDepthEstimator> estimator)
-    : options_(std::move(options)), estimator_(std::move(estimator)), stabilizer_(options_.stabilize, options_.stabilizeWindow) {
+    : options_(std::move(options)), estimator_(std::move(estimator)) {
     if (!estimator_) estimator_ = CreateDepthEstimator(options_.backend);
 }
 
@@ -51,11 +90,17 @@ DepthStage::~DepthStage() {
 void DepthStage::Init(const StageConfig& config, D3D12Device&) {
     if (config.params.contains("backend")) options_.backend = config.params["backend"].get<std::string>();
     estimator_->Init(options_.estimator);
-    if (estimator_->IsMetric()) {
-        stabilizer_ = TemporalStabilizer(options_.stabilizeMetric ? TemporalStabilizer::Mode::ScaleOnly : TemporalStabilizer::Mode::None, options_.stabilizeWindow);
-    } else {
-        stabilizer_ = TemporalStabilizer(options_.stabilize, options_.stabilizeWindow);
-    }
+    const bool metric = estimator_->IsMetric();
+    stabilizer_ = TemporalStabilizer(ResolveStabilizeMode(options_.stabilize, metric), options_.stabilizeWindow);
+    if (stabilizer_.GetMode() == TemporalStabilizer::Mode::None)
+        Log()->info("depth: no temporal alignment (per-frame depth as the model gives it)");
+    else
+        Log()->info("depth: temporal alignment '{}' over ±{} frames ({}), output delayed by {} frames", StabilizeModeName(stabilizer_.GetMode()),
+                    stabilizer_.Radius(), DepthStabilizeName(options_.stabilize), stabilizer_.Delay());
+    if (metric && options_.stabilize == DepthStabilize::ScaleShift)
+        Log()->warn("depth: scale_shift on a metric model - the shift does not keep the metres; 'scale' is the metric mode");
+    cache_ = nullptr;
+    device_ = nullptr;
     if (!options_.mvDir.empty()) {
         mvReader_.emplace(PassReader::Open(options_.mvDir));
         mvReader_->Validate({0, 0, -1, PassKind::MvDlss});
@@ -67,6 +112,8 @@ void DepthStage::Init(const StageConfig& config, D3D12Device&) {
 
 void DepthStage::Process(FrameContext& ctx) {
     if (!initialized_) Throw("DepthStage::Process before Init");
+    cache_ = &ctx.cache;
+    device_ = &ctx.device;
     Pending p;
     p.index = ctx.frame.index;
     p.rgb = YuvToRgb(ctx.frame, options_.color, PixelType::F32);
@@ -107,16 +154,36 @@ void DepthStage::RunWindow(bool flush) {
     const size_t emitCount = flush || overlap == 0 || n < static_cast<size_t>(window) ? n : n - static_cast<size_t>(overlap);
     overlapPrev_.clear();
     for (size_t i = emitCount; i < n; ++i) overlapPrev_.emplace_back(pending_[i].index, depth[i]);
-    for (size_t i = 0; i < emitCount; ++i) Emit(pending_[i].index, std::move(depth[i]), pending_[i]);
+    for (size_t i = 0; i < emitCount; ++i) Emit(pending_[i].index, std::move(depth[i]));
     pending_.erase(pending_.begin(), pending_.begin() + static_cast<ptrdiff_t>(emitCount));
     if (flush && !pending_.empty()) RunWindow(true);
 }
 
-void DepthStage::Emit(int64_t index, PassImage depth, Pending& p) {
+void DepthStage::Emit(int64_t index, PassImage depth) {
     if (depth.type != PixelType::F32) depth = depth.ConvertTo(PixelType::F32);
     depth.channels = {"Z"};
+    stabilizer_.Push(index, std::move(depth));  // holes are filled after the alignment (Finalize)
+    Drain();
+}
+
+void DepthStage::Drain() {
+    int64_t index = 0;
+    PassImage depth;
+    ScaleShift applied;
+    while (stabilizer_.Pop(index, depth, &applied)) Finalize(index, std::move(depth), applied);
+}
+
+void DepthStage::Finalize(int64_t index, PassImage depth, const ScaleShift& applied) {
+    // after the alignment: a filled frame without valid depth (constant 1) measured as real depth joined its neighbours'
+    // windows (review of TASK-0038); the fill copies the nearest valid sample, so it commutes with the transform
     if (options_.fillHoles) stats_.holesFilled += static_cast<int64_t>(FillInvalidDepth(depth));
-    stabilizer_.Stabilize(depth);
+    if (stabilizer_.GetMode() != TemporalStabilizer::Mode::None) {
+        const bool first = stats_.frames == 0;
+        stats_.scaleMin = first ? applied.scale : std::min(stats_.scaleMin, applied.scale);
+        stats_.scaleMax = first ? applied.scale : std::max(stats_.scaleMax, applied.scale);
+        stats_.shiftMin = first ? applied.shift : std::min(stats_.shiftMin, applied.shift);
+        stats_.shiftMax = first ? applied.shift : std::max(stats_.shiftMax, applied.shift);
+    }
     if (prevDepth_) {
         double tae = 0.0;
         if (mvReader_ && mvReader_->HasFrame(index)) {
@@ -147,7 +214,9 @@ void DepthStage::Emit(int64_t index, PassImage depth, Pending& p) {
             m.depth.zNear = options_.dlss.zNear;
             m.depth.zFar = options_.dlss.zFar;
             m.stageParams = estimator_->Describe();
-            m.stageParams["stabilize"] = stabilizer_.GetMode() == TemporalStabilizer::Mode::None ? "none" : stabilizer_.GetMode() == TemporalStabilizer::Mode::ScaleOnly ? "scale" : "scale_shift";
+            m.stageParams["stabilize"] = StabilizeModeName(stabilizer_.GetMode());
+            m.stageParams["stabilize_requested"] = DepthStabilizeName(options_.stabilize);
+            m.stageParams["stabilize_window"] = stabilizer_.Radius();
             m.stageParams["tae_mode"] = mvReader_ ? "warped" : "static";
             rawWriter_ = std::make_unique<PassWriter>(RawDir(), m);
             if (options_.writeDlss) {
@@ -171,26 +240,39 @@ void DepthStage::Emit(int64_t index, PassImage depth, Pending& p) {
             dlssWriter_->WriteFrame(index, dlss);
         }
     }
-    if (options_.uploadToGpu && p.cache && p.device) {
-        GpuFrameCache::Slot* slot = p.cache->Find(index);
-        if (slot) p.cache->UploadPass(*slot, "depth_raw", depth);
+    if (options_.uploadToGpu && cache_ && device_) {
+        // the slot still holds this frame unless the estimator window / the alignment delay outlived it
+        GpuFrameCache::Slot* slot = cache_->Find(index);
+        if (slot) cache_->UploadPass(*slot, "depth_raw", depth);
     }
     ++stats_.frames;
 }
 
 void DepthStage::Finish() {
     RunWindow(true);
+    stabilizer_.Close();
+    Drain();
+    if (stabilizer_.Buffered() != 0) Throw("depth: " + std::to_string(stabilizer_.Buffered()) + " frame(s) left in the temporal alignment buffer");
+    const nlohmann::json scale = {stats_.scaleMin, stats_.scaleMax}, shift = {stats_.shiftMin, stats_.shiftMax};
+    const bool aligned = stabilizer_.GetMode() != TemporalStabilizer::Mode::None;
     if (rawWriter_) {
-        auto tae = stats_.MeanTae();
-        const_cast<Manifest&>(rawWriter_->Man()).stageParams["tae_mean"] = tae;
-        const_cast<Manifest&>(rawWriter_->Man()).stageParams["holes_filled"] = stats_.holesFilled;
+        auto& sp = const_cast<Manifest&>(rawWriter_->Man()).stageParams;
+        sp["tae_mean"] = stats_.MeanTae();
+        sp["holes_filled"] = stats_.holesFilled;
+        if (aligned) sp["stabilize_scale"] = scale;
+        if (stabilizer_.GetMode() == TemporalStabilizer::Mode::ScaleShift) sp["stabilize_shift"] = shift;
         rawWriter_->Finish();
     }
     if (dlssWriter_) {
-        const_cast<Manifest&>(dlssWriter_->Man()).stageParams["tae_mean"] = stats_.MeanTae();
+        auto& sp = const_cast<Manifest&>(dlssWriter_->Man()).stageParams;
+        sp["tae_mean"] = stats_.MeanTae();
+        if (aligned) sp["stabilize_scale"] = scale;
+        if (stabilizer_.GetMode() == TemporalStabilizer::Mode::ScaleShift) sp["stabilize_shift"] = shift;
         dlssWriter_->Finish();
     }
-    Log()->info("depth: {} frames, {} windows, mean TAE {:.4f}, holes filled {}", stats_.frames, stats_.windows, stats_.MeanTae(), stats_.holesFilled);
+    Log()->info("depth: {} frames, {} windows, mean TAE {:.4f}, holes filled {}, alignment {}{}", stats_.frames, stats_.windows, stats_.MeanTae(),
+                stats_.holesFilled, StabilizeModeName(stabilizer_.GetMode()),
+                aligned ? fmt::format(" (scale {:.4f}..{:.4f})", stats_.scaleMin, stats_.scaleMax) : std::string());
 }
 
 void DepthStage::Shutdown() {
@@ -224,6 +306,7 @@ DepthRunResult RunDepth(VideoDecoder& decoder, D3D12Device& device, DepthStageOp
     r.rawDir = raw->RawDir();
     r.dlssDir = raw->DlssDir();
     r.estimator = raw->Estimator().Describe();
+    r.stabilize = StabilizeModeName(raw->Stabilizer().GetMode());
     pipeline.Shutdown();
     return r;
 }

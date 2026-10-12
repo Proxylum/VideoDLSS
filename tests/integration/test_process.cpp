@@ -194,3 +194,113 @@ TEST_CASE("RunProcess: --frames, passthrough, an unavailable nr stage and a run 
         CHECK_THROWS(RunProcess(o));
     }
 }
+
+// Audit fg-2 (TASK-0038): an FG stage that fails mid-run - here it reads a color_nr shorter than the source - is
+// reported failed with --disable-unavailable, in this process and in its own; the result is encoded from color_nr.
+TEST_CASE("RunProcess: an fg stage that throws mid-run is failed with disableUnavailable; the result comes from color_nr",
+          "[integration][process][fg][isolation]") {
+    for (const bool isolated : {false, true}) {
+        INFO((isolated ? "in its own process" : "in this process"));
+        ClipSpec spec;
+        spec.frames = 5;
+        spec.width = 48;
+        spec.height = 32;
+        const auto dir = Dir(isolated ? "fg_throws_child" : "fg_throws");
+        const auto clip = WriteClip(dir / "clip.mkv", spec);
+        ProcessOptions o;
+        o.input = clip;
+        o.output = dir / "r1.mkv";
+        o.passesRoot = dir / "passes";
+        o.stages = StubStages(2);
+        o.codec = "ffv1";
+        o.warp = true;
+        o.frames = 3;
+        RunProcess(o);  // color_nr of 3 frames
+        for (auto& s : o.stages) s.enabled = s.name == "fg";
+        o.frames = -1;
+        o.forceStages = {"fg"};  // the MKV has no frame count: a 3-frame color_fg counts as complete, so force the rerun
+        o.output = dir / "r2.mkv";
+        o.disableUnavailable = true;
+        if (isolated) o.fgExecutable = DLSSVID_CLI_PATH;
+        const ProcessResult r = RunProcess(o);
+        const ProcessStageReport& fg = Report(r, "fg");
+        CHECK(fg.status == "failed");
+        CHECK_THAT(fg.reason, Catch::Matchers::ContainsSubstring("has no frame 3"));
+        CHECK(fg.fingerprint.empty());
+        CHECK(fg.details["isolated"] == isolated);
+        CHECK(r.finalPass == o.passesRoot / "color_nr");
+        CHECK(r.framesOut == 3);
+        CHECK(r.warnings.size() == 1);
+        CHECK(Report(r, "encode").status == "ran");
+        CHECK(!std::filesystem::exists(o.passesRoot / "color_fg"));    // the half-written pass of this run is removed,
+        CHECK(!std::filesystem::exists(o.passesRoot / "color_fg.v"));  // not kept as a version
+        o.disableUnavailable = false;
+        o.output = dir / "r3.mkv";
+        CHECK_THROWS_WITH(RunProcess(o), Catch::Matchers::ContainsSubstring("stage 'fg' failed"));
+        CHECK(!std::filesystem::exists(o.output));
+    }
+}
+
+// Review of TASK-0038 (fg-iso-4): fg disabled while a color_fg with its own fingerprint stays in place (a forced rerun is
+// not moved to the history) - the result is the stage's input, not the pass left on disk.
+TEST_CASE("RunProcess: fg disabled over a color_fg kept in place encodes color_nr, not that pass", "[integration][process][fg][regression]") {
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("fg_disabled_in_place");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "r1.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);  // color_fg of 9 frames made by blend
+    ApplyParamSpec(o.stages, "fg.backend=dlssg");  // unavailable on WARP
+    o.disableUnavailable = true;
+    // the blend pass stamped with the fingerprint the dlssg run needs: it stays in place under --force
+    const std::string want = [&] {
+        for (const auto& s : PlanProcess(o).stages)
+            if (s.name == "fg") return s.fingerprint;
+        return std::string();
+    }();
+    REQUIRE(!want.empty());
+    Manifest m = Manifest::Load(o.passesRoot / "color_fg");
+    m.fingerprint = want;
+    m.Save(o.passesRoot / "color_fg");
+    o.forceStages = {"fg"};
+    o.output = dir / "r2.mkv";
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "fg").status == "disabled");
+    CHECK(std::filesystem::exists(o.passesRoot / "color_fg" / Manifest::kFileName));  // left alone
+    CHECK(r.finalPass == o.passesRoot / "color_nr");  // before: the 9-frame color_fg of another backend was encoded
+    CHECK(r.framesOut == 5);
+}
+
+TEST_CASE("RunProcess: fg disabled over an older color_fg encodes color_nr, not the stale pass", "[integration][process][fg]") {
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("fg_disabled_stale");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "r1.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    o.codec = "ffv1";
+    o.warp = true;
+    o.frames = 3;
+    RunProcess(o);  // color_fg of 3 real frames
+    o.frames = -1;
+    ApplyParamSpec(o.stages, "fg.backend=dlssg");  // unavailable on WARP
+    o.disableUnavailable = true;
+    o.output = dir / "r2.mkv";
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "fg").status == "disabled");
+    CHECK(r.finalPass == o.passesRoot / "color_nr");  // the input of the disabled stage, never a color_fg left from another run
+    CHECK(r.framesOut == 3);                           // color_nr of the first run (the MKV has no frame count: reused)
+}

@@ -17,6 +17,7 @@
 #include <QStyle>
 #include <QVBoxLayout>
 #include <QWheelEvent>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -24,7 +25,9 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 #include <QFileInfo>
@@ -34,6 +37,7 @@
 
 #include "AppModel.h"
 #include "SourceNames.h"
+#include "PlaybackClock.h"
 #include "ProcessingPanel.h"
 #include "RecentPreviews.h"
 #include "ResultBar.h"
@@ -262,11 +266,19 @@ TEST_CASE("AppModel time axis: 24 and 48 fps sources, steps by the base layer, t
     CHECK(model.baseSource() == "color_fg");
     CHECK(model.frameStates().size() == 2);
 
-    // playback runs at the fastest shown rate (48 fps) and stops where the base source ends
+    // playback runs at the fastest shown rate (48 fps), visits every color_fg frame and stops where the base source ends
     model.setTime(0.0);
+    std::vector<int64_t> visited;
+    const auto conn = QObject::connect(&model, &AppModel::timeChanged, [&] { visited.push_back(model.store().FrameAt("color_fg", model.time())); });
+    QElapsedTimer played;
+    played.start();
     model.setPlaying(true);
     Pump([&] { return !model.playing(); }, 5000);
+    const double seconds = static_cast<double>(played.nsecsElapsed()) / 1e9;
+    QObject::disconnect(conn);
     CHECK(!model.playing());
+    CHECK(visited == std::vector<int64_t>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10});  // steps of 1/48 s, not 1/24
+    CHECK(seconds >= 11.0 / 48.0 - 0.005);  // by the clock; the old 20 ms timer took 11 x 20 = 0.22 s
     CHECK(model.timelineFrame() == 10);  // the last color_fg frame; the timeline itself runs to 11 (0.25 s of color_sr)
     REQUIRE(model.saveProject());
     CHECK(std::abs(Project::Load(d / "proj.dlssvid.json").viewport.time - 10.0 / 48.0) < 1e-9);  // saved as a time
@@ -1109,4 +1121,250 @@ TEST_CASE("StageCard shows backend-scoped parameters only for their backend", "[
     model.setStageParam("upscale", "backend", "nis");
     card.refresh();
     CHECK(!form->isRowVisible(modelRow));
+}
+
+// Audit fg-2 (TASK-0038): `process: fg failed - ...` from the runner (FG in its own process failed, the result was encoded
+// without it) keeps the stage failed while the run finishes with a result - also when a progress update glued onto it.
+TEST_CASE("ProcessingPanel: a stage the runner reports failed stays failed while the run finishes with a result", "[app][tasks][isolation]") {
+    App();
+    const auto d = Dir("stage_failed");
+    TaskQueue queue;
+    ProcessingPanel panel(queue);
+    const std::vector<TaskQueue::StagePlan> plan{{"fg", "Генерация кадров ×2", 4.0, false}, {"encode", "Кодирование", 2.0, false}};
+    // the runner's output as cmd scripts: whole lines, and a progress update without its newline glued to the log line
+    auto script = [&](const char* name, const char* firstLine) {
+        const auto path = d / name;
+        std::ofstream(path) << "@echo off\r\n"
+                            << firstLine << "\r\n"
+                            << "echo [2026-10-12 10:00:00.000] [warning] process: fg failed - the fg process crashed\r\n"
+                            << "echo encode: 4/4 frames\r\n";
+        return QString::fromStdWString(path.wstring());
+    };
+    for (const QString& file : {script("lines.cmd", "echo fg: 1/4 frames"), script("glued.cmd", "<nul set /p \"=fg: 2/4 frames\"")}) {
+        INFO(file.toStdString());
+        const int id = queue.enqueue("Обработка", "cmd", {"/c", file}, plan);
+        panel.watch(id, "clip.mp4 → clip_result.mkv");
+        Pump([&] { return queue.finished(id); }, 20000);
+        REQUIRE(queue.succeeded(id));
+        const TaskQueue::Progress p = queue.progress(id);
+        CHECK(p.failedStageTitles() == QStringList{"Генерация кадров ×2"});
+        CHECK(p.stagesDone == 1);
+        CHECK(p.fraction == 1.0);
+        CHECK(panel.headline().startsWith("Готово за"));
+        CHECK(panel.headline().contains("без стадии «Генерация кадров ×2»"));
+        const QStringList lines = panel.stageLines();
+        REQUIRE(lines.size() == 2);
+        CHECK(lines[0].startsWith("Генерация кадров ×2 · ошибка"));  // before: done as soon as encode started
+        CHECK(lines[1].startsWith("Кодирование · готово"));
+        auto* showResult = panel.findChild<QPushButton*>("showResult");
+        REQUIRE(showResult);
+        CHECK(!showResult->isHidden());
+    }
+}
+
+TEST_CASE("TaskQueue takes a failed stage only from the runner's line, not from any 'process: X failed' text", "[app][tasks][isolation][regression]") {
+    App();
+    const auto d = Dir("failed_line");
+    TaskQueue queue;
+    const std::vector<TaskQueue::StagePlan> plan{{"fg", "FG", 1.0, false}, {"encode", "Кодирование", 1.0, false}};
+    // the warning Subprocess writes when the job object cannot be used contains "process: AssignProcessToJobObject failed"
+    const auto path = d / "warn.cmd";
+    std::ofstream(path) << "@echo off\r\n"
+                        << "echo [2026-10-12 10:00:00.000] [warning] Subprocess: AssignProcessToJobObject failed (error 5); the child is not tied\r\n"
+                        << "echo fg: 4/4 frames\r\n"
+                        << "echo encode: 4/4 frames\r\n";
+    const int id = queue.enqueue("Обработка", "cmd", {"/c", QString::fromStdWString(path.wstring())}, plan);
+    Pump([&] { return queue.finished(id); }, 20000);
+    REQUIRE(queue.succeeded(id));
+    CHECK(queue.progress(id).failedStageTitles().isEmpty());  // before: a stage «AssignProcessToJobObject» failed
+}
+
+TEST_CASE("TaskQueue runs dlssvid process whose fg process crashes: fg failed, encode done, the task succeeded", "[app][tasks][process][isolation]") {
+    App();
+    const auto d = Dir("process_fg_crash");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    const auto out = d / "out.mkv";
+    TaskQueue queue;
+    QStringList output;
+    QObject::connect(&queue, &TaskQueue::taskOutput, [&](int, const QString& line) { output << line; });
+    const std::vector<TaskQueue::StagePlan> plan{{"depth", "Глубина", 1.0, false}, {"flow", "Векторы", 1.0, false}, {"upscale", "Апскейл", 1.0, false},
+                                                  {"nr", "NR", 1.0, false},          {"fg", "FG", 1.0, false},      {"encode", "Кодирование", 1.0, false}};
+    const QStringList args{"process", "-i", QString::fromStdWString(clip.wstring()), "-o", QString::fromStdWString(out.wstring()), "--passes",
+                           QString::fromStdWString((d / "p").wstring()), "--warp", "--codec", "ffv1", "--disable-unavailable",
+                           "--param", "depth.backend=stub", "--param", "flow.backend=stub", "--param", "upscale.backend=nis",
+                           "--param", "nr.backend=stub", "--param", "fg.backend=blend", "--fg-crash-after", "1"};
+    const int id = queue.enqueue("Обработка", DLSSVID_CLI_PATH, args, plan);
+    Pump([&] { return queue.finished(id); }, 120000);
+    REQUIRE(queue.finished(id));
+    CHECK(queue.succeeded(id));  // before: the whole run died with 0xC0000005, no result
+    const TaskQueue::Progress p = queue.progress(id);
+    CHECK(p.failedStageTitles() == QStringList{"FG"});
+    for (const auto& s : p.stages)
+        if (s.name == "encode") CHECK(s.state == "done");
+    CHECK(std::filesystem::exists(out));
+    CHECK(DecodeAll(out).size() == 4);  // color_nr: 4 frames
+    CHECK(std::any_of(output.begin(), output.end(), [](const QString& l) { return l.contains("process: fg failed"); }));
+}
+
+// Audit play-fg-rate (TASK-0038): playback is paced by a clock at the exact rational rate. Before, a QTimer of
+// floor(1000 / fps) ms advanced a frame per tick: 48 fps played at 50 Hz, 24 fps at 24.39 Hz.
+TEST_CASE("PlaybackClock paces frames at the exact rational rate: 48 fps is 48 Hz, not 50; 24 fps steps 1/24 s (regression: timer interval truncated to whole ms)",
+          "[app][playback][regression]") {
+    auto shownInOneSecond = [](Rational rate, const std::vector<int64_t>& stepsMs) {
+        PlaybackClock clock;
+        clock.Start(0, 0.0, rate);
+        int shown = 0;
+        size_t i = 0;
+        // up to 1 s plus the longest step: the frame due at exactly 1 s is shown by the first tick at or after it
+        for (int64_t now = 0; now <= 1'007'000'000;) {
+            if (clock.Decide(now, true) == PlaybackClock::Action::Show) {
+                ++shown;
+                clock.Advance(now);
+            }
+            now += stepsMs[i++ % stepsMs.size()] * 1'000'000;
+        }
+        return shown;
+    };
+    for (const std::vector<int64_t>& steps : {std::vector<int64_t>{1}, std::vector<int64_t>{1, 3, 7}}) {
+        CHECK(shownInOneSecond({48, 1}, steps) == 48);
+        CHECK(shownInOneSecond({24, 1}, steps) == 24);
+        CHECK(shownInOneSecond({50, 1}, steps) == 50);  // the test tells 48 from 50
+    }
+    PlaybackClock clock;
+    clock.Start(0, 0.0, {48, 1});
+    for (int k = 0; k < 5; ++k) {
+        CHECK(clock.NextTime() == Catch::Approx((k + 1) / 48.0));
+        clock.Advance(clock.DueNs());
+    }
+    clock.Start(0, 1.0 / 24.0 + 0.004, {48, 1});  // between two frames of the grid: snapped, the next is the following one
+    CHECK(clock.NextTime() == Catch::Approx(3.0 / 48.0));
+    PlaybackClock ntsc;
+    ntsc.Start(0, 0.0, {24000, 1001});
+    for (int k = 0; k < 1001; ++k) ntsc.Advance(ntsc.DueNs());
+    CHECK(std::llabs(ntsc.DueNs() - std::llround(1002.0 * 1e9 * 1001 / 24000)) <= 1);  // no drift over 1001 frames
+}
+
+TEST_CASE("PlaybackClock waits for a slow decode, skips after the stall limit and restarts the count instead of racing", "[app][playback]") {
+    PlaybackClock c;
+    c.Start(0, 0.0, {48, 1});
+    const int64_t period = c.PeriodNs();
+    const int64_t due = c.DueNs();
+    CHECK(due == period);
+    CHECK(c.Decide(due - 1, true) == PlaybackClock::Action::Wait);
+    CHECK(c.Decide(due, false) == PlaybackClock::Action::Wait);
+    CHECK(c.Decide(due + PlaybackClock::kStallNs - 1, false) == PlaybackClock::Action::Wait);
+    CHECK(c.Decide(due + PlaybackClock::kStallNs, false) == PlaybackClock::Action::Skip);
+    CHECK(c.Decide(due, true) == PlaybackClock::Action::Show);
+    c.Advance(due + 15'000'000);  // late by less than a period: the grid stays
+    CHECK(c.DueNs() == std::llround(2e9 / 48));
+    const int64_t now = c.DueNs() + 50'000'000;  // late by more than a period: count from now
+    c.Advance(now);
+    CHECK(c.DueNs() == now + period);
+    c.Restart(now + 1, 1.5);  // a jump while playing
+    CHECK(c.NextTime() == Catch::Approx(1.5 + 1.0 / 48.0));
+    CHECK(c.WakeNs(0) == c.DueNs());
+    CHECK(c.WakeNs(c.DueNs() + 5) == c.DueNs() + 5 + PlaybackClock::kPollNs);
+
+    // a loop back to the start on time keeps the grid; one a period late counts from now
+    PlaybackClock loop;
+    loop.Start(0, 0.0, {48, 1});
+    for (int k = 0; k < 4; ++k) loop.Advance(loop.DueNs());
+    const int64_t loopDue = loop.DueNs();
+    loop.Restart(loopDue + 5'000'000, 0.0);
+    CHECK(loop.DueNs() == loopDue + loop.PeriodNs());  // the next frame on the old grid, not 5 ms late
+    CHECK(loop.NextTime() == Catch::Approx(1.0 / 48.0));
+    const int64_t late = loop.DueNs() + 2 * loop.PeriodNs();
+    loop.Restart(late, 0.0);
+    CHECK(loop.DueNs() == late + loop.PeriodNs());
+}
+
+TEST_CASE("AppModel plays at the real rate of the fastest shown source and shows every frame (regression: 20 ms timer made 48 fps play at 50 Hz)",
+          "[app][model][gpu][regression]") {
+    App();
+    for (const int fps : {48, 24}) {
+        INFO(fps << " fps");
+        const auto d = Dir(fps == 48 ? "rate48" : "rate24");
+        WritePassFps(d / "passes" / (fps == 48 ? "color_fg" : "color_sr"), fps == 48 ? PassKind::ColorFg : PassKind::ColorSr, 49, fps);
+        Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+        AppModel model(true);
+        model.openProject(Q(d / "proj.dlssvid.json"));
+        model.setSingleSource(fps == 48 ? "color_fg" : "color_sr");
+        model.setTime(0.0);
+        model.store().WaitForCurrent();
+        std::vector<int64_t> visited;
+        QObject::connect(&model, &AppModel::timeChanged, [&] { visited.push_back(model.baseFrame()); });
+        QElapsedTimer played;
+        played.start();
+        model.setPlaying(true);
+        Pump([&] { return !model.playing(); }, 6000);
+        const double seconds = static_cast<double>(played.nsecsElapsed()) / 1e9;
+        std::vector<int64_t> all(48);
+        for (int i = 0; i < 48; ++i) all[static_cast<size_t>(i)] = i + 1;
+        CHECK(visited == all);                 // every frame shown, none skipped
+        CHECK(seconds >= 49.0 / fps - 0.005);  // never faster than real time (the old timer: 49 x 20 ms = 0.98 s at 48 fps);
+                                               // no upper bound: a loaded CI machine may only make it slower
+    }
+}
+
+// Deterministic counterpart (audit play-fg-rate): the playback timer driven by hand against a fake clock - one second of
+// the clock shows exactly as many frames as the source's rate, at the source's steps.
+TEST_CASE("AppModel paces playback by its clock: 48 frames of a 48 fps source in one second, 50 at 50 fps (regression: whole-ms timer)",
+          "[app][model][gpu][regression]") {
+    App();
+    for (const int fps : {48, 50}) {
+        INFO(fps << " fps");
+        const auto d = Dir(fps == 48 ? "clock48" : "clock50");
+        WritePassFps(d / "passes" / "color_fg", PassKind::ColorFg, 80, fps);
+        Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+        AppModel model(true);
+        model.openProject(Q(d / "proj.dlssvid.json"));
+        model.setSingleSource("color_fg");
+        for (int k = 0; k <= 60; ++k) {  // every frame of the second resident: the clock alone decides
+            model.setTime(static_cast<double>(k) / fps);
+            model.store().WaitForCurrent();
+        }
+        model.setTime(0.0);
+        model.store().WaitForCurrent();
+        int64_t fake = 0;
+        model.setPlaybackClock([&] { return fake; });
+        std::vector<double> times;
+        const auto conn = QObject::connect(&model, &AppModel::timeChanged, [&](double t) { times.push_back(t); });
+        model.setPlaying(true);
+        for (fake = 0; fake <= 1'000'000'000; fake += 1'000'000) model.playbackTick();
+        model.setPlaying(false);
+        QObject::disconnect(conn);
+        REQUIRE(times.size() == static_cast<size_t>(fps));  // the old timer: 1000 / floor(1000 / 48) = 50 frames a second
+        for (size_t k = 0; k < times.size(); ++k) CHECK(times[k] == Catch::Approx(static_cast<double>(k + 1) / fps));
+    }
+}
+
+// Review of TASK-0038 (play-2): a time set without setTime while playing (a project opened during playback restores its
+// saved time) restarts the clock from there instead of jumping back to where the clock was.
+TEST_CASE("AppModel playback goes on from a time changed behind its back", "[app][model][gpu][regression]") {
+    App();
+    const auto d = Dir("clock_bypass");
+    WritePassFps(d / "passes" / "color_fg", PassKind::ColorFg, 80, 48);
+    Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setSingleSource("color_fg");
+    for (int k = 0; k <= 70; ++k) {
+        model.setTime(static_cast<double>(k) / 48);
+        model.store().WaitForCurrent();
+    }
+    model.setTime(0.0);
+    int64_t fake = 0;
+    model.setPlaybackClock([&] { return fake; });
+    model.setPlaying(true);
+    for (fake = 0; fake <= 100'000'000; fake += 1'000'000) model.playbackTick();  // ~4 frames
+    REQUIRE(model.time() < 0.2);
+    model.state().time = 1.0;  // as reloadSources does with a project's saved time
+    for (int i = 0; i < 40; ++i, fake += 1'000'000) model.playbackTick();
+    model.setPlaying(false);
+    CHECK(model.time() > 1.0);  // before: back to ~0.1 s, where the clock was
+    CHECK(model.time() < 1.1);
 }

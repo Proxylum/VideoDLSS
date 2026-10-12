@@ -7,6 +7,9 @@ Programming Guide"): the current frame, depth and motion vectors go in as textur
 out as a texture — no swapchain, no hook, no Streamline binaries (which the GitHub checkout does not even ship).
 
 So the stage lives in `core/stages/fg/` (`DlssgFrameGenerator`, `RifeFrameGenerator`, `BlendFrameGenerator`,
-`FgStage`) and runs inside `dlssvid fg`. Process isolation for the GUI is the same as for every stage: the project
-panel launches `dlssvid fg` through `TaskQueue`; a crash ends that process only (`tests/app`: a deliberately
-crashing `dlssvid fg --crash-after 0`). See `docs/plans/07-fg.md` and `docs/architecture.md`.
+`FgStage`) and runs inside `dlssvid fg`, which is the worker process. A single stage from the project panel runs as
+`dlssvid fg` through `TaskQueue`; the whole pipeline (`dlssvid process`, «Обработать», `bench`) starts FG as a child
+`dlssvid fg --as-stage` (`core/pipeline/FgProcess.h`, audit fg-2): a crash of DLSS-G ends that process only, the
+stage is reported `failed` and the result is encoded from color_nr (tests: `--crash-after`, `--crash-on-exit`,
+`--stall` in `tests/integration/test_cli_process.cpp`, `tests/app`). See `docs/plans/07-fg.md` and
+`docs/architecture.md`.

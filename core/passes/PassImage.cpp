@@ -109,6 +109,27 @@ double PassImage::MaxAbsDiff(const PassImage& a, const PassImage& b) {
     return m;
 }
 
+void NegateChannel(PassImage& img, size_t channel) {
+    const size_t n = img.ChannelCount();
+    if (channel >= n)
+        Throw("NegateChannel: channel " + std::to_string(channel) + " of a " + std::to_string(n) + "-channel image");
+    const size_t pixels = static_cast<size_t>(img.width) * img.height;
+    switch (img.type) {
+        case PixelType::F32: {
+            float* p = img.As<float>();
+            for (size_t i = 0; i < pixels; ++i) p[i * n + channel] = -p[i * n + channel];
+            break;
+        }
+        case PixelType::F16: {
+            uint16_t* h = img.As<uint16_t>();  // the sign bit: exact, no round trip through float
+            for (size_t i = 0; i < pixels; ++i) h[i * n + channel] ^= 0x8000u;
+            break;
+        }
+        default:
+            Throw("NegateChannel: " + std::string(ToString(img.type)) + " samples cannot hold negative values (f16 or f32 needed)");
+    }
+}
+
 // ---- pass kinds ----------------------------------------------------------------------
 
 namespace {

@@ -148,11 +148,14 @@ PassImage DilateMvByDepth(const PassImage& mv, const PassImage& depth, int radiu
     return out;
 }
 
-PassImage FlipMvY(const PassImage& mv) {
+void FlipMvYInPlace(PassImage& mv) {
     CheckMv(mv, "FlipMvY");
+    NegateChannel(mv, 1);
+}
+
+PassImage FlipMvY(const PassImage& mv) {
     PassImage out = mv;
-    for (uint32_t y = 0; y < mv.height; ++y)
-        for (uint32_t x = 0; x < mv.width; ++x) out.Set(x, y, 1, -mv.Get(x, y, 1));
+    FlipMvYInPlace(out);
     return out;
 }
 

@@ -12,6 +12,7 @@
 
 #include "TestClips.h"
 #include "convert/ColorConvert.h"
+#include "convert/MvConvert.h"
 #include "gpu/D3D12Device.h"
 #include "gpu/GpuFrameCache.h"
 #include "io/VideoDecoder.h"
@@ -293,4 +294,70 @@ TEST_CASE("Neural Rendering (NGX Feature 18) produces color_nr on an NVIDIA GPU 
             CHECK(out0.Get(x, y, 1) >= 0.f);
             CHECK(out0.Get(x, y, 1) <= 1.f);
         }
+}
+
+// Audit pass-mv-yup (TASK-0038): an mv_dlss pass stored with y up reaches the cache slot - and so the NR, upscale and FG
+// backends, which all upload their guides through PassReader::ReadFrame - in the DLSS convention (y down).
+TEST_CASE("NrStage puts a y_up mv_dlss pass into the cache slot in the DLSS convention", "[integration][nr][mv][y_up]") {
+    const uint32_t w = 64, h = 48, gw = 32, gh = 24;
+    const int frames = 2;
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = gw;
+    spec.height = gh;
+    const auto dir = Dir("yup");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const auto passes = dir / "passes";
+    auto mvDown = [&](int64_t i) {  // what the backends must get
+        PassImage mv = MakePassImage(PassKind::MvDlss, gw, gh);
+        for (uint32_t y = 0; y < gh; ++y)
+            for (uint32_t x = 0; x < gw; ++x) {
+                mv.Set(x, y, 0, 0.5f + static_cast<float>(i));
+                mv.Set(x, y, 1, 0.25f + 0.01f * static_cast<float>(y));
+            }
+        return mv;
+    };
+    WritePass(passes / "color_sr", PassKind::ColorSr, w, h, frames, FileFormat::Exr, [&](int64_t i, PassImage& img) { img = ColorFrame(i, w, h); });
+    WritePass(passes / "depth_dlss", PassKind::DepthDlss, gw, gh, frames, FileFormat::Exr, [&](int64_t, PassImage& img) {
+        for (uint32_t y = 0; y < gh; ++y)
+            for (uint32_t x = 0; x < gw; ++x) img.Set(x, y, 0, 0.5f);
+    });
+    WritePass(passes / "mv_dlss", PassKind::MvDlss, gw, gh, frames, FileFormat::Exr, [&](int64_t i, PassImage& img) { img = FlipMvY(mvDown(i)); });
+    Manifest m = Manifest::Load(passes / "mv_dlss");
+    m.mv.yUp = true;  // stored y up, as another tool would
+    m.Save(passes / "mv_dlss");
+
+    D3D12Device dev({true, false});
+    NrStageOptions o;
+    o.backend = "stub";
+    o.outputDir = passes;
+    o.colorDir = passes / "color_sr";
+    o.depthDir = passes / "depth_dlss";
+    o.mvDir = passes / "mv_dlss";
+    o.sourceFile = "clip.mkv";
+    Pipeline pipeline(dev, 4);
+    auto stage = std::make_unique<NrStage>(o);
+    NrStage* raw = stage.get();
+    pipeline.AddStage(std::move(stage));
+    pipeline.Init();
+    VideoDecoder dec(clip);
+    CpuFrame f;
+    int64_t n = 0;
+    while (dec.NextFrame(f)) {
+        GpuFrameCache::Slot& slot = pipeline.Cache().Acquire(f.index, f.desc);
+        pipeline.ProcessFrame(f);
+        REQUIRE(slot.passes.count("mv_dlss") == 1);
+        const PassImage got = pipeline.Cache().DownloadPass(slot, "mv_dlss").ConvertTo(PixelType::F32);
+        const PassImage want = mvDown(f.index);
+        REQUIRE(got.SameLayout(want));
+        CHECK(PassImage::MaxAbsDiff(got, want) < 2e-3);  // y down; the stored (y-up) vectors would be off by ~0.5
+        CHECK(got.Get(4, 10, 1) > 0.f);
+        ++n;
+    }
+    pipeline.Finish();
+    CHECK(n == frames);
+    const auto* stub0 = dynamic_cast<const StubNrBackend*>(raw->Backend(0));
+    REQUIRE(stub0);
+    CHECK(stub0->LastHadMv());
+    pipeline.Shutdown();
 }

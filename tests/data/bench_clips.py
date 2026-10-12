@@ -5,8 +5,9 @@
 
 Sections (docs/benchmarks.md):
   flow     — OFA vs SEA-RAFT: warp-PSNR (mean / min), mean |v|, ms/frame            (stage 3)
-  depth    — DA3 vs VDA: metric scale (mean / median depth of depth_raw), TAE with motion compensation
-             (--mv-dir from the OFA run), ms/frame                                    (stage 2)
+  depth    — DA3 vs VDA, each with the default temporal alignment (auto: scale over a centred ±8-frame window for
+             metric models, TASK-0038) and without it (--stabilize none): metric scale (mean / median depth of
+             depth_raw), TAE with motion compensation (--mv-dir from the OFA run), ms/frame          (stage 2)
   upscale  — A/B ×2 against the clip itself: NIS / bicubic / DLSS (jitter emulation) / DLSS + guides /
              Real-ESRGAN x2plus and general-x4v3 through TensorRT (trt)
              (depth + MV estimated on the half-resolution input), PSNR Y / RGB, SSIM Y (stage 5 methodology)
@@ -25,8 +26,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-
-import numpy as np
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -58,8 +57,40 @@ def grab(pattern: str, text: str, group: int = 1, default=None):
     return float(m.group(group)) if m else default
 
 
+def pass_frames(pass_dir: Path) -> int:
+    """frame_count of a pass folder's manifest; 0 when there is none."""
+    try:
+        return int(json.loads((pass_dir / "manifest.json").read_text(encoding="utf-8")).get("frame_count", 0))
+    except (OSError, ValueError):
+        return 0
+
+
+def clip_frames(clip: Path, limit: int = -1) -> int:
+    """Frames dlssvid reads from the clip: all of them, or at most --frames."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries", "stream=nb_read_packets",
+                          "-of", "csv=p=0", str(clip)], check=True, capture_output=True, text=True).stdout
+    n = int(out.strip().split(",")[0])
+    return min(n, limit) if limit > 0 else n
+
+
+def mv_covers(mv_dir: Path, need: int) -> bool:
+    """The mv_dlss pass has a vector field for every frame the depth run reads. A shorter one (a flow run with a smaller
+    --frames) would turn the TAE of the remaining frames into the static proxy without a word (review of TASK-0038)."""
+    return pass_frames(mv_dir) >= need
+
+
+def fresh_dir(path: Path) -> Path:
+    """An empty output folder: frames left by an earlier, longer run (--keep-passes) would enter depth_stats."""
+    shutil.rmtree(path, ignore_errors=True)
+    if path.exists():
+        raise RuntimeError(f"cannot clear {path}")
+    return path
+
+
 def depth_stats(pass_dir: Path) -> dict:
     """Mean / median of the depth_raw NPZ frames (metres for metric models)."""
+    import numpy as np  # here: the helpers above are tested without numpy (tests/data/test_bench_clips.py)
+
     files = sorted(pass_dir.glob("*.npz"))
     if not files:
         return {}
@@ -87,6 +118,7 @@ def main() -> int:
     ap.add_argument("--frames", type=int, default=-1, help="frames per clip (default: all)")
     ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--force", action="store_true", help="re-run measurements already present in results.json")
+    ap.add_argument("--keep-passes", action="store_true", help="keep the depth / flow pass folders (NPZ / EXR: gigabytes per clip)")
     args = ap.parse_args()
 
     cli = args.cli
@@ -130,20 +162,38 @@ def main() -> int:
                 save()
 
         if "depth" in sections:
+            # warped TAE needs the OFA vectors of the clip: make them when the flow section did not leave them
             mv_dir = d / "flow_ofa" / "mv_dlss"
-            mv = ["--mv-dir", str(mv_dir)] if mv_dir.exists() else []
-            for backend in ("da3", "vda"):
-                if done("depth", backend):
+            need = clip_frames(clip, args.frames)
+            if not mv_covers(mv_dir, need):
+                run([cli, "flow", "--backend", "ofa", "-i", str(clip), "-o", str(fresh_dir(d / "flow_ofa")), *frames], d / "flow_ofa_mv.log")
+            if not mv_covers(mv_dir, need):
+                raise RuntimeError(f"{name}: OFA mv_dlss in {mv_dir} has {pass_frames(mv_dir)} of {need} frames - the TAE would silently become static")
+            mv = ["--mv-dir", str(mv_dir)]
+            # records from before TASK-0038 carry no "stabilize": measured without alignment, they are stale
+            for key in list(r.get("depth", {})):
+                if isinstance(r["depth"][key], dict) and "stabilize" not in r["depth"][key]:
+                    del r["depth"][key]
+            variants = [("da3", "da3", []), ("da3:none", "da3", ["--stabilize", "none"]), ("vda", "vda", []), ("vda:none", "vda", ["--stabilize", "none"])]
+            for key, backend, extra in variants:
+                if done("depth", key):
                     continue
-                text = run([cli, "depth", "--backend", backend, "--format", "npz", "-i", str(clip), "-o", str(d / f"depth_{backend}"), *mv, *frames], d / f"depth_{backend}.log")
-                r.setdefault("depth", {})[backend] = dict(
-                    tae=grab(r"mean TAE:\s+([\d.]+)", text), tae_mode="warped" if mv else "static", ms_per_frame=grab(r"ms/frame:\s+([\d.]+)", text),
-                    frames=grab(r"frames:\s+(\d+)", text), **depth_stats(d / f"depth_{backend}" / "depth_raw"))
-                print(f"  depth {backend}: {r['depth'][backend]}", flush=True)
+                out = fresh_dir(d / f"depth_{key.replace(':', '_')}")  # no ':' in Windows paths
+                text = run([cli, "depth", "--backend", backend, "--format", "npz", "-i", str(clip), "-o", str(out), *mv, *extra, *frames], d / f"depth_{key.replace(':', '_')}.log")
+                sp = json.loads((out / "depth_raw" / "manifest.json").read_text(encoding="utf-8")).get("stage_params", {})
+                r.setdefault("depth", {})[key] = dict(
+                    tae=grab(r"mean TAE:\s+([\d.]+)", text), tae_mode="warped", ms_per_frame=grab(r"ms/frame:\s+([\d.]+)", text),
+                    frames=grab(r"frames:\s+(\d+)", text), stabilize=sp.get("stabilize"), stabilize_requested=sp.get("stabilize_requested"),
+                    stabilize_window=sp.get("stabilize_window"), stabilize_scale=sp.get("stabilize_scale"), **depth_stats(out / "depth_raw"))
+                print(f"  depth {key}: {r['depth'][key]}", flush=True)
                 save()
+                if not args.keep_passes:
+                    shutil.rmtree(out, ignore_errors=True)  # ~6 MB a frame of NPZ at 1920x800
             a, b = r["depth"].get("da3", {}), r["depth"].get("vda", {})
             if a.get("median_m") and b.get("median_m"):
                 r["depth"]["scale_ratio_da3_over_vda"] = a["median_m"] / b["median_m"]
+            if not args.keep_passes and "upscale" not in sections and "fg" not in sections:
+                shutil.rmtree(d / "flow_ofa", ignore_errors=True)
 
         if "fg" in sections and json.loads(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "json", str(clip)],
                                                            check=True, capture_output=True, text=True).stdout)["streams"][0]["r_frame_rate"] in ("60/1", "50/1", "48/1"):
@@ -222,14 +272,16 @@ def main() -> int:
             for backend, m in r.get("flow", {}).items():
                 print(f"| {name} | {backend} | {f(m.get('frames'), '.0f')} | {f(m.get('mean_v_px'))} | {f(m.get('warp_psnr_db'))} ({f(m.get('warp_psnr_min_db'))}) | {f(m.get('ms_per_frame'), '.1f')} |")
     if "depth" in sections:
-        print("\n| Клип | Бэкенд | Кадров | median depth, м | mean depth, м | TAE (warp) | мс/кадр |\n|---|---|---|---|---|---|---|")
+        print("\n| Клип | Бэкенд | Выравнивание | Кадров | median depth, м | mean depth, м | TAE (warp) | мс/кадр |\n|---|---|---|---|---|---|---|---|")
         for name, r in results.items():
-            for backend, m in r.get("depth", {}).items():
+            for key, m in r.get("depth", {}).items():
                 if not isinstance(m, dict):
                     continue
-                print(f"| {name} | {backend} | {f(m.get('frames'), '.0f')} | {f(m.get('median_m'))} | {f(m.get('mean_m'))} | {f(m.get('tae'), '.4f')} | {f(m.get('ms_per_frame'), '.1f')} |")
+                align = "выкл" if m.get("stabilize") == "none" else f"{m.get('stabilize')} ±{m.get('stabilize_window')}"
+                print(f"| {name} | {key.split(':')[0]} | {align} | {f(m.get('frames'), '.0f')} | {f(m.get('median_m'))} | {f(m.get('mean_m'))} | {f(m.get('tae'), '.4f')} |"
+                      f" {f(m.get('ms_per_frame'), '.1f')} |")
             if "scale_ratio_da3_over_vda" in r.get("depth", {}):
-                print(f"| {name} | DA3 / VDA (median) | | ×{r['depth']['scale_ratio_da3_over_vda']:.2f} | | | |")
+                print(f"| {name} | DA3 / VDA (median, авто) | | | ×{r['depth']['scale_ratio_da3_over_vda']:.2f} | | | |")
     if "fg" in sections:
         print("\n| Клип | Бэкенд FG | PSNR Y, дБ (min) | PSNR RGB, дБ | SSIM Y | мс/кадр |\n|---|---|---|---|---|---|")
         for name, r in results.items():

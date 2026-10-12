@@ -54,6 +54,13 @@ GpuFrameCache::Slot& GpuFrameCache::Acquire(int64_t frameIndex, const FrameDesc&
         }
 #endif
     }
+    // another frame takes the slot: its pass textures belong to the old frame (a delayed stage - depth alignment, a VDA
+    // window - must not leave them for a reader of this one)
+    // (the textures go to `spare`: the next frame's upload reuses them - review of TASK-0038, no allocation per frame)
+    if (slot.frameIndex != frameIndex) {
+        for (auto& [name, pt] : slot.passes) slot.spare[name] = std::move(pt);
+        slot.passes.clear();
+    }
     slot.frameIndex = frameIndex;
     slot.layout = Layout::Yuv420p;
     return slot;
@@ -114,7 +121,17 @@ TexLayout LayoutFor(const PassImage& img) {
 void GpuFrameCache::UploadPass(Slot& slot, const std::string& name, const PassImage& img) {
     if (img.Empty()) Throw("GpuFrameCache::UploadPass: empty image");
     const TexLayout lay = LayoutFor(img);
-    PassTexture& pt = slot.passes[name];
+    auto it = slot.passes.find(name);
+    if (it == slot.passes.end()) {
+        auto spare = slot.spare.find(name);
+        if (spare != slot.spare.end()) {
+            it = slot.passes.emplace(name, std::move(spare->second)).first;
+            slot.spare.erase(spare);
+        } else {
+            it = slot.passes.emplace(name, PassTexture{}).first;
+        }
+    }
+    PassTexture& pt = it->second;
     if (!pt.texture || pt.width != img.width || pt.height != img.height || pt.format != lay.format) {
         pt.texture = device_.CreateTexture2D(img.width, img.height, lay.format);
         pt.width = img.width;

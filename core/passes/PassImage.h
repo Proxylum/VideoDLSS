@@ -54,6 +54,10 @@ struct PassImage {
     static double MaxAbsDiff(const PassImage& a, const PassImage& b);
 };
 
+// Flips the sign of one channel in place, exactly: f32 by negation, f16 by its sign bit. Integer samples cannot hold
+// negative values and throw. Used for motion vectors stored with y up (mv.y_up): PassReader negates v on read.
+void NegateChannel(PassImage& img, size_t channel);
+
 // ---- pass kinds ----------------------------------------------------------------------
 
 enum class PassKind : uint8_t {

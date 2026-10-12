@@ -55,5 +55,10 @@ std::vector<std::string> ValidateStageParams(const std::string& stage, const nlo
 nlohmann::json EffectiveStageParams(const std::string& stage, const nlohmann::json& params);
 // A parameter's value as its form shows it: the choice label, a number, «да» / «нет».
 std::string ParamValueLabel(const ParamSpec& spec, const nlohmann::json& value);
+// The options of `dlssvid <stage>` for the parameters (the GUI's «Запустить этап»; review of TASK-0038): `--<key> <value>`
+// with the schema key (the commands take the underscore spelling as an alias); a flag only when it differs from its
+// default - `--<key>` when set, `--no-<key>` when a default-on flag is cleared (jitter, guides); empty strings are left
+// out; upscale's target_width + target_height become `--target WxH`.
+std::vector<std::string> StageCliArgs(const std::string& stage, const nlohmann::json& params);
 
 }  // namespace dlssvid

@@ -1,6 +1,13 @@
 #include "util/Paths.h"
 
 #include <string>
+#include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#include "util/Error.h"
 
 namespace dlssvid {
 
@@ -17,6 +24,17 @@ std::filesystem::path Win32LongPath(const std::filesystem::path& p) {
     return std::filesystem::path(L"\\\\?\\" + s);
 #else
     return p;
+#endif
+}
+
+std::filesystem::path CurrentExecutable() {
+#ifdef _WIN32
+    std::vector<wchar_t> buf(32768);
+    const DWORD n = GetModuleFileNameW(nullptr, buf.data(), static_cast<DWORD>(buf.size()));
+    if (n == 0 || n >= buf.size()) Throw("cannot get the path of the running executable (error " + std::to_string(GetLastError()) + ")");
+    return std::filesystem::path(std::wstring(buf.data(), n));
+#else
+    return std::filesystem::read_symlink("/proc/self/exe");
 #endif
 }
 

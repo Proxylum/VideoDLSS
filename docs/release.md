@@ -83,7 +83,9 @@ C:\dlss-video\bin\dlssvid_golden_tests.exe "[golden]~[gpu]"   :: только д
 1. Ветка `release/X.Y.Z`: `project(dlss-video VERSION X.Y.Z)` в `CMakeLists.txt`, раздел в `CHANGELOG.md`, строка версии в README.
    Версия релиза не входит в отпечатки пассов: поле `tool.app` — версия алгоритма пассов `kPassToolVersion`
    (`core/pipeline/PassFingerprint.h`), её поднимают отдельно и только когда результат стадии меняется при тех же
-   параметрах, иначе релиз обесценил бы все пассы пользователей.
+   параметрах, иначе релиз обесценил бы все пассы пользователей. Когда меняется одна стадия, вместо глобальной версии
+   поднимают её ревизию в `PassToolVersionFor` (`tool.app` = `<версия>+<стадия>.<ревизия>`, например `0.1.0+depth.2`):
+   пассы остальных стадий остаются валидными.
 2. Локально: сборка, `ctest`, `scripts\package.cmd` (и `full`), распаковать ZIP во временную папку, golden на распакованной
    копии (`DLSSVID_CLI`, `DLSSVID_GOLDEN_DIR`; для `[gpu]`-части положить DLL NVIDIA в её `bin\nvidia`).
 3. Pull request → CI → слияние в `main` → аннотированный тег `vX.Y.Z` на merge-коммите → push тега: workflow тега собирает

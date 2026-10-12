@@ -117,9 +117,14 @@ std::string Sha256FileCached(const std::filesystem::path& path) {
     return e.hash;
 }
 
+std::string PassToolVersionFor(const std::string& stage, const nlohmann::json& p) {
+    if (stage == "depth" && Str(p, "stabilize", "auto") != "none") return std::string(kPassToolVersion) + "+depth.2";
+    return kPassToolVersion;
+}
+
 ToolInfo ToolForStage(const std::string& stage, const nlohmann::json& p) {
     ToolInfo t;
-    t.app = kPassToolVersion;  // not DLSSVID_VERSION: a release does not invalidate the passes (CHANGELOG 0.2.0)
+    t.app = PassToolVersionFor(stage, p);  // not DLSSVID_VERSION: a release does not invalidate the passes (CHANGELOG 0.2.0)
     const char* def = stage == "depth" ? "da3" : stage == "flow" ? "ofa" : stage == "upscale" ? "dlss" : stage == "nr" ? "ngx" : stage == "fg" ? "dlssg" : "";
     t.backend = Str(p, "backend", def);
     const std::string model = Str(p, "model", "");

@@ -4,11 +4,13 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 
 #include "gpu/D3D12Device.h"
 #include "io/VideoDecoder.h"
 #include "passes/Manifest.h"
+#include "pipeline/FgProcess.h"
 #include "stages/fg/FgStage.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "util/Error.h"
@@ -76,13 +78,88 @@ int CmdFgCheck(const FgCommands::FgArgs& a) {
     return d.ok ? 0 : 1;
 }
 
+// One protocol line on stdout in a single write: the runner parses it, and the log (spdlog on the same handle) must not
+// split it.
+void EmitLine(const std::string& text) {
+    const std::string s = text + "\n";
+    std::fflush(stdout);
+    DWORD written = 0;
+    WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), s.data(), static_cast<DWORD>(s.size()), &written, nullptr);
+}
+
+nlohmann::json Summary(const FgRunResult& r, double sec) {
+    return {{"color_fg", r.outDir.string()},
+            {"backend", r.backend},
+            {"diagnostics", r.diagnostics},
+            {"disabled", r.stats.disabled},
+            {"disabled_reason", r.stats.disabledReason},
+            {"seconds", sec},
+            {"stats",
+             {{"frames", r.stats.frames},
+              {"generated", r.stats.generated},
+              {"frames_out", FgFrameCount(r.stats.frames, r.stats.multiplier)},
+              {"multiplier", r.stats.multiplier},
+              {"ms_per_frame_backend", r.stats.MeanMs()},
+              {"ms_per_frame_wall", r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0},
+              {"size", {r.stats.width, r.stats.height}},
+              {"depth_used", r.stats.depthUsed},
+              {"mv_used", r.stats.mvUsed},
+              {"color_source", r.stats.colorSource}}}};
+}
+
+// `fg --as-stage`: the FG stage of `dlssvid process` in its own process (audit fg-2). The options are assembled exactly as
+// the runner does in-process (defaults + the stage's parameters through FgStage::ApplyParams), so color_fg is the same.
+int CmdFgAsStage(const FgCommands::FgArgs& a) {
+    if (a.input.empty() || a.output.empty()) Throw("fg --as-stage: -i and -o are required");
+    if (a.stall) {
+        Log()->error("fg: --stall: hanging before the input (isolation test)");
+        for (;;) Sleep(1000);
+    }
+    nlohmann::json params = a.paramsJson.empty() ? nlohmann::json::object() : nlohmann::json::parse(a.paramsJson);
+    if (!params.is_object()) Throw("fg --as-stage: --params-json must be a JSON object");
+    VideoDecoder decoder(a.input);
+    FgStageOptions o;
+    o.outputDir = a.output;
+    o.colorDir = a.colorDir;
+    o.depthDir = a.depthDir;
+    o.mvDir = a.mvDir;
+    o.disableWhenUnavailable = a.disableUnavailable;
+    const auto fmt = ParseFileFormat(a.format);  // any pass format, as `process` accepts for the stage
+    if (!fmt) Throw("fg --as-stage: unknown --format '" + a.format + "'");
+    o.format = *fmt;
+    o.crashAfter = a.crashAfter;
+    o.sourceFile = std::filesystem::path(a.input).filename().string();
+    o.sourceHash = a.sourceHash.rfind("sha256:", 0) == 0 ? a.sourceHash : "sha256:" + Sha256File(a.input);
+    D3D12Device device({a.warp, false});
+    const auto t0 = std::chrono::steady_clock::now();
+    // the result goes out as soon as color_fg is written - before the backend is released, where a driver fault ends
+    // the process most often: the runner then keeps the complete pass (it checks the pass on a non-zero exit code)
+    RunFg(decoder, device, o, a.frames, [](int64_t n) { EmitLine(std::string(kFgProgressPrefix) + std::to_string(n)); }, params,
+          [&](const FgRunResult& r) {
+              const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+              EmitLine(std::string(kFgResultPrefix) + Summary(r, sec).dump(-1, ' ', true, nlohmann::json::error_handler_t::replace));
+              if (a.crashOnExit) {  // isolation test: a crash while the backend is released
+                  Log()->error("fg: --crash-on-exit: terminating the process after the result (isolation test)");
+                  TerminateProcess(GetCurrentProcess(), 0xC0000005u);
+              }
+          });
+    return 0;
+}
+
 int CmdFg(const FgCommands::FgArgs& a) {
+    if (a.asStage) {
+        // A crashed child must exit, not wait on a Windows Error Reporting dialog (the runner's job object also sets
+        // this for unhandled exceptions); abort() still prints its message, without the report dialog.
+        SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+        _set_abort_behavior(0, _CALL_REPORTFAULT);
+    }
     if (a.crashAfter == 0) {
         // isolation test: die before touching any input, the way a runtime fault would
         Log()->error("fg: --crash-after 0: terminating the process (isolation test)");
         TerminateProcess(GetCurrentProcess(), 0xC0000005u);
     }
     if (a.check) return CmdFgCheck(a);
+    if (a.asStage) return CmdFgAsStage(a);
     if (a.input.empty()) Throw("fg: -i/--input is required (or --check)");
     if (a.output.empty()) Throw("fg: -o/--output is required");
     VideoDecoder decoder(a.input);
@@ -144,23 +221,7 @@ int CmdFg(const FgCommands::FgArgs& a) {
                 static_cast<long long>(FgFrameCount(r.stats.frames, r.stats.multiplier)), static_cast<long long>(r.stats.generated), r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0,
                 r.stats.MeanMs());
     if (!a.video.empty()) std::printf("video:       %s\n", a.video.c_str());
-    if (!a.json.empty()) {
-        nlohmann::json j = {{"color_fg", r.outDir.string()},
-                            {"backend", r.backend},
-                            {"diagnostics", r.diagnostics},
-                            {"stats",
-                             {{"frames", r.stats.frames},
-                              {"generated", r.stats.generated},
-                              {"frames_out", FgFrameCount(r.stats.frames, r.stats.multiplier)},
-                              {"multiplier", r.stats.multiplier},
-                              {"ms_per_frame_backend", r.stats.MeanMs()},
-                              {"ms_per_frame_wall", r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0},
-                              {"size", {r.stats.width, r.stats.height}},
-                              {"depth_used", r.stats.depthUsed},
-                              {"mv_used", r.stats.mvUsed},
-                              {"color_source", r.stats.colorSource}}}};
-        std::ofstream(a.json) << j.dump(2) << "\n";
-    }
+    if (!a.json.empty()) std::ofstream(a.json) << Summary(r, sec).dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
     return 0;
 }
 
@@ -191,6 +252,16 @@ void FgCommands::Register(CLI::App& app) {
     fg_->add_option("--check-size,--check_size", fa_.checkSize, "resolution for --check")->default_val("1280x720");
     fg_->add_option("--json", fa_.json, "write the run summary / diagnostics to this JSON file");
     fg_->add_option("--crash-after,--crash_after", fa_.crashAfter, "development: terminate the process after N input frames (0 = immediately) — isolation test")->group("");
+    // the stage of `dlssvid process` in its own process (pipeline/FgProcess.h) - hidden
+    fg_->add_flag("--as-stage,--as_stage", fa_.asStage, "run as the fg stage of `dlssvid process`: @progress / @result lines on stdout")->group("");
+    fg_->add_option("--params-json,--params_json", fa_.paramsJson, "the stage's parameters as a JSON object (--as-stage)")->group("");
+    fg_->add_option("--source-hash,--source_hash", fa_.sourceHash, "sha256:<hex> of the input, instead of hashing it again (--as-stage)")->group("");
+    fg_->add_flag("--disable-unavailable,--disable_unavailable", fa_.disableUnavailable, "report a disabled stage when the backend is unavailable (--as-stage)")
+        ->group("");
+    fg_->add_flag("--crash-on-exit,--crash_on_exit", fa_.crashOnExit,
+                  "development: terminate after printing the result, before the backend is released (--as-stage) — isolation test")
+        ->group("");
+    fg_->add_flag("--stall", fa_.stall, "development: hang before reading the input (--as-stage) — isolation test")->group("");
 }
 
 int FgCommands::Dispatch() {

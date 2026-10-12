@@ -49,6 +49,7 @@ add_executable(dlssvid_unit_tests
   unit/test_tonemap.cpp
   unit/test_nr.cpp
   unit/test_fg.cpp
+  unit/test_fg_process.cpp
   unit/test_repo_hygiene.cpp
 )
 target_link_libraries(dlssvid_unit_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
@@ -155,4 +156,7 @@ find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
   add_test(NAME sdk.layout_check COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/setup_sdk.py --check --from-env)
   set_tests_properties(sdk.layout_check PROPERTIES SKIP_RETURN_CODE 77 LABELS "sdk" TIMEOUT 120)
+  # the benchmark script's guards against stale passes (review of TASK-0038); standard library only
+  add_test(NAME scripts.bench_clips COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tests/data/test_bench_clips.py)
+  set_tests_properties(scripts.bench_clips PROPERTIES LABELS "scripts" TIMEOUT 60)
 endif()

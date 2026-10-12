@@ -91,12 +91,16 @@ std::vector<StageSchema> Build() {
                   {"worker", "Python worker", "внешний воркер (models/export)"},
                   {"stub", "stub (тест)", "синтетическая глубина без модели"}}),
             Enum("stabilize", "Стабилизация", "auto",
-                 {{"auto", "авто", "масштаб и сдвиг по окну кадров"}, {"none", "выкл", ""}, {"scale", "масштаб", ""}, {"scale_shift", "масштаб + сдвиг", ""}},
-                 ParamWidget::Toggle, "временная стабилизация метрической глубины"),
+                 {{"auto", "авто", "metric-модели (DA3, VDA metric) — масштаб, относительные — масштаб и сдвиг"},
+                  {"none", "выкл", "глубина кадр за кадром, как её дала модель"},
+                  {"scale", "масштаб", "только масштаб: метры сохраняют отношения"},
+                  {"scale_shift", "масштаб + сдвиг", "для относительной глубины; на метрической сдвиг искажает метры"}},
+                 ParamWidget::Toggle, "временное выравнивание глубины по окну ±N кадров вокруг кадра (N — «Окно стабилизации»)"),
             Text("model", "Модель (id реестра)", "", "пусто = модель бэкенда по умолчанию"),
             Number("input_size", "Размер входа модели", ParamType::Int, 518, 64, 4096, 14, ParamWidget::Spin, "", true),
             Number("max_res", "Максимальная сторона", ParamType::Int, 1080, 256, 8192, 1, ParamWidget::Spin, "", true),
-            Number("stabilize_window", "Окно стабилизации", ParamType::Int, 8, 1, 64, 1, ParamWidget::Spin, "", true),
+            Number("stabilize_window", "Окно стабилизации, ± кадров", ParamType::Int, 8, 1, 64, 1, ParamWidget::Spin,
+                   "кадр выравнивается по кадрам t−N…t+N; глубина выходит с задержкой N кадров", true),
             Number("z_near", "Ближняя плоскость, м", ParamType::Float, 0.1, 0.001, 100.0, 0.01, ParamWidget::Spin, "", true),
             Number("z_far", "Дальняя плоскость, м", ParamType::Float, 1000.0, 1.0, 100000.0, 1.0, ParamWidget::Spin, "", true),
             Flag("fp32", "FP32", false, "модель в fp32 вместо fp16"),
@@ -160,7 +164,8 @@ std::vector<StageSchema> Build() {
             Text("preset", "Пресет DLSS", "default"),
             Flag("jitter", "Джиттер DLSS", true),
             Number("jitter_sign", "Знак джиттера", ParamType::Float, 1.0, -1.0, 1.0, 2.0, ParamWidget::Spin, "", true),
-            Flag("artifact_reduction_only", "Только подавление артефактов", false),
+            Flag("artifact_reduction_only", "Без масштабирования (×1)", false,
+                 "DLSS — сглаживание DLAA, NIS — повышение резкости; артефакты сжатия не подавляются"),
             Number("target_width", "Ширина цели", ParamType::Int, 0, 0, 7680, 2, ParamWidget::Spin, "0 = по масштабу", true),
             Number("target_height", "Высота цели", ParamType::Int, 0, 0, 4320, 2, ParamWidget::Spin, "0 = по масштабу", true),
             Flag("no_fallback", "Без запасного NIS", false, "ошибка вместо перехода на NIS"),
@@ -342,6 +347,39 @@ std::string ParamValueLabel(const ParamSpec& spec, const nlohmann::json& value) 
         return buf;
     }
     return value.is_string() ? value.get<std::string>() : value.dump();
+}
+
+std::vector<std::string> StageCliArgs(const std::string& stage, const nlohmann::json& params) {
+    std::vector<std::string> out;
+    if (!params.is_object()) return out;
+    const StageSchema* schema = FindStageSchema(stage);
+    int64_t targetW = 0, targetH = 0;
+    for (auto it = params.begin(); it != params.end(); ++it) {
+        const std::string& key = it.key();
+        const nlohmann::json& v = it.value();
+        const ParamSpec* spec = schema ? schema->Find(key) : nullptr;
+        if (stage == "upscale" && (key == "target_width" || key == "target_height") && v.is_number()) {
+            (key == "target_width" ? targetW : targetH) = v.get<int64_t>();
+            continue;
+        }
+        if (v.is_boolean()) {
+            const bool def = spec && spec->def.is_boolean() && spec->def.get<bool>();
+            if (v.get<bool>() == def) continue;  // the command's default
+            out.push_back(v.get<bool>() ? "--" + key : "--no-" + key);
+        } else if (v.is_string()) {
+            if (v.get<std::string>().empty()) continue;  // «пусто = по умолчанию»
+            out.push_back("--" + key);
+            out.push_back(v.get<std::string>());
+        } else if (!v.is_null()) {
+            out.push_back("--" + key);
+            out.push_back(v.dump());
+        }
+    }
+    if (targetW > 0 && targetH > 0) {
+        out.push_back("--target");
+        out.push_back(std::to_string(targetW) + "x" + std::to_string(targetH));
+    }
+    return out;
 }
 
 }  // namespace dlssvid

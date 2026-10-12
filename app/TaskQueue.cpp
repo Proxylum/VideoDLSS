@@ -53,6 +53,13 @@ double TimeLeft(const TaskQueue::Progress& p, double runningLeft) {
 
 }  // namespace
 
+QStringList TaskQueue::Progress::failedStageTitles() const {
+    QStringList out;
+    for (const auto& s : stages)
+        if (s.state == "failed") out << s.title;
+    return out;
+}
+
 TaskQueue::TaskQueue(QWidget* parent) : QWidget(parent) {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -204,12 +211,21 @@ void TaskQueue::onOutput() {
     static const QRegularExpression progressRe(R"((?:([A-Za-z_]+): )?(\d+)/(\d+) frames)");
     static const QRegularExpression doneRe(R"(process: ([A-Za-z_]+) done \S+ (\d+) frames in ([0-9.]+) s)");
     static const QRegularExpression reusedRe(R"(process: ([A-Za-z_]+) \S+ .*(is complete, reused|restored from the history))");
+    // a stage that failed while the run went on (fg in its own process, audit fg-2); "process: stage 'fg' failed" - the
+    // whole run failing - does not match
+    static const QRegularExpression failedRe(R"((?:^|\] )process: (depth|flow|upscale|nr|fg) failed\b)");
     static const QRegularExpression newline("[\r\n]");
     QStringList lines = buffer_.split(newline, Qt::SkipEmptyParts);
     if (!buffer_.endsWith('\n') && !buffer_.endsWith('\r') && !lines.isEmpty()) buffer_ = lines.takeLast();
     else buffer_.clear();
     for (const QString& line : lines) {
         Task& t = tasks_[static_cast<size_t>(current_)];  // re-fetched: a slot may have queued a task (vector growth)
+        if (const auto f = failedRe.match(line); f.hasMatch()) {  // first: a progress update may be glued to this line
+            stageFailed(t, f.captured(1));
+            const int id = t.id;
+            emit taskOutput(id, line);
+            continue;
+        }
         if (const auto m = progressRe.match(line); m.hasMatch()) {
             updateProgress(t, m.captured(1), m.captured(2).toInt(), m.captured(3).toInt());
             continue;
@@ -296,6 +312,24 @@ void TaskQueue::stageReused(Task& t, const QString& stage) {
         s->percent = 100;
         s->seconds = 0.0;
     }
+    p.eta = TimeLeft(p, -1.0);
+    Recount(p, false);
+    publish(t);
+}
+
+void TaskQueue::stageFailed(Task& t, const QString& stage) {
+    Progress& p = t.progress;
+    if (!FindStage(p, stage)) {
+        StageStatus st;
+        st.name = stage;
+        st.title = stage;
+        p.stages.push_back(st);
+    }
+    StageStatus* s = FindStage(p, stage);
+    if (s->state == "running") s->seconds = static_cast<double>(t.timer.elapsed() - t.stageStartMs) / 1000.0;
+    s->state = "failed";
+    if (t.stage == stage) t.stage.clear();
+    p.elapsed = static_cast<double>(t.timer.elapsed()) / 1000.0;
     p.eta = TimeLeft(p, -1.0);
     Recount(p, false);
     publish(t);

@@ -33,6 +33,9 @@ public:
         void* cudaPtr = nullptr;         // mapped CUDA pointer of `buffer` when CUDA is attached
         void* cudaMemory = nullptr;      // cudaExternalMemory_t
         std::map<std::string, PassTexture> passes;  // "depth_raw" -> R32F, "mv_raw" -> RG32F, colour -> RGBA16F
+        // textures of the slot's previous frame: not readable (not in `passes`), reused by UploadPass of the same pass
+        // name, size and format instead of a new allocation per frame
+        std::map<std::string, PassTexture> spare;
     };
 
     // Pass textures (stage 2+): 1 channel -> R32_FLOAT, 2 -> R32G32_FLOAT, 3/4 -> R16G16B16A16_FLOAT.

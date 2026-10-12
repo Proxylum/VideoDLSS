@@ -22,6 +22,8 @@ PassVersionInfo InfoFor(const std::string& pass, const std::filesystem::path& di
     v.dir = dir;
     v.fingerprint = m.fingerprint;
     v.created = m.created.empty() ? FileTimeIso8601(dir / Manifest::kFileName) : m.created;
+    std::error_code ec;
+    v.written = std::filesystem::last_write_time(dir / Manifest::kFileName, ec);
     v.frames = m.frameCount;
     v.bytes = DirectoryBytes(dir);
     v.params = m.paramsCanonical;
@@ -32,6 +34,9 @@ PassVersionInfo InfoFor(const std::string& pass, const std::filesystem::path& di
 
 bool NewerFirst(const PassVersionInfo& a, const PassVersionInfo& b) {
     if (a.created != b.created) return a.created > b.created;
+    // `created` has whole seconds: before, the id (that is the fingerprint) decided, and gc could remove the newer of two
+    // versions made in one second - the one a switch back restores (review of TASK-0038)
+    if (a.written != b.written) return a.written > b.written;
     return a.id > b.id;
 }
 

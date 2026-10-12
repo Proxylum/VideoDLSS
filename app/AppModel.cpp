@@ -22,7 +22,10 @@ AppModel::AppModel(bool warp, QObject* parent) : QObject(parent) {
     device_ = std::make_unique<D3D12Device>(D3D12Device::Options{warp, false});
     store_ = std::make_unique<FrameStore>(*device_);
     playTimer_.setTimerType(Qt::PreciseTimer);
+    playTimer_.setSingleShot(true);
     connect(&playTimer_, &QTimer::timeout, this, &AppModel::onPlayTick);
+    monotonic_.start();
+    now_ = [this] { return monotonic_.nsecsElapsed(); };
     engineerMode_ = QSettings().value("view/engineerMode", false).toBool();
     loop_ = QSettings().value("view/loop", false).toBool();
     planTimer_.setSingleShot(true);
@@ -185,6 +188,10 @@ void AppModel::setTime(double seconds) {
     seconds = std::clamp(seconds, 0.0, lastTime());
     if (std::abs(seconds - state().time) < 1e-9) return;
     state().time = seconds;
+    if (playing_ && !inPlayTick_) {  // a jump while playing: go on from there
+        clock_.Restart(now_(), seconds);
+        clockTime_ = seconds;
+    }
     requestFrames();
     emit timeChanged(seconds);
     emit stateChanged();
@@ -203,23 +210,63 @@ void AppModel::setTimelineFps(Rational fps) {
 }
 
 void AppModel::setPlaying(bool playing) {
-    if (playing == playTimer_.isActive()) return;
+    if (playing == playing_) return;
     if (playing) {
-        const double rate = std::max(1.0, store_->MaxFps(neededSources()));  // the fastest shown source: an FG result runs at 2x
-        playStep_ = 1.0 / rate;
-        playStalled_ = 0;
-        playTimer_.start(static_cast<int>(std::max(1.0, 1000.0 / rate)));
+        Rational rate = store_->MaxRate(neededSources());  // the fastest shown source: an FG result runs at 2x
+        if (rate.num <= 0 || rate.den <= 0) rate = {1, 1};
+        clock_.Start(now_(), time(), rate);
+        clockTime_ = time();
+        playing_ = true;
+        schedulePlayTick();
     } else {
+        playing_ = false;
         playTimer_.stop();
     }
     emit playingChanged(playing);
 }
 
+void AppModel::setPlaybackClock(std::function<int64_t()> nowNs) { now_ = nowNs ? std::move(nowNs) : std::function<int64_t()>([this] { return monotonic_.nsecsElapsed(); }); }
+
+void AppModel::schedulePlayTick() {
+    if (!playing_) return;
+    const int64_t now = now_();
+    const int64_t ms = std::clamp<int64_t>((clock_.WakeNs(now) - now + 999'999) / 1'000'000, 0, 1000);
+    playTimer_.start(static_cast<int>(ms));
+}
+
+// Playback by the clock (audit play-fg-rate): frame k is due at k periods of the exact rational rate; a tick shows at
+// most one frame. Every frame is shown: while a shown source has not decoded the next frame, the tick waits (finished
+// loads are uploaded first, so the wait is as short as it can be) - a slow decode plays slower than real time instead
+// of skipping frames or flashing plates. A frame that does not arrive within PlaybackClock::kStallNs is skipped, so
+// playback never freezes.
 void AppModel::onPlayTick() {
-    const double next = time() + playStep_;
+    if (!playing_) return;
+    const int64_t now = now_();
+    // the time changed without setTime (a project opened while playing restores its saved time): go on from there
+    if (std::abs(time() - clockTime_) > 1e-9) {
+        clock_.Start(now, time(), clock_.Rate());
+        clockTime_ = time();
+    }
+    // the shown sources may change while playing (source 24 fps -> an FG result at 48): follow the fastest one
+    if (const Rational rate = store_->MaxRate(neededSources()); rate.num > 0 && rate.den > 0 &&
+                                                                (rate.num != clock_.Rate().num || rate.den != clock_.Rate().den))
+        clock_.Start(now, time(), rate);
+    if (now < clock_.DueNs()) {
+        schedulePlayTick();
+        return;
+    }
+    const double next = clock_.NextTime();
     if (next > lastTime() + 1e-9) {  // the end: wrap when looping, else stop
-        if (loop_ && lastTime() > 0.0) setTime(0.0);
-        else setPlaying(false);
+        if (loop_ && lastTime() > 0.0) {
+            inPlayTick_ = true;
+            setTime(0.0);
+            inPlayTick_ = false;
+            clock_.Restart(now, 0.0);
+            clockTime_ = time();
+            schedulePlayTick();
+        } else {
+            setPlaying(false);
+        }
         return;
     }
     // play only over computed frames: stop where the base source has no frame
@@ -227,16 +274,21 @@ void AppModel::onPlayTick() {
         setPlaying(false);
         return;
     }
-    // Every frame is shown: while a shown source has not decoded the next frame, the tick waits (finished loads are
-    // uploaded first, so the wait is as short as it can be) - a slow decode plays slower than real time instead of
-    // skipping frames or flashing plates. A frame that does not arrive within kPlayStallSeconds is skipped, so
-    // playback never freezes.
-    if (!framesReadyAt(next)) {
-        if (store_->Update()) notifyFramesUpdated();
-        if (!framesReadyAt(next) && ++playStalled_ < std::max(1, static_cast<int>(kPlayStallSeconds / playStep_))) return;
+    bool ready = framesReadyAt(next);
+    if (!ready && store_->Update()) {
+        notifyFramesUpdated();
+        ready = framesReadyAt(next);
     }
-    playStalled_ = 0;
+    if (clock_.Decide(now, ready) == PlaybackClock::Action::Wait) {
+        schedulePlayTick();
+        return;
+    }
+    inPlayTick_ = true;
     setTime(next);
+    inPlayTick_ = false;
+    clockTime_ = time();
+    clock_.Advance(now);
+    schedulePlayTick();
 }
 
 void AppModel::setLoop(bool on) {

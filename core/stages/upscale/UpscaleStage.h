@@ -28,7 +28,7 @@ struct UpscaleStageOptions {
     uint32_t maxWidth = 3840, maxHeight = 2160;  // v1 cap (ТЗ §3)
     float sharpness = 0.5f;                // nis
     std::string preset = "default";        // dlss render preset hint
-    bool artifactReductionOnly = false;    // no scaling (nis sharpen)
+    bool artifactReductionOnly = false;    // no scaling (x1): dlss = DLAA, nis = NVSharpen
     bool useJitter = true;                 // dlss: jitter emulation (HACK)
     float jitterSign = 1.f;                // dlss: sign of the reported jitter
     std::filesystem::path dllDir;          // nvngx_dlss.dll folder override

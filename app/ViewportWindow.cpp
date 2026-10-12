@@ -19,11 +19,42 @@ ViewportWindow::ViewportWindow(AppModel& model) : model_(model) {
     pollTimer_.setInterval(16);
     connect(&pollTimer_, &QTimer::timeout, this, [this] {
         if (model_.store().Update()) model_.notifyFramesUpdated();  // -> dirty_ below
-        if (dirty_ && isExposed()) render();
+        if (!dirty_ || !isExposed()) return;
+        // while playing, the playback tick presents each frame itself: a present for every prefetch upload would only
+        // wait on vsync and make the ticks late. Only a frame of the current time that has arrived since (a loop to an
+        // evicted frame 0, a seek, a skipped frame shown as a stand-in) is presented here.
+        if (!model_.playing() || model_.frameStates() != renderedStates_) render();
     });
     pollTimer_.start();
     connect(&model_, &AppModel::framesUpdated, this, [this] { dirty_ = true; });  // also uploads by the playback tick
-    connect(&model_, &AppModel::stateChanged, this, [this] { requestRender(); });
+    connect(&model_, &AppModel::stateChanged, this, [this] {
+        // setTime emits timeChanged, then stateChanged: the frame the playback tick has just presented needs no second
+        // (deferred) present - two presents per frame on a two-buffer flip chain would halve the rate on vsync
+        if (presentedByTick_) {
+            presentedByTick_ = false;
+            return;
+        }
+        requestRender();
+    });
+    connect(&model_, &AppModel::timeChanged, this, [this] {
+        // while playing, every frame the clock shows is presented at once: a deferred UpdateRequest could merge two
+        // ticks and drop the frame between them (audit play-fg-rate); pan / zoom / wipe stay deferred
+        if (model_.playing()) {
+            dirty_ = true;
+            render();
+            presentedByTick_ = true;
+            ++playFrames_;  // frames shown by the clock, not every render
+        }
+    });
+    connect(&model_, &AppModel::playingChanged, this, [this](bool playing) {
+        if (playing) {
+            playFrames_ = 0;
+            playElapsed_.start();
+        } else if (playElapsed_.isValid() && playFrames_ > 0) {
+            const double s = static_cast<double>(playElapsed_.nsecsElapsed()) / 1e9;
+            Log()->info("viewport: playback {} frames presented in {:.2f} s = {:.2f} fps", playFrames_, s, s > 0.0 ? playFrames_ / s : 0.0);
+        }
+    });
     connect(&model_, &AppModel::sourcesChanged, this, [this] { requestRender(); });
 }
 
@@ -50,6 +81,7 @@ void ViewportWindow::render() {
         const FrameTextures frame = model_.store().TexturesAt(model_.state().time);
         const FrameStates states = model_.frameStates();  // plates for cells whose frame is loading / missing
         renderer_->RenderToWindow(model_.state(), frame, model_.store().ImageWidth(), model_.store().ImageHeight(), &states);
+        renderedStates_ = states;
     } catch (const std::exception& e) {
         Log()->error("viewport render: {}", e.what());
     }
@@ -64,7 +96,7 @@ void ViewportWindow::resizeEvent(QResizeEvent*) { requestRender(); }
 
 bool ViewportWindow::event(QEvent* e) {
     if (e->type() == QEvent::UpdateRequest) {
-        render();
+        if (dirty_) render();  // a frame presented synchronously by playback needs no second render
         return true;
     }
     return QWindow::event(e);

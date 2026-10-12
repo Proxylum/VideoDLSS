@@ -12,6 +12,7 @@
 #include "io/OutputFormat.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
+#include "pipeline/FgProcess.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/Pipeline.h"
@@ -70,13 +71,8 @@ DepthStageOptions DepthOptions(const nlohmann::json& p, const std::filesystem::p
     o.writeDlss = !Get<bool>(p, "no_dlss", false);
     o.dlss.zNear = Get<float>(p, "z_near", 0.1f);
     o.dlss.zFar = Get<float>(p, "z_far", 1000.f);
-    const std::string stabilize = Get<std::string>(p, "stabilize", "auto");
-    if (stabilize == "none") o.stabilize = TemporalStabilizer::Mode::None;
-    else if (stabilize == "scale") o.stabilize = TemporalStabilizer::Mode::ScaleOnly;
-    else if (stabilize == "scale_shift" || stabilize == "auto") o.stabilize = TemporalStabilizer::Mode::ScaleShift;
-    else Throw("process: depth.stabilize must be auto|none|scale|scale_shift");
-    o.stabilizeMetric = stabilize == "scale" || stabilize == "scale_shift";
-    o.stabilizeWindow = Get<int>(p, "stabilize_window", 8);
+    o.stabilize = ParseDepthStabilize(Get<std::string>(p, "stabilize", "auto"));
+    o.stabilizeWindow = std::clamp(Get<int>(p, "stabilize_window", 8), 1, 64);  // the schema's range: the buffer holds N+1 frames
     o.fillHoles = !Get<bool>(p, "no_fill", false);
     o.format = ParsePassFormat(Get<std::string>(p, "format", "exr"), false);
     return o;
@@ -132,7 +128,13 @@ struct PlanState {
     std::set<std::string> ran;
 };
 
-std::string LegacyId(const Manifest& m) { return "legacy:" + m.sourceHash + ":" + std::to_string(m.frameCount); }
+// A pass without a fingerprint stands for its source and length; a y-up motion-vector pass also for its orientation:
+// PassReader negates v on read, so toggling mv.y_up changes what the stages below read and must recompute them.
+std::string LegacyId(const Manifest& m) {
+    std::string id = "legacy:" + m.sourceHash + ":" + std::to_string(m.frameCount);
+    if (m.IsYUpMv()) id += ":y_up";
+    return id;
+}
 
 void RefreshFromDisk(PlanState& s, const std::filesystem::path& root) {
     s.fp.clear();
@@ -269,6 +271,11 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             run("source_changed", m.sourceHash.empty() ? "the pass has no source hash" : "the pass was made from another source", true);
         } else if (madeFrom != sourceFormatNow) {
             run("source_changed", "the pass was made from the source decoded as " + madeFrom + " (now " + sourceFormatNow + ")", true);
+        } else if (name == "depth" && p.value("stabilize", std::string("auto")) != "none" && !m.stageParams.contains("stabilize_requested")) {
+            // a standalone `dlssvid depth` from before the centred alignment (TASK-0038): metric depth was not aligned
+            // then - adopting it would stamp the old depth with the depth.2 revision
+            d.diff["tool"]["app"] = nlohmann::json::array({kPassToolVersion, PassToolVersionFor(name, p)});
+            run("tool_changed", "depth made before the temporal alignment of TASK-0038", true);
         } else if (!complete) {
             run("incomplete", incomplete, false);
         } else {
@@ -412,7 +419,7 @@ nlohmann::json ProcessResult::ToJson() const {
     nlohmann::json st = nlohmann::json::array();
     for (const auto& s : stages) st.push_back(s.ToJson());
     return {{"stages", st},         {"final_pass", finalPass.string()}, {"output", output.string()}, {"frames_in", framesIn}, {"frames_out", framesOut},
-            {"output_fps", outputFps.ToDouble()}, {"audio", audio},   {"seconds", seconds},
+            {"output_fps", outputFps.ToDouble()}, {"audio", audio},   {"seconds", seconds}, {"warnings", warnings},
             {"output_format", {{"codec", codec}, {"pix_fmt", outputPixelFormat}, {"name", outputFormat.Name()}, {"bit_depth", outputFormat.HighBitDepth() ? outputFormat.bitDepth : 8},
                                {"chroma", std::string(ChromaName(outputFormat.format))}, {"description", outputFormat.Describe()}}}};
 }
@@ -658,6 +665,8 @@ ProcessResult RunProcess(const ProcessOptions& options) {
 
     PlanState state;
     bool retiredAny = false;
+    bool fgSkipped = false;           // fg was wanted but failed or is disabled: the result comes from its input, not color_fg
+    std::filesystem::path fgColorDir;  // that input (color_nr / color_sr; empty: the source)
     for (const std::string& name : ProcessStageOrder()) {
         const auto it = pr.wanted.find(name);
         if (it == pr.wanted.end()) continue;
@@ -705,6 +714,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                     retiredAny = true;
                 }
         const auto t0 = Clock::now();
+        double childMsPerFrame = 0.0, childSeconds = 0.0;  // fg in its own process: its own timing, without the start-up
         try {
             if (name == "depth") {
                 VideoDecoder decoder(options.input);
@@ -714,7 +724,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 const DepthRunResult r = RunDepth(decoder, device, o, options.frames, progressFor(name));
                 rep.frames = r.stats.frames;
                 rep.outDir = o.writeDlss ? r.dlssDir : r.rawDir;
-                rep.details = {{"estimator", r.estimator}, {"mean_tae", r.stats.MeanTae()}};
+                rep.details = {{"estimator", r.estimator}, {"mean_tae", r.stats.MeanTae()}, {"stabilize", r.stabilize}};
             } else if (name == "flow") {
                 VideoDecoder::Options dopt;
                 const std::string backend = Get<std::string>(p, "backend", "ofa");
@@ -763,7 +773,6 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 }
                 rep.details = {{"backend", r.backend}, {"diagnostics", r.diagnostics}};
             } else if (name == "fg") {
-                VideoDecoder decoder(options.input);
                 FgStageOptions o;
                 o.outputDir = root;
                 o.colorDir = ExistingPass(root, {"color_nr", "color_sr"});
@@ -773,21 +782,133 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 o.format = ParsePassFormat(Get<std::string>(p, "format", "exr"), true);
                 o.sourceFile = sourceFile;
                 o.sourceHash = sourceHash;
-                const FgRunResult r = RunFg(decoder, device, o, options.frames, progressFor(name), p);
-                if (r.stats.disabled) {
-                    rep.status = "disabled";
-                    rep.reason = r.stats.disabledReason;
-                } else {
-                    rep.frames = r.stats.frames;
-                    rep.outDir = r.outDir;
+                o.crashAfter = options.fgCrashAfter;
+                fgColorDir = o.colorDir;
+                // What is on disk before the run: after a failure, the debris of this run is removed, while a signed version
+                // the run did not touch (an in-place completion that died early) stays current.
+                const std::filesystem::path fgDir = root / "color_fg";
+                std::optional<std::filesystem::file_time_type> manifestBefore;
+                if (Manifest::Exists(fgDir)) {
+                    std::error_code ec;
+                    const auto t = std::filesystem::last_write_time(fgDir / Manifest::kFileName, ec);
+                    if (!ec) manifestBefore = t;
                 }
-                rep.details = {{"backend", r.backend}, {"diagnostics", r.diagnostics}, {"generated", r.stats.generated}};
+                std::optional<std::string> failure;
+                nlohmann::json failDetails = nlohmann::json::object();
+                if (!options.fgExecutable.empty()) {
+                    // audit fg-2: DLSS-G (a driver DLL) in its own process - its crash ends only that process
+                    FgProcessSpec spec;
+                    spec.exe = options.fgExecutable;
+                    spec.input = options.input;
+                    spec.passesRoot = root;
+                    spec.colorDir = o.colorDir;
+                    spec.depthDir = o.depthDir;
+                    spec.mvDir = o.mvDir;
+                    spec.params = p;
+                    spec.format = Get<std::string>(p, "format", "exr");
+                    spec.sourceHash = sourceHash;
+                    spec.frames = options.frames;
+                    spec.warp = options.warp;
+                    spec.disableUnavailable = options.disableUnavailable;
+                    spec.verbose = Log()->should_log(spdlog::level::debug);
+                    spec.crashAfter = options.fgCrashAfter;
+                    spec.crashOnExit = options.fgCrashOnExit;
+                    spec.stall = options.fgStall;
+                    const FgProcessOutcome c = RunFgProcess(spec, progressFor(name));
+                    const nlohmann::json& res = c.result;
+                    const nlohmann::json stats = res.contains("stats") && res["stats"].is_object() ? res["stats"] : nlohmann::json::object();
+                    if (c.ok) {
+                        if (c.disabled) {
+                            rep.status = "disabled";
+                            rep.reason = c.disabledReason;
+                        } else {
+                            rep.frames = stats.value("frames", int64_t{0});
+                            rep.outDir = fgDir;
+                            childMsPerFrame = stats.value("ms_per_frame_wall", 0.0);
+                            childSeconds = res.value("seconds", 0.0);
+                        }
+                        rep.details = {{"backend", res.value("backend", nlohmann::json::object())},
+                                       {"diagnostics", res.value("diagnostics", nlohmann::json::object())},
+                                       {"generated", stats.value("generated", int64_t{0})},
+                                       {"isolated", true},
+                                       {"pid", c.pid}};
+                        if (!c.warning.empty()) {
+                            rep.details["warning"] = c.warning;
+                            result.warnings.push_back("fg: " + c.warning);
+                            Log()->warn("process: fg — {}", c.warning);
+                        }
+                    } else {
+                        failure = c.error;
+                        failDetails = {{"isolated", true},          {"pid", c.pid},         {"exit_code", c.exitCode}, {"exit", DescribeExitCode(c.exitCode)},
+                                       {"crashed", c.crashed},      {"frames_done", c.framesDone}, {"error", c.error}};
+                    }
+                } else {
+                    try {
+                        VideoDecoder decoder(options.input);
+                        const FgRunResult r = RunFg(decoder, device, o, options.frames, progressFor(name), p);
+                        if (r.stats.disabled) {
+                            rep.status = "disabled";
+                            rep.reason = r.stats.disabledReason;
+                        } else {
+                            rep.frames = r.stats.frames;
+                            rep.outDir = r.outDir;
+                        }
+                        rep.details = {{"backend", r.backend}, {"diagnostics", r.diagnostics}, {"generated", r.stats.generated}, {"isolated", false}};
+                    } catch (const std::exception& e) {
+                        failure = e.what();
+                        failDetails = {{"isolated", false}, {"error", *failure}};
+                    }
+                }
+                if (failure) {
+                    // Debris: no manifest (the process died before Finish), a manifest this run wrote (no fingerprint, or
+                    // not the one that was there) - it must not stay the current color_fg nor go to the history.
+                    bool debris = std::filesystem::exists(fgDir);
+                    if (debris && manifestBefore && Manifest::Exists(fgDir)) {
+                        std::error_code ec;
+                        const auto now = std::filesystem::last_write_time(fgDir / Manifest::kFileName, ec);
+                        try {
+                            debris = ec || now != *manifestBefore || Manifest::Load(fgDir).fingerprint.empty();
+                        } catch (const std::exception&) {
+                            debris = true;
+                        }
+                        // a rerun in place (forced, incomplete) rewrites the frames of the signed version: one written
+                        // by this run (possibly cut short by the crash) makes the folder debris as well
+                        for (auto entry = std::filesystem::directory_iterator(fgDir, ec); !debris && !ec && entry != std::filesystem::directory_iterator(); entry.increment(ec)) {
+                            std::error_code tec;
+                            const auto t = std::filesystem::last_write_time(entry->path(), tec);
+                            if (!tec && t > *manifestBefore) debris = true;
+                        }
+                    }
+                    if (debris) {
+                        const uint64_t bytes = DirectoryBytes(fgDir);
+                        std::error_code ec;
+                        std::filesystem::remove_all(fgDir, ec);
+                        if (ec) Log()->warn("process: cannot remove the partial color_fg {}: {}", fgDir.string(), ec.message());
+                        failDetails["partial"] = ec ? "kept" : "removed";
+                        failDetails["removed_bytes"] = ec ? 0 : bytes;
+                    } else if (std::filesystem::exists(fgDir)) {
+                        failDetails["partial"] = "kept";  // the previous signed version, untouched by this run
+                    }
+                    if (!options.disableUnavailable) Throw(*failure);  // -> "process: stage 'fg' failed: ..."
+                    rep.status = "failed";
+                    rep.reason = *failure;
+                    rep.details = failDetails;
+                    const std::string from = fgColorDir.empty() ? "the source" : fgColorDir.filename().string();
+                    result.warnings.push_back("fg failed: " + *failure + "; the result is encoded from " + from + " without frame generation");
+                    Log()->warn("process: fg failed — {}; the result is encoded from {}", *failure, from);  // TaskQueue parses this line
+                }
+                fgSkipped = rep.status == "failed" || rep.status == "disabled";
             }
         } catch (const std::exception& e) {
             Throw("process: stage '" + name + "' failed: " + e.what());
         }
         rep.seconds = Seconds(t0);
         rep.msPerFrame = rep.frames ? 1000.0 * rep.seconds / static_cast<double>(rep.frames) : 0.0;
+        if (childMsPerFrame > 0.0) {
+            // the fg process timed itself: the estimates (Estimates.cpp) must not count its start-up per frame
+            rep.msPerFrame = childMsPerFrame;
+            rep.details["startup_seconds"] = std::max(0.0, rep.seconds - childSeconds);
+        }
         if (rep.status.empty()) {
             rep.status = "ran";
             rep.reason = d.kind + ": " + d.detail;
@@ -796,7 +917,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 if (Manifest::Exists(root / pass)) StampPass(root / pass, d, created, rep.msPerFrame);
             state.ran.insert(d.outputs.begin(), d.outputs.end());
         } else {
-            rep.fingerprint.clear();  // disabled: nothing was written
+            rep.fingerprint.clear();  // disabled / failed: no pass of this run
         }
         if (rep.status == "ran")
             Log()->info("process: {} done — {} frames in {:.1f} s ({:.1f} ms/frame), {} ({})", name, rep.frames, rep.seconds, rep.msPerFrame, ShortFingerprint(d.fingerprint),
@@ -809,9 +930,11 @@ ProcessResult RunProcess(const ProcessOptions& options) {
     }
 
     // ---- encode the last colour pass, or pass the source through ----
-    result.finalPass = ExistingPass(root, {"color_fg", "color_nr", "color_sr"});
+    // fg failed or disabled: its input, not a color_fg left from an older run (an incomplete one would cut the result short)
+    result.finalPass = fgSkipped ? fgColorDir : ExistingPass(root, {"color_fg", "color_nr", "color_sr"});
     ProcessStageReport enc;
     enc.name = "encode";
+    if (fgSkipped) enc.reason = "fg skipped: encoded from " + (result.finalPass.empty() ? std::string("the source") : result.finalPass.filename().string());
     const auto t0 = Clock::now();
     if (result.finalPass.empty()) {
         Log()->warn("process: no colour pass was produced — encoding the source frames unchanged");
