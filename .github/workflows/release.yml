@@ -27,13 +27,8 @@ jobs:
       - name: Attach to the release of the tag
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: powershell   # Windows PowerShell 5.1: the runner has no pwsh (PowerShell 7)
-        run: |
-          $tag = $env:GITHUB_REF_NAME
-          $zip = (Get-ChildItem build/release/dlss-video-*-win64.zip | Select-Object -First 1).FullName
-          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $zip --repo $env:GITHUB_REPOSITORY --clobber
-          } else {
-            gh release create $tag $zip --repo $env:GITHUB_REPOSITORY --title "dlss-video $($tag.TrimStart('v'))" --generate-notes --verify-tag
-          }
+        # cmd, not powershell: under Windows PowerShell 5.1 the "release not found" that the release lookup prints to
+        # stderr is a terminating error, so the step died before creating the Release (incident TASK-0037). The script
+        # takes the package of the tag's version, creates the Release if needed and is covered by ctest scripts.attach_release.
+        shell: cmd
+        run: call scripts\attach_release.cmd %GITHUB_REF_NAME% build\release
