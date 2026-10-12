@@ -12,7 +12,14 @@ scripts\ci-build.cmd     :: то же, что делает раннер: configu
 scripts\package.cmd      :: сборка и cpack --preset release -> build\release\dlss-video-<версия>-win64.zip
 scripts\configure.cmd    :: cmake --preset release с повтором до 3 раз (vcpkg install тянет реестр с GitHub, и с раннера
                          :: это время от времени срывается — «Fetching registry information … failed»; повтор проходит)
+scripts\attach_release.cmd v0.4.0   :: шаг release.yml: dlss-video-0.4.0-win64.zip в Release тега (создаёт Release, если его
+                         :: нет); нужны gh, GH_TOKEN и GITHUB_REPOSITORY; тест — ctest scripts.attach_release
 ```
+
+Шаг прикрепления пакета — cmd, а не PowerShell: Windows PowerShell 5.1 под `$ErrorActionPreference = 'stop'` (так GitHub
+запускает `shell: powershell`) превращает вывод нативной команды в stderr в завершающую ошибку. Поэтому «release not
+found», которое `gh` печатает для ещё не созданного Release, обрывало шаг до создания Release (инцидент TASK-0037, тег
+v0.4.0). Новые шаги workflow с нативными командами пишите на `shell: cmd` или выносите в `scripts/`.
 
 Раннер — машина с NVIDIA RTX (labels `self-hosted`, `windows`, `rtx`): GPU-тесты, DLSS SR / NR / FG, TensorRT-движки идут
 на настоящем железе; hosted-раннеры GitHub для этого не подходят.

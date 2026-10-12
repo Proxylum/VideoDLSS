@@ -143,6 +143,13 @@ if(CMAKE_GENERATOR MATCHES "Ninja")
     COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DNINJA=${CMAKE_MAKE_PROGRAM} -P ${CMAKE_SOURCE_DIR}/tests/check_ninja_deps.cmake)
 endif()
 
+# ---- release workflow: scripts/attach_release.cmd against a fake gh (incident TASK-0037: the attach step of release.yml
+# died when the Release of the tag did not exist yet) ----
+add_test(NAME scripts.attach_release
+  COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DWORK_DIR=${CMAKE_BINARY_DIR}/test-tmp/attach_release
+          -P ${CMAKE_SOURCE_DIR}/tests/check_attach_release.cmake)
+set_tests_properties(scripts.attach_release PROPERTIES LABELS "scripts" TIMEOUT 60)
+
 # ---- SDK layout: the machine's SDK checkouts match the pinned revisions of scripts/setup_sdk.py (skipped without Python or SDK env) ----
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)

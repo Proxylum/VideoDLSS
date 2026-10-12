@@ -87,8 +87,9 @@ C:\dlss-video\bin\dlssvid_golden_tests.exe "[golden]~[gpu]"   :: только д
 2. Локально: сборка, `ctest`, `scripts\package.cmd` (и `full`), распаковать ZIP во временную папку, golden на распакованной
    копии (`DLSSVID_CLI`, `DLSSVID_GOLDEN_DIR`; для `[gpu]`-части положить DLL NVIDIA в её `bin\nvidia`).
 3. Pull request → CI → слияние в `main` → аннотированный тег `vX.Y.Z` на merge-коммите → push тега: workflow тега собирает
-   `dlss-video-X.Y.Z-win64.zip` (job `package`, артефакт хранится месяц) и прикладывает его к GitHub Release тега — если
-   Release ещё нет, job создаёт его с автоматическими заметками; заметки затем правятся вручную (раздел CHANGELOG, состав
+   `dlss-video-X.Y.Z-win64.zip` (job `package`, артефакт хранится месяц) и прикладывает его к GitHub Release тега
+   скриптом `scripts\attach_release.cmd` (пакет берётся по версии из тега) — если Release ещё нет, скрипт создаёт его с
+   автоматическими заметками; заметки затем правятся вручную (раздел CHANGELOG, состав
    пакета, что в него не входит, sha256). Вручную то же делает `gh release create vX.Y.Z build\release\dlss-video-X.Y.Z-win64.zip
    --title "dlss-video X.Y.Z" --notes-file <заметки> --verify-tag`. Страница релизов: https://github.com/Proxylum/VideoDLSS/releases.
 4. Полный пакет (несколько ГБ) в CI не собирается — собирается на машине разработчика и выкладывается вручную.
