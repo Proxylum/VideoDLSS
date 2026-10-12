@@ -188,10 +188,12 @@ void ProcessingPanel::render() {
     const bool ok = done && tasks_.succeeded(taskId_);
     const bool cancelled = done && tasks_.cancelled(taskId_);
     const double elapsed = done ? p.elapsed : (known ? tasks_.elapsed(taskId_) : 0.0);
+    const QStringList failedStages = ok ? p.failedStageTitles() : QStringList{};  // the run finished without them (audit fg-2)
 
     QString head;
     if (!known) head = tr("Обработка");
     else if (!done) head = tr("Обработка · Прошло %1 · Осталось %2").arg(FormatClock(elapsed), p.eta >= 0.0 ? tr("≈ %1").arg(FormatClock(p.eta)) : tr("оцениваем…"));
+    else if (ok && !failedStages.isEmpty()) head = tr("Готово за %1 · без стадии «%2»").arg(FormatClock(elapsed), failedStages.join(tr("», «")));
     else if (ok) head = tr("Готово за %1").arg(FormatClock(elapsed));
     else if (cancelled) head = tr("Отменено через %1 · готовые стадии сохранены").arg(FormatClock(elapsed));
     else head = tr("Ошибка через %1 · подробности в логе").arg(FormatClock(elapsed));
@@ -247,6 +249,9 @@ void ProcessingPanel::render() {
     back_->setVisible(done && !ok);
     if (!known) note_->setText(QString());
     else if (!done) note_->setText(tr("Отмена сохранит уже готовые стадии — в следующий раз они переиспользуются. Свёрнутое окно сообщит о завершении уведомлением."));
+    else if (ok && !failedStages.isEmpty())
+        note_->setText(tr("Стадия «%1» завершилась сбоем — результат закодирован без неё, готовые стадии сохранены. Подробности в логе.")
+                           .arg(failedStages.join(tr("», «"))));
     else if (ok) note_->setText(tr("Вьюпорт показывает «До | После»: исходник слева, результат справа."));
     else if (cancelled) note_->setText(tr("Готовые стадии остались на диске: следующая обработка продолжит с прерванной."));
     else note_->setText(tr("Что случилось — в логе ниже; готовые стадии сохранены."));

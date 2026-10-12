@@ -360,13 +360,15 @@ reused only when its fingerprint matches (stage 9: source hash, canonical parame
 read, the tool — app version, backend, model, NVIDIA DLL hash); a changed parameter recomputes that stage and the ones
 below it, the replaced folder is kept as a version in `<pass>.v/` and comes back without recomputing when the
 parameters return. `process --plan` shows the decisions first; `passes list|use|gc` manage the versions
-(`docs/architecture.md`, «Отпечатки и версии пассов»).
+(`docs/architecture.md`, «Отпечатки и версии пассов»). Frame Generation runs in a process of its own (a child
+`dlssvid fg`): if DLSS-G or the driver crashes there, `--disable-unavailable` (which the GUI always passes) marks the
+stage `failed`, encodes the result from `color_nr` and prints a `warning:` line; without the flag the run fails.
 
 ```bat
 dlssvid process -i input.mp4 -o result.mp4                                            :: depth -> flow -> upscale x2 -> nr -> fg x2 -> encode (+ audio)
 dlssvid process --project clip.dlssvid.json                                           :: the stages and parameters the GUI saved (button «Обработать → result»)
 dlssvid process -i input.mp4 -o result.mp4 --stages upscale,fg --scale 1.5 --multiplier 2 --param fg.backend=rife
-dlssvid process -i input.mp4 -o result.mp4 --no-skip-existing --disable-unavailable   :: recompute everything; skip nr / fg without a DLL
+dlssvid process -i input.mp4 -o result.mp4 --no-skip-existing --disable-unavailable   :: recompute everything; skip nr / fg without a DLL (or a crashed fg)
 dlssvid process --project clip.dlssvid.json --plan [--json plan.json]                 :: what would run or be reused and why (fingerprints, versions) — nothing is processed
 dlssvid process -i input.mp4 -o result.mp4 --param nr.intensity=1.4 --keep-versions 3 :: only nr, fg and the encode rerun; the old color_nr / color_fg stay as versions (default keep: 2)
 dlssvid process --project clip.dlssvid.json --force nr,fg                            :: recompute these stages in place even when their passes match; parameters are validated first

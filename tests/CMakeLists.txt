@@ -49,6 +49,7 @@ add_executable(dlssvid_unit_tests
   unit/test_tonemap.cpp
   unit/test_nr.cpp
   unit/test_fg.cpp
+  unit/test_fg_process.cpp
   unit/test_repo_hygiene.cpp
 )
 target_link_libraries(dlssvid_unit_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)

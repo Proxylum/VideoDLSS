@@ -31,6 +31,13 @@ public:
         std::string checkSize = "1280x720";
         std::string json;
         int64_t crashAfter = -1;
+        // `dlssvid process` runs the stage as `fg --as-stage` (pipeline/FgProcess.h): the stage's parameters as JSON, the
+        // runner's source hash, @progress / @result lines on stdout; hidden flags
+        bool asStage = false;
+        std::string paramsJson, sourceHash;
+        bool disableUnavailable = false;
+        bool crashOnExit = false;  // isolation test: die after printing @result
+        bool stall = false;        // isolation test: hang before reading the input
     };
 
 private:

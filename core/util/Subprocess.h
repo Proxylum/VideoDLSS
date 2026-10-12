@@ -17,9 +17,13 @@ public:
     Subprocess(const Subprocess&) = delete;
     Subprocess& operator=(const Subprocess&) = delete;
 
-    // `args[0]` is the executable. Throws dlssvid::Error if the process cannot start.
-    void Start(const std::vector<std::string>& args, const std::filesystem::path& workingDir = {});
+    // `args[0]` is the executable; arguments are UTF-8 (pass paths through Utf8Arg). Throws dlssvid::Error if the process
+    // cannot start. killWithOwner: the child runs in a job object that ends it (and what it starts, except processes that
+    // break away, e.g. nvngx_update.exe) when this object or our process goes away, and that suppresses the Windows
+    // Error Reporting dialog for its unhandled exceptions - a crashed child exits instead of hanging on a dialog.
+    void Start(const std::vector<std::string>& args, const std::filesystem::path& workingDir = {}, bool killWithOwner = false);
     bool Running() const;
+    uint32_t Pid() const;
     std::optional<uint32_t> ExitCode() const;  // set once the process has exited
 
     void WriteLine(const std::string& line);
@@ -34,6 +38,7 @@ public:
 
 private:
     void* process_ = nullptr;
+    void* job_ = nullptr;
     void* stdinWrite_ = nullptr;
     void* stdoutRead_ = nullptr;
     std::string buffer_;
@@ -41,5 +46,6 @@ private:
 };
 
 std::string QuoteArg(const std::string& arg);  // Windows command-line quoting
+std::string Utf8Arg(const std::filesystem::path& p);  // a path as the UTF-8 argument Subprocess::Start expects (not path.string(): ACP)
 
 }  // namespace dlssvid

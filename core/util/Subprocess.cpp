@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include "util/Error.h"
+#include "util/Log.h"
 
 namespace dlssvid {
 
@@ -28,6 +29,11 @@ std::string QuoteArg(const std::string& arg) {
     return out;
 }
 
+std::string Utf8Arg(const std::filesystem::path& p) {
+    const std::u8string u = p.u8string();
+    return std::string(u.begin(), u.end());
+}
+
 namespace {
 std::wstring Widen(const std::string& s) {
     if (s.empty()) return {};
@@ -45,9 +51,10 @@ Subprocess::~Subprocess() {
         if (WaitForSingleObject(process_, 0) == WAIT_TIMEOUT) TerminateProcess(process_, 1);
         CloseHandle(process_);
     }
+    if (job_) CloseHandle(job_);  // KILL_ON_JOB_CLOSE: whatever is left in the job ends here
 }
 
-void Subprocess::Start(const std::vector<std::string>& args, const std::filesystem::path& workingDir) {
+void Subprocess::Start(const std::vector<std::string>& args, const std::filesystem::path& workingDir, bool killWithOwner) {
     if (args.empty()) Throw("Subprocess::Start: no executable");
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
     HANDLE inRead = nullptr, inWrite = nullptr, outRead = nullptr, outWrite = nullptr;
@@ -67,22 +74,47 @@ void Subprocess::Start(const std::vector<std::string>& args, const std::filesyst
     si.hStdOutput = outWrite;
     si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
     PROCESS_INFORMATION pi{};
-    const BOOL ok = CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr,
-                                   wdir.empty() ? nullptr : wdir.c_str(), &si, &pi);
+    HANDLE job = nullptr;
+    if (killWithOwner) {
+        job = CreateJobObjectW(nullptr, nullptr);  // not inheritable: only this process holds it
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+        if (job && !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+            Log()->warn("Subprocess: SetInformationJobObject failed (error {}); the child is not tied to this process", GetLastError());
+            CloseHandle(job);
+            job = nullptr;
+        }
+    }
+    const DWORD flags = CREATE_NO_WINDOW | (job ? CREATE_SUSPENDED : 0);
+    const BOOL ok = CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, flags, nullptr, wdir.empty() ? nullptr : wdir.c_str(), &si, &pi);
     CloseHandle(inRead);
     CloseHandle(outWrite);
     if (!ok) {
+        const DWORD error = GetLastError();
         CloseHandle(inWrite);
         CloseHandle(outRead);
-        Throw("cannot start process: " + cmd + " (error " + std::to_string(GetLastError()) + ")");
+        if (job) CloseHandle(job);
+        Throw("cannot start process: " + cmd + " (error " + std::to_string(error) + ")");
+    }
+    if (job) {
+        if (!AssignProcessToJobObject(job, pi.hProcess)) {
+            Log()->warn("Subprocess: AssignProcessToJobObject failed (error {}); the child is not tied to this process", GetLastError());
+            CloseHandle(job);
+            job = nullptr;
+        }
+        ResumeThread(pi.hThread);  // started suspended so that it is in the job before it runs any code
     }
     CloseHandle(pi.hThread);
+    job_ = job;
     process_ = pi.hProcess;
     stdinWrite_ = inWrite;
     stdoutRead_ = outRead;
 }
 
 bool Subprocess::Running() const { return process_ && WaitForSingleObject(process_, 0) == WAIT_TIMEOUT; }
+
+uint32_t Subprocess::Pid() const { return process_ ? GetProcessId(process_) : 0; }
 
 std::optional<uint32_t> Subprocess::ExitCode() const {
     if (!process_ || Running()) return std::nullopt;

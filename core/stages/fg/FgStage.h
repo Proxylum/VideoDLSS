@@ -18,8 +18,9 @@ namespace dlssvid {
 
 // Pipeline stage "Frame Generation" (ТЗ §4, §8): colour (color_nr / color_sr / the decoded frame) + depth_dlss /
 // mv_dlss -> `color_fg` with `multiplier` x frames: real frame i at index i * multiplier, generated frames between.
-// The manifest carries fps * multiplier; the optional preview video runs at that rate. The GUI runs this stage as
-// the `dlssvid fg` process (TaskQueue), so a crash inside the backend never reaches the GUI (ТЗ §9).
+// The manifest carries fps * multiplier; the optional preview video runs at that rate. The stage always runs in a
+// process of its own: `dlssvid fg` from the GUI's TaskQueue, `dlssvid fg --as-stage` from `dlssvid process`
+// (pipeline/FgProcess.h) - a crash inside the backend never reaches the GUI nor the rest of the run (ТЗ §9, audit fg-2).
 struct FgStageOptions {
     std::string backend = "dlssg";       // dlssg | rife | blend
     int multiplier = 2;                  // 2 | 3 | 4

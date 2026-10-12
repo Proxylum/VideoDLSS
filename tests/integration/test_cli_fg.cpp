@@ -109,3 +109,48 @@ TEST_CASE("dlssvid fg --crash-after ends the stage process only: the caller sees
     const CliResult fine = RunCli({"fg", "--backend", "blend", "--warp", "-i", clip.string(), "-o", (dir / "passes_ok").string()});
     CHECK(fine.code == 0);
 }
+
+// Audit fg-2 (TASK-0038): `dlssvid process` runs FG as `fg --as-stage` (pipeline/FgProcess.h) - progress and the result
+// as protocol lines, the stage's parameters as JSON, the runner's source hash, a disabled backend reported, not failed.
+TEST_CASE("dlssvid fg --as-stage reports progress and the result as lines; --params-json is applied; --disable-unavailable reports a disabled stage",
+          "[integration][cli][fg][isolation]") {
+    ClipSpec spec;
+    spec.frames = 6;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("as_stage");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    auto resultOf = [](const std::string& out) {
+        const size_t at = out.find("@result ");
+        REQUIRE(at != std::string::npos);
+        const size_t end = out.find('\n', at);
+        return nlohmann::json::parse(out.substr(at + 8, end == std::string::npos ? std::string::npos : end - at - 8));
+    };
+
+    const CliResult r = RunCli({"fg", "--as-stage", "--warp", "-i", clip.string(), "-o", (dir / "p").string(), "--no-auto", "--params-json",
+                                R"({"backend":"blend","multiplier":3})", "--source-hash", "sha256:00"});
+    CHECK(r.code == 0);
+    for (int n = 1; n <= 6; ++n) CHECK(r.out.find("@progress " + std::to_string(n) + "\n") != std::string::npos);
+    const nlohmann::json res = resultOf(r.out);
+    CHECK(res["disabled"] == false);
+    CHECK(res["stats"]["multiplier"] == 3);
+    CHECK(res["stats"]["frames"] == 6);
+    CHECK(res["stats"]["frames_out"] == 16);
+    CHECK(res["stats"]["ms_per_frame_wall"].get<double>() > 0.0);
+    CHECK(Manifest::Load(dir / "p" / "color_fg").sourceHash == "sha256:00");  // the runner's hash, not hashed again
+    CHECK(Manifest::Load(dir / "p" / "color_fg").frameCount == 16);
+
+    const CliResult off = RunCli({"fg", "--as-stage", "--warp", "-i", clip.string(), "-o", (dir / "p_off").string(), "--no-auto", "--params-json",
+                                  R"({"backend":"dlssg"})", "--disable-unavailable"});
+    CHECK(off.code == 0);  // disabled is a result, not a failure
+    const nlohmann::json offRes = resultOf(off.out);
+    CHECK(offRes["disabled"] == true);
+    CHECK(!offRes["disabled_reason"].get<std::string>().empty());
+
+    const CliResult tiff = RunCli({"fg", "--as-stage", "--warp", "-i", clip.string(), "-o", (dir / "p_tiff").string(), "--no-auto", "--format", "tiff",
+                                   "--params-json", R"({"backend":"blend"})", "--frames", "2"});
+    CHECK(tiff.code == 0);  // the formats `process` accepts for the stage
+    CHECK(Manifest::Load(dir / "p_tiff" / "color_fg").format == FileFormat::Tiff);
+
+    CHECK(RunCli({"fg", "--as-stage", "--warp", "-i", clip.string(), "-o", (dir / "p_bad").string(), "--params-json", "[1]"}).code != 0);
+}

@@ -20,7 +20,9 @@ struct ColorInfo;
 // The whole pipeline as one command (stage 8, ТЗ §4 / §7 / §9): the stages run one after another over the disk
 // cache of passes under `passesRoot` (depth -> flow -> upscale -> nr -> fg; each reads what the previous ones wrote),
 // then the last colour pass (color_fg > color_nr > color_sr) is encoded into `output` with the source's audio copied.
-// Stage parameters are the JSON the project file and the GUI hold.
+// Stage parameters are the JSON the project file and the GUI hold. Frame Generation runs in its own process
+// (`dlssvid fg --as-stage`, FgProcess.h) when `fgExecutable` is set: a crash of DLSS-G ends only that process, and with
+// `disableUnavailable` the stage is reported `failed` and the result is encoded from color_nr / color_sr (audit fg-2).
 //
 // Stage 9 (MR A): a pass is reused only when its fingerprint (PassFingerprint.h: source, parameters, input passes,
 // tool) equals the one the run needs; a pass that would be replaced by another version is moved aside first
@@ -37,7 +39,8 @@ struct ProcessOptions {
     std::filesystem::path passesRoot;  // default: <output stem>_passes next to the output
     std::vector<ProcessStage> stages;  // any order; run in the canonical one
     bool skipExisting = true;          // false: every enabled stage runs (a version with the same fingerprint is overwritten in place)
-    bool disableUnavailable = false;   // nr / fg without DLL or GPU: skip with a message instead of failing
+    bool disableUnavailable = false;   // nr / fg without DLL or GPU, or an fg process that fails: skip the stage (fg: encode
+                                       // color_nr) with a message instead of failing the run
     std::string codec = "h264_nvenc";
     std::map<std::string, std::string> codecOptions;
     OutputFormatRequest outputFormat;  // bit depth and chroma of the result (auto: the source's, within the codec)
@@ -50,11 +53,15 @@ struct ProcessOptions {
     std::set<std::string> forceStages;  // recompute these stages even when their pass matches (a per-stage --no-skip-existing)
     std::string sourceHash;             // "sha256:<hex>" of the input when the caller knows it (Project::SourceHash); empty = hash the file
     std::function<void(const std::string& stage, int64_t done, int64_t total)> progress;
+    std::filesystem::path fgExecutable;  // dlssvid.exe: FG runs as `<exe> fg --as-stage` (its crash ends only that process); empty: in this process
+    int64_t fgCrashAfter = -1;           // test hooks of the fg process (isolation tests): die after N real frames,
+    bool fgCrashOnExit = false;          // die after printing its result,
+    bool fgStall = false;                // hang before reading the input
 };
 
 struct ProcessStageReport {
     std::string name;
-    std::string status;  // ran | reused | disabled | passthrough
+    std::string status;  // ran | reused | disabled | failed (fg: its process failed, the run went on) | passthrough
     std::string reason;  // why it ran or was reused ("params_changed: intensity: 1 -> 1.4"), or why it is disabled
     std::filesystem::path outDir;
     int64_t frames = 0;
@@ -79,6 +86,7 @@ struct ProcessResult {
     std::string codec;              // the encoder used
     FrameDesc outputFormat;         // the result's layout (bit depth, chroma)
     std::string outputPixelFormat;  // the encoder's input format ("p010le", "yuv422p10le" ...)
+    std::vector<std::string> warnings;  // e.g. "fg failed: ...; the result is encoded from color_nr without frame generation"
     nlohmann::json ToJson() const;
 };
 

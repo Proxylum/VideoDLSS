@@ -43,6 +43,9 @@ public:
         double fraction = 0.0;  // overall 0..1 (by stages when the task has a plan, else by frames)
         int stagesDone = 0, stagesTotal = 0;
         std::vector<StageStatus> stages;
+        // stages the runner reported failed while the task went on (`process: fg failed - ...`: the result is encoded
+        // without it, audit fg-2); their titles, in run order
+        QStringList failedStageTitles() const;
     };
 
     explicit TaskQueue(QWidget* parent = nullptr);
@@ -89,6 +92,7 @@ private:
     void updateProgress(Task& t, const QString& stage, int done, int total);
     void stageDone(Task& t, const QString& stage, double seconds);
     void stageReused(Task& t, const QString& stage);
+    void stageFailed(Task& t, const QString& stage);
     void publish(Task& t);  // the row and the taskProgress signal
     void finishTask(Task& t, bool ok, const QString& status);
     double plannedSeconds(const Task& t, const QString& stage) const;

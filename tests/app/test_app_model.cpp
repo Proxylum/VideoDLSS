@@ -17,6 +17,7 @@
 #include <QStyle>
 #include <QVBoxLayout>
 #include <QWheelEvent>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -1109,4 +1110,74 @@ TEST_CASE("StageCard shows backend-scoped parameters only for their backend", "[
     model.setStageParam("upscale", "backend", "nis");
     card.refresh();
     CHECK(!form->isRowVisible(modelRow));
+}
+
+// Audit fg-2 (TASK-0038): `process: fg failed - ...` from the runner (FG in its own process failed, the result was encoded
+// without it) keeps the stage failed while the run finishes with a result - also when a progress update glued onto it.
+TEST_CASE("ProcessingPanel: a stage the runner reports failed stays failed while the run finishes with a result", "[app][tasks][isolation]") {
+    App();
+    const auto d = Dir("stage_failed");
+    TaskQueue queue;
+    ProcessingPanel panel(queue);
+    const std::vector<TaskQueue::StagePlan> plan{{"fg", "Генерация кадров ×2", 4.0, false}, {"encode", "Кодирование", 2.0, false}};
+    // the runner's output as cmd scripts: whole lines, and a progress update without its newline glued to the log line
+    auto script = [&](const char* name, const char* firstLine) {
+        const auto path = d / name;
+        std::ofstream(path) << "@echo off\r\n"
+                            << firstLine << "\r\n"
+                            << "echo [2026-10-12 10:00:00.000] [warning] process: fg failed - the fg process crashed\r\n"
+                            << "echo encode: 4/4 frames\r\n";
+        return QString::fromStdWString(path.wstring());
+    };
+    for (const QString& file : {script("lines.cmd", "echo fg: 1/4 frames"), script("glued.cmd", "<nul set /p \"=fg: 2/4 frames\"")}) {
+        INFO(file.toStdString());
+        const int id = queue.enqueue("Обработка", "cmd", {"/c", file}, plan);
+        panel.watch(id, "clip.mp4 → clip_result.mkv");
+        Pump([&] { return queue.finished(id); }, 20000);
+        REQUIRE(queue.succeeded(id));
+        const TaskQueue::Progress p = queue.progress(id);
+        CHECK(p.failedStageTitles() == QStringList{"Генерация кадров ×2"});
+        CHECK(p.stagesDone == 1);
+        CHECK(p.fraction == 1.0);
+        CHECK(panel.headline().startsWith("Готово за"));
+        CHECK(panel.headline().contains("без стадии «Генерация кадров ×2»"));
+        const QStringList lines = panel.stageLines();
+        REQUIRE(lines.size() == 2);
+        CHECK(lines[0].startsWith("Генерация кадров ×2 · ошибка"));  // before: done as soon as encode started
+        CHECK(lines[1].startsWith("Кодирование · готово"));
+        auto* showResult = panel.findChild<QPushButton*>("showResult");
+        REQUIRE(showResult);
+        CHECK(!showResult->isHidden());
+    }
+}
+
+TEST_CASE("TaskQueue runs dlssvid process whose fg process crashes: fg failed, encode done, the task succeeded", "[app][tasks][process][isolation]") {
+    App();
+    const auto d = Dir("process_fg_crash");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    const auto out = d / "out.mkv";
+    TaskQueue queue;
+    QStringList output;
+    QObject::connect(&queue, &TaskQueue::taskOutput, [&](int, const QString& line) { output << line; });
+    const std::vector<TaskQueue::StagePlan> plan{{"depth", "Глубина", 1.0, false}, {"flow", "Векторы", 1.0, false}, {"upscale", "Апскейл", 1.0, false},
+                                                  {"nr", "NR", 1.0, false},          {"fg", "FG", 1.0, false},      {"encode", "Кодирование", 1.0, false}};
+    const QStringList args{"process", "-i", QString::fromStdWString(clip.wstring()), "-o", QString::fromStdWString(out.wstring()), "--passes",
+                           QString::fromStdWString((d / "p").wstring()), "--warp", "--codec", "ffv1", "--disable-unavailable",
+                           "--param", "depth.backend=stub", "--param", "flow.backend=stub", "--param", "upscale.backend=nis",
+                           "--param", "nr.backend=stub", "--param", "fg.backend=blend", "--fg-crash-after", "1"};
+    const int id = queue.enqueue("Обработка", DLSSVID_CLI_PATH, args, plan);
+    Pump([&] { return queue.finished(id); }, 120000);
+    REQUIRE(queue.finished(id));
+    CHECK(queue.succeeded(id));  // before: the whole run died with 0xC0000005, no result
+    const TaskQueue::Progress p = queue.progress(id);
+    CHECK(p.failedStageTitles() == QStringList{"FG"});
+    for (const auto& s : p.stages)
+        if (s.name == "encode") CHECK(s.state == "done");
+    CHECK(std::filesystem::exists(out));
+    CHECK(DecodeAll(out).size() == 4);  // color_nr: 4 frames
+    CHECK(std::any_of(output.begin(), output.end(), [](const QString& l) { return l.contains("process: fg failed"); }));
 }

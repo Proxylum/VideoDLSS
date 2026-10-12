@@ -470,3 +470,34 @@ TEST_CASE("Regression (pass-mv-yup): toggling mv.y_up of a legacy mv_dlss recomp
     m.Save(mvDir);
     CHECK(Decision(PlanProcess(o), "upscale").action == "restore");  // the version made without the flag comes back
 }
+
+// Audit fg-2 (TASK-0038): an fg process that dies while it rewrites color_fg in place (a forced or incomplete pass is not
+// moved to the history first) leaves the previous signed version current - only debris of the run is removed.
+TEST_CASE("RunProcess: an fg process that dies while completing color_fg in place keeps the previous version", "[integration][process][versions][fg][isolation]") {
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("fg_in_place_crash");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o = Options(dir, clip);
+    o.frames = 3;
+    const ProcessResult base = RunProcess(o);
+    o.frames = -1;
+    o.forceStages = {"fg"};  // a rerun in place (the MKV has no frame count, so the 3-frame pass counts as complete)
+    o.fgExecutable = DLSSVID_CLI_PATH;
+    o.fgCrashAfter = 1;
+    o.disableUnavailable = true;
+    const ProcessResult r = RunProcess(o);
+    const ProcessStageReport& fg = Report(r, "fg");
+    CHECK(fg.status == "failed");
+    CHECK(fg.details["crashed"] == true);
+    CHECK(fg.details["partial"] == "kept");
+    const Manifest m = Manifest::Load(o.passesRoot / "color_fg");
+    CHECK(m.fingerprint == Report(base, "fg").fingerprint);
+    CHECK(m.frameCount == 5);  // 3 real frames x2
+    CHECK(!std::filesystem::exists(o.passesRoot / "color_fg.v"));
+    CHECK(r.finalPass == o.passesRoot / "color_nr");
+    o.forceStages.clear();
+    CHECK(Decision(PlanProcess(o), "fg").action == "reuse");  // the previous version is still current and valid
+}

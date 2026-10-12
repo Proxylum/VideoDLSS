@@ -57,6 +57,7 @@ add_library(dlssvid_core STATIC
   pipeline/IStage.h
   pipeline/Pipeline.h pipeline/Pipeline.cpp
   pipeline/ProcessRunner.h pipeline/ProcessRunner.cpp
+  pipeline/FgProcess.h pipeline/FgProcess.cpp
   pipeline/PassFingerprint.h pipeline/PassFingerprint.cpp
   pipeline/PassVersions.h pipeline/PassVersions.cpp
   pipeline/Estimates.h pipeline/Estimates.cpp

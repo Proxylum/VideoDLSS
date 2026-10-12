@@ -366,8 +366,22 @@ IFrameGenerator: dlssg (NGX Feature 11, DLSS SDK) | rife (RIFE 4.x, TensorRT) | 
   (текущий кадр), `Depth`, `MVecs` (пиксели в разрешении MV, «от текущего к предыдущему» — наш `mv_dlss` со
   `mvecScale = 1`), выход `OutputInterpolated` — кадр между **предыдущим** backbuffer (его хранит рантайм) и текущим;
   `multiFrameCount/Index` — evaluate вызывается `mult − 1` раз на пару. Ни swapchain, ни хуков, ни бинарников Streamline
-  (в клоне с GitHub их и нет). Изоляция для GUI осталась процессной: панель проекта запускает `dlssvid fg` через
-  `TaskQueue`, падение процесса — `taskFinished(false)` (тест с `--crash-after`).
+  (в клоне с GitHub их и нет).
+- **Изоляция процессом (TASK-0038, аудит fg-2).** `dlssvid process` и `bench` (а значит, и «Обработать» в GUI)
+  запускают FG дочерним `dlssvid fg --as-stage` (`core/pipeline/FgProcess.h`): тот же exe и корень пассов, параметры
+  стадии — `--params-json`, папки пассов — явно (`--color-dir/--depth-dir/--mv-dir --no-auto`), хэш источника —
+  `--source-hash`. Ребёнок печатает `@progress <n>` и одну строку `@result <json>`, остальной его вывод — лог,
+  родитель пересылает его как есть. Ребёнок живёт в job object (`KILL_ON_JOB_CLOSE`: отмена прогона убивает и его;
+  `nvngx_update.exe` уходит из job; `DIE_ON_UNHANDLED_EXCEPTION` и `SetErrorMode` — без диалога WER). Результат FG
+  бит-в-бит тот же, что в процессе (тот же `RunFg` с теми же параметрами), отпечатки и golden не меняются; время на
+  кадр берётся у ребёнка (`ms_per_frame_wall`), запуск — в `details.startup_seconds`. Исходы: `@result` и код 0 —
+  `ran` (или `disabled`); `@result`, полный `color_fg` и сбой на выходе — `ran` с предупреждением; иначе (ребёнок
+  упал, вышел с ошибкой или без итога) с `--disable-unavailable` стадия `failed`, мусор упавшего прогона в `color_fg`
+  удаляется (прежняя подписанная версия, которую прогон не трогал, остаётся текущей), encode идёт из `color_nr` ›
+  `color_sr` › исходника, в отчёте и JSON — `warnings`, код 0; без флага — «process: stage 'fg' failed», код 1.
+  Исключения FG в процессе (`--fg-in-process`, библиотечные вызовы) обрабатываются так же. GUI разбирает строку
+  «process: fg failed — …»: стадия «ошибка», заголовок «Готово за … · без стадии «…»», страница обработки остаётся
+  с «Показать результат». Отдельная стадия из панели проекта по-прежнему идёт своим процессом `dlssvid fg`.
 - `DlssgFrameGenerator`: capability check (`FrameGeneration.Available`, `MultiFrameCountMax`, версия драйвера из блока),
   создание с `rgba16f`, при отказе — `rgba8` через compute-конверсию; guides через субректы в своём разрешении, без них —
   константная глубина / нулевые MV с предупреждением; первый кадр — `reset`, его выход отбрасывается (рантайм
@@ -510,7 +524,7 @@ PlanProcess / RunProcess ── для каждой включённой ста�
 | `DlssgFrameGenerator` (backbuffer) | цвет подаётся как `R16G16B16A16_FLOAT` с `ColorBuffersHDR = 0`; при `FAIL_UnsupportedFormat` — копия в `R8G8B8A8_UNORM` через `Resampler` | руководство описывает display-ready SDR/HDR10; RGBA16F [0,1] приняты на Ada | — |
 | `FgStage` / `IFrameGenerator::Generate` | каждый сгенерированный кадр читается на CPU (readback / TensorRT host) и пишется в пасс; `color_fg` не кладётся в слот кэша | у `color_fg` больше кадров, чем у источника (нет соответствия «один слот — один индекс») | этап 8: `process` с потоковой записью |
 | `RifeFrameGenerator` | вход паддится до кратного 32 (replicate), движок под паддингованный размер | RIFE 4.x работает на кратных 32 | — |
-| `FgStage --crash-after` | скрытый флаг: `TerminateProcess(0xC0000005)` после N кадров | воспроизводимое «падение воркера» для теста изоляции (ТЗ §9) | остаётся тестовым |
+| `FgStage --crash-after` | скрытый флаг: `TerminateProcess(0xC0000005)` после N кадров; также `fg --crash-on-exit`, `fg --stall`, `process --fg-crash-after N`, `--fg-crash-on-exit`, `--fg-stall`, `--fg-in-process` | воспроизводимое «падение воркера» и зависание для тестов изоляции (ТЗ §9, аудит fg-2); `--fg-in-process` — отладка без изоляции | остаётся тестовым |
 | `EncodePassToVideo` | источник декодируется целиком ради аудио-пакетов | у `VideoDecoder` нет режима «только аудио»; декодирование дёшево по сравнению со стадиями | этап 8b: демукс аудио без декодирования видео |
 | `ProcessRunner` | стадии выполняются последовательно через дисковый кэш пассов, а не одним потоковым пайплайном | дисковый кэш нужен по ТЗ §4, и каждая стадия уже умеет читать пассы; потоковый режим потребовал бы убрать CPU-readback | — |
 
