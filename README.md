@@ -303,6 +303,8 @@ dlssvid depth   -i input.mp4 -o passes --backend worker:da3              :: PyTo
 dlssvid flow    -i input.mp4 -o passes --backend ofa                     :: NVDEC -> OFA, mv_raw + mv_dlss, warp PSNR
 dlssvid flow    -i input.mp4 -o passes --backend searaft --depth-dir passes\depth_raw --target 3840x2160
 dlssvid depth   -i input.mp4 -o passes --backend da3 --mv-dir passes\mv_dlss   :: TAE with motion compensation
+dlssvid proxy   -i input.mp4 --passes passes                          :: scrubbing proxy (lossless intra copy in passes\.proxy): random jumps ≥ 30 fps on 1080p
+dlssvid render  -i input.mp4 --passes passes --bench 120 --bench-mode random   :: jump latency, misses only (p50 / p90)
 dlssvid models  list
 ```
 

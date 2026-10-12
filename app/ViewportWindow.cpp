@@ -26,7 +26,11 @@ ViewportWindow::ViewportWindow(AppModel& model) : model_(model) {
         if (!model_.playing() || model_.frameStates() != renderedStates_) render();
     });
     pollTimer_.start();
-    connect(&model_, &AppModel::framesUpdated, this, [this] { dirty_ = true; });  // also uploads by the playback tick
+    connect(&model_, &AppModel::framesUpdated, this, [this] {  // also uploads by the playback tick
+        dirty_ = true;
+        // a scrub's frames all arrived (the store's callback, TASK-0040): present now, not on the next poll (up to 16 ms)
+        if (!model_.playing() && isExposed() && model_.framesReadyAt(model_.time())) render();
+    });
     connect(&model_, &AppModel::stateChanged, this, [this] {
         // setTime emits timeChanged, then stateChanged: the frame the playback tick has just presented needs no second
         // (deferred) present - two presents per frame on a two-buffer flip chain would halve the rate on vsync

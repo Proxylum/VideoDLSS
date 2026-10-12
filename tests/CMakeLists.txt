@@ -71,6 +71,7 @@ add_executable(dlssvid_integration_tests
   integration/test_cli_passes.cpp
   integration/test_depth_stage.cpp
   integration/test_vda_models.cpp
+  integration/test_viewport_proxy.cpp
   integration/test_cli_depth.cpp
   integration/test_flow_stage.cpp
   integration/test_gpu_decode.cpp
@@ -140,6 +141,18 @@ target_compile_definitions(dlssvid_golden_tests PRIVATE
   DLSSVID_GOLDEN_DIR="${CMAKE_SOURCE_DIR}/tests/golden")
 add_dependencies(dlssvid_golden_tests dlssvid)
 catch_discover_tests(dlssvid_golden_tests TEST_PREFIX "golden." DISCOVERY_MODE PRE_TEST WORKING_DIRECTORY "${DLSSVID_TEST_CWD}" PROPERTIES LABELS golden)
+
+# ---- Performance (TASK-0040): scrubbing at >= 30 fps on 1080p, the p90 of random jumps into frames not resident; an
+# NVIDIA GPU (skipped otherwise), serially - parallel tests would time each other (`ctest -LE perf` leaves it out) ----
+add_executable(dlssvid_perf_tests perf/test_scrub_perf.cpp integration/TestClips.h integration/TestClips.cpp)
+target_include_directories(dlssvid_perf_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/integration)
+target_link_libraries(dlssvid_perf_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
+target_compile_definitions(dlssvid_perf_tests PRIVATE
+  DLSSVID_CLI_PATH="$<TARGET_FILE:dlssvid>"
+  DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp")
+add_dependencies(dlssvid_perf_tests dlssvid)
+catch_discover_tests(dlssvid_perf_tests TEST_PREFIX "perf." DISCOVERY_MODE PRE_TEST WORKING_DIRECTORY "${DLSSVID_TEST_CWD}"
+  PROPERTIES RUN_SERIAL TRUE LABELS perf TIMEOUT 900)
 
 # ---- build hygiene: ninja must have recorded header dependencies for every C++ object (stale-object incident) ----
 if(CMAKE_GENERATOR MATCHES "Ninja")

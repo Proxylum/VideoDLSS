@@ -299,3 +299,32 @@ TEST_CASE("10-bit round trip keeps every luma code; 4:2:2 and 4:4:4 chroma are r
     CHECK(std::abs(static_cast<int>(to10.Plane16(0)[0]) - 504) <= 1);  // 126 at 8 bits is 504 at 10
     CHECK(std::abs(static_cast<int>(to10.Plane16(1)[0]) - 520) <= 1);  // the mean of 100 and 160 is 130 -> 520
 }
+
+// TASK-0040: the viewport converts in bands of rows on several threads (8-12 ms single-threaded at 1080p); every pixel
+// is computed alone, so any thread count - more threads than rows too - gives the same halves.
+TEST_CASE("YuvToRgba16f in bands of rows is the same bit for bit whatever the thread count", "[convert][color][regression]") {
+    struct Layout {
+        uint32_t w, h;
+        PixelFormat fmt;
+        uint8_t depth;
+    };
+    for (const Layout lay : {Layout{37, 23, PixelFormat::Yuv420p, 8}, Layout{64, 40, PixelFormat::Yuv422p16, 10}, Layout{30, 5, PixelFormat::Yuv444p, 8},
+                             Layout{48, 300, PixelFormat::Yuv420p16, 12}}) {
+        CpuFrame f;
+        f.Allocate(FrameDesc{lay.w, lay.h, lay.fmt, lay.depth});
+        uint32_t seed = 12345;
+        const uint32_t maxv = (1u << lay.depth) - 1u;
+        if (f.desc.HighBitDepth()) {
+            auto* p = reinterpret_cast<uint16_t*>(f.data.data());
+            for (size_t i = 0; i < f.data.size() / 2; ++i) p[i] = static_cast<uint16_t>((seed = seed * 1664525u + 1013904223u) >> 16 & maxv);
+        } else {
+            for (auto& b : f.data) b = static_cast<uint8_t>((seed = seed * 1664525u + 1013904223u) >> 24);
+        }
+        const ColorInfo ci{ColorMatrix::Bt709, ColorRange::Limited};
+        const PassImage one = YuvToRgba16f(f, ci, 1);
+        for (const int threads : {2, 3, 7, 16, 0}) {
+            INFO(lay.w << "x" << lay.h << " threads " << threads);
+            CHECK(YuvToRgba16f(f, ci, threads).data == one.data);
+        }
+    }
+}

@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <thread>
+#include <vector>
 
 #include "util/Error.h"
 
@@ -61,14 +63,14 @@ YuvCoeffs Coeffs(const ColorInfo& info, int bitDepth) {
 // Walks every pixel of a planar frame, replicating chroma per block, and hands `emit(x, y, r, g, b)` the clamped
 // display-referred RGB in [0, 1]. The arithmetic is the one the 8-bit 4:2:0 converter always used.
 template <typename T, typename Emit>
-void ForEachRgb(const CpuFrame& frame, const YuvCoeffs& k, Emit emit) {
-    const uint32_t w = frame.desc.width, h = frame.desc.height;
+void ForEachRgb(const CpuFrame& frame, const YuvCoeffs& k, Emit emit, uint32_t y0 = 0, uint32_t y1 = UINT32_MAX) {
+    const uint32_t w = frame.desc.width, h = std::min(frame.desc.height, y1);
     const int sx = ChromaShiftX(frame.desc.format), sy = ChromaShiftY(frame.desc.format);
     const T* Y = reinterpret_cast<const T*>(frame.Plane(0));
     const T* U = reinterpret_cast<const T*>(frame.Plane(1));
     const T* V = reinterpret_cast<const T*>(frame.Plane(2));
     const size_t cw = frame.desc.PlaneCols(1);
-    for (uint32_t y = 0; y < h; ++y) {
+    for (uint32_t y = y0; y < h; ++y) {
         const T* yr = Y + static_cast<size_t>(y) * w;
         const T* ur = U + static_cast<size_t>(y >> sy) * cw;
         const T* vr = V + static_cast<size_t>(y >> sy) * cw;
@@ -85,11 +87,11 @@ void ForEachRgb(const CpuFrame& frame, const YuvCoeffs& k, Emit emit) {
 }
 
 template <typename Emit>
-void ForEachRgbOf(const CpuFrame& frame, const ColorInfo& info, Emit emit) {
+void ForEachRgbOf(const CpuFrame& frame, const ColorInfo& info, Emit emit, uint32_t y0 = 0, uint32_t y1 = UINT32_MAX) {
     if (frame.data.size() < frame.desc.ByteSize()) Throw("YuvToRgb: frame has no data");
     const YuvCoeffs k = Coeffs(info, frame.desc.HighBitDepth() ? frame.desc.bitDepth : 8);
-    if (frame.desc.HighBitDepth()) ForEachRgb<uint16_t>(frame, k, emit);
-    else ForEachRgb<uint8_t>(frame, k, emit);
+    if (frame.desc.HighBitDepth()) ForEachRgb<uint16_t>(frame, k, emit, y0, y1);
+    else ForEachRgb<uint8_t>(frame, k, emit, y0, y1);
 }
 
 // 4 floats -> 4 halves (round to nearest even), F16C or the portable routine.
@@ -128,15 +130,32 @@ bool HasF16C() {
     return has;
 }
 
-PassImage YuvToRgba16f(const CpuFrame& frame, const ColorInfo& info) {
+PassImage YuvToRgba16f(const CpuFrame& frame, const ColorInfo& info, int threads) {
     const uint32_t w = frame.desc.width, h = frame.desc.height;
+    if (frame.data.size() < frame.desc.ByteSize()) Throw("YuvToRgb: frame has no data");
     PassImage out;
     out.Allocate(w, h, PixelType::F16, {"R", "G", "B", "A"});
     const bool f16c = HasF16C();
     uint16_t* dst = out.As<uint16_t>();
-    ForEachRgbOf(frame, info, [&](uint32_t x, uint32_t y, float r, float g, float b) {
-        StoreHalf4(dst + (static_cast<size_t>(y) * w + x) * 4, r, g, b, 1.f, f16c);
-    });
+    auto rows = [&](uint32_t y0, uint32_t y1) {
+        ForEachRgbOf(frame, info, [&](uint32_t x, uint32_t y, float r, float g, float b) {
+            StoreHalf4(dst + (static_cast<size_t>(y) * w + x) * 4, r, g, b, 1.f, f16c);
+        }, y0, y1);
+    };
+    // bands of rows on several threads (TASK-0040: 8-12 ms single-threaded at 1080p, a third of the scrubbing budget);
+    // every pixel is computed alone, so the result is the same bit for bit whatever the count
+    int n = threads > 0 ? threads : (h >= 256 ? std::clamp(static_cast<int>(std::thread::hardware_concurrency()) / 2, 1, 8) : 1);
+    n = std::clamp(n, 1, static_cast<int>(std::max(1u, h)));
+    if (n == 1) {
+        rows(0, h);
+        return out;
+    }
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<size_t>(n - 1));
+    const auto band = [&](int i) { return static_cast<uint32_t>(static_cast<uint64_t>(h) * static_cast<uint64_t>(i) / static_cast<uint64_t>(n)); };
+    for (int i = 1; i < n; ++i) pool.emplace_back(rows, band(i), band(i + 1));
+    rows(0, band(1));
+    for (auto& t : pool) t.join();
     return out;
 }
 

@@ -182,25 +182,94 @@ void D3D12Device::UploadTexture2D(ID3D12Resource* dst, const uint8_t* data, size
     UINT64 rowSize = 0, total = 0;
     device_->GetCopyableFootprints(&desc, 0, 1, 0, &fp, &rows, &rowSize, &total);
 
-    ComPtr<ID3D12Resource> staging = CreateBuffer(total, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
-    uint8_t* mapped = nullptr;
-    const CD3DX12_RANGE noRead(0, 0);
-    CheckHr(staging->Map(0, &noRead, reinterpret_cast<void**>(&mapped)), "Map(upload)");
+    if (total > uploadStagingBytes_) {  // grown, never shrunk: the copy below waits, so the buffer is free on return
+        if (uploadStaging_ && uploadMapped_) uploadStaging_->Unmap(0, nullptr);
+        uploadMapped_ = nullptr;
+        const uint64_t bytes = (total + (uint64_t{1} << 20) - 1) & ~((uint64_t{1} << 20) - 1);
+        uploadStaging_ = CreateBuffer(bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        const CD3DX12_RANGE noRead(0, 0);
+        CheckHr(uploadStaging_->Map(0, &noRead, reinterpret_cast<void**>(&uploadMapped_)), "Map(upload)");
+        uploadStagingBytes_ = bytes;
+    }
+    uint8_t* mapped = uploadMapped_;
     for (UINT r = 0; r < rows; ++r) {
         std::memcpy(mapped + fp.Offset + static_cast<size_t>(r) * fp.Footprint.RowPitch, data + r * srcRowPitch,
                     static_cast<size_t>(rowSize));
     }
-    staging->Unmap(0, nullptr);
 
+    ID3D12Resource* staging = uploadStaging_.Get();
     ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) {
         const auto toCopy = CD3DX12_RESOURCE_BARRIER::Transition(dst, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
         cl->ResourceBarrier(1, &toCopy);
         const CD3DX12_TEXTURE_COPY_LOCATION dstLoc(dst, 0);
-        const CD3DX12_TEXTURE_COPY_LOCATION srcLoc(staging.Get(), fp);
+        const CD3DX12_TEXTURE_COPY_LOCATION srcLoc(staging, fp);
         cl->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
         const auto toCommon = CD3DX12_RESOURCE_BARRIER::Transition(dst, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
         cl->ResourceBarrier(1, &toCommon);
     });
+}
+
+D3D12Device::StagedTexture D3D12Device::StageTexture2D(uint32_t width, uint32_t height, DXGI_FORMAT format, const uint8_t* data, size_t srcRowPitch,
+                                                        ComPtr<ID3D12Resource> reuse) {
+    StagedTexture st;
+    if (reuse) {
+        const D3D12_RESOURCE_DESC d = reuse->GetDesc();
+        if (d.Width == width && d.Height == height && d.Format == format) st.texture = std::move(reuse);
+    }
+    if (!st.texture) st.texture = CreateTexture2D(width, height, format);  // ID3D12Device is free-threaded: creation needs no queue
+    const D3D12_RESOURCE_DESC desc = st.texture->GetDesc();
+    UINT rows = 0;
+    UINT64 rowSize = 0, total = 0;
+    device_->GetCopyableFootprints(&desc, 0, 1, 0, &st.footprint, &rows, &rowSize, &total);
+    uint8_t* mapped = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(uploadPoolMutex_);
+        for (auto it = uploadPool_.begin(); it != uploadPool_.end(); ++it)
+            if (it->bytes >= total && it->bytes <= 2 * total) {
+                st.upload = std::move(it->buffer);
+                mapped = it->mapped;
+                uploadPool_.erase(it);
+                break;
+            }
+    }
+    if (!st.upload) {
+        st.upload = CreateBuffer(total, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+        const CD3DX12_RANGE noRead(0, 0);
+        CheckHr(st.upload->Map(0, &noRead, reinterpret_cast<void**>(&mapped)), "Map(staged upload)");  // mapped for good
+    }
+    {
+        std::lock_guard<std::mutex> lock(uploadPoolMutex_);
+        uploadMappedOf_[st.upload.Get()] = mapped;
+    }
+    for (UINT r = 0; r < rows; ++r)
+        std::memcpy(mapped + st.footprint.Offset + static_cast<size_t>(r) * st.footprint.Footprint.RowPitch, data + r * srcRowPitch, static_cast<size_t>(rowSize));
+    return st;
+}
+
+void D3D12Device::CopyStagedTextures(std::vector<StagedTexture*> textures) {
+    if (textures.empty()) return;
+    ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) {
+        std::vector<D3D12_RESOURCE_BARRIER> toCopy, toCommon;
+        for (StagedTexture* t : textures) {
+            toCopy.push_back(CD3DX12_RESOURCE_BARRIER::Transition(t->texture.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST));
+            toCommon.push_back(CD3DX12_RESOURCE_BARRIER::Transition(t->texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON));
+        }
+        cl->ResourceBarrier(static_cast<UINT>(toCopy.size()), toCopy.data());
+        for (StagedTexture* t : textures) {
+            const CD3DX12_TEXTURE_COPY_LOCATION dstLoc(t->texture.Get(), 0);
+            const CD3DX12_TEXTURE_COPY_LOCATION srcLoc(t->upload.Get(), t->footprint);
+            cl->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, nullptr);
+        }
+        cl->ResourceBarrier(static_cast<UINT>(toCommon.size()), toCommon.data());
+    });
+    std::lock_guard<std::mutex> lock(uploadPoolMutex_);
+    for (StagedTexture* t : textures) {  // the copies are done: the buffers go back to the pool (a few, the largest kept)
+        if (!t->upload) continue;
+        const auto m = uploadMappedOf_.find(t->upload.Get());
+        if (m != uploadMappedOf_.end() && uploadPool_.size() < 12) uploadPool_.push_back({t->upload, t->upload->GetDesc().Width, m->second});
+        if (m != uploadMappedOf_.end()) uploadMappedOf_.erase(m);
+        t->upload.Reset();
+    }
 }
 
 std::vector<uint8_t> D3D12Device::ReadbackTexture2D(ID3D12Resource* src, size_t& rowPitchOut) {

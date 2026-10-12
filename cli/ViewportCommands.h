@@ -40,13 +40,26 @@ public:
         bool warp = false;
         int bench = 0;         // scrub N frames and print timings
         bool saveState = false;
+        std::string proxy = "auto";     // auto: use a valid scrubbing proxy | off | build: make the missing ones first
+        std::string benchMode = "all";  // all | cold | warm | random
+        std::string benchJson;          // write the bench results as JSON
+    };
+    struct ProxyArgs {
+        std::string project, input, passes, result;
+        std::string sources = "source,result";
+        bool force = false;       // rebuild a valid proxy
+        bool check = false;       // print the plan and the state, build nothing
+        bool background = false;  // below-normal priority (the GUI builds while the user works)
+        double maxGb = 0.0;       // > 0: skip a proxy estimated above this or above a quarter of the free disk
     };
 
 private:
     ProjectArgs pa_;
     RenderArgs ra_;
+    ProxyArgs xa_;
     CLI::App* project_ = nullptr;
     CLI::App* render_ = nullptr;
+    CLI::App* proxy_ = nullptr;
 };
 
 }  // namespace dlssvid::cli

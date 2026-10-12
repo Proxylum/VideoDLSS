@@ -48,7 +48,8 @@ struct Project {
     // "sha256:<hex>" of the source video, from the cache when its size and time still match (empty without a file).
     std::string SourceHash();
     // Sources for the FrameStore: "source", "result" (when set) and every pass folder found under passesRoot.
-    std::vector<ViewportSource> Sources() const;
+    // `useProxies`: the source and result videos get their valid scrubbing proxy (ViewportProxy.h; TASK-0040).
+    std::vector<ViewportSource> Sources(bool useProxies = true) const;
     static std::vector<StageEntry> DefaultStages();
 };
 

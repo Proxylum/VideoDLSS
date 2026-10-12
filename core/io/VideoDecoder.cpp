@@ -84,6 +84,44 @@ FrameDesc DecodedFrameDescFor(const std::string& pixelFormat) {
     return FrameDesc{0, 0, PixelFormat::Yuv420p, 8};
 }
 
+KeyframeScan ScanKeyframes(const std::filesystem::path& path) {
+    KeyframeScan scan;
+    AVFormatContext* fmt = nullptr;
+    const std::string url = path.string();
+    CheckAv(avformat_open_input(&fmt, url.c_str(), nullptr, nullptr), "avformat_open_input");
+    AVPacket* pkt = av_packet_alloc();
+    try {
+        CheckAv(avformat_find_stream_info(fmt, nullptr), "avformat_find_stream_info");
+        const int vs = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (vs < 0) Throw("no video stream in " + url);
+        for (unsigned i = 0; i < fmt->nb_streams; ++i)
+            if (static_cast<int>(i) != vs) fmt->streams[i]->discard = AVDISCARD_ALL;  // video packets only
+        int64_t sinceKey = 0;
+        bool anyKey = false;
+        while (av_read_frame(fmt, pkt) >= 0) {
+            if (pkt->stream_index == vs) {
+                ++scan.frames;
+                if (pkt->flags & AV_PKT_FLAG_KEY) {
+                    if (anyKey) scan.maxInterval = std::max(scan.maxInterval, sinceKey);
+                    ++scan.keyframes;
+                    anyKey = true;
+                    sinceKey = 0;
+                }
+                ++sinceKey;
+            }
+            av_packet_unref(pkt);
+        }
+        scan.maxInterval = std::max(scan.maxInterval, anyKey ? sinceKey : scan.frames);  // the tail after the last keyframe
+    } catch (...) {
+        av_packet_free(&pkt);
+        avformat_close_input(&fmt);
+        throw;
+    }
+    av_packet_free(&pkt);
+    avformat_close_input(&fmt);
+    return scan;
+}
+
 VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& options) {
     const std::string url = path.string();
     CheckAv(avformat_open_input(&fmt_, url.c_str(), nullptr, nullptr), "avformat_open_input");
@@ -123,10 +161,12 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     }
 
     if (!hwDevice_) {
-        // software decoding: frame + slice threads, count chosen by libavcodec (viewport scrubbing at 1080p)
+        // software decoding: frame + slice threads, count chosen by libavcodec (viewport scrubbing at 1080p); an intra
+        // proxy: slice threads only (a seek then costs one decode)
         codec_->thread_count = 0;
-        codec_->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+        codec_->thread_type = options.sliceThreadsOnly ? FF_THREAD_SLICE : FF_THREAD_FRAME | FF_THREAD_SLICE;
     }
+    indexRate_ = options.indexRate;
     CheckAv(avcodec_open2(codec_, decoder, nullptr), "avcodec_open2");
 
     frame_ = av_frame_alloc();
@@ -233,6 +273,8 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     int64_t index = nextIndex_;
     if (seeked_ && pts != AV_NOPTS_VALUE) index = IndexFromPts(pts);
     nextIndex_ = index + 1;
+    decodedSinceSeek_ = true;
+    ++framesDecoded_;
     AVFrame* src = frame_;
     if (frame_->format == AV_PIX_FMT_CUDA) {
         if (gpu) {
@@ -339,10 +381,11 @@ void VideoDecoder::ConvertFrame(AVFrame* f, CpuFrame& out) {
 }
 
 int64_t VideoDecoder::IndexFromPts(int64_t pts) const {
-    if (info_.frameRate.num <= 0 || info_.timeBase.num <= 0) return nextIndex_;
+    const Rational rate = IndexRate();
+    if (rate.num <= 0 || info_.timeBase.num <= 0) return nextIndex_;
     const int64_t start = fmt_->streams[videoStream_]->start_time != AV_NOPTS_VALUE ? fmt_->streams[videoStream_]->start_time : 0;
     const double seconds = static_cast<double>(pts - start) * info_.timeBase.num / info_.timeBase.den;
-    return static_cast<int64_t>(std::llround(seconds * info_.frameRate.num / info_.frameRate.den));
+    return static_cast<int64_t>(std::llround(seconds * rate.num / rate.den));
 }
 
 bool VideoDecoder::DiscardFrames(int64_t upTo) {
@@ -356,9 +399,10 @@ bool VideoDecoder::DiscardFrames(int64_t upTo) {
 bool VideoDecoder::SeekToKeyframeBefore(int64_t index) {
     if (index < 0) return false;
     if (info_.frameCount > 0 && index >= info_.frameCount) return false;
-    if (info_.frameRate.num <= 0 || info_.timeBase.num <= 0) return false;
+    const Rational rate = IndexRate();
+    if (rate.num <= 0 || info_.timeBase.num <= 0) return false;
     const int64_t start = fmt_->streams[videoStream_]->start_time != AV_NOPTS_VALUE ? fmt_->streams[videoStream_]->start_time : 0;
-    const AVRational fps{info_.frameRate.num, info_.frameRate.den};
+    const AVRational fps{rate.num, rate.den};
     const AVRational tb{info_.timeBase.num, info_.timeBase.den};
     const int64_t target = start + av_rescale_q(index, av_inv_q(fps), tb);
     if (av_seek_frame(fmt_, videoStream_, target, AVSEEK_FLAG_BACKWARD) < 0) return false;
@@ -366,6 +410,8 @@ bool VideoDecoder::SeekToKeyframeBefore(int64_t index) {
     eofSent_ = false;
     drained_ = false;
     seeked_ = true;
+    decodedSinceSeek_ = false;
+    ++seeks_;
     nextIndex_ = 0;  // replaced by the pts-derived index of the first decoded frame
     return true;
 }
@@ -377,7 +423,8 @@ bool VideoDecoder::SeekToFrame(int64_t index) {
     if (!drained_ && index > nextIndex_ && index - nextIndex_ <= 48) return DiscardFrames(index);
 
     const int64_t start = fmt_->streams[videoStream_]->start_time != AV_NOPTS_VALUE ? fmt_->streams[videoStream_]->start_time : 0;
-    const AVRational fps{info_.frameRate.num, info_.frameRate.den};
+    const Rational rate = IndexRate();
+    const AVRational fps{rate.num, rate.den};
     const AVRational tb{info_.timeBase.num, info_.timeBase.den};
     auto seekTo = [&](int64_t frameIndex) {
         const int64_t target = start + av_rescale_q(std::max<int64_t>(frameIndex, 0), av_inv_q(fps), tb);
@@ -386,6 +433,8 @@ bool VideoDecoder::SeekToFrame(int64_t index) {
         eofSent_ = false;
         drained_ = false;
         seeked_ = true;
+        decodedSinceSeek_ = false;
+        ++seeks_;
         nextIndex_ = 0;  // replaced by the pts-derived index of the first decoded frame
         return true;
     };

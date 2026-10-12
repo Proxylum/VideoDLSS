@@ -26,7 +26,9 @@ PassImage YuvToRgb(const CpuFrame& frame, const ColorInfo& info, PixelType outTy
 
 // Same conversion straight into the viewport's RGBA16F texture layout (alpha = 1). Bit-identical to
 // YuvToRgb(frame, info, PixelType::F16) plus alpha; uses F16C when the CPU has it.
-PassImage YuvToRgba16f(const CpuFrame& frame, const ColorInfo& info);
+// `threads`: bands of rows converted in parallel (0 = auto: half the cores, at most 8, from 256 rows); the result does
+// not depend on it.
+PassImage YuvToRgba16f(const CpuFrame& frame, const ColorInfo& info, int threads = 0);
 
 // Any colour image (u8/u16/f16/f32, 1..4 channels) -> RGBA16F with integer types scaled to [0,1].
 PassImage ToRgba16f(const PassImage& img);
