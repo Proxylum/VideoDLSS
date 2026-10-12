@@ -60,7 +60,7 @@ CpuFrame(YUV) ─ColorConvert─▶ RGB F32 ─▶ DepthStage (окно N кад
                                                                                    ├─ WorkerDepthEstimator (worker:da3|vda|icdepth|stub): python depth_worker, .npz через scratch
                                                                                    └─ StubDepthEstimator (тесты)
                                                             ▼
-                             FillInvalidDepth → TemporalStabilizer (центрированное окно ±N, задержка N; auto: metric → масштаб, relative → масштаб+сдвиг) → TAE → PassWriter(depth_raw, depth_dlss) + GpuFrameCache slot texture R32F
+                             TemporalStabilizer (центрированное окно ±N, задержка N; auto: metric → масштаб, relative → масштаб+сдвиг) → FillInvalidDepth → TAE → PassWriter(depth_raw, depth_dlss) + GpuFrameCache slot texture R32F
 ```
 
 - **Временное выравнивание глубины (TASK-0038, аудит depth-7).** `TemporalStabilizer` (`core/stages/depth/
@@ -86,6 +86,36 @@ CpuFrame(YUV) ─ColorConvert─▶ RGB F32 ─▶ DepthStage (окно N кад
   предупреждением в логе). Раньше `auto` для metric значило «выкл», окно было причинным (8 прошлых кадров), а МНК к
   размытому среднему выровненных кадров уводил масштаб вниз на движении. Отпечаток: ревизия стадии `depth.2` в
   `tool.app` (`PassToolVersionFor`), только при `stabilize ≠ none`.
+
+- **Выбор модели глубины (TASK-0039).** `core/stages/depth/DepthModels` — одно место, где бэкенд превращается в модель
+  реестра: семейство (`vda` для vda / worker:vda, `da3` для da3 / worker / worker:da3), модель по умолчанию, окно и
+  перекрытие. `ResolveDepthModel` отказывает до декодера, хэша исходника, экспорта и сборки: неизвестный id или модель
+  чужого семейства — ошибка со списком моделей семейства (раньше — список всего реестра после sha256 исходника, а DA3-id
+  для vda доходил до Python с KeyError); окно VDA — 1…`max_window`, кратно 4 выше 4 (голова DPT считает микробатчами по
+  4, иначе весь полноразмерный выход сразу), перекрытие масштабируется с окном; окно у DA3 игнорируется с
+  предупреждением (проект хранит `depth.window` после переключения с VDA). Его вызывают `ProcessRunner::Prepare` (ошибка
+  плана), `dlssvid depth`, `TrtDepthEstimator::Init` (раньше «нужен TensorRT») и `WorkerDepthEstimator::Init` (до
+  запуска Python; воркер получает окно и перекрытие числами и только проверяет их). Схема: `depth.model` — прежний
+  ключ, у `vda` и `worker:vda` форма показывает список Small / Base / Large (`ParamSpec::formChoices` — список формы по
+  бэкенду, значения не ограничены: JSON и CLI принимают любой id реестра); `depth.window` — `OnlyFor(vda, worker:vda)`
+  с `ParamSpec::omitDefault` (0 и отсутствие — один прогон, ключ не входит в отпечаток). Отпечатки прежних пассов не
+  изменились: у VDA-Small по умолчанию те же параметры и пустой `tool.modelHash` (sha256 Small сознательно не закреплён);
+  Base и Large закреплены HF-ревизией и sha256 до первых пассов. `ParamsForBackendChange` убирает модель списка
+  прежнего бэкенда при смене бэкенда (GUI, `--depth-backend`, `--param depth.backend=…`), `StageCliArgs` не передаёт
+  ключи чужого бэкенда и `omitDefault`-ключи по умолчанию. VRAM: таблица замеров в реестре (`params.vram` для TensorRT,
+  `params.vram_torch` для воркера: точки окно × вход → МиБ процесса), консервативная оценка `EstimateDepthVramMiB`
+  (ближайшее замеренное окно не меньше, ближайший вход не меньше по пикселям, +10 %), `AdviseDepth` в решении плана
+  (`StageDecision::warnings` / `info` / `error`): лицензия NC — предупреждение, оценка больше памяти GPU — ошибка только
+  для `run` (переиспользование и восстановление GPU не требуют), больше 85 % — «впритык». `RunProcess` отказывает до
+  retire, GUI показывает ошибку на карточке и держит «Обработать», `process --plan` печатает советы и выходит с 1 при
+  ошибке. Перед экспортом и сборкой `TrtDepthEstimator` сверяет оценку со свободной памятью (`cudaMemGetInfo`,
+  отключается `DLSSVID_DEPTH_SKIP_VRAM_CHECK=1`); `TrtEngine` пишет память движка (`DeviceBytes`, в манифесте
+  `estimator.vram_mib`) и свободную память в ошибках сборки и контекста. Экспорт: внимание motion module без пустого
+  входа `baddbmm` (те же scores; из ONNX и движка уходит B×T×T нулей — ≈ 1 ГБ на 518×924 при T = 32), граф больше 1.9 ГБ —
+  с внешними данными, на время экспорта — lock (кэш общий с CI). Энкодер DINOv2 — через `scaled_dot_product_attention`
+  и при экспорте (трассировка на CPU иначе материализует q·kᵀ всех кадров: 9 ГБ на слой у Base при окне 32 на 518×924 —
+  экспорт падал по памяти; в ONNX те же MatMul / Softmax), и в воркере (без xformers ViT-L иначе не помещается в 16 ГБ).
+  Оценка времени — по модели (`BaselineMsPerFrame`), записанное время пасса другой модели не используется.
 
 - TensorRT грузится в рантайме (`ml/TrtLoader`): C-точки входа заголовков (`createInferRuntime_INTERNAL` …)
   определены у нас и форвардят в `nvinfer_10.dll`; import-библиотеки не нужны, без DLL бэкенды `da3`/`vda`

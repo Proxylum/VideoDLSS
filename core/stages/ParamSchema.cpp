@@ -59,6 +59,25 @@ ParamSpec OnlyFor(ParamSpec s, std::vector<std::string> backends) {
     return s;
 }
 
+ParamSpec WithFormChoices(ParamSpec s, std::map<std::string, std::vector<ParamChoice>> lists) {
+    s.formChoices = std::move(lists);
+    s.widget = ParamWidget::Select;
+    return s;
+}
+
+ParamSpec OmitDefault(ParamSpec s) {
+    s.omitDefault = true;
+    return s;
+}
+
+// The VDA models of models/registry.json (family vda, metric): "" is the backend's default, metric-vda-small.
+std::vector<ParamChoice> VdaModels() {
+    return {{"", "Small — Apache-2.0", "Metric Video Depth Anything Small: 28M параметров, окно 32 кадра; по умолчанию"},
+            {"metric-vda-base", "Base — CC-BY-NC-4.0 (некоммерческая)", "113M параметров; ≈ 5 ГБ видеопамяти на 1080p, +33–42 % времени к Small; только некоммерческое использование"},
+            {"metric-vda-large", "Large — CC-BY-NC-4.0 (некоммерческая)",
+             "382M параметров; ≈ 10 ГБ видеопамяти на 1080p при окне 32, +45–65 % времени; только некоммерческое использование; первый запуск — экспорт и сборка TensorRT ≈ 11–14 мин"}};
+}
+
 ParamSpec Text(const char* key, const char* label, const char* def, const char* hint = "", bool advanced = true) {
     ParamSpec s;
     s.key = key;
@@ -85,10 +104,11 @@ std::vector<StageSchema> Build() {
         s.title = "Глубина";
         s.subtitle = "guide для DLSS, NR и FG";
         s.params = {
-            Enum("backend", "Модель", "da3",
+            Enum("backend", "Метод", "da3",
                  {{"da3", "DA3 metric (точнее)", "Depth Anything 3, метрическая глубина"},
-                  {"vda", "VDA small (стабильнее)", "Video Depth Anything: меньше мерцания"},
-                  {"worker", "Python worker", "внешний воркер (models/export)"},
+                  {"vda", "VDA (стабильнее)", "Video Depth Anything: меньше мерцания; модель — ниже"},
+                  {"worker", "DA3 через PyTorch", "эталонный путь depth_worker (models/export/.venv)"},
+                  {"worker:vda", "VDA через PyTorch", "эталонный путь depth_worker, модели те же"},
                   {"stub", "stub (тест)", "синтетическая глубина без модели"}}),
             Enum("stabilize", "Стабилизация", "auto",
                  {{"auto", "авто", "metric-модели (DA3, VDA metric) — масштаб, относительные — масштаб и сдвиг"},
@@ -96,7 +116,10 @@ std::vector<StageSchema> Build() {
                   {"scale", "масштаб", "только масштаб: метры сохраняют отношения"},
                   {"scale_shift", "масштаб + сдвиг", "для относительной глубины; на метрической сдвиг искажает метры"}},
                  ParamWidget::Toggle, "временное выравнивание глубины по окну ±N кадров вокруг кадра (N — «Окно стабилизации»)"),
-            Text("model", "Модель (id реестра)", "", "пусто = модель бэкенда по умолчанию"),
+            WithFormChoices(Text("model", "Модель", "", "пусто = модель бэкенда по умолчанию", false), {{"vda", VdaModels()}, {"worker:vda", VdaModels()}}),
+            OmitDefault(OnlyFor(Number("window", "Окно кадров VDA", ParamType::Int, 0, 0, 32, 4, ParamWidget::Spin,
+                                       "кадров за проход модели, кратно 4; 0 = как в реестре (32); меньше окно — меньше видеопамяти", false),
+                                {"vda", "worker:vda"})),
             Number("input_size", "Размер входа модели", ParamType::Int, 518, 64, 4096, 14, ParamWidget::Spin, "", true),
             Number("max_res", "Максимальная сторона", ParamType::Int, 1080, 256, 8192, 1, ParamWidget::Spin, "", true),
             Number("stabilize_window", "Окно стабилизации, ± кадров", ParamType::Int, 8, 1, 64, 1, ParamWidget::Spin,
@@ -326,6 +349,10 @@ nlohmann::json EffectiveStageParams(const std::string& stage, const nlohmann::js
                 out.erase(p.key);  // another backend's parameter: the same run whatever it says
                 continue;
             }
+            if (p.omitDefault) {  // absent and the default are one run, and neither enters the fingerprint
+                if (out.contains(p.key) && out[p.key] == p.def) out.erase(p.key);
+                continue;
+            }
             if (!out.contains(p.key)) out[p.key] = p.def;
         }
     }
@@ -349,15 +376,59 @@ std::string ParamValueLabel(const ParamSpec& spec, const nlohmann::json& value) 
     return value.is_string() ? value.get<std::string>() : value.dump();
 }
 
+std::string ParamValueLabel(const ParamSpec& spec, const nlohmann::json& value, const std::string& backend) {
+    if (value.is_null() && spec.omitDefault) return "по умолчанию";
+    if (const auto* list = FormChoicesFor(spec, backend))
+        for (const auto& c : *list)
+            if (value.is_string() && value.get<std::string>() == c.value) return c.label;
+    return ParamValueLabel(spec, value);
+}
+
+std::string StageBackend(const std::string& stage, const nlohmann::json& params) {
+    if (params.is_object() && params.contains("backend") && params["backend"].is_string()) return params["backend"].get<std::string>();
+    if (const StageSchema* schema = FindStageSchema(stage))
+        if (const ParamSpec* b = schema->Find("backend"); b && b->def.is_string()) return b->def.get<std::string>();
+    return {};
+}
+
+const std::vector<ParamChoice>* FormChoicesFor(const ParamSpec& spec, const std::string& backend) {
+    const auto it = spec.formChoices.find(backend);
+    return it == spec.formChoices.end() ? nullptr : &it->second;
+}
+
+nlohmann::json ParamsForBackendChange(const std::string& stage, const nlohmann::json& params, const std::string& newBackend) {
+    nlohmann::json out = params.is_object() ? params : nlohmann::json::object();
+    const StageSchema* schema = FindStageSchema(stage);
+    if (!schema) return out;
+    const std::string oldBackend = StageBackend(stage, out);
+    const auto inList = [](const std::vector<ParamChoice>* list, const nlohmann::json& v) {
+        if (!list || !v.is_string()) return false;
+        for (const auto& c : *list)
+            if (c.value == v.get<std::string>()) return true;
+        return false;
+    };
+    for (const ParamSpec& p : schema->params) {
+        if (p.formChoices.empty() || !out.contains(p.key)) continue;
+        const nlohmann::json& v = out[p.key];
+        if (v.is_string() && v.get<std::string>().empty()) continue;  // "" = the new backend's default
+        const auto* now = FormChoicesFor(p, newBackend);
+        if (now ? !inList(now, v) : inList(FormChoicesFor(p, oldBackend), v)) out.erase(p.key);
+    }
+    return out;
+}
+
 std::vector<std::string> StageCliArgs(const std::string& stage, const nlohmann::json& params) {
     std::vector<std::string> out;
     if (!params.is_object()) return out;
     const StageSchema* schema = FindStageSchema(stage);
+    const std::string backend = StageBackend(stage, params);
     int64_t targetW = 0, targetH = 0;
     for (auto it = params.begin(); it != params.end(); ++it) {
         const std::string& key = it.key();
         const nlohmann::json& v = it.value();
         const ParamSpec* spec = schema ? schema->Find(key) : nullptr;
+        if (spec && !spec->backends.empty() && std::find(spec->backends.begin(), spec->backends.end(), backend) == spec->backends.end()) continue;
+        if (spec && spec->omitDefault && v == spec->def) continue;
         if (stage == "upscale" && (key == "target_width" || key == "target_height") && v.is_number()) {
             (key == "target_width" ? targetW : targetH) = v.get<int64_t>();
             continue;

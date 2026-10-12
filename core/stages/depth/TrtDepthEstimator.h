@@ -2,6 +2,7 @@
 
 #include <memory>
 
+#include "stages/depth/DepthModels.h"
 #include "stages/depth/DepthPreprocess.h"
 #include "stages/depth/IDepthEstimator.h"
 
@@ -12,7 +13,7 @@ class ModelRegistry;
 struct ModelEntry;
 
 // TensorRT backend for ONNX depth models (Depth Anything 3 metric/mono, Video Depth Anything).
-// Registry params: input_size, window (1 for DA3, 32 for VDA), overlap, metric, output
+// The model is resolved by ResolveDepthModel (family of the backend, window). Registry params: input_size, window (1 for DA3, 32 for VDA), overlap, metric, output
 // ("depth" | "disparity"), input ("image"), output_name, mean/std. The ONNX file is produced
 // by models/export for the exact input geometry; when it is missing the estimator runs the
 // export script in models/export/.venv (PyTorch reference path) once.
@@ -31,8 +32,6 @@ public:
     void Shutdown() override;
     nlohmann::json Describe() const override;
 
-    static std::string DefaultModel(const std::string& family);
-
 private:
     void EnsureEngine(uint32_t srcWidth, uint32_t srcHeight);
     std::filesystem::path OnnxFor(const ModelInputSize& size);
@@ -41,6 +40,7 @@ private:
     DepthEstimatorConfig config_;
     std::unique_ptr<ModelRegistry> registry_;
     std::string modelId_, modelFile_, license_;
+    DepthModelChoice choice_;
     bool metric_ = false;
     bool disparity_ = false;
     int window_ = 1, overlap_ = 0;

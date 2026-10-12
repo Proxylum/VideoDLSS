@@ -90,14 +90,15 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
             QWidget* w = MakeParamWidget(spec);
             w->setToolTip(QString::fromStdString(spec.hint.empty() ? spec.key : spec.hint + " (" + spec.key + ")"));
             form->addRow(QString::fromStdString(spec.label), w);
-            if (!spec.backends.empty()) {  // shown for its backends only (the model of the TensorRT upscaler)
+            // shown for its backends only (the model of the TensorRT upscaler), or for the backends with a form list
+            // (the VDA models of depth.model, TASK-0039)
+            if (!spec.backends.empty() || !spec.formChoices.empty()) {
                 const int row = form->rowCount() - 1;
                 pull_.push_back([this, spec, form, row] {
-                    const StageEntry* e = model_.stageEntry(stage_);
-                    std::string backend;
-                    if (e && e->params.contains("backend") && e->params["backend"].is_string()) backend = e->params["backend"].get<std::string>();
-                    else if (const ParamSpec* b = schema_->Find("backend"); b && b->def.is_string()) backend = b->def.get<std::string>();
-                    form->setRowVisible(row, std::find(spec.backends.begin(), spec.backends.end(), backend) != spec.backends.end());
+                    const std::string backend = currentBackend();
+                    const bool ofBackend = spec.backends.empty() || std::find(spec.backends.begin(), spec.backends.end(), backend) != spec.backends.end();
+                    const bool hasList = spec.formChoices.empty() || FormChoicesFor(spec, backend) != nullptr;
+                    form->setRowVisible(row, ofBackend && hasList);
                 });
             }
         }
@@ -175,8 +176,41 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     refresh();
 }
 
+std::string StageCard::currentBackend() const {
+    const StageEntry* e = model_.stageEntry(stage_);
+    return StageBackend(stage_, e ? e->params : nlohmann::json::object());
+}
+
 QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
     const std::string key = spec.key;
+    if (!spec.formChoices.empty()) {  // the list of the current backend (depth.model: the VDA models), rebuilt on refresh
+        auto* combo = new QComboBox(form_);
+        combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        combo->setMinimumContentsLength(10);
+        connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, spec, combo](int i) {
+            if (!updating_ && i >= 0) setParam(spec.key, combo->itemData(i).toString().toStdString());
+        });
+        pull_.push_back([this, spec, combo] {
+            const StageEntry* e = model_.stageEntry(stage_);
+            const nlohmann::json params = e ? e->params : nlohmann::json::object();
+            const nlohmann::json v = params.contains(spec.key) ? params[spec.key] : spec.def;
+            const QString value = QString::fromStdString(v.is_string() ? v.get<std::string>() : v.dump());
+            const QSignalBlocker b(combo);
+            combo->clear();
+            if (const auto* list = FormChoicesFor(spec, currentBackend()))
+                for (const ParamChoice& c : *list) {
+                    combo->addItem(QString::fromStdString(c.label), QString::fromStdString(c.value));
+                    combo->setItemData(combo->count() - 1, QString::fromStdString(c.hint), Qt::ToolTipRole);
+                }
+            int idx = combo->findData(value);
+            if (idx < 0) {  // an id from the JSON / CLI that the list does not name (vda-small): shown as it is
+                combo->addItem(value + tr(" (из JSON)"), value);
+                idx = combo->count() - 1;
+            }
+            combo->setCurrentIndex(idx);
+        });
+        return combo;
+    }
     switch (spec.widget) {
         case ParamWidget::Toggle: {
             auto* row = new QWidget(form_);

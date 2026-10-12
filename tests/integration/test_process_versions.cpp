@@ -598,3 +598,87 @@ TEST_CASE("Unfingerprinted depth from before the alignment is recomputed, not ad
     CHECK(Decision(plan, "depth").action == "reuse");
     CHECK(Decision(plan, "depth").kind == "legacy");
 }
+
+// TASK-0039: the VDA model in the plan. Large is a new version with a licence warning and a pinned model hash; Small by
+// default keeps the fingerprint of the passes made before; window 0 is the registry's (the same run); a foreign model is
+// refused by the plan; too little VRAM makes a run an error - the plan says so, the run refuses before retiring - while
+// a pass already made is reused whatever the GPU.
+TEST_CASE("VDA model choice in the plan: versions, licence, foreign model, VRAM", "[integration][process][versions][models]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("vda_models");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const std::string models = (std::filesystem::path(DLSSVID_SOURCE_DIR) / "models").string();
+    ProcessOptions o = Options(dir, clip);
+    for (auto& s : o.stages) s.enabled = s.name == "depth";
+    const auto plan = [&](const nlohmann::json& depth, uint64_t vram = 0) {
+        ProcessOptions p = o;
+        p.vramBytes = vram;
+        for (auto& s : p.stages)
+            if (s.name == "depth") s.params = depth;
+        return Decision(PlanProcess(p), "depth");
+    };
+    const nlohmann::json small = {{"backend", "vda"}, {"models_dir", models}};
+    const StageDecision s = plan(small);
+    CHECK(s.action == "run");
+    CHECK(s.warnings.empty());
+    CHECK(s.tool["model"] == "metric-vda-small");
+    CHECK(s.tool["model_hash"] == "");  // not pinned: the VDA-Small passes made before keep their fingerprint
+    nlohmann::json large = small;
+    large["model"] = "metric-vda-large";
+    const StageDecision l = plan(large);
+    CHECK(l.fingerprint != s.fingerprint);
+    REQUIRE(!l.warnings.empty());
+    CHECK_THAT(l.warnings[0], ContainsSubstring("CC-BY-NC-4.0"));
+    CHECK(l.tool["model_hash"] == "24eba25342e7ee0f054be25da6a852ebd7cfa40cd6bf41a353ecb6abfe24e620");
+    nlohmann::json w = small;
+    w["window"] = 0;
+    CHECK(plan(w).fingerprint == s.fingerprint);
+    w["window"] = 16;
+    CHECK(plan(w).fingerprint != s.fingerprint);
+    nlohmann::json foreign = small;
+    foreign["model"] = "da3metric-large";
+    CHECK_THROWS_WITH(plan(foreign), ContainsSubstring("not a VDA model"));
+    w["window"] = 10;
+    CHECK_THROWS_WITH(plan(w), ContainsSubstring("multiple of 4"));
+
+    // VRAM: a registry whose Large needs 100 GB; the GPU has 4 GiB
+    const auto measured = dir / "models";
+    std::filesystem::create_directories(measured);
+    nlohmann::json reg;
+    std::ifstream(std::filesystem::path(models) / "registry.json") >> reg;
+    for (auto& m : reg["models"])
+        if (m["id"] == "metric-vda-large") m["params"]["vram"] = {{"points", {{{"window", 32}, {"input", {924, 518}}, {"mib", 100000}}}}};
+    std::ofstream(measured / "registry.json") << reg.dump(2);
+    nlohmann::json heavy = large;
+    heavy["models_dir"] = measured.string();
+    const uint64_t gib = uint64_t{1} << 30;
+    const StageDecision tooBig = plan(heavy, 4 * gib);  // the plan itself does not throw: the GUI shows it on the card
+    CHECK(tooBig.action == "run");
+    CHECK_THAT(tooBig.error, ContainsSubstring("видеопамяти"));
+    CHECK(plan(heavy, 0).error.empty());  // unknown memory (WARP): no error
+    ProcessOptions run = o;
+    run.vramBytes = 4 * gib;
+    for (auto& st : run.stages)
+        if (st.name == "depth") st.params = heavy;
+    CHECK_THROWS_WITH(RunProcess(run), ContainsSubstring("видеопамяти"));
+    CHECK(!std::filesystem::exists(o.passesRoot / "depth_raw"));
+
+    // a pass that is there already: reused, no error (stub depth stamped with the fingerprint the Large run needs)
+    ProcessOptions stub = o;
+    RunProcess(stub);
+    for (const char* pass : {"depth_raw", "depth_dlss"}) {
+        Manifest m = Manifest::Load(o.passesRoot / pass);
+        m.fingerprint = tooBig.fingerprint;
+        m.Save(o.passesRoot / pass);
+    }
+    const StageDecision reused = plan(heavy, 4 * gib);
+    CHECK(reused.action == "reuse");
+    CHECK(reused.error.empty());
+    CHECK(RunProcess(run).stages.front().status == "reused");
+    run.forceStages = {"depth"};
+    CHECK_THROWS_WITH(RunProcess(run), ContainsSubstring("видеопамяти"));  // a forced run is a run
+    CHECK(Manifest::Load(o.passesRoot / "depth_dlss").fingerprint == tooBig.fingerprint);  // refused before retiring it
+}

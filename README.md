@@ -238,14 +238,16 @@ models\export\.venv\Scripts\python models\export\fetch.py --all
 
 Nothing has to be fetched in advance: the first run of a stage downloads its model, exports the ONNX for the input
 geometry (`models\export\export_*.py`, through the venv) and builds the TensorRT engine for your GPU — DA3 ≈ 2 min,
-VDA ≈ 4 min, SEA-RAFT ≈ 2.5 min, Real-ESRGAN ≈ 1 min per tile size; the engines are cached next to the ONNX and rebuilt
+VDA Small ≈ 4 min, Base ≈ 6 min, Large ≈ 11–14 min (≈ 20 GB of RAM for the export, up to 14 GB of VRAM while building),
+SEA-RAFT ≈ 2.5 min, Real-ESRGAN ≈ 1 min per tile size; the engines are cached next to the ONNX and rebuilt
 only for another GPU or TensorRT version. RealBasicVSR is downloaded by `sr_worker` on first use.
 
 | Model (registry id) | Stage, backend | Source | Licence |
 |---|---|---|---|
 | Depth Anything 3 metric / mono large (`da3metric-large`, `da3mono-large`) | depth, `da3` | HuggingFace `depth-anything/DA3METRIC-LARGE`, `DA3MONO-LARGE` | Apache-2.0 |
-| Metric Video Depth Anything small (`metric-vda-small`, `vda-small`) | depth, `vda` | HuggingFace `depth-anything/Metric-Video-Depth-Anything-Small` | Apache-2.0 |
-| Metric Video Depth Anything large (`metric-vda-large`) | depth, `vda` (optional) | HuggingFace | CC-BY-NC-4.0 — research only |
+| Metric Video Depth Anything Small (`metric-vda-small`, the default of `vda`; relative `vda-small`) | depth, `vda` / `worker:vda` | HuggingFace `depth-anything/Metric-Video-Depth-Anything-Small` | Apache-2.0 |
+| Metric Video Depth Anything Base (`metric-vda-base`) | depth, `vda` / `worker:vda` — «Глубина → VDA → Модель» in the GUI, `--model` in the CLI | HuggingFace `depth-anything/Metric-Video-Depth-Anything-Base`, revision and sha256 pinned | CC-BY-NC-4.0 — non-commercial only |
+| Metric Video Depth Anything Large (`metric-vda-large`) | depth, `vda` / `worker:vda`, chosen the same way; window 32: ≈ 10 GB of VRAM at 1080p | HuggingFace `depth-anything/Metric-Video-Depth-Anything-Large`, revision and sha256 pinned | CC-BY-NC-4.0 — non-commercial only |
 | SEA-RAFT Spring-M / S (`sea-raft-spring-m`, `-s`) | flow, `searaft` | HuggingFace mirror of the official weights | BSD-3-Clause code; confirm the weights' terms before commercial use |
 | RIFE 4.9 / 4.8 / 4.7 (`rife49`, …) | frame generation, `rife` (the baseline) | ONNX export by yuvraj108c (ComfyUI-Rife-Tensorrt) | MIT |
 | Real-ESRGAN x2plus, x4plus, general-x4v3 (`realesrgan-x2plus`, …) | upscale, `trt` | GitHub releases of xinntao/Real-ESRGAN, sha256-pinned | BSD-3-Clause |
@@ -292,7 +294,11 @@ dlssvid convert -i passes\depth_raw -o passes\depth_dlss --to depth_dlss --near 
 dlssvid convert -i passes\mv_raw -o passes\mv_dlss --to mv_dlss --target 3840x2160 --depth-dir passes\depth_raw
 dlssvid import  -i ext\mv --pass mv_raw --y-up --write-manifest     :: vectors from another tool with y up: read in the DLSS convention (y down)
 dlssvid depth   -i input.mp4 -o passes --backend da3                     :: DA3METRIC-LARGE via TensorRT -> depth_raw + depth_dlss
-dlssvid depth   -i input.mp4 -o passes --backend vda --model metric-vda-small
+dlssvid depth   -i input.mp4 -o passes --backend vda                     :: Metric VDA Small (default), window 32
+dlssvid depth   -i input.mp4 -o passes --backend vda --model metric-vda-large   :: Large (CC-BY-NC-4.0), the registry's window
+dlssvid depth   -i input.mp4 -o passes --backend vda --model metric-vda-base --window 16   :: a smaller window needs less VRAM
+dlssvid depth   -i input.mp4 -o passes --backend worker:vda --model metric-vda-base       :: the same models through PyTorch
+dlssvid process -i input.mp4 -o out.mp4 --param depth.backend=vda --param depth.model=metric-vda-large --plan  :: licence and VRAM advice
 dlssvid depth   -i input.mp4 -o passes --backend worker:da3              :: PyTorch reference path (depth_worker)
 dlssvid flow    -i input.mp4 -o passes --backend ofa                     :: NVDEC -> OFA, mv_raw + mv_dlss, warp PSNR
 dlssvid flow    -i input.mp4 -o passes --backend searaft --depth-dir passes\depth_raw --target 3840x2160

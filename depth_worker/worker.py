@@ -8,7 +8,8 @@ output depth_<i>.npz key "depth" (H, W)    float32, larger = farther (metres whe
 
 Requests
   {"cmd": "init", "backend": "da3|vda|icdepth|stub", "model": "<registry id or ''>",
-   "input_size": 518, "max_res": 1080, "fp16": true, "models_dir": "...", "extra": {}}
+   "input_size": 518, "max_res": 1080, "fp16": true, "models_dir": "...", "extra": {},
+   "window": 0, "overlap": 0}        vda: frames per window and overlap resolved by the C++ side (0 = the registry's)
   {"cmd": "infer", "inputs": ["rgb_0.npz", ...], "out_dir": "..."}
   {"cmd": "quit"}
 Replies
@@ -143,27 +144,51 @@ class Da3Backend(TorchBackend):
 
 
 class VdaBackend(TorchBackend):
-    """Video Depth Anything (temporal window of 32 frames)."""
+    """Video Depth Anything: windows of `window` frames (the registry's, 32 for Small / Base, or the one the C++ side
+    resolved). DINOv2 runs through scaled_dot_product_attention and the motion module without the empty baddbmm input
+    (vda_loader.patch_attention): without xformers the original attention of ViT-L does not fit 16 GB."""
 
     def __init__(self, req):
         super().__init__(req)
-        from vda_loader import load_vda  # models/export/vda_loader.py
+        from vda_loader import check_window, load_vda, patch_attention  # models/export/vda_loader.py
 
+        import torch
+
+        patch_attention(runtime=True)
         self.model_id = req.get("model") or "metric-vda-small"
-        self.model, self.metric, self.output, self.window, self.overlap = load_vda(self.model_id, self.cache, log=log)
+        registry = self.models_dir / "registry.json"
+        self.model, self.metric, self.output, window, overlap = load_vda(self.model_id, self.cache, log=log,
+                                                                         registry=registry if registry.exists() else None)
+        self.window = check_window(int(req.get("window") or window))
+        self.overlap = int(req.get("overlap") or 0) if req.get("window") else overlap
+        if not 0 <= self.overlap < self.window:
+            raise ValueError(f"VDA overlap {self.overlap} for a window of {self.window}")
+        from common import REGISTRY, registry_entry
+
+        self.license = registry_entry(self.model_id, registry if registry.exists() else REGISTRY).get("license", "")
         self.model = self.model.to(self.device).eval()
         self.model_name = self.model_id
+        if self.device == "cuda":
+            torch.cuda.reset_peak_memory_stats()
 
     def infer(self, frames):
         import torch
 
         n = len(frames)
-        x, _, (h0, w0) = self.preprocess(frames)
+        x, (h, w), (h0, w0) = self.preprocess(frames)
         # pad the window by repeating the last frame; the model expects exactly `window` frames
         if x.shape[0] < self.window:
             x = torch.cat([x, x[-1:].repeat(self.window - x.shape[0], 1, 1, 1)], dim=0)
-        with torch.no_grad(), torch.autocast(device_type=self.device, enabled=self.fp16):
-            depth = self.model(x[None])[0].float()  # (T, h, w)
+        try:
+            with torch.no_grad(), torch.autocast(device_type=self.device, enabled=self.fp16):
+                depth = self.model(x[None])[0].float()  # (T, h, w)
+        except torch.cuda.OutOfMemoryError:
+            del x
+            torch.cuda.empty_cache()
+            free, total = torch.cuda.mem_get_info()
+            raise RuntimeError(f"CUDA out of memory: {self.model_id}, window {self.window} at {w}x{h}; free {free / 2**30:.1f} of "
+                               f"{total / 2**30:.1f} GB - use a smaller window (depth.window / --window {max(4, self.window // 2 // 4 * 4)}) "
+                               f"or a smaller model") from None
         depth = depth[:n]
         if self.output == "disparity":
             depth = 1.0 / depth.clamp(min=1e-6)
@@ -209,7 +234,8 @@ def main():
                 backend = BACKENDS[name](req)
                 reply({"ok": True, "backend": name, "model": getattr(backend, "model_name", getattr(backend, "model", name)) if isinstance(getattr(backend, "model_name", None), str) else name,
                        "metric": bool(backend.metric), "window": int(backend.window), "overlap": int(backend.overlap),
-                       "device": getattr(backend, "device", "cpu"), "fp16": bool(getattr(backend, "fp16", False))})
+                       "device": getattr(backend, "device", "cpu"), "fp16": bool(getattr(backend, "fp16", False)),
+                       "license": getattr(backend, "license", "")})
             elif cmd == "infer":
                 if backend is None:
                     raise RuntimeError("infer before init")
@@ -224,7 +250,12 @@ def main():
                     p = out_dir / f"depth_{i}.npz"
                     np.savez(p, depth=np.ascontiguousarray(d, dtype=np.float32))
                     outputs.append(str(p))
-                reply({"ok": True, "outputs": outputs})
+                peak = {}
+                if getattr(backend, "device", "cpu") == "cuda":
+                    import torch
+
+                    peak = {"vram_peak_mib": round(torch.cuda.max_memory_reserved() / 2**20)}  # reserved: what the allocator holds
+                reply({"ok": True, "outputs": outputs, **peak})
             elif cmd == "quit":
                 reply({"ok": True})
                 break

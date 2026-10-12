@@ -38,6 +38,7 @@ signals:
 private:
     QWidget* MakeParamWidget(const ParamSpec& spec);
     void setParam(const std::string& key, const nlohmann::json& value);
+    std::string currentBackend() const;  // the stage's backend in the project (the schema default when unset)
 
     AppModel& model_;
     std::string stage_;

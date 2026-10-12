@@ -38,6 +38,19 @@ TEST_CASE("Baselines scale with the source size, the recorded ms/frame wins, byt
     Manifest d = Manifest::ForPass(PassKind::DepthRaw, 8, 4, FileFormat::Exr);
     d.Save(root / "depth_raw");
     CHECK(!RecordedMsPerFrame(root, "depth"));  // no record in the manifest
+    // TASK-0039: by model - the time of Small is not the time of Large
+    CHECK(BaselineMsPerFrame("depth", "vda", ref, "metric-vda-large") > BaselineMsPerFrame("depth", "vda", ref, "metric-vda-small"));
+    CHECK(BaselineMsPerFrame("depth", "vda", ref, "metric-vda-small") == Approx(300.0));
+    CHECK(BaselineMsPerFrame("depth", "worker:vda", ref) > BaselineMsPerFrame("depth", "vda", ref));
+    d.stageParams["ms_per_frame"] = 250.0;
+    d.fingerprint = "sha256:made-by-process";  // the version block (tool) is written for stamped passes only
+    d.tool = {{"backend", "vda"}, {"model", "metric-vda-small"}};
+    d.Save(root / "depth_raw");
+    CHECK(!RecordedMsPerFrame(root, "depth", {{"model", "metric-vda-large"}}));
+    CHECK(!RecordedMsPerFrame(root, "depth", {{"backend", "da3"}, {"model", "da3metric-large"}}));
+    CHECK(RecordedMsPerFrame(root, "depth", {{"backend", "vda"}, {"model", "metric-vda-small"}}) == Approx(250.0));
+    CHECK(RecordedMsPerFrame(root, "depth", {{"model", ""}}) == Approx(250.0));  // only fields given and non-empty count
+    CHECK(RecordedMsPerFrame(root, "depth") == Approx(250.0));
 
     CHECK(BytesPerFrame("depth", 1920, 800, 1.0, 1) == 1920ull * 800 * 4 * 2);
     CHECK(BytesPerFrame("flow", 1920, 800, 1.0, 1) == 1920ull * 800 * 8 * 2);

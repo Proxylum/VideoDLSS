@@ -119,6 +119,8 @@ def main() -> int:
     ap.add_argument("--ffmpeg", default="ffmpeg")
     ap.add_argument("--force", action="store_true", help="re-run measurements already present in results.json")
     ap.add_argument("--keep-passes", action="store_true", help="keep the depth / flow pass folders (NPZ / EXR: gigabytes per clip)")
+    ap.add_argument("--vda-models", default="small",
+                    help="depth: VDA models to run with the default alignment, small,base,large (Base / Large: CC-BY-NC-4.0, TASK-0039)")
     args = ap.parse_args()
 
     cli = args.cli
@@ -175,6 +177,8 @@ def main() -> int:
                 if isinstance(r["depth"][key], dict) and "stabilize" not in r["depth"][key]:
                     del r["depth"][key]
             variants = [("da3", "da3", []), ("da3:none", "da3", ["--stabilize", "none"]), ("vda", "vda", []), ("vda:none", "vda", ["--stabilize", "none"])]
+            for vm in [m.strip() for m in args.vda_models.split(",") if m.strip() and m.strip() != "small"]:
+                variants.append((f"vda:{vm}", "vda", ["--model", f"metric-vda-{vm}"]))
             for key, backend, extra in variants:
                 if done("depth", key):
                     continue
@@ -184,7 +188,9 @@ def main() -> int:
                 r.setdefault("depth", {})[key] = dict(
                     tae=grab(r"mean TAE:\s+([\d.]+)", text), tae_mode="warped", ms_per_frame=grab(r"ms/frame:\s+([\d.]+)", text),
                     frames=grab(r"frames:\s+(\d+)", text), stabilize=sp.get("stabilize"), stabilize_requested=sp.get("stabilize_requested"),
-                    stabilize_window=sp.get("stabilize_window"), stabilize_scale=sp.get("stabilize_scale"), **depth_stats(out / "depth_raw"))
+                    stabilize_window=sp.get("stabilize_window"), stabilize_scale=sp.get("stabilize_scale"),
+                    model=(re.search(r"depth: model (\S+)", text) or [None, None])[1], window=grab(r"window (\d+) / overlap", text),
+                    engine_mib=grab(r"TensorRT engine \S+: \d+ inputs, \d+ outputs, (\d+) MiB", text), **depth_stats(out / "depth_raw"))
                 print(f"  depth {key}: {r['depth'][key]}", flush=True)
                 save()
                 if not args.keep_passes:

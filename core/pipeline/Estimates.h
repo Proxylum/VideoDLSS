@@ -14,9 +14,12 @@ namespace dlssvid {
 // real-clip runs of docs/benchmarks.md on the reference machine (RTX 4070 Ti SUPER, 1920×800 source: depth 350,
 // flow 500, upscale 420, nr 480, fg 780 ms per source frame, encode 150 ms per output frame) scaled by megapixels;
 // a pass on disk that was made on this machine overrides the baseline with the ms/frame its manifest recorded.
-double BaselineMsPerFrame(const std::string& stage, const std::string& backend, double sourceMegapixels);
-// ms/frame the current pass of a stage recorded (manifest stage_params.ms_per_frame), if any.
-std::optional<double> RecordedMsPerFrame(const std::filesystem::path& passesRoot, const std::string& stage);
+// `model`: the depth model (VDA Small / Base / Large differ several times, TASK-0039).
+double BaselineMsPerFrame(const std::string& stage, const std::string& backend, double sourceMegapixels, const std::string& model = "");
+// ms/frame the current pass of a stage recorded (manifest stage_params.ms_per_frame), if any. `tool` (StageDecision::tool):
+// a pass made by another backend or model than the one asked for is not used - after a switch to VDA Large the time
+// of Small would be shown (TASK-0039); only the fields present and non-empty in `tool` are compared.
+std::optional<double> RecordedMsPerFrame(const std::filesystem::path& passesRoot, const std::string& stage, const nlohmann::json& tool = {});
 // Bytes one source frame of a stage's outputs takes on disk (the layouts the passes use: colour RGBA16F, depth F32 in
 // two folders, motion vectors RG32F in two folders; frame generation writes `multiplier` frames per source frame).
 uint64_t BytesPerFrame(const std::string& stage, uint32_t sourceW, uint32_t sourceH, double scale, int multiplier);

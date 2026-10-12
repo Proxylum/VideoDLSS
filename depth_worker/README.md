@@ -9,8 +9,16 @@ Depth Anything, and the home of **ICDepth** once its code is public (as of 2026-
 `models/export/.venv` (or `DLSSVID_PYTHON`), talks JSON lines over stdin/stdout and exchanges
 frames as `.npz` files in a scratch folder (see the docstring in `worker.py` for the protocol).
 
-Backends: `da3` (default `da3metric-large`), `vda` (default `metric-vda-small`), `icdepth`
-(unavailable), `stub` (synthetic, used by tests without a GPU).
+Backends: `da3` (default `da3metric-large`), `vda` (default `metric-vda-small`; also `metric-vda-base`,
+`metric-vda-large`), `icdepth` (unavailable), `stub` (synthetic, used by tests without a GPU).
+
+VDA (TASK-0039): the C++ side resolves the model and the window (`ResolveDepthModel`, the same rules and registry as
+TensorRT) before python starts and sends `"window"` / `"overlap"` in `init` (0 = the registry's); the worker checks the
+family and the window (1..32, a multiple of 4 above 4) and reads the registry of `models_dir`. The DINOv2 encoder runs
+through `scaled_dot_product_attention` and the motion module without the empty `baddbmm` input
+(`vda_loader.patch_attention(runtime=True)`): without xformers the original attention of ViT-L does not fit 16 GB. The
+`init` reply carries `license`, each `infer` reply `vram_peak_mib` (the allocator's reserved peak). A CUDA OOM becomes
+«CUDA out of memory: <model>, window W at WxH; free X of Y GB — use a smaller window …».
 
 Environment: `models/export/requirements.txt` (shared venv). Weights are downloaded from
 HuggingFace into `models/cache/` on first use (`models/registry.json` lists ids and licences).

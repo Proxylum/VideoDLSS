@@ -1123,6 +1123,83 @@ TEST_CASE("StageCard shows backend-scoped parameters only for their backend", "[
     CHECK(!form->isRowVisible(modelRow));
 }
 
+// TASK-0039: the VDA models in the depth card - Small / Base / Large for vda and worker:vda, hidden for DA3; a switch to
+// DA3 drops the VDA model from the project; an id the list does not name is shown as it is.
+TEST_CASE("StageCard lists the VDA models for VDA only and a switch to DA3 drops the VDA model", "[app][card][models]") {
+    App();
+    const auto d = Dir("card_vda");
+    Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    dlssvid::StageCard card(model, "depth");
+    auto* form = card.findChild<QFormLayout*>();
+    REQUIRE(form);
+    int modelRow = -1, windowRow = -1;
+    for (int r = 0; r < form->rowCount(); ++r) {
+        QLayoutItem* item = form->itemAt(r, QFormLayout::LabelRole);
+        auto* label = item ? qobject_cast<QLabel*>(item->widget()) : nullptr;
+        if (!label) continue;
+        if (label->text() == QString::fromUtf8("Модель")) modelRow = r;
+        if (label->text() == QString::fromUtf8("Окно кадров VDA")) windowRow = r;
+    }
+    REQUIRE(modelRow >= 0);
+    REQUIRE(windowRow >= 0);
+    card.refresh();
+    CHECK(!form->isRowVisible(modelRow));  // DA3 by default: no list
+    CHECK(!form->isRowVisible(windowRow));
+    model.setStageParam("depth", "backend", "vda");
+    card.refresh();
+    CHECK(form->isRowVisible(modelRow));
+    CHECK(form->isRowVisible(windowRow));
+    auto* combo = qobject_cast<QComboBox*>(form->itemAt(modelRow, QFormLayout::FieldRole)->widget());
+    REQUIRE(combo);
+    REQUIRE(combo->count() == 3);
+    CHECK(combo->itemData(0).toString().isEmpty());
+    CHECK(combo->itemData(1).toString() == "metric-vda-base");
+    CHECK(combo->itemData(2).toString() == "metric-vda-large");
+    CHECK(combo->itemText(2).contains("CC-BY-NC-4.0"));
+    CHECK(combo->currentIndex() == 0);  // Small, the default
+    combo->setCurrentIndex(2);
+    CHECK(model.stageEntry("depth")->params["model"] == "metric-vda-large");
+    model.setStageParam("depth", "backend", "worker:vda");  // the same list: the model stays
+    CHECK(model.stageEntry("depth")->params["model"] == "metric-vda-large");
+    model.setStageParam("depth", "backend", "da3");
+    card.refresh();
+    CHECK(!model.stageEntry("depth")->params.contains("model"));  // before: DA3 with a VDA model, refused by the plan
+    CHECK(!form->isRowVisible(modelRow));
+    model.setStageParam("depth", "backend", "vda");
+    model.setStageParam("depth", "model", "vda-small");  // a registry id from the JSON
+    card.refresh();
+    REQUIRE(combo->count() == 4);
+    CHECK(combo->currentText().contains("vda-small"));
+}
+
+// TASK-0039: the plan's advice on the depth card - a non-commercial model is a warning, Small is none.
+TEST_CASE("AppModel: the depth card warns about the licence of VDA Large", "[app][model][models]") {
+    App();
+    const auto d = Dir("card_vda_licence");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    Project p = Project::Create(clip, d / "passes");
+    const std::string models = (std::filesystem::path(DLSSVID_SOURCE_DIR) / "models").string();
+    for (auto& st : p.stages) {
+        st.enabled = st.name == "depth";
+        if (st.name == "depth") st.params = {{"backend", "vda"}, {"model", "metric-vda-large"}, {"models_dir", models}};
+    }
+    p.Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    REQUIRE(model.planError().isEmpty());
+    CHECK(model.cardState("depth").warning.contains("CC-BY-NC-4.0"));
+    CHECK(model.planBlocker().isEmpty());  // WARP: the memory is unknown, no VRAM error
+    model.setStageParam("depth", "model", "");
+    model.refreshPlan();
+    CHECK(!model.cardState("depth").warning.contains("CC-BY-NC-4.0"));
+}
+
 // Audit fg-2 (TASK-0038): `process: fg failed - ...` from the runner (FG in its own process failed, the result was encoded
 // without it) keeps the stage failed while the run finishes with a result - also when a progress update glued onto it.
 TEST_CASE("ProcessingPanel: a stage the runner reports failed stays failed while the run finishes with a result", "[app][tasks][isolation]") {

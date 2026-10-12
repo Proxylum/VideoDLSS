@@ -92,3 +92,29 @@ TEST_CASE("Worker reports errors and unavailable backends", "[worker][depth]") {
     WorkerDepthEstimator unknown("nope");
     CHECK_THROWS(unknown.Init(cfg));
 }
+
+// TASK-0039: the PyTorch path checks the model and window with the same rules and registry as TensorRT, before python
+// starts - a wrong id gives the family's models, not a Python KeyError after the model download.
+TEST_CASE("Worker VDA refuses an unknown or foreign model and a bad window before starting python", "[worker][depth][models]") {
+    DepthEstimatorConfig cfg;
+    cfg.modelsDir = (std::filesystem::path(DLSSVID_SOURCE_DIR) / "models").string();
+    cfg.extra["python"] = "python-that-does-not-exist";  // never started
+    auto initError = [&](const std::string& backend) {
+        WorkerDepthEstimator w(backend);
+        try {
+            w.Init(cfg);
+        } catch (const std::exception& e) {
+            return std::string(e.what());
+        }
+        return std::string();
+    };
+    cfg.modelId = "metric-vda-huge";
+    CHECK(initError("vda").find("unknown VDA model 'metric-vda-huge'") != std::string::npos);
+    cfg.modelId = "da3metric-large";
+    CHECK(initError("vda").find("not a VDA model") != std::string::npos);
+    cfg.modelId = "metric-vda-small";
+    CHECK(initError("da3").find("not a DA3 model") != std::string::npos);
+    cfg.modelId = "";
+    cfg.window = 10;
+    CHECK(initError("vda").find("multiple of 4") != std::string::npos);
+}

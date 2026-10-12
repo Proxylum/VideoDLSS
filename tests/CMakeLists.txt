@@ -28,6 +28,7 @@ add_executable(dlssvid_unit_tests
   unit/test_color_convert.cpp
   unit/test_depth_preprocess.cpp
   unit/test_depth_postprocess.cpp
+  unit/test_depth_models.cpp
   unit/test_worker.cpp
   unit/test_trt_engine.cpp
   unit/test_trt_upscaler.cpp
@@ -69,6 +70,7 @@ add_executable(dlssvid_integration_tests
   integration/test_pass_sequence.cpp
   integration/test_cli_passes.cpp
   integration/test_depth_stage.cpp
+  integration/test_vda_models.cpp
   integration/test_cli_depth.cpp
   integration/test_flow_stage.cpp
   integration/test_gpu_decode.cpp
@@ -103,7 +105,8 @@ if(DLSSVID_BUILD_APP)
   target_compile_definitions(dlssvid_app_tests PRIVATE
     DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
     DLSSVID_QT_PLUGINS="${DLSSVID_QT_BIN}/../plugins"
-    DLSSVID_CLI_PATH="$<TARGET_FILE:dlssvid>")
+    DLSSVID_CLI_PATH="$<TARGET_FILE:dlssvid>"
+    DLSSVID_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
   add_dependencies(dlssvid_app_tests dlssvid)
   if(TARGET dlssvid-gui)  # both deploy Qt into bin/ in POST_BUILD: one after the other, or two windeployqt race (CI 2026-09-25)
     add_dependencies(dlssvid_app_tests dlssvid-gui)
@@ -150,6 +153,12 @@ add_test(NAME scripts.attach_release
   COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DWORK_DIR=${CMAKE_BINARY_DIR}/test-tmp/attach_release
           -P ${CMAKE_SOURCE_DIR}/tests/check_attach_release.cmake)
 set_tests_properties(scripts.attach_release PROPERTIES LABELS "scripts" TIMEOUT 60)
+
+# ---- VDA export (TASK-0039): patched attention and external data, with the models/export venv (CPU; skipped without it) ----
+add_test(NAME models.vda_export
+  COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DSCRIPT=${CMAKE_SOURCE_DIR}/models/export/test_vda_export.py
+          -P ${CMAKE_SOURCE_DIR}/tests/run_venv_python.cmake)
+set_tests_properties(models.vda_export PROPERTIES LABELS "python;export" TIMEOUT 900 SKIP_REGULAR_EXPRESSION "venv not found")
 
 # ---- SDK layout: the machine's SDK checkouts match the pinned revisions of scripts/setup_sdk.py (skipped without Python or SDK env) ----
 find_package(Python3 COMPONENTS Interpreter QUIET)

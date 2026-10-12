@@ -99,6 +99,14 @@ TEST_CASE("ToolInfo JSON round trip and ToolForStage from parameters", "[unit][f
     CHECK(ToolForStage("depth", {{"backend", "vda"}}).model == "metric-vda-small");
     CHECK(ToolForStage("depth", {{"backend", "da3"}, {"model", "da3mono-large"}}).model == "da3mono-large");
     CHECK(ToolForStage("depth", {{"backend", "stub"}}).model.empty());
+    // TASK-0039: the VDA models; this checkout's registry, not DLSSVID_MODELS_DIR (another tree on the CI runner)
+    const std::string models = (std::filesystem::path(DLSSVID_SOURCE_DIR) / "models").string();
+    const ToolInfo large = ToolForStage("depth", {{"backend", "vda"}, {"model", "metric-vda-large"}, {"models_dir", models}});
+    CHECK(large.model == "metric-vda-large");
+    CHECK(large.modelHash == "24eba25342e7ee0f054be25da6a852ebd7cfa40cd6bf41a353ecb6abfe24e620");
+    CHECK(ToolForStage("depth", {{"backend", "worker:vda"}}).model == "metric-vda-small");
+    CHECK(ToolForStage("depth", {{"backend", "vda"}, {"models_dir", models}}).modelHash.empty());  // Small not pinned: its passes stay
+    CHECK(ToolForStage("depth", {{"backend", "worker"}}).model.empty());  // DA3 worker as before
     CHECK(ToolForStage("flow", {{"backend", "searaft"}}).model == "sea-raft-spring-m");
     CHECK(ToolForStage("flow", nlohmann::json::object()).backend == "ofa");
     CHECK(ToolForStage("flow", nlohmann::json::object()).model.empty());

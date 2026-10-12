@@ -8,7 +8,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from common import MODELS_DIR, download_url, hf_download, load_registry, sha256_file
+from common import MODELS_DIR, download_url, hf_download, load_registry, sha256_file, verify_sha256
 
 
 def main():
@@ -35,8 +35,11 @@ def main():
             continue
         files = [entry["hf_file"]] if entry.get("hf_file") else ["config.json", "model.safetensors"]
         for f in files:
-            p = hf_download(entry["hf"], f, args.cache)
-            print(f"{mid}: {p} sha256 {sha256_file(p)[:16]} license {entry.get('license', '?')}")
+            # one pinned file (hf_file): the registry's HF revision and sha256; several: the repo's head, hashes printed
+            pinned = bool(entry.get("hf_file"))
+            p = hf_download(entry["hf"], f, args.cache, revision=(entry.get("hf_revision") or None) if pinned else None)
+            got = verify_sha256(p, entry.get("sha256", "") if pinned else "", log=lambda *_: None) if pinned else sha256_file(p)
+            print(f"{mid}: {p} sha256 {got[:16]}{' (pinned)' if pinned and entry.get('sha256') else ''} license {entry.get('license', '?')}")
     return rc
 
 

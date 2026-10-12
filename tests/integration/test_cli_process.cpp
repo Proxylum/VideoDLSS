@@ -248,3 +248,65 @@ TEST_CASE("dlssvid process: killing the run ends its fg process too", "[integrat
     CloseHandle(child);
     CHECK(waited == WAIT_OBJECT_0);  // without the job object the stalled child would live on
 }
+
+// TASK-0039: the depth model is checked against the registry before anything is decoded or hashed - before, an unknown
+// id listed the whole registry after the source hash, a DA3 id for vda reached the Python export (KeyError 'hf_file').
+TEST_CASE("dlssvid depth refuses an unknown or foreign VDA model and a bad window before decoding", "[integration][cli][depth][models]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("vda_refuse");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const std::string models = (std::filesystem::path(DLSSVID_SOURCE_DIR) / "models").string();
+    const auto out = dir / "passes";
+    auto depth = [&](std::vector<std::string> extra) {
+        std::vector<std::string> args{"depth", "--warp", "--models-dir", models, "-i", clip.string(), "-o", out.string()};
+        args.insert(args.end(), extra.begin(), extra.end());
+        return RunCli(args);
+    };
+    const CliResult unknown = depth({"--backend", "vda", "--model", "metric-vda-huge"});
+    CHECK(unknown.code != 0);
+    CHECK(unknown.out.find("metric-vda-huge") != std::string::npos);
+    CHECK(unknown.out.find("metric-vda-small") != std::string::npos);
+    CHECK(unknown.out.find("metric-vda-large") != std::string::npos);
+    CHECK(unknown.out.find("sea-raft") == std::string::npos);  // the VDA models, not the whole registry
+    const CliResult foreign = depth({"--backend", "vda", "--model", "da3metric-large"});
+    CHECK(foreign.code != 0);
+    CHECK(foreign.out.find("not a VDA model") != std::string::npos);
+    CHECK(depth({"--backend", "vda", "--window", "40"}).code != 0);  // out of range
+    const CliResult bad = depth({"--backend", "vda", "--window", "10"});
+    CHECK(bad.code != 0);
+    CHECK(bad.out.find("multiple of 4") != std::string::npos);
+    CHECK(!std::filesystem::exists(out / "depth_raw"));  // refused before the decoder and the stage
+}
+
+// TASK-0039: `--depth-backend da3` over a project with VDA Large leaves no VDA model (it would be "not a DA3 model"),
+// and the plan prints the advice of the stages: the licence of a non-commercial model.
+TEST_CASE("dlssvid process --plan: a backend switch drops the VDA model, a non-commercial model is a warning", "[integration][cli][process][models]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("vda_plan");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const std::string models = (std::filesystem::path(DLSSVID_SOURCE_DIR) / "models").string();
+    Project p = Project::Create(clip, dir / "passes");
+    for (auto& st : p.stages) {
+        st.enabled = st.name == "depth";
+        if (st.name == "depth") st.params = {{"backend", "vda"}, {"model", "metric-vda-large"}, {"models_dir", models}};
+    }
+    p.Save(dir / "clip.dlssvid.json");
+    const auto json = dir / "plan.json";
+    const CliResult nc = RunCli({"process", "--project", (dir / "clip.dlssvid.json").string(), "--plan", "--warp", "--json", json.string()});
+    CHECK(nc.code == 0);
+    CHECK(nc.out.find("warning: depth: metric-vda-large") != std::string::npos);
+    CHECK(nc.out.find("CC-BY-NC-4.0") != std::string::npos);
+    const CliResult da3 = RunCli({"process", "--project", (dir / "clip.dlssvid.json").string(), "--plan", "--warp", "--depth-backend", "da3", "--json", json.string()});
+    CHECK(da3.code == 0);  // before: "process: depth: 'metric-vda-large' is not a DA3 model"
+    const nlohmann::json plan = ReadJson(json);
+    REQUIRE(plan["stages"].size() == 1);
+    CHECK(plan["stages"][0]["params"]["backend"] == "da3");
+    CHECK(plan["stages"][0]["params"]["model"] == "");  // the schema default, not the VDA model
+    CHECK(plan["stages"][0]["warnings"].empty());
+}

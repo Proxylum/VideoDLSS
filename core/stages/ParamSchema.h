@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
@@ -35,6 +36,13 @@ struct ParamSpec {
     // When set, the parameter belongs to these backends only: EffectiveStageParams drops it for the others, so a
     // parameter added for one backend leaves the fingerprints of the other backends' passes untouched.
     std::vector<std::string> backends;
+    // A list for the form per backend (depth.model: the VDA models for vda / worker:vda). It does not restrict the
+    // values (JSON and CLI take any registry id) and the key stays for every backend; the form shows the row only for
+    // a backend with a list.
+    std::map<std::string, std::vector<ParamChoice>> formChoices;
+    // EffectiveStageParams leaves the key out when absent or equal to the default (depth.window: 0 = the registry's), so
+    // a parameter added later leaves the fingerprints of the passes made before it untouched.
+    bool omitDefault = false;
 };
 
 struct StageSchema {
@@ -55,10 +63,22 @@ std::vector<std::string> ValidateStageParams(const std::string& stage, const nlo
 nlohmann::json EffectiveStageParams(const std::string& stage, const nlohmann::json& params);
 // A parameter's value as its form shows it: the choice label, a number, «да» / «нет».
 std::string ParamValueLabel(const ParamSpec& spec, const nlohmann::json& value);
+// The same with the backend's form list first (depth.model of vda: «Large — CC-BY-NC-4.0»); a missing value of an
+// omitDefault key reads «по умолчанию».
+std::string ParamValueLabel(const ParamSpec& spec, const nlohmann::json& value, const std::string& backend);
+// The stage's backend: params.backend, else the schema default ("" for a stage without backends).
+std::string StageBackend(const std::string& stage, const nlohmann::json& params);
+// The form list of the parameter for the backend, nullptr when it has none.
+const std::vector<ParamChoice>* FormChoicesFor(const ParamSpec& spec, const std::string& backend);
+// The parameters after a switch to `newBackend` (GUI, --depth-backend, --param depth.backend=...): a value from the old
+// backend's form list that the new backend's list does not have is dropped (vda + metric-vda-large -> da3 leaves no VDA
+// model), and so is a value that is not in the new backend's list; "" stays. The backend key itself is not changed.
+nlohmann::json ParamsForBackendChange(const std::string& stage, const nlohmann::json& params, const std::string& newBackend);
 // The options of `dlssvid <stage>` for the parameters (the GUI's «Запустить этап»; review of TASK-0038): `--<key> <value>`
 // with the schema key (the commands take the underscore spelling as an alias); a flag only when it differs from its
 // default - `--<key>` when set, `--no-<key>` when a default-on flag is cleared (jitter, guides); empty strings are left
-// out; upscale's target_width + target_height become `--target WxH`.
+// out; upscale's target_width + target_height become `--target WxH`; a parameter of another backend (OnlyFor) and an
+// omitDefault key at its default are left out (`depth --backend da3` never gets the window of a VDA setting).
 std::vector<std::string> StageCliArgs(const std::string& stage, const nlohmann::json& params);
 
 }  // namespace dlssvid

@@ -17,6 +17,7 @@ struct DepthEstimatorConfig {
     int maxInputRes = 1080;   // frames larger than this (shorter side) are downscaled before the model
     bool fp16 = true;
     std::string modelsDir;    // models/ folder (registry.json + cache); default = auto
+    int window = 0;           // VDA: frames per window; 0 = the registry's (ResolveDepthModel checks it)
     nlohmann::json extra = nlohmann::json::object();
 };
 
