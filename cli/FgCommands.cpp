@@ -132,14 +132,17 @@ int CmdFgAsStage(const FgCommands::FgArgs& a) {
     o.sourceHash = a.sourceHash.rfind("sha256:", 0) == 0 ? a.sourceHash : "sha256:" + Sha256File(a.input);
     D3D12Device device({a.warp, false});
     const auto t0 = std::chrono::steady_clock::now();
-    const FgRunResult r =
-        RunFg(decoder, device, o, a.frames, [](int64_t n) { EmitLine(std::string(kFgProgressPrefix) + std::to_string(n)); }, params);
-    const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    EmitLine(std::string(kFgResultPrefix) + Summary(r, sec).dump(-1, ' ', true, nlohmann::json::error_handler_t::replace));
-    if (a.crashOnExit) {
-        Log()->error("fg: --crash-on-exit: terminating the process after the result (isolation test)");
-        TerminateProcess(GetCurrentProcess(), 0xC0000005u);
-    }
+    // the result goes out as soon as color_fg is written - before the backend is released, where a driver fault ends
+    // the process most often: the runner then keeps the complete pass (it checks the pass on a non-zero exit code)
+    RunFg(decoder, device, o, a.frames, [](int64_t n) { EmitLine(std::string(kFgProgressPrefix) + std::to_string(n)); }, params,
+          [&](const FgRunResult& r) {
+              const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+              EmitLine(std::string(kFgResultPrefix) + Summary(r, sec).dump(-1, ' ', true, nlohmann::json::error_handler_t::replace));
+              if (a.crashOnExit) {  // isolation test: a crash while the backend is released
+                  Log()->error("fg: --crash-on-exit: terminating the process after the result (isolation test)");
+                  TerminateProcess(GetCurrentProcess(), 0xC0000005u);
+              }
+          });
     return 0;
 }
 
@@ -255,7 +258,9 @@ void FgCommands::Register(CLI::App& app) {
     fg_->add_option("--source-hash,--source_hash", fa_.sourceHash, "sha256:<hex> of the input, instead of hashing it again (--as-stage)")->group("");
     fg_->add_flag("--disable-unavailable,--disable_unavailable", fa_.disableUnavailable, "report a disabled stage when the backend is unavailable (--as-stage)")
         ->group("");
-    fg_->add_flag("--crash-on-exit,--crash_on_exit", fa_.crashOnExit, "development: terminate after printing the result (--as-stage) — isolation test")->group("");
+    fg_->add_flag("--crash-on-exit,--crash_on_exit", fa_.crashOnExit,
+                  "development: terminate after printing the result, before the backend is released (--as-stage) — isolation test")
+        ->group("");
     fg_->add_flag("--stall", fa_.stall, "development: hang before reading the input (--as-stage) — isolation test")->group("");
 }
 

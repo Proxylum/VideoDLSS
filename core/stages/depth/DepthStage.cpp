@@ -162,8 +162,7 @@ void DepthStage::RunWindow(bool flush) {
 void DepthStage::Emit(int64_t index, PassImage depth) {
     if (depth.type != PixelType::F32) depth = depth.ConvertTo(PixelType::F32);
     depth.channels = {"Z"};
-    if (options_.fillHoles) stats_.holesFilled += static_cast<int64_t>(FillInvalidDepth(depth));
-    stabilizer_.Push(index, std::move(depth));
+    stabilizer_.Push(index, std::move(depth));  // holes are filled after the alignment (Finalize)
     Drain();
 }
 
@@ -175,6 +174,9 @@ void DepthStage::Drain() {
 }
 
 void DepthStage::Finalize(int64_t index, PassImage depth, const ScaleShift& applied) {
+    // after the alignment: a filled frame without valid depth (constant 1) measured as real depth joined its neighbours'
+    // windows (review of TASK-0038); the fill copies the nearest valid sample, so it commutes with the transform
+    if (options_.fillHoles) stats_.holesFilled += static_cast<int64_t>(FillInvalidDepth(depth));
     if (stabilizer_.GetMode() != TemporalStabilizer::Mode::None) {
         const bool first = stats_.frames == 0;
         stats_.scaleMin = first ? applied.scale : std::min(stats_.scaleMin, applied.scale);

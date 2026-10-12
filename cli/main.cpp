@@ -66,7 +66,14 @@ bool ParseSize(const std::string& s, uint32_t& w, uint32_t& h) {
 }
 
 PassReader OpenReader(const std::string& dir, const std::string& passName, const std::string& convention, const std::string& size) {
-    if (Manifest::Exists(dir) && passName.empty()) return PassReader::Open(dir);
+    if (Manifest::Exists(dir)) {
+        // the manifest describes the folder (y_up, source, fps, ...): --pass / --convention / --size are for folders
+        // without one - a scan would drop all of that and --write-manifest would overwrite it
+        PassReader r = PassReader::Open(dir);
+        if (!passName.empty() && r.Man().pass != passName)
+            Throw(dir + " has a manifest for pass '" + r.Man().pass + "', not '" + passName + "'");
+        return r;
+    }
     if (passName.empty()) Throw("no manifest.json in " + dir + ": specify --pass (and --convention, --size for raw dumps)");
     PassReader::ScanHints hints;
     const auto kind = ParsePassKind(passName);
@@ -522,6 +529,12 @@ int ConvertFolder(const PassReader& in, const std::string& outDir, PassKind toKi
     const Manifest src = in.FrameManifest();  // in.ReadFrame() returns y-down vectors: the result must not carry mv.y_up
     const auto fromKind = src.Kind();
     if (!fromKind) Throw("cannot convert custom pass '" + src.pass + "'");
+    const bool pair = (*fromKind == PassKind::DepthRaw && toKind == PassKind::DepthDlss) || (*fromKind == PassKind::DepthDlss && toKind == PassKind::DepthRaw) ||
+                      (*fromKind == PassKind::MvRaw && toKind == PassKind::MvDlss) || (*fromKind == PassKind::MvDlss && toKind == PassKind::MvRaw);
+    if (!pair)
+        Throw("convert: " + src.pass + " -> " + std::string(Spec(toKind).name) +
+              " is not a conversion (depth_raw <-> depth_dlss, mv_raw <-> mv_dlss); to write y-up vectors y down in the same pass use "
+              "`export --from-dir <dir> --y-up --format exr`");
     Manifest out = Manifest::ForPass(toKind, src.width, src.height, src.format == FileFormat::Png ? FileFormat::Exr : src.format);
     if (out.format == FileFormat::Npz) out.format = FileFormat::Npz;
     out.fps = src.fps;
@@ -702,25 +715,25 @@ int main(int argc, char** argv) {
     depth->add_option("-o,--output", da.output, "pass root folder (writes depth_raw/ and depth_dlss/)")->required();
     depth->add_option("--backend", da.backend, "da3 | vda | worker | worker:da3 | worker:vda | worker:icdepth | stub")->default_val("da3");
     depth->add_option("--model", da.model, "registry model id (default per backend)");
-    depth->add_option("--input-size", da.inputSize, "model input on the shorter side (multiple of 14)")->default_val(518);
-    depth->add_option("--max-res", da.maxRes, "downscale frames above this shorter side before the model")->default_val(1080);
+    depth->add_option("--input-size,--input_size", da.inputSize, "model input on the shorter side (multiple of 14)")->default_val(518);
+    depth->add_option("--max-res,--max_res", da.maxRes, "downscale frames above this shorter side before the model")->default_val(1080);
     depth->add_flag("--fp32", da.fp32, "build/run the model in fp32");
     depth->add_option("--frames", da.frames, "process at most N frames")->default_val(-1);
-    depth->add_flag("--no-dlss", da.noDlss, "do not write depth_dlss");
-    depth->add_option("--near", da.zNear, "near plane for depth_dlss (metres)")->default_val(0.1f);
-    depth->add_option("--far", da.zFar, "far plane for depth_dlss (metres)")->default_val(1000.f);
+    depth->add_flag("--no-dlss,--no_dlss", da.noDlss, "do not write depth_dlss");
+    depth->add_option("--near,--z-near,--z_near", da.zNear, "near plane for depth_dlss (metres)")->default_val(0.1f);
+    depth->add_option("--far,--z-far,--z_far", da.zFar, "far plane for depth_dlss (metres)")->default_val(1000.f);
     depth->add_option("--stabilize", da.stabilize,
                       "temporal alignment over a centred window: auto (metric models: scale, relative: scale + shift) | none | scale | scale_shift")
         ->default_val("auto");
     depth->add_option("--stabilize-window,--stabilize_window", da.stabilizeWindow, "radius N: frame t is aligned over t-N..t+N (output delayed by N frames)")
         ->default_val(8)
         ->check(CLI::Range(1, 64));
-    depth->add_flag("--no-fill", da.noFill, "keep invalid depth samples instead of filling them");
+    depth->add_flag("--no-fill,--no_fill", da.noFill, "keep invalid depth samples instead of filling them");
     depth->add_option("--format", da.format, "exr | tiff | npz | raw")->default_val("exr");
     depth->add_flag("--warp", da.warp, "use the WARP software adapter");
-    depth->add_option("--models-dir", da.modelsDir, "folder with registry.json (default: auto)");
+    depth->add_option("--models-dir,--models_dir", da.modelsDir, "folder with registry.json (default: auto)");
     depth->add_option("--python", da.python, "python interpreter for the worker backends");
-    depth->add_option("--mv-dir", da.mvDir, "mv_dlss pass folder: TAE with motion compensation");
+    depth->add_option("--mv-dir,--mv_dir", da.mvDir, "mv_dlss pass folder: TAE with motion compensation");
 
     FlowArgs fa;
     auto* flow = app.add_subcommand("flow", "estimate motion vectors (mv_raw forward flow, mv_dlss backward) for a video");
@@ -729,10 +742,10 @@ int main(int argc, char** argv) {
     flow->add_option("--backend", fa.backend, "ofa | searaft | stub")->default_val("ofa");
     flow->add_option("--model", fa.model, "registry model id (searaft)");
     flow->add_option("--hwaccel", fa.hwaccel, "decoder: cuda (NVDEC frames feed OFA directly) | none")->default_val("cuda");
-    flow->add_option("--max-res", fa.maxRes, "searaft: model input cap on the shorter side")->default_val(720);
+    flow->add_option("--max-res,--max_res", fa.maxRes, "searaft: model input cap on the shorter side")->default_val(720);
     flow->add_flag("--fp32", fa.fp32, "searaft: fp32 engine");
     flow->add_option("--frames", fa.frames, "process at most N frames")->default_val(-1);
-    flow->add_flag("--no-dlss", fa.noDlss, "do not write mv_dlss");
+    flow->add_flag("--no-dlss,--no_dlss", fa.noDlss, "do not write mv_dlss");
     flow->add_option("--target", fa.target, "mv_dlss resolution WxH (default: source)");
     flow->add_option("--dilate", fa.dilate, "mv_dlss dilation radius at depth edges")->default_val(1);
     flow->add_option("--depth-dir", fa.depthDir, "depth_raw folder for occlusion handling in mv_dlss");
@@ -740,7 +753,7 @@ int main(int argc, char** argv) {
     flow->add_option("--grid", fa.grid, "ofa: requested output grid (1, 2, 4)")->default_val(1);
     flow->add_option("--format", fa.format, "exr | tiff | npz | raw")->default_val("exr");
     flow->add_flag("--warp", fa.warp, "use the WARP software adapter");
-    flow->add_option("--models-dir", fa.modelsDir, "folder with registry.json (default: auto)");
+    flow->add_option("--models-dir,--models_dir", fa.modelsDir, "folder with registry.json (default: auto)");
 
     cli::ViewportCommands viewportCommands;  // project init|show, render (stage 4)
     viewportCommands.Register(app);

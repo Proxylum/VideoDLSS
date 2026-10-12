@@ -159,8 +159,10 @@ public slots:
     void setTimelineFps(Rational fps);     // {0,1}: follow the base source
     void setPlaying(bool playing);
     bool playing() const { return playing_; }
-    // tests: the monotonic clock playback is paced by, in nanoseconds (default: QElapsedTimer)
+    // tests: the monotonic clock playback is paced by, in nanoseconds (default: QElapsedTimer), and one tick of the
+    // playback timer driven by hand against that clock
     void setPlaybackClock(std::function<int64_t()> nowNs);
+    void playbackTick() { onPlayTick(); }
     bool loop() const { return loop_; }              // playback wraps to the start at the end (QSettings view/loop)
     void setLoop(bool on);
     void setMode(ViewMode mode);
@@ -217,6 +219,7 @@ private:
     PlaybackClock clock_;
     bool playing_ = false;
     bool inPlayTick_ = false;  // setTime from playback itself, not a jump
+    double clockTime_ = 0.0;   // the time playback last stood at: a time set in another way restarts the clock
     QElapsedTimer monotonic_;
     std::function<int64_t()> now_;
     Rational timelineFps_{0, 1};  // {0,1}: the base source's rate

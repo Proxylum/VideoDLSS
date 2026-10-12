@@ -271,6 +271,11 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             run("source_changed", m.sourceHash.empty() ? "the pass has no source hash" : "the pass was made from another source", true);
         } else if (madeFrom != sourceFormatNow) {
             run("source_changed", "the pass was made from the source decoded as " + madeFrom + " (now " + sourceFormatNow + ")", true);
+        } else if (name == "depth" && p.value("stabilize", std::string("auto")) != "none" && !m.stageParams.contains("stabilize_requested")) {
+            // a standalone `dlssvid depth` from before the centred alignment (TASK-0038): metric depth was not aligned
+            // then - adopting it would stamp the old depth with the depth.2 revision
+            d.diff["tool"]["app"] = nlohmann::json::array({kPassToolVersion, PassToolVersionFor(name, p)});
+            run("tool_changed", "depth made before the temporal alignment of TASK-0038", true);
         } else if (!complete) {
             run("incomplete", incomplete, false);
         } else {
@@ -865,6 +870,13 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                             debris = ec || now != *manifestBefore || Manifest::Load(fgDir).fingerprint.empty();
                         } catch (const std::exception&) {
                             debris = true;
+                        }
+                        // a rerun in place (forced, incomplete) rewrites the frames of the signed version: one written
+                        // by this run (possibly cut short by the crash) makes the folder debris as well
+                        for (auto entry = std::filesystem::directory_iterator(fgDir, ec); !debris && !ec && entry != std::filesystem::directory_iterator(); entry.increment(ec)) {
+                            std::error_code tec;
+                            const auto t = std::filesystem::last_write_time(entry->path(), tec);
+                            if (!tec && t > *manifestBefore) debris = true;
                         }
                     }
                     if (debris) {

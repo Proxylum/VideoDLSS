@@ -29,8 +29,9 @@ bool StartsWith(const std::string& s, std::string_view prefix) { return s.size()
 std::vector<std::string> FgProcessArgs(const FgProcessSpec& spec) {
     std::vector<std::string> a = {Utf8Arg(spec.exe)};
     if (spec.verbose) a.push_back("-v");
-    a.insert(a.end(), {"fg", "--as-stage", "-i", Utf8Arg(std::filesystem::absolute(spec.input)), "-o", Utf8Arg(std::filesystem::absolute(spec.passesRoot)),
-                       "--no-auto"});
+    // paths as the runner got them (the child inherits the working directory): making them absolute would add the working
+    // directory's characters, which the child's ANSI-codepage argv may not carry where the parent's relative path did
+    a.insert(a.end(), {"fg", "--as-stage", "-i", Utf8Arg(spec.input), "-o", Utf8Arg(spec.passesRoot), "--no-auto"});
     // explicit pass folders, exactly the ones the runner chose (--no-auto: the child does not pick its own)
     if (!spec.colorDir.empty()) a.insert(a.end(), {"--color-dir", Utf8Arg(spec.colorDir)});
     if (!spec.depthDir.empty()) a.insert(a.end(), {"--depth-dir", Utf8Arg(spec.depthDir)});

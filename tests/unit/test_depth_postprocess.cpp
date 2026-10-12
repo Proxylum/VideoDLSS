@@ -286,3 +286,42 @@ TEST_CASE("TemporalStabilizer (scale_shift) is robust to far outliers", "[depth]
         CHECK(std::fabs(MedianAbsDev(out[static_cast<size_t>(k)].depth) / spread0 - 1.0) < 0.02);
     }
 }
+
+// Review of TASK-0038 (scaleshift-unbounded): a low-contrast frame (fog, a blank wall) with the location of its neighbours
+// was stretched to their mean spread - x19 here - amplifying its noise. A jump of the spread now breaks the segment.
+TEST_CASE("TemporalStabilizer (scale_shift) does not stretch a low-contrast frame to its neighbours' spread", "[depth][postprocess][stabilize][regression]") {
+    const int n = 24, radius = 4, flat = 12;
+    std::vector<PassImage> in;
+    for (int k = 0; k < n; ++k) in.push_back(Ramp(40, 20, 1.f + 0.05f * (Flicker(k) - 1.f), 0.f));
+    const double m = Median(in[flat]);
+    for (uint32_t y = 0; y < 20; ++y)
+        for (uint32_t x = 0; x < 40; ++x) in[flat].Set(x, y, 0, static_cast<float>(m + (in[flat].Get(x, y, 0) - m) * 0.05));
+    TemporalStabilizer st(TemporalStabilizer::Mode::ScaleShift, radius);
+    const std::vector<Out> out = RunAll(st, in);
+    REQUIRE(out.size() == static_cast<size_t>(n));
+    CHECK(out[flat].applied.scale == 1.f);  // before: about 19
+    CHECK(std::fabs(MedianAbsDev(out[flat].depth) / MedianAbsDev(in[flat]) - 1.0) < 1e-4);
+    CHECK(out[flat - 1].applied.scale == 1.f);  // the neighbours' windows end at the break
+    CHECK(out[flat + 1].applied.scale == 1.f);
+    CHECK(out[flat - 3].applied.samples > 1);  // the rest of the clip is still aligned
+}
+
+// Review of TASK-0038 (scaleshift-unbounded): each step under kBreakRatio, the window can still ask for a large scale -
+// spreads growing x1.3 per frame ask for x2 at the centre of a ±8 window. The transform is bounded by kBreakRatio.
+TEST_CASE("TemporalStabilizer never scales a frame by more than kBreakRatio", "[depth][postprocess][stabilize][regression]") {
+    const int n = 30, radius = 8;
+    std::vector<PassImage> in;
+    for (int k = 0; k < n; ++k) in.push_back(Ramp(32, 16, static_cast<float>(std::pow(1.3, k)), 0.f));
+    TemporalStabilizer st(TemporalStabilizer::Mode::ScaleShift, radius);
+    const std::vector<Out> out = RunAll(st, in);
+    REQUIRE(out.size() == static_cast<size_t>(n));
+    float most = 1.f;
+    for (const Out& o : out) {
+        CHECK(o.applied.scale <= TemporalStabilizer::kBreakRatio + 1e-6);
+        CHECK(o.applied.scale >= 1.0 / TemporalStabilizer::kBreakRatio - 1e-6);
+        most = std::max(most, o.applied.scale);
+        for (uint32_t y = 0; y < 16; ++y)
+            for (uint32_t x = 0; x < 32; ++x) CHECK(o.depth.Get(x, y, 0) > 0.f);
+    }
+    CHECK(most > 1.4f);  // the clamp was reached (unclamped: about 2)
+}

@@ -194,12 +194,12 @@ void UpscaleCommands::Register(CLI::App& app) {
     upscale_->add_option("--mv-dir", ua_.mvDir, "mv_dlss pass folder (dlss)");
     upscale_->add_option("--sharpness", ua_.sharpness, "nis sharpness 0..1")->default_val(0.5f);
     upscale_->add_option("--preset", ua_.preset, "dlss render preset: default | J | K | L | M")->default_val("default");
-    upscale_->add_flag("--no-scaling,--artifact-reduction-only", ua_.artifactReductionOnly,
+    upscale_->add_flag("--no-scaling,--artifact-reduction-only,--artifact_reduction_only", ua_.artifactReductionOnly,
                        "no scaling (x1): dlss = DLAA anti-aliasing, nis = NVSharpen; does not remove compression artifacts "
                        "(--artifact-reduction-only is the old name)");
     upscale_->add_flag("--no-jitter", ua_.noJitter, "dlss: feed frames without the jitter emulation");
-    upscale_->add_option("--jitter-sign", ua_.jitterSign, "dlss: sign of the reported jitter offset (+1 | -1)")->default_val(1.f);
-    upscale_->add_flag("--no-fallback", ua_.noFallback, "fail instead of falling back to nis when the backend is unavailable");
+    upscale_->add_option("--jitter-sign,--jitter_sign", ua_.jitterSign, "dlss: sign of the reported jitter offset (+1 | -1)")->default_val(1.f);
+    upscale_->add_flag("--no-fallback,--no_fallback", ua_.noFallback, "fail instead of falling back to nis when the backend is unavailable");
     upscale_->add_option("--format", ua_.format, "exr | png16")->default_val("exr");
     upscale_->add_option("--video", ua_.video, "also encode the result into this video file (no audio)");
     upscale_->add_option("--codec", ua_.codec, "encoder for --video: h264_nvenc | hevc_nvenc | av1_nvenc | ffv1")->default_val("h264_nvenc");

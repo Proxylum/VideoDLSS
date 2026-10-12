@@ -25,7 +25,9 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 #include <QFileInfo>
@@ -1160,6 +1162,23 @@ TEST_CASE("ProcessingPanel: a stage the runner reports failed stays failed while
     }
 }
 
+TEST_CASE("TaskQueue takes a failed stage only from the runner's line, not from any 'process: X failed' text", "[app][tasks][isolation][regression]") {
+    App();
+    const auto d = Dir("failed_line");
+    TaskQueue queue;
+    const std::vector<TaskQueue::StagePlan> plan{{"fg", "FG", 1.0, false}, {"encode", "Кодирование", 1.0, false}};
+    // the warning Subprocess writes when the job object cannot be used contains "process: AssignProcessToJobObject failed"
+    const auto path = d / "warn.cmd";
+    std::ofstream(path) << "@echo off\r\n"
+                        << "echo [2026-10-12 10:00:00.000] [warning] Subprocess: AssignProcessToJobObject failed (error 5); the child is not tied\r\n"
+                        << "echo fg: 4/4 frames\r\n"
+                        << "echo encode: 4/4 frames\r\n";
+    const int id = queue.enqueue("Обработка", "cmd", {"/c", QString::fromStdWString(path.wstring())}, plan);
+    Pump([&] { return queue.finished(id); }, 20000);
+    REQUIRE(queue.succeeded(id));
+    CHECK(queue.progress(id).failedStageTitles().isEmpty());  // before: a stage «AssignProcessToJobObject» failed
+}
+
 TEST_CASE("TaskQueue runs dlssvid process whose fg process crashes: fg failed, encode done, the task succeeded", "[app][tasks][process][isolation]") {
     App();
     const auto d = Dir("process_fg_crash");
@@ -1249,6 +1268,18 @@ TEST_CASE("PlaybackClock waits for a slow decode, skips after the stall limit an
     CHECK(c.NextTime() == Catch::Approx(1.5 + 1.0 / 48.0));
     CHECK(c.WakeNs(0) == c.DueNs());
     CHECK(c.WakeNs(c.DueNs() + 5) == c.DueNs() + 5 + PlaybackClock::kPollNs);
+
+    // a loop back to the start on time keeps the grid; one a period late counts from now
+    PlaybackClock loop;
+    loop.Start(0, 0.0, {48, 1});
+    for (int k = 0; k < 4; ++k) loop.Advance(loop.DueNs());
+    const int64_t loopDue = loop.DueNs();
+    loop.Restart(loopDue + 5'000'000, 0.0);
+    CHECK(loop.DueNs() == loopDue + loop.PeriodNs());  // the next frame on the old grid, not 5 ms late
+    CHECK(loop.NextTime() == Catch::Approx(1.0 / 48.0));
+    const int64_t late = loop.DueNs() + 2 * loop.PeriodNs();
+    loop.Restart(late, 0.0);
+    CHECK(loop.DueNs() == late + loop.PeriodNs());
 }
 
 TEST_CASE("AppModel plays at the real rate of the fastest shown source and shows every frame (regression: 20 ms timer made 48 fps play at 50 Hz)",
@@ -1277,4 +1308,63 @@ TEST_CASE("AppModel plays at the real rate of the fastest shown source and shows
         CHECK(seconds >= 49.0 / fps - 0.005);  // never faster than real time (the old timer: 49 x 20 ms = 0.98 s at 48 fps);
                                                // no upper bound: a loaded CI machine may only make it slower
     }
+}
+
+// Deterministic counterpart (audit play-fg-rate): the playback timer driven by hand against a fake clock - one second of
+// the clock shows exactly as many frames as the source's rate, at the source's steps.
+TEST_CASE("AppModel paces playback by its clock: 48 frames of a 48 fps source in one second, 50 at 50 fps (regression: whole-ms timer)",
+          "[app][model][gpu][regression]") {
+    App();
+    for (const int fps : {48, 50}) {
+        INFO(fps << " fps");
+        const auto d = Dir(fps == 48 ? "clock48" : "clock50");
+        WritePassFps(d / "passes" / "color_fg", PassKind::ColorFg, 80, fps);
+        Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+        AppModel model(true);
+        model.openProject(Q(d / "proj.dlssvid.json"));
+        model.setSingleSource("color_fg");
+        for (int k = 0; k <= 60; ++k) {  // every frame of the second resident: the clock alone decides
+            model.setTime(static_cast<double>(k) / fps);
+            model.store().WaitForCurrent();
+        }
+        model.setTime(0.0);
+        model.store().WaitForCurrent();
+        int64_t fake = 0;
+        model.setPlaybackClock([&] { return fake; });
+        std::vector<double> times;
+        const auto conn = QObject::connect(&model, &AppModel::timeChanged, [&](double t) { times.push_back(t); });
+        model.setPlaying(true);
+        for (fake = 0; fake <= 1'000'000'000; fake += 1'000'000) model.playbackTick();
+        model.setPlaying(false);
+        QObject::disconnect(conn);
+        REQUIRE(times.size() == static_cast<size_t>(fps));  // the old timer: 1000 / floor(1000 / 48) = 50 frames a second
+        for (size_t k = 0; k < times.size(); ++k) CHECK(times[k] == Catch::Approx(static_cast<double>(k + 1) / fps));
+    }
+}
+
+// Review of TASK-0038 (play-2): a time set without setTime while playing (a project opened during playback restores its
+// saved time) restarts the clock from there instead of jumping back to where the clock was.
+TEST_CASE("AppModel playback goes on from a time changed behind its back", "[app][model][gpu][regression]") {
+    App();
+    const auto d = Dir("clock_bypass");
+    WritePassFps(d / "passes" / "color_fg", PassKind::ColorFg, 80, 48);
+    Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setSingleSource("color_fg");
+    for (int k = 0; k <= 70; ++k) {
+        model.setTime(static_cast<double>(k) / 48);
+        model.store().WaitForCurrent();
+    }
+    model.setTime(0.0);
+    int64_t fake = 0;
+    model.setPlaybackClock([&] { return fake; });
+    model.setPlaying(true);
+    for (fake = 0; fake <= 100'000'000; fake += 1'000'000) model.playbackTick();  // ~4 frames
+    REQUIRE(model.time() < 0.2);
+    model.state().time = 1.0;  // as reloadSources does with a project's saved time
+    for (int i = 0; i < 40; ++i, fake += 1'000'000) model.playbackTick();
+    model.setPlaying(false);
+    CHECK(model.time() > 1.0);  // before: back to ~0.1 s, where the clock was
+    CHECK(model.time() < 1.1);
 }

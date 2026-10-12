@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -181,4 +182,25 @@ TEST_CASE("GcPassVersions keeps the newest N per pass, referenced versions and n
     RetirePassVersion(root, "color_sr");
     CHECK(GcPassVersions(root, 1, "color_sr").removed.size() == 1);
     CHECK(Ids(ListPassVersions(root, "color_sr")) == std::vector<std::string>{"20260922-151000_s2"});
+}
+
+// Review of TASK-0038: two versions created within one second (`created` has whole seconds) were ordered by their id,
+// that is by the fingerprint - gc with keep 2 removed the newer one when its fingerprint sorted lower, and a switch back
+// recomputed instead of restoring (the y_up test failed in a fast run). The manifest's write time orders them now.
+TEST_CASE("Versions made in the same second are ordered by the manifest write time, not by the fingerprint", "[unit][versions][regression]") {
+    const auto root = Root("same_second");
+    const std::string older = "sha256:ffffffff01", newer = "sha256:0000000002", current = "sha256:5555555503";
+    const auto t0 = std::filesystem::file_time_type::clock::now() - std::chrono::minutes(5);
+    MakePass(root, "color_sr", older, "2026-10-12T10:00:00Z", 2);
+    std::filesystem::last_write_time(root / "color_sr" / Manifest::kFileName, t0);
+    RetirePassVersion(root, "color_sr");
+    MakePass(root, "color_sr", newer, "2026-10-12T10:00:00Z", 2);
+    std::filesystem::last_write_time(root / "color_sr" / Manifest::kFileName, t0 + std::chrono::milliseconds(400));
+    RetirePassVersion(root, "color_sr");
+    MakePass(root, "color_sr", current, "2026-10-12T10:00:01Z", 2);
+    CHECK(Ids(ListPassVersions(root, "color_sr")) == std::vector<std::string>{"current", "20261012-100000_00000000", "20261012-100000_ffffffff"});
+    const PassGcReport gc = GcPassVersions(root, 2);
+    REQUIRE(gc.removed.size() == 1);
+    CHECK(gc.removed[0].fingerprint == older);  // before: the newer one went
+    CHECK(Ids(ListPassVersions(root, "color_sr")) == std::vector<std::string>{"current", "20261012-100000_00000000"});
 }

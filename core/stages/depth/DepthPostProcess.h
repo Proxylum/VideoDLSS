@@ -36,8 +36,9 @@ double TemporalAlignmentError(const PassImage& prev, const PassImage& cur);
 //   ScaleShift (relative models): location = median depth, spread = median |d - location| per frame; frame t is mapped
 //     so that both equal their window means (MiDaS-style normalisation, robust to far outliers).
 // The window shrinks symmetrically at the ends of the clip and of a segment, r = min(N, distance to the segment's ends);
-// a segment breaks where neighbouring frames differ by more than kBreakRatio (a cut), at a resolution change and around
-// a frame without valid depth. Frame t leaves after frame t+N came in (or on Close): the output is delayed by N frames;
+// a segment breaks where neighbouring frames differ by more than kBreakRatio (a cut; ScaleShift: in location or in
+// spread), at a resolution change and around a frame without valid depth. The transform of a frame never scales by more
+// than kBreakRatio either way (flicker is removed, a drift is not re-graded). Frame t leaves after frame t+N came in (or on Close): the output is delayed by N frames;
 // Mode::None passes frames through unchanged at once. Why metric depth gets no shift: docs/architecture.md.
 class TemporalStabilizer {
 public:
@@ -52,7 +53,8 @@ public:
     int Radius() const { return radius_; }
     int Delay() const { return mode_ == Mode::None ? 0 : radius_; }
 
-    // The next frame in order (F32, holes already filled). Throws when the index is not the previous one + 1.
+    // The next frame in order (F32, holes NOT filled: invalid samples stay out of the statistics, so a frame without
+    // valid depth breaks the segment; fill after Pop). Throws when the index is not the previous one + 1.
     void Push(int64_t index, PassImage depth);
     // The next aligned frame, if its window is complete (or after Close). `applied`: the transform it got.
     bool Pop(int64_t& index, PassImage& depth, ScaleShift* applied = nullptr);

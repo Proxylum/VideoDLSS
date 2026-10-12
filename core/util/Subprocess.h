@@ -18,9 +18,10 @@ public:
     Subprocess& operator=(const Subprocess&) = delete;
 
     // `args[0]` is the executable; arguments are UTF-8 (pass paths through Utf8Arg). Throws dlssvid::Error if the process
-    // cannot start. killWithOwner: the child runs in a job object that ends it (and what it starts, except processes that
-    // break away, e.g. nvngx_update.exe) when this object or our process goes away, and that suppresses the Windows
-    // Error Reporting dialog for its unhandled exceptions - a crashed child exits instead of hanging on a dialog.
+    // cannot start. killWithOwner: the child runs in a job object that ends it when this object or our process goes away,
+    // and that suppresses the Windows Error Reporting dialog for its unhandled exceptions - a crashed child exits instead
+    // of hanging on a dialog. Only the child itself: processes it starts leave the job silently (SILENT_BREAKAWAY - so
+    // that NGX's nvngx_update.exe lives on as it does without a job), so a child with workers of its own must end them.
     void Start(const std::vector<std::string>& args, const std::filesystem::path& workingDir = {}, bool killWithOwner = false);
     bool Running() const;
     uint32_t Pid() const;

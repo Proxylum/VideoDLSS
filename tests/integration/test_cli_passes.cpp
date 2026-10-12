@@ -267,6 +267,23 @@ TEST_CASE("dlssvid convert, export and import honour mv.y_up: a y-up pass gives 
         CheckSameFrames(b, a);
         CHECK_FALSE(Manifest::Load(flagless).mv.yUp);  // not rewritten
     }
+    SECTION("a folder with a manifest keeps it under --pass: no scan, no overwrite (review of TASK-0038, yup-1)") {
+        const auto kept = Dir("yup_kept");
+        std::filesystem::copy(up, kept, std::filesystem::copy_options::recursive);
+        const std::string before = Manifest::Load(kept).ToJson().dump();
+        REQUIRE(Run("import -i " + Q(kept) + " --pass mv_raw --write-manifest") == 0);
+        CHECK(Manifest::Load(kept).ToJson().dump() == before);  // before: rescanned and overwritten, y_up lost
+        const auto a = Dir("yup_kept_a");
+        const auto b = Dir("yup_kept_b");
+        REQUIRE(Run("convert -i " + Q(down) + " -o " + Q(a) + " --to mv_dlss --dilate 0") == 0);
+        REQUIRE(Run("convert -i " + Q(kept) + " --pass mv_raw -o " + Q(b) + " --to mv_dlss --dilate 0") == 0);
+        CheckSameFrames(b, a);  // y_up of the manifest applied, as without --pass
+        CHECK(Run("import -i " + Q(kept) + " --pass depth_raw") != 0);  // the manifest names another pass
+    }
+    SECTION("convert refuses a pair that is not a conversion (review of TASK-0038, yup-3)") {
+        CHECK(Run("convert -i " + Q(up) + " -o " + Q(Dir("yup_same")) + " --to mv_raw --y-up") != 0);  // before: shifted, inverted garbage
+        CHECK(Run("convert -i " + Q(up) + " -o " + Q(Dir("yup_cross")) + " --to depth_dlss") != 0);
+    }
     SECTION("--y-up is refused for passes that are not motion vectors") {
         const auto depth = WriteDepthFolder("yup_depth", 8, 4, 2);
         CHECK(Run("import -i " + Q(depth) + " --y-up") != 0);

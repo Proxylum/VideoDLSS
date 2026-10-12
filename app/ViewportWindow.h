@@ -54,8 +54,10 @@ private:
     std::unique_ptr<ViewportRenderer> renderer_;
     QTimer pollTimer_;  // uploads finished loads and repaints while frames are arriving
     bool dirty_ = true;
-    QElapsedTimer playElapsed_;  // frames presented while playing: the real playback rate goes to the log
+    QElapsedTimer playElapsed_;  // frames shown by the playback clock: the real playback rate goes to the log
     int64_t playFrames_ = 0;
+    bool presentedByTick_ = false;  // the current frame was presented by the playback tick (skip the deferred render)
+    FrameStates renderedStates_;    // what the last render showed: playback re-presents only a frame that has arrived
     bool panning_ = false, wiping_ = false;
     QPointF lastMouse_;
     QPointF pressPos_;

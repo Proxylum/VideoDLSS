@@ -187,7 +187,10 @@ void TemporalStabilizer::Measure(const PassImage& depth, Track& t) {
         for (const double l : cur)
             if (std::isfinite(l)) dev.push_back(std::fabs(std::exp(l) - t.loc));
         t.spread = LowerMedian(dev);  // median |d - loc|: robust to the sky / far outliers
-        if (connectable && prev->loc > 0.0 && t.loc > 0.0) t.segmentStart = std::max(t.loc / prev->loc, prev->loc / t.loc) > kBreakRatio;
+        // a jump of the location or of the spread breaks the segment: a low-contrast frame (fog, a blank wall) has a
+        // spread far below its neighbours', and stretching it to their mean would amplify its noise (review of TASK-0038)
+        const auto jump = [](double a, double b) { return !(a > 0.0 && b > 0.0) || std::max(a / b, b / a) > kBreakRatio; };
+        if (connectable) t.segmentStart = jump(t.loc, prev->loc) || jump(t.spread, prev->spread);
     }
     prevLog_ = std::move(cur);
 }
@@ -236,6 +239,16 @@ ScaleShift TemporalStabilizer::TransformFor(int64_t t) const {
         shift = loc - scale * cur.loc;
     }
     if (!std::isfinite(scale) || scale <= 0.0 || !std::isfinite(shift)) return ss;
+    if (scale > kBreakRatio || scale < 1.0 / kBreakRatio) {
+        // alignment removes flicker, it does not re-grade a frame: a gradual drift inside a segment (each step under
+        // kBreakRatio) could still ask for more over the window
+        scale = std::clamp(scale, 1.0 / kBreakRatio, kBreakRatio);
+        if (mode_ == Mode::ScaleShift) {
+            double loc = 0.0;
+            for (int64_t k = t - r; k <= t + r; ++k) loc += TrackAt(k).loc;
+            shift = loc / (2 * r + 1) - scale * cur.loc;
+        }
+    }
     ss.scale = static_cast<float>(scale);
     ss.shift = static_cast<float>(shift);
     ss.samples = 2 * static_cast<size_t>(r) + 1;

@@ -188,7 +188,10 @@ void AppModel::setTime(double seconds) {
     seconds = std::clamp(seconds, 0.0, lastTime());
     if (std::abs(seconds - state().time) < 1e-9) return;
     state().time = seconds;
-    if (playing_ && !inPlayTick_) clock_.Restart(now_(), seconds);  // a jump while playing: go on from there
+    if (playing_ && !inPlayTick_) {  // a jump while playing: go on from there
+        clock_.Restart(now_(), seconds);
+        clockTime_ = seconds;
+    }
     requestFrames();
     emit timeChanged(seconds);
     emit stateChanged();
@@ -212,6 +215,7 @@ void AppModel::setPlaying(bool playing) {
         Rational rate = store_->MaxRate(neededSources());  // the fastest shown source: an FG result runs at 2x
         if (rate.num <= 0 || rate.den <= 0) rate = {1, 1};
         clock_.Start(now_(), time(), rate);
+        clockTime_ = time();
         playing_ = true;
         schedulePlayTick();
     } else {
@@ -238,6 +242,11 @@ void AppModel::schedulePlayTick() {
 void AppModel::onPlayTick() {
     if (!playing_) return;
     const int64_t now = now_();
+    // the time changed without setTime (a project opened while playing restores its saved time): go on from there
+    if (std::abs(time() - clockTime_) > 1e-9) {
+        clock_.Start(now, time(), clock_.Rate());
+        clockTime_ = time();
+    }
     // the shown sources may change while playing (source 24 fps -> an FG result at 48): follow the fastest one
     if (const Rational rate = store_->MaxRate(neededSources()); rate.num > 0 && rate.den > 0 &&
                                                                 (rate.num != clock_.Rate().num || rate.den != clock_.Rate().den))
@@ -253,6 +262,7 @@ void AppModel::onPlayTick() {
             setTime(0.0);
             inPlayTick_ = false;
             clock_.Restart(now, 0.0);
+            clockTime_ = time();
             schedulePlayTick();
         } else {
             setPlaying(false);
@@ -276,6 +286,7 @@ void AppModel::onPlayTick() {
     inPlayTick_ = true;
     setTime(next);
     inPlayTick_ = false;
+    clockTime_ = time();
     clock_.Advance(now);
     schedulePlayTick();
 }

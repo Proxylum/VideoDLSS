@@ -213,7 +213,7 @@ void TaskQueue::onOutput() {
     static const QRegularExpression reusedRe(R"(process: ([A-Za-z_]+) \S+ .*(is complete, reused|restored from the history))");
     // a stage that failed while the run went on (fg in its own process, audit fg-2); "process: stage 'fg' failed" - the
     // whole run failing - does not match
-    static const QRegularExpression failedRe(R"(process: ([A-Za-z_]+) failed\b)");
+    static const QRegularExpression failedRe(R"((?:^|\] )process: (depth|flow|upscale|nr|fg) failed\b)");
     static const QRegularExpression newline("[\r\n]");
     QStringList lines = buffer_.split(newline, Qt::SkipEmptyParts);
     if (!buffer_.endsWith('\n') && !buffer_.endsWith('\r') && !lines.isEmpty()) buffer_ = lines.takeLast();

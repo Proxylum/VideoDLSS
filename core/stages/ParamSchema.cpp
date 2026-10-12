@@ -349,4 +349,37 @@ std::string ParamValueLabel(const ParamSpec& spec, const nlohmann::json& value) 
     return value.is_string() ? value.get<std::string>() : value.dump();
 }
 
+std::vector<std::string> StageCliArgs(const std::string& stage, const nlohmann::json& params) {
+    std::vector<std::string> out;
+    if (!params.is_object()) return out;
+    const StageSchema* schema = FindStageSchema(stage);
+    int64_t targetW = 0, targetH = 0;
+    for (auto it = params.begin(); it != params.end(); ++it) {
+        const std::string& key = it.key();
+        const nlohmann::json& v = it.value();
+        const ParamSpec* spec = schema ? schema->Find(key) : nullptr;
+        if (stage == "upscale" && (key == "target_width" || key == "target_height") && v.is_number()) {
+            (key == "target_width" ? targetW : targetH) = v.get<int64_t>();
+            continue;
+        }
+        if (v.is_boolean()) {
+            const bool def = spec && spec->def.is_boolean() && spec->def.get<bool>();
+            if (v.get<bool>() == def) continue;  // the command's default
+            out.push_back(v.get<bool>() ? "--" + key : "--no-" + key);
+        } else if (v.is_string()) {
+            if (v.get<std::string>().empty()) continue;  // «пусто = по умолчанию»
+            out.push_back("--" + key);
+            out.push_back(v.get<std::string>());
+        } else if (!v.is_null()) {
+            out.push_back("--" + key);
+            out.push_back(v.dump());
+        }
+    }
+    if (targetW > 0 && targetH > 0) {
+        out.push_back("--target");
+        out.push_back(std::to_string(targetW) + "x" + std::to_string(targetH));
+    }
+    return out;
+}
+
 }  // namespace dlssvid

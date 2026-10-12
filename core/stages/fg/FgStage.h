@@ -101,7 +101,9 @@ struct FgRunResult {
     std::filesystem::path outDir;
     nlohmann::json backend, diagnostics;
 };
+// `onWritten`: called with the result once color_fg is complete on disk, before the backend is released (NGX unload is
+// where a driver fault ends a process most often - the fg process reports its result there, audit fg-2).
 FgRunResult RunFg(VideoDecoder& decoder, D3D12Device& device, FgStageOptions options, int64_t maxFrames = -1, const std::function<void(int64_t)>& progress = {},
-      const nlohmann::json& params = nlohmann::json::object());
+      const nlohmann::json& params = nlohmann::json::object(), const std::function<void(const FgRunResult&)>& onWritten = {});
 
 }  // namespace dlssvid

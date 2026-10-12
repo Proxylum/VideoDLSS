@@ -19,20 +19,31 @@ ViewportWindow::ViewportWindow(AppModel& model) : model_(model) {
     pollTimer_.setInterval(16);
     connect(&pollTimer_, &QTimer::timeout, this, [this] {
         if (model_.store().Update()) model_.notifyFramesUpdated();  // -> dirty_ below
-        // while playing, the playback tick presents each frame itself; extra presents of the same frame for every
-        // prefetch upload would only wait on vsync and make the ticks late
-        if (dirty_ && isExposed() && !model_.playing()) render();
+        if (!dirty_ || !isExposed()) return;
+        // while playing, the playback tick presents each frame itself: a present for every prefetch upload would only
+        // wait on vsync and make the ticks late. Only a frame of the current time that has arrived since (a loop to an
+        // evicted frame 0, a seek, a skipped frame shown as a stand-in) is presented here.
+        if (!model_.playing() || model_.frameStates() != renderedStates_) render();
     });
     pollTimer_.start();
     connect(&model_, &AppModel::framesUpdated, this, [this] { dirty_ = true; });  // also uploads by the playback tick
     connect(&model_, &AppModel::stateChanged, this, [this] {
+        // setTime emits timeChanged, then stateChanged: the frame the playback tick has just presented needs no second
+        // (deferred) present - two presents per frame on a two-buffer flip chain would halve the rate on vsync
+        if (presentedByTick_) {
+            presentedByTick_ = false;
+            return;
+        }
+        requestRender();
+    });
+    connect(&model_, &AppModel::timeChanged, this, [this] {
         // while playing, every frame the clock shows is presented at once: a deferred UpdateRequest could merge two
-        // ticks and drop the frame between them (audit play-fg-rate)
+        // ticks and drop the frame between them (audit play-fg-rate); pan / zoom / wipe stay deferred
         if (model_.playing()) {
             dirty_ = true;
             render();
-        } else {
-            requestRender();
+            presentedByTick_ = true;
+            ++playFrames_;  // frames shown by the clock, not every render
         }
     });
     connect(&model_, &AppModel::playingChanged, this, [this](bool playing) {
@@ -70,7 +81,7 @@ void ViewportWindow::render() {
         const FrameTextures frame = model_.store().TexturesAt(model_.state().time);
         const FrameStates states = model_.frameStates();  // plates for cells whose frame is loading / missing
         renderer_->RenderToWindow(model_.state(), frame, model_.store().ImageWidth(), model_.store().ImageHeight(), &states);
-        if (model_.playing()) ++playFrames_;
+        renderedStates_ = states;
     } catch (const std::exception& e) {
         Log()->error("viewport render: {}", e.what());
     }

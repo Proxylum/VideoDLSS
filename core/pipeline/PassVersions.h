@@ -26,6 +26,8 @@ struct PassVersionInfo {
     std::filesystem::path dir;
     std::string fingerprint;  // empty for legacy passes
     std::string created;      // ISO-8601 UTC: the manifest's `created`, else the manifest file time
+    // the manifest file's write time: orders versions made within one second of `created` (two quick runs)
+    std::filesystem::file_time_type written{};
     int64_t frames = 0;
     uint64_t bytes = 0;
     nlohmann::json params = nlohmann::json::object();  // canonical parameters (empty for legacy passes)

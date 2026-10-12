@@ -34,7 +34,8 @@ std::string After(const std::vector<std::string>& v, const std::string& key) {
     return it == v.end() || it + 1 == v.end() ? std::string() : *(it + 1);
 }
 
-// What the child sees: the command line Subprocess::Start builds, parsed back the way the CRT does.
+// The parent's half of the trip: the command line Subprocess::Start builds (UTF-8 -> UTF-16), parsed back with
+// CommandLineToArgvW. The child's CRT then converts argv to its ANSI codepage - the same limit the parent's own argv has.
 std::vector<std::string> RoundTrip(const std::vector<std::string>& args) {
     std::string cmd;
     for (size_t i = 0; i < args.size(); ++i) cmd += (i ? " " : "") + QuoteArg(args[i]);
@@ -63,8 +64,8 @@ TEST_CASE("FgProcessArgs builds the child command line: pass dirs, parameters as
     CHECK(Has(a, "fg"));
     CHECK(Has(a, "--as-stage"));
     CHECK(Has(a, "--no-auto"));
-    CHECK(After(a, "-i") == U8(std::filesystem::absolute(spec.input)));  // UTF-8 bytes, not the ANSI codepage
-    CHECK(After(a, "-o") == U8(std::filesystem::absolute(spec.passesRoot)));
+    CHECK(After(a, "-i") == U8(spec.input));  // UTF-8 bytes, not the ANSI codepage; as given (no working directory added)
+    CHECK(After(a, "-o") == U8(spec.passesRoot));
     CHECK(After(a, "--color-dir") == U8(spec.colorDir));
     CHECK_FALSE(Has(a, "--depth-dir"));  // empty folders are not passed
     CHECK_FALSE(Has(a, "--mv-dir"));
@@ -87,7 +88,7 @@ TEST_CASE("FgProcessArgs builds the child command line: pass dirs, parameters as
     CHECK(After(a, "--source-hash") == "sha256:ab");
     CHECK(After(a, "--crash-after") == "0");
     for (const char* flag : {"--warp", "--disable-unavailable", "--crash-on-exit", "--stall", "-v"}) CHECK(Has(a, flag));
-    CHECK(RoundTrip(a) == a);  // quotes, backslashes and Cyrillic survive the command line
+    CHECK(RoundTrip(a) == a);  // quotes, backslashes and Cyrillic survive the command line the parent builds
 }
 
 TEST_CASE("DescribeExitCode names crash statuses and rejected command lines", "[unit][process][fg]") {

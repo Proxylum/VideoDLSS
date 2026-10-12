@@ -461,6 +461,9 @@ TEST_CASE("Regression (pass-mv-yup): toggling mv.y_up of a legacy mv_dlss recomp
     CHECK(up.inputs.at("mv_dlss") == legacy + ":y_up");
     CHECK(Decision(plan, "nr").action == "run");
     CHECK(Decision(plan, "fg").action == "run");
+    // nr and fg read mv_dlss themselves, not only through color_sr / color_nr (review of TASK-0038, yup-4)
+    CHECK(Decision(plan, "nr").inputs.at("mv_dlss") == legacy + ":y_up");
+    CHECK(Decision(plan, "fg").inputs.at("mv_dlss") == legacy + ":y_up");
 
     const ProcessResult r = RunProcess(o);
     CHECK(Report(r, "upscale").status == "ran");
@@ -473,8 +476,9 @@ TEST_CASE("Regression (pass-mv-yup): toggling mv.y_up of a legacy mv_dlss recomp
 }
 
 // Audit fg-2 (TASK-0038): an fg process that dies while it rewrites color_fg in place (a forced or incomplete pass is not
-// moved to the history first) leaves the previous signed version current - only debris of the run is removed.
-TEST_CASE("RunProcess: an fg process that dies while completing color_fg in place keeps the previous version", "[integration][process][versions][fg][isolation]") {
+// moved to the history first) has already overwritten frames of the signed version - one of them possibly cut short by
+// the crash - so the folder is removed rather than left current (review of TASK-0038, fg-iso-3); the run encodes color_nr.
+TEST_CASE("RunProcess: an fg process that dies while rewriting color_fg in place leaves no half-rewritten pass", "[integration][process][versions][fg][isolation]") {
     ClipSpec spec;
     spec.frames = 5;
     spec.width = 48;
@@ -493,14 +497,16 @@ TEST_CASE("RunProcess: an fg process that dies while completing color_fg in plac
     const ProcessStageReport& fg = Report(r, "fg");
     CHECK(fg.status == "failed");
     CHECK(fg.details["crashed"] == true);
-    CHECK(fg.details["partial"] == "kept");
-    const Manifest m = Manifest::Load(o.passesRoot / "color_fg");
-    CHECK(m.fingerprint == Report(base, "fg").fingerprint);
-    CHECK(m.frameCount == 5);  // 3 real frames x2
+    CHECK(fg.details["partial"] == "removed");  // the child had rewritten frames 0 and 1 of the signed version
+    CHECK(!std::filesystem::exists(o.passesRoot / "color_fg"));
     CHECK(!std::filesystem::exists(o.passesRoot / "color_fg.v"));
     CHECK(r.finalPass == o.passesRoot / "color_nr");
     o.forceStages.clear();
-    CHECK(Decision(PlanProcess(o), "fg").action == "reuse");  // the previous version is still current and valid
+    o.fgCrashAfter = -1;
+    const StageDecision next = Decision(PlanProcess(o), "fg");
+    CHECK(next.action == "run");  // recomputed next time, never reused half-written
+    CHECK(next.kind == "missing");
+    CHECK(next.fingerprint == Report(base, "fg").fingerprint);
 }
 
 // Audit depth-7 (TASK-0038): the depth stage's own revision (tool.app "0.1.0+depth.2") recomputes depth passes made
@@ -547,4 +553,48 @@ TEST_CASE("Depth passes made before the centred alignment are recomputed once (r
     ApplyParamSpec(o2.stages, "depth.stabilize=none");
     RunProcess(o2);
     CHECK(Manifest::Load(o2.passesRoot / "depth_raw").tool["app"] == kPassToolVersion);
+}
+
+// Review of TASK-0038 (depth-legacy-adopt): a depth pass without fingerprints (a standalone `dlssvid depth` from before
+// the centred alignment - no stage_params.stabilize_requested) was adopted as is and stamped with the depth.2 revision,
+// so the unaligned metric depth stayed for good. It is recomputed; with stabilize=none it is still adopted.
+TEST_CASE("Unfingerprinted depth from before the alignment is recomputed, not adopted (review of TASK-0038)", "[integration][process][versions][depth][regression]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("depth_legacy");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o = Options(dir, clip);
+    RunProcess(o);
+    const auto strip = [&](bool oldDepth) {
+        for (const auto& name : PassesUnderRoot(o.passesRoot)) {
+            const auto file = o.passesRoot / name / Manifest::kFileName;
+            nlohmann::json j;
+            std::ifstream(file) >> j;
+            for (const char* key : {"fingerprint", "inputs", "tool", "params_canonical", "created"}) j.erase(key);
+            if (oldDepth && (name == "depth_raw" || name == "depth_dlss")) j["stage_params"].erase("stabilize_requested");
+            std::ofstream(file) << j.dump(2);
+        }
+    };
+    strip(true);
+    ProcessPlan plan = PlanProcess(o);
+    const StageDecision& depth = Decision(plan, "depth");
+    CHECK(depth.action == "run");  // before: reuse, kind legacy
+    CHECK(depth.kind == "tool_changed");
+    CHECK(depth.retire);
+    CHECK(depth.diff["tool"]["app"] == nlohmann::json::array({kPassToolVersion, std::string(kPassToolVersion) + "+depth.2"}));
+    CHECK(Decision(plan, "flow").kind == "input_changed");
+    ProcessOptions none = o;
+    ApplyParamSpec(none.stages, "depth.stabilize=none");
+    CHECK(Decision(PlanProcess(none), "depth").kind == "legacy");  // unaligned then, unaligned now: adopted
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "depth").status == "ran");
+    CHECK(Manifest::Load(o.passesRoot / "depth_dlss").stageParams["stabilize_requested"] == "auto");
+    CHECK(PlanProcess(o).runCount == 0);
+
+    strip(false);  // the version block alone is missing: made by the current depth stage, adopted
+    plan = PlanProcess(o);
+    CHECK(Decision(plan, "depth").action == "reuse");
+    CHECK(Decision(plan, "depth").kind == "legacy");
 }
