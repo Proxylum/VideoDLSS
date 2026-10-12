@@ -91,6 +91,9 @@ void TrtDepthEstimator::EnsureEngine(uint32_t srcWidth, uint32_t srcHeight) {
     TrtEngine::Options opt;
     opt.fp16 = config_.fp16;
     opt.cacheDir = registry_->CacheDir();
+    // the builder's scratch limit: with 2 GiB the DPT head of VDA Base / Large at 16-32 frames has no tactic at all
+    // ("Could not find any implementation", the tactics ask for 2.1-3.4 GB; TASK-0039) - half the free memory, 2..8 GiB
+    opt.workspaceBytes = DepthWorkspaceBytes(TrtEngine::DeviceMemoryInfo().first);
     engine_ = TrtEngine::FromOnnx(OnnxFor(inputSize_), opt);
     const auto& in = engine_->Input(inputName_);
     const size_t expected = static_cast<size_t>(window_) * 3 * inputSize_.width * inputSize_.height;

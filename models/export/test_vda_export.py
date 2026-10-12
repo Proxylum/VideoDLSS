@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -69,6 +70,37 @@ class PatchedAttention(unittest.TestCase):
         for bad in (0, 6, 10, 30, 36):
             with self.assertRaises(ValueError):
                 vda_loader.check_window(bad)
+
+
+class ExportLockTakeover(unittest.TestCase):
+    """A crashed export (0xC0000005 in the trace of Large at 32 frames) left its lock behind: the next export took 3
+    hours to call it stale. A lock of a dead process is taken over at once; one of a live process is waited for."""
+
+    def test_lock_of_a_dead_process_is_taken_over(self):
+        import export_vda
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "m.onnx"
+            dead = subprocess.Popen([sys.executable, "-c", "pass"])
+            dead.wait()
+            lock = out.with_name(out.name + ".lock")
+            lock.write_text(f"{dead.pid}\n", encoding="utf-8")
+            t0 = time.time()
+            with export_vda.ExportLock(out, wait=30) as held:
+                self.assertFalse(held.waited)
+                self.assertEqual(lock.read_text(encoding="utf-8").strip(), str(os.getpid()))
+            self.assertLess(time.time() - t0, 5)
+            self.assertFalse(lock.exists())
+
+    def test_lock_of_a_live_process_is_waited_for(self):
+        import export_vda
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "m.onnx"
+            out.with_name(out.name + ".lock").write_text(f"{os.getpid()}\n", encoding="utf-8")  # this process: alive
+            with self.assertRaises(TimeoutError):
+                with export_vda.ExportLock(out, wait=1):
+                    pass
 
 
 @unittest.skipUnless(vda_available(), "torch or the Video-Depth-Anything checkout is missing")

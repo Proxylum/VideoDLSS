@@ -62,5 +62,7 @@ DepthAdvice AdviseDepth(const DepthModelChoice& choice, std::optional<double> es
 std::string CheckDepthVramFree(const DepthModelChoice& choice, double estimateMiB, uint64_t freeBytes, uint64_t totalBytes);
 // A smaller VDA window to suggest: half, a multiple of 4, at least 4.
 int SmallerDepthWindow(int window);
+// TensorRT builder workspace for a depth engine: half the free GPU memory, within 2..8 GiB (2 GiB when unknown).
+uint64_t DepthWorkspaceBytes(uint64_t freeBytes);
 
 }  // namespace dlssvid

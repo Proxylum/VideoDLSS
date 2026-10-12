@@ -14,15 +14,15 @@ namespace {
 
 constexpr double kReferenceMegapixels = 1920.0 * 800.0 / 1e6;  // the face clip of docs/benchmarks.md
 constexpr double kReferenceOutputMegapixels = 3840.0 * 1600.0 / 1e6;
-constexpr double kVdaBaseMs = 330.0;   // preliminary until the TASK-0039 measurement
-constexpr double kVdaLargeMs = 450.0;  // preliminary until the TASK-0039 measurement
+constexpr double kVdaBaseMs = 310.0;   // TASK-0039, 2026-10-12: face 1920x800 (910x378), window 32: 306 ms/frame
+constexpr double kVdaLargeMs = 420.0;  // the same: 416 ms/frame
 
 double Baseline(const std::string& stage, const std::string& backend, const std::string& model) {
     if (stage == "depth") {
         // VDA by model: Small measured (docs/benchmarks.md); Base and Large - TASK-0039 measurement on the reference GPU
         const double vda = model == "metric-vda-large" ? kVdaLargeMs : model == "metric-vda-base" ? kVdaBaseMs : 300.0;
         if (backend == "vda") return vda;
-        if (backend == "worker:vda") return vda * 2.3;  // PyTorch fp16 against TensorRT
+        if (backend == "worker:vda") return vda * 1.4;  // PyTorch fp16 + SDPA against TensorRT: 1.3x (Small), 1.45x (Large)
         return backend == "worker" ? 600.0 : backend == "stub" ? 5.0 : 350.0;
     }
     if (stage == "flow") return backend == "searaft" ? 580.0 : backend == "stub" ? 5.0 : 500.0;

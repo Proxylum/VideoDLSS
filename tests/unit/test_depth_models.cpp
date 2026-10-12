@@ -137,6 +137,9 @@ TEST_CASE("VRAM estimate from the registry's measurements and the advice of the 
     CHECK_THAT(CheckDepthVramFree(w32, 3850, 2 * gib, 16 * gib), ContainsSubstring("свободно 2.0 из 16.0"));
     CHECK(CheckDepthVramFree(w32, 3850, 8 * gib, 16 * gib).empty());
     CHECK(CheckDepthVramFree(w32, 3850, 0, 0).empty());  // unknown: not refused
+    CHECK(DepthWorkspaceBytes(0) == 2 * gib);  // unknown: the TensorRT default of the project
+    CHECK(DepthWorkspaceBytes(14 * gib) == 7 * gib);
+    CHECK(DepthWorkspaceBytes(30 * gib) == 8 * gib);
     CHECK(SmallerDepthWindow(32) == 16);
     CHECK(SmallerDepthWindow(12) == 4);
     CHECK(SmallerDepthWindow(8) == 4);

@@ -41,7 +41,9 @@ dlss-video-<версия>-win64/
                         nvinfer_builder_resource_{ptx,sm75,sm86,sm89,sm120}_10.dll (RTX 20/30/40/50; список — DLSSVID_PACKAGE_TRT_SMS)
   bin/cudart64_12.dll   рантайм CUDA 12, который импортируют dlssvid.exe (interop)
   models/cache/*.onnx   экспортированные модели: DA3 metric large, Metric-VDA small (16:9 518×924 и 2.4:1 378×910),
-                        SEA-RAFT (1280×720, 1728×720), RIFE 4.9 — всё, что лежит в models/cache на машине сборки
+                        SEA-RAFT (1280×720, 1728×720), RIFE 4.9 — всё, что лежит в models/cache на машине сборки, кроме
+                        Metric-VDA Base и Large (CC-BY-NC-4.0, с внешними данными .onnx.data): они экспортируются
+                        при первом запуске на машине пользователя
 ```
 
 Источники по умолчанию — `DLSSVID_TENSORRT_DIR` (или venv `models/export/.venv/.../tensorrt_libs`), `CUDA_PATH`,

@@ -73,9 +73,9 @@ ParamSpec OmitDefault(ParamSpec s) {
 // The VDA models of models/registry.json (family vda, metric): "" is the backend's default, metric-vda-small.
 std::vector<ParamChoice> VdaModels() {
     return {{"", "Small — Apache-2.0", "Metric Video Depth Anything Small: 28M параметров, окно 32 кадра; по умолчанию"},
-            {"metric-vda-base", "Base — CC-BY-NC-4.0 (некоммерческая)", "113M параметров; точнее Small; только некоммерческое использование"},
+            {"metric-vda-base", "Base — CC-BY-NC-4.0 (некоммерческая)", "113M параметров; ≈ 5 ГБ видеопамяти на 1080p, +33–42 % времени к Small; только некоммерческое использование"},
             {"metric-vda-large", "Large — CC-BY-NC-4.0 (некоммерческая)",
-             "382M параметров, самая точная; только некоммерческое использование; первый запуск — экспорт и сборка TensorRT ≈ 20 мин"}};
+             "382M параметров; ≈ 10 ГБ видеопамяти на 1080p при окне 32, +45–65 % времени; только некоммерческое использование; первый запуск — экспорт и сборка TensorRT ≈ 11–14 мин"}};
 }
 
 ParamSpec Text(const char* key, const char* label, const char* def, const char* hint = "", bool advanced = true) {

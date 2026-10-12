@@ -43,7 +43,8 @@ call <SDK>\env.cmd                                   :: DLSS_SDK_ROOT, NV_OPTICA
 Веса не входят в репозиторий: `models/registry.json` перечисляет id, источник на HuggingFace и лицензию;
 `models/export/fetch.py` (или первый запуск `dlssvid depth`) скачивает их в `models/cache/`, экспортирует ONNX под
 геометрию входа и собирает TensorRT-engine (`*.engine`, кэш рядом). Лицензии: DA3 metric/mono и VDA-Small —
-Apache-2.0; VDA-Large — CC-BY-NC-4.0 (только исследования). ICDepth — публичного кода нет (2026-09-18).
+Apache-2.0; VDA-Base и VDA-Large — CC-BY-NC-4.0 (только некоммерческое использование; план и GUI предупреждают, полный
+пакет их ONNX не содержит). ICDepth — публичного кода нет (2026-09-18).
 
 ## DLL в `bin/nvidia/`
 

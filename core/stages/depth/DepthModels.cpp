@@ -49,6 +49,11 @@ std::string Gb(double mib) {
 
 int SmallerDepthWindow(int window) { return std::max(4, window / 2 / 4 * 4); }
 
+uint64_t DepthWorkspaceBytes(uint64_t freeBytes) {
+    constexpr uint64_t gib = uint64_t{1} << 30;
+    return std::clamp<uint64_t>(freeBytes / 2, 2 * gib, 8 * gib);
+}
+
 DepthModelChoice ResolveDepthModel(const ModelRegistry& registry, const std::string& backend, const std::string& modelId, int windowOverride,
                                    bool torch) {
     DepthModelChoice c;

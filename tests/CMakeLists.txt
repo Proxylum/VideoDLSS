@@ -70,6 +70,7 @@ add_executable(dlssvid_integration_tests
   integration/test_pass_sequence.cpp
   integration/test_cli_passes.cpp
   integration/test_depth_stage.cpp
+  integration/test_vda_models.cpp
   integration/test_cli_depth.cpp
   integration/test_flow_stage.cpp
   integration/test_gpu_decode.cpp

@@ -6,7 +6,9 @@
 
 Input  "image": float32 (1, T, 3, H, W)  Output "depth": float32 (1, T, H, W)
 The motion module's attention is exported without the empty baddbmm input (vda_loader.patch_attention): the graph
-carries the weights only (Large ~1.5 GB, Base ~0.46 GB) instead of ~1 GB of zeros more. A graph above 1.9 GB is written
+carries the weights only (Large ~1.5 GB, Base ~0.46 GB) instead of ~1 GB of zeros more. The DINOv2 encoder is traced
+through scaled_dot_product_attention (exported as the same MatMul / Softmax / MatMul): the original materialises q k^T of
+all T frames at once on the CPU - 9 GB per layer for Base at T = 32 on 518x924, 12 GB for Large. A graph above 1.9 GB is written
 with external data (<out>.data next to <out>; delete both together). The export holds <out>.lock: the model cache is
 shared with the CI runner, and two exports of one geometry must not write the same files.
 """
@@ -14,7 +16,6 @@ import argparse
 import os
 import shutil
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -27,9 +28,27 @@ from vda_loader import check_window, load_vda, patch_attention
 EXTERNAL_THRESHOLD = int(1.9e9)  # protobuf's limit is 2 GiB
 
 
+def _process_alive(pid):
+    """Windows: the process exists and has not exited (a lock of a crashed export is taken over at once)."""
+    try:
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return False
+        code = ctypes.c_ulong()
+        ok = k32.GetExitCodeProcess(h, ctypes.byref(code))
+        k32.CloseHandle(h)
+        return bool(ok) and code.value == 259  # STILL_ACTIVE
+    except Exception:
+        return True  # unknown: trust the age
+
+
 class ExportLock:
-    """<out>.lock created exclusively; an existing lock younger than `stale` seconds is waited for (another process
-    exports the same file), an older one is taken over."""
+    """<out>.lock created exclusively, with the exporting process id; a lock of a live process younger than `stale`
+    seconds is waited for (another process exports the same file), a lock of a dead process or an older one is taken
+    over."""
 
     def __init__(self, out: Path, stale=3 * 3600, wait=4 * 3600):
         self.path = out.with_name(out.name + ".lock")
@@ -47,10 +66,11 @@ class ExportLock:
             except FileExistsError:
                 try:
                     age = time.time() - self.path.stat().st_mtime
+                    owner = self.path.read_text(encoding="utf-8").strip()
                 except OSError:
                     continue
-                if age > self.stale:
-                    print(f"removing a stale lock {self.path} ({age / 60:.0f} min)")
+                if age > self.stale or (owner.isdigit() and not _process_alive(owner)):
+                    print(f"removing a stale lock {self.path} ({age / 60:.0f} min, process {owner})")
                     self.path.unlink(missing_ok=True)
                     continue
                 if time.time() - t0 > self.wait:
@@ -98,7 +118,7 @@ def main():
     ap.add_argument("--opset", type=int, default=17)
     ap.add_argument("--external-data", choices=["auto", "on", "off"], default="auto")
     ap.add_argument("--verify", choices=["auto", "on", "off"], default="auto",
-                    help="onnxruntime against torch on the CPU; auto: off for ViT-L above 8 frames (three CPU passes of tens of GB)")
+                    help="onnxruntime against torch on the CPU; auto: off when the encoder's attention takes > 6 GB per layer in onnxruntime")
     ap.add_argument("--no-verify", action="store_true", help="same as --verify off")
     ap.add_argument("--tolerance", type=float, default=2e-2)
     args = ap.parse_args()
@@ -110,8 +130,11 @@ def main():
         ap.error("--width/--height or --source-size required")
 
     t0 = time.time()
-    patch_attention(runtime=False)
+    patch_attention(runtime=True)  # SDPA in the encoder too: the trace runs eagerly on the CPU
     model, metric, output, window, overlap = load_vda(args.model, args.cache, registry=args.registry or None)
+    # no autograd state: with requires_grad the trace keeps every activation for a backward pass - 67 GB of commit for
+    # Large at 8 frames on 518x924 (11 GB without), and 32 frames crashed the exporter (TASK-0039)
+    model.requires_grad_(False)
     T = check_window(args.window or window)
     out = Path(args.out) if args.out else Path(args.cache) / f"{args.model}_{T}x{args.height}x{args.width}.onnx"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -122,10 +145,13 @@ def main():
             print(f"{out} was exported by the process that held the lock")
             return 0
         dummy = torch.randn(1, T, 3, args.height, args.width)
-        params = sum(p.numel() for p in model.parameters())
-        verify = {"on": True, "off": False}.get("off" if args.no_verify else args.verify, not (params > 200e6 and T > 8))
+        # onnxruntime materialises the encoder's attention (frames x heads x tokens^2 floats): checked when it is small
+        heads = {384: 6, 768: 12, 1024: 16}.get(model.net.pretrained.embed_dim, 16)  # ViT-S / B / L
+        tokens = (args.height // 14) * (args.width // 14) + 1
+        attention_gb = T * heads * tokens * tokens * 4 / 1e9
+        verify = {"on": True, "off": False}.get("off" if args.no_verify else args.verify, attention_gb < 6.0)
         if not verify:
-            print(f"onnxruntime check skipped ({params / 1e6:.0f}M parameters, window {T}); the TensorRT engine is checked by its tests")
+            print(f"onnxruntime check skipped (attention {attention_gb:.1f} GB per layer at window {T}); the TensorRT engine is checked by its tests")
         ref = None
         if verify:
             with torch.no_grad():
@@ -134,7 +160,10 @@ def main():
 
         import onnx
 
-        tmpdir = Path(tempfile.mkdtemp(prefix="vda_export_", dir=out.parent))
+        # one scratch folder per output, under the lock: what a crashed export left there is removed first
+        tmpdir = out.with_name(out.name + ".export_tmp")
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        tmpdir.mkdir(parents=True)
         try:
             traced = tmpdir / "model.onnx"
             # the legacy exporter spreads tensors over files next to the graph above 2 GB: onnx.load gathers them

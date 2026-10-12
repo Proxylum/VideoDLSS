@@ -102,7 +102,41 @@
           0.224,
           0.225
         ],
-        "max_window": 32
+        "max_window": 32,
+        "vram": {
+          "points": [
+            {
+              "window": 32,
+              "input": [
+                924,
+                518
+              ],
+              "mib": 3672
+            },
+            {
+              "window": 32,
+              "input": [
+                910,
+                378
+              ],
+              "mib": 2533
+            }
+          ],
+          "measured": "RTX 4070 Ti SUPER 16 GB, TensorRT 10.16.1 fp16, 2026-10-12 (TASK-0039): GPU memory.used during `dlssvid depth` minus before - CUDA context, D3D12, engine, IO; docs/benchmarks.md"
+        },
+        "vram_torch": {
+          "points": [
+            {
+              "window": 32,
+              "input": [
+                924,
+                518
+              ],
+              "mib": 3258
+            }
+          ],
+          "measured": "RTX 4070 Ti SUPER 16 GB, PyTorch 2.14 fp16 autocast with SDPA attention, 2026-10-12 (TASK-0039): GPU memory.used during `dlssvid depth --backend worker:vda` minus before"
+        }
       }
     },
     {
@@ -143,7 +177,7 @@
     {
       "id": "metric-vda-base",
       "stage": "depth",
-      "role": "quality/speed middle (non-commercial licence)",
+      "role": "quality/speed middle (non-commercial licence; ~5.5 GB of VRAM at 924x518)",
       "source": "https://github.com/DepthAnything/Video-Depth-Anything",
       "hf": "depth-anything/Metric-Video-Depth-Anything-Base",
       "hf_file": "metric_video_depth_anything_vitb.pth",
@@ -172,13 +206,34 @@
           0.224,
           0.225
         ],
-        "max_window": 32
+        "max_window": 32,
+        "vram": {
+          "points": [
+            {
+              "window": 32,
+              "input": [
+                924,
+                518
+              ],
+              "mib": 5468
+            },
+            {
+              "window": 32,
+              "input": [
+                910,
+                378
+              ],
+              "mib": 3906
+            }
+          ],
+          "measured": "RTX 4070 Ti SUPER 16 GB, TensorRT 10.16.1 fp16, 2026-10-12 (TASK-0039): GPU memory.used during `dlssvid depth` minus before - CUDA context, D3D12, engine, IO; docs/benchmarks.md"
+        }
       }
     },
     {
       "id": "metric-vda-large",
       "stage": "depth",
-      "role": "quality (non-commercial licence)",
+      "role": "quality (non-commercial licence; window 32: ~10 GB of VRAM at 924x518 through TensorRT)",
       "source": "https://github.com/DepthAnything/Video-Depth-Anything",
       "hf": "depth-anything/Metric-Video-Depth-Anything-Large",
       "hf_file": "metric_video_depth_anything_vitl.pth",
@@ -207,7 +262,81 @@
           0.224,
           0.225
         ],
-        "max_window": 32
+        "max_window": 32,
+        "vram": {
+          "points": [
+            {
+              "window": 8,
+              "input": [
+                924,
+                518
+              ],
+              "mib": 3161
+            },
+            {
+              "window": 12,
+              "input": [
+                924,
+                518
+              ],
+              "mib": 4042
+            },
+            {
+              "window": 16,
+              "input": [
+                924,
+                518
+              ],
+              "mib": 5046
+            },
+            {
+              "window": 16,
+              "input": [
+                910,
+                378
+              ],
+              "mib": 3903
+            },
+            {
+              "window": 32,
+              "input": [
+                924,
+                518
+              ],
+              "mib": 10304
+            },
+            {
+              "window": 32,
+              "input": [
+                910,
+                378
+              ],
+              "mib": 7663
+            }
+          ],
+          "measured": "RTX 4070 Ti SUPER 16 GB, TensorRT 10.16.1 fp16, 2026-10-12 (TASK-0039): GPU memory.used during `dlssvid depth` minus before - CUDA context, D3D12, engine, IO; docs/benchmarks.md"
+        },
+        "vram_torch": {
+          "points": [
+            {
+              "window": 16,
+              "input": [
+                924,
+                518
+              ],
+              "mib": 9360
+            },
+            {
+              "window": 32,
+              "input": [
+                924,
+                518
+              ],
+              "mib": 12402
+            }
+          ],
+          "measured": "RTX 4070 Ti SUPER 16 GB, PyTorch 2.14 fp16 autocast with SDPA attention, 2026-10-12 (TASK-0039): GPU memory.used during `dlssvid depth --backend worker:vda` minus before"
+        }
       }
     },
     {
