@@ -39,6 +39,10 @@ z = near · far / (d · (far − near) + near)            обратное пр�
   в манифест, чтобы обратное преобразование было точным. `max == min` → всё на near.
 - Обратное преобразование `depth_dlss → depth_raw` при `relative = true` возвращает исходные
   относительные единицы.
+- `depth_raw` пишется после временного выравнивания (TASK-0038): `stage_params.stabilize` — что применено
+  (`none` | `scale` | `scale_shift`), `stabilize_requested` — что запрошено (`auto` …), `stabilize_window` — радиус N
+  (кадр выровнен по t−N…t+N), `stabilize_scale` / `stabilize_shift` — диапазон применённого преобразования. Сырой выход
+  модели — `--stabilize none`.
 
 ## 3. Motion vectors
 

@@ -44,6 +44,20 @@ TEST_CASE("dlssvid depth --backend stub produces both depth passes", "[integrati
     CHECK_FALSE(std::filesystem::exists(out2 / "depth_dlss"));
     CHECK(Run("depth --backend bogus --warp -i " + Q(clip) + " -o " + Q(out2)) != 0);
     CHECK(Run("depth --backend stub --warp --format png16 -i " + Q(clip) + " -o " + Q(out2)) != 0);
+
+    // temporal alignment (TASK-0038, audit depth-7): metric depth is scaled over a centred window by default
+    CHECK(raw.Man().stageParams["stabilize"] == "scale");  // before: "none" for metric models
+    CHECK(raw.Man().stageParams["stabilize_window"] == 8);
+    const auto out3 = TempDir() / "cli_depth_out3";
+    std::filesystem::remove_all(out3);
+    REQUIRE(Run("depth --backend stub --warp --stabilize none -i " + Q(clip) + " -o " + Q(out3)) == 0);
+    CHECK(PassReader::Open(out3 / "depth_raw").Man().stageParams["stabilize"] == "none");
+    CHECK(Run("depth --backend stub --warp --stabilize bogus -i " + Q(clip) + " -o " + Q(out3)) != 0);
+    CHECK(Run("depth --backend stub --warp --stabilize-window 0 -i " + Q(clip) + " -o " + Q(out3)) != 0);
+    CHECK(Run("depth --backend stub --warp --stabilize-window 65 -i " + Q(clip) + " -o " + Q(out3)) != 0);
+    std::filesystem::remove_all(out3);
+    REQUIRE(Run("depth --backend stub --warp --stabilize_window 4 -i " + Q(clip) + " -o " + Q(out3)) == 0);  // the GUI's spelling
+    CHECK(PassReader::Open(out3 / "depth_raw").Man().stageParams["stabilize_window"] == 4);
 }
 
 TEST_CASE("dlssvid models list works from the build tree", "[integration][cli][depth]") {

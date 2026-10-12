@@ -54,6 +54,9 @@ GpuFrameCache::Slot& GpuFrameCache::Acquire(int64_t frameIndex, const FrameDesc&
         }
 #endif
     }
+    // another frame takes the slot: its pass textures belong to the old frame (a delayed stage - depth alignment, a VDA
+    // window - must not leave them for a reader of this one)
+    if (slot.frameIndex != frameIndex) slot.passes.clear();
     slot.frameIndex = frameIndex;
     slot.layout = Layout::Yuv420p;
     return slot;

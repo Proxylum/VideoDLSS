@@ -202,11 +202,7 @@ int CmdDepth(const DepthArgs& a) {
     o.writeDlss = !a.noDlss;
     o.dlss.zNear = a.zNear;
     o.dlss.zFar = a.zFar;
-    if (a.stabilize == "none") o.stabilize = TemporalStabilizer::Mode::None;
-    else if (a.stabilize == "scale") o.stabilize = TemporalStabilizer::Mode::ScaleOnly;
-    else if (a.stabilize == "scale_shift" || a.stabilize == "auto") o.stabilize = TemporalStabilizer::Mode::ScaleShift;
-    else Throw("--stabilize must be auto|none|scale|scale_shift");
-    o.stabilizeMetric = a.stabilize == "scale" || a.stabilize == "scale_shift";
+    o.stabilize = ParseDepthStabilize(a.stabilize);
     o.stabilizeWindow = a.stabilizeWindow;
     o.fillHoles = !a.noFill;
     const auto fmt = ParseFileFormat(a.format);
@@ -231,6 +227,9 @@ int CmdDepth(const DepthArgs& a) {
     if (!a.noDlss) std::printf("depth_dlss:  %s\n", r.dlssDir.string().c_str());
     std::printf("frames:      %lld\nmean TAE:    %.4f\nms/frame:    %.1f\n", static_cast<long long>(r.stats.frames), r.stats.MeanTae(),
                 r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0);
+    std::printf("stabilize:   %s", r.stabilize.c_str());
+    if (r.stabilize != "none") std::printf(" (scale %.4f..%.4f)", r.stats.scaleMin, r.stats.scaleMax);
+    std::printf("\n");
     return 0;
 }
 
@@ -710,8 +709,12 @@ int main(int argc, char** argv) {
     depth->add_flag("--no-dlss", da.noDlss, "do not write depth_dlss");
     depth->add_option("--near", da.zNear, "near plane for depth_dlss (metres)")->default_val(0.1f);
     depth->add_option("--far", da.zFar, "far plane for depth_dlss (metres)")->default_val(1000.f);
-    depth->add_option("--stabilize", da.stabilize, "temporal scale/shift: auto | none | scale | scale_shift")->default_val("auto");
-    depth->add_option("--stabilize-window", da.stabilizeWindow, "frames in the alignment window")->default_val(8);
+    depth->add_option("--stabilize", da.stabilize,
+                      "temporal alignment over a centred window: auto (metric models: scale, relative: scale + shift) | none | scale | scale_shift")
+        ->default_val("auto");
+    depth->add_option("--stabilize-window,--stabilize_window", da.stabilizeWindow, "radius N: frame t is aligned over t-N..t+N (output delayed by N frames)")
+        ->default_val(8)
+        ->check(CLI::Range(1, 64));
     depth->add_flag("--no-fill", da.noFill, "keep invalid depth samples instead of filling them");
     depth->add_option("--format", da.format, "exr | tiff | npz | raw")->default_val("exr");
     depth->add_flag("--warp", da.warp, "use the WARP software adapter");

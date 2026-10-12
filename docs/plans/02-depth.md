@@ -33,7 +33,7 @@
      удался), `WorkerDepthEstimator` (клиент `depth_worker`: PyTorch DA3/VDA, ICDepth когда появится).
    - Препроцессинг: resize (bilinear) до `input_size` кратного 14 с сохранением пропорций, ImageNet-нормализация,
      NCHW; постпроцессинг: апсемпл до исходного разрешения edge-aware (guided filter по цвету), заполнение дыр.
-   - `DepthPostProcess`: temporal scale-shift alignment по окну ±8 кадров (least squares к опорному кадру),
+   - `DepthPostProcess`: temporal scale-shift alignment по окну ±8 кадров (least squares к опорному кадру; изменено в TASK-0038: центрированное окно ±N по робастной статистике кадра вместо МНК к опорному, для metric по умолчанию только масштаб),
      edge-aware сглаживание, заполнение невалидных значений.
    - `DepthStage : IStage`: копит окно кадров, вызывает оценщик, пишет `depth_raw` (и `depth_dlss` через
      `DepthConvert`) в папки пассов и в слот `GpuFrameCache` (текстура R32F).
@@ -44,7 +44,7 @@
    «недоступен»), `stub` (синтетика для тестов без GPU); `requirements.txt` → тот же venv.
 5. **`models/export/`** — `export_da3.py` (safetensors → ONNX opset 17, проверка ORT vs torch), `export_vda.py`,
    `fetch.py` (HF → `models/cache`, sha256 в registry), pytest на экспорт.
-6. **CLI:** `dlssvid depth -i clip -o passes --backend da3|vda|worker [--model id] [--range] [--no-stabilize]
+6. **CLI:** `dlssvid depth -i clip -o passes --backend da3|vda|worker [--model id] [--range] [--stabilize auto|none|scale|scale_shift] [--stabilize-window N]
    [--dlss --near --far] [--input-size 518] [--max-res 1080]`; `dlssvid models list|fetch <id>`.
 7. **Тесты:** препроцессинг (геометрия, нормализация), scale-shift alignment на синтетике, guided upsample,
    TAE, воркер со `stub` (протокол, ошибки, падение процесса), `TrtEngine` на крошечной ONNX (`tests/data/tiny.onnx`,

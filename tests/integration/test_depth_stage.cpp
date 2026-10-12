@@ -56,7 +56,10 @@ TEST_CASE("DepthStage writes depth_raw and depth_dlss for every frame", "[integr
     CHECK(raw.Man().depth.zNear == 0.5f);
     CHECK(raw.Man().fps.num == 24);
     CHECK(raw.Man().stageParams.contains("tae_mean"));
-    CHECK(raw.Man().stageParams["stabilize"] == "none");  // metric stub -> no alignment by default
+    CHECK(raw.Man().stageParams["stabilize"] == "scale");  // metric stub -> scale over the window by default (TASK-0038)
+    CHECK(raw.Man().stageParams["stabilize_requested"] == "auto");
+    CHECK(raw.Man().stageParams["stabilize_window"] == 8);
+    CHECK(r.stabilize == "scale");
     raw.Validate({48, 32, 7, PassKind::DepthRaw});
 
     // depth equals the stub's formula on the decoded frame
@@ -107,6 +110,24 @@ TEST_CASE("DepthStage windows with overlap emit every frame exactly once", "[int
     CHECK(r.Man().lastFrame == 10);
     CHECK(r.MissingFrames().empty());
     CHECK_FALSE(std::filesystem::exists(o.outputDir / "depth_dlss"));
+
+    // the estimator's windows and the alignment delay interleave: every frame still comes out exactly once, in order
+    VideoDecoder dec3(clip);
+    o.outputDir = Dir("window_delay");
+    o.stabilizeWindow = 2;
+    Pipeline p2(dev, 2);
+    auto stage2 = std::make_unique<DepthStage>(o, std::make_unique<StubDepthEstimator>(4, 1));
+    DepthStage* s2 = stage2.get();
+    p2.AddStage(std::move(stage2));
+    p2.Init();
+    while (dec3.NextFrame(f)) p2.ProcessFrame(f);
+    p2.Finish();
+    CHECK(s2->GetStats().frames == 11);
+    p2.Shutdown();
+    const PassReader r2 = PassReader::Open(o.outputDir / "depth_raw");
+    CHECK(r2.Man().frameCount == 11);
+    CHECK(r2.MissingFrames().empty());
+    CHECK(r2.Man().stageParams["stabilize_window"] == 2);
 }
 
 TEST_CASE("DepthStage uploads depth into the GPU frame cache slot", "[integration][depth][gpu]") {
@@ -162,4 +183,119 @@ TEST_CASE("GpuFrameCache pass textures round-trip 1, 2 and 3 channels", "[integr
     CHECK(c.channels == rgb.channels);
     CHECK(c.data == rgb.data);
     CHECK_THROWS(cache.DownloadPass(slot, "nope"));
+}
+
+// Audit depth-7 (TASK-0038): metric depth is aligned by default - before, auto meant "none" for metric models, so the
+// TAE of the default run was the TAE of the raw model.
+namespace {
+class FlickerDepthEstimator final : public IDepthEstimator {  // the stub's depth, x1.15 / x0.87 on alternate frames
+public:
+    std::string Name() const override { return "flicker"; }
+    bool IsMetric() const override { return true; }
+    void Init(const DepthEstimatorConfig&) override { n_ = 0; }
+    void Estimate(const std::vector<const PassImage*>& rgb, std::vector<PassImage>& out) override {
+        out.clear();
+        for (const PassImage* f : rgb) {
+            PassImage d = StubDepthEstimator::Expected(*f);
+            const float k = n_++ % 2 == 0 ? 1.15f : 0.87f;
+            for (uint32_t y = 0; y < d.height; ++y)
+                for (uint32_t x = 0; x < d.width; ++x) d.Set(x, y, 0, d.Get(x, y, 0) * k);
+            out.push_back(std::move(d));
+        }
+    }
+
+private:
+    int n_ = 0;
+};
+
+DepthStage::Stats RunFlicker(const std::filesystem::path& clip, const std::filesystem::path& out, DepthStabilize mode) {
+    VideoDecoder dec(clip);
+    D3D12Device dev({true, false});
+    DepthStageOptions o;
+    o.outputDir = out;
+    o.stabilize = mode;
+    o.color = ColorInfoFromStream(dec.Info());
+    o.fps = dec.Info().frameRate;
+    Pipeline pipeline(dev, 4);
+    auto stage = std::make_unique<DepthStage>(o, std::make_unique<FlickerDepthEstimator>());
+    DepthStage* raw = stage.get();
+    pipeline.AddStage(std::move(stage));
+    pipeline.Init();
+    CpuFrame f;
+    while (dec.NextFrame(f)) {
+        pipeline.Cache().Acquire(f.index, f.desc);
+        pipeline.ProcessFrame(f);
+    }
+    pipeline.Finish();
+    const DepthStage::Stats st = raw->GetStats();
+    pipeline.Shutdown();
+    return st;
+}
+}  // namespace
+
+TEST_CASE("DepthStage aligns metric depth by default: TAE below the unaligned run (regression TASK-0038 depth-7)", "[integration][depth][regression]") {
+    ClipSpec spec;
+    spec.frames = 48;  // most frames get the full ±8 window; the shrunk windows at the ends keep part of the flicker
+    spec.width = 32;
+    spec.height = 16;
+    const auto clip = WriteClip(TempDir() / "depth_flicker.mkv", spec);
+    const DepthStage::Stats aligned = RunFlicker(clip, Dir("flicker_auto"), DepthStabilize::Auto);
+    const DepthStage::Stats raw = RunFlicker(clip, Dir("flicker_none"), DepthStabilize::None);
+    CHECK(aligned.frames == 48);
+    CHECK(raw.frames == 48);
+    CHECK(aligned.MeanTae() < 0.6 * raw.MeanTae());  // before the fix both were the raw model's flicker (ratio 1)
+    const Manifest m = Manifest::Load(TempDir() / "depth" / "flicker_auto" / "depth_dlss");
+    CHECK(m.stageParams["stabilize"] == "scale");
+    CHECK(m.stageParams["stabilize_requested"] == "auto");
+    CHECK(m.stageParams["stabilize_window"] == 8);
+    CHECK(m.stageParams["stabilize_scale"] != nlohmann::json::array({1.0, 1.0}));
+    CHECK(Manifest::Load(TempDir() / "depth" / "flicker_none" / "depth_raw").stageParams["stabilize"] == "none");
+}
+
+TEST_CASE("DepthStabilize: auto is scale for metric, scale+shift for relative; explicit modes are kept", "[integration][depth]") {
+    using M = TemporalStabilizer::Mode;
+    CHECK(ResolveStabilizeMode(DepthStabilize::Auto, true) == M::ScaleOnly);
+    CHECK(ResolveStabilizeMode(DepthStabilize::Auto, false) == M::ScaleShift);
+    CHECK(ResolveStabilizeMode(DepthStabilize::ScaleShift, true) == M::ScaleShift);  // before: silently scale for metric
+    CHECK(ResolveStabilizeMode(DepthStabilize::Scale, false) == M::ScaleOnly);
+    CHECK(ResolveStabilizeMode(DepthStabilize::None, true) == M::None);
+    CHECK(ResolveStabilizeMode(DepthStabilize::None, false) == M::None);
+    CHECK(ParseDepthStabilize("auto") == DepthStabilize::Auto);
+    CHECK(ParseDepthStabilize("scale_shift") == DepthStabilize::ScaleShift);
+    CHECK_THROWS(ParseDepthStabilize("bogus"));
+    for (const auto s : {DepthStabilize::Auto, DepthStabilize::None, DepthStabilize::Scale, DepthStabilize::ScaleShift})
+        CHECK(ParseDepthStabilize(DepthStabilizeName(s)) == s);
+
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 24;
+    spec.height = 16;
+    const auto clip = WriteClip(TempDir() / "depth_scale_shift.mkv", spec);
+    VideoDecoder dec(clip);
+    D3D12Device dev({true, false});
+    DepthStageOptions o;
+    o.backend = "stub";
+    o.outputDir = Dir("scale_shift");
+    o.stabilize = DepthStabilize::ScaleShift;
+    const DepthRunResult r = RunDepth(dec, dev, o);
+    CHECK(r.stabilize == "scale_shift");
+    const Manifest m = Manifest::Load(o.outputDir / "depth_raw");
+    CHECK(m.stageParams["stabilize"] == "scale_shift");
+    CHECK(m.stageParams.contains("stabilize_shift"));
+}
+
+TEST_CASE("GpuFrameCache drops pass textures when a slot is reused for another frame", "[integration][gpu]") {
+    D3D12Device dev({true, false});
+    GpuFrameCache cache(dev, 1);
+    FrameDesc desc;
+    desc.width = 16;
+    desc.height = 8;
+    GpuFrameCache::Slot& slot = cache.Acquire(0, desc);
+    cache.UploadPass(slot, "depth_raw", MakePassImage(PassKind::DepthRaw, 16, 8));
+    REQUIRE(slot.passes.count("depth_raw") == 1);
+    cache.Acquire(0, desc);  // the same frame again: kept
+    CHECK(slot.passes.count("depth_raw") == 1);
+    GpuFrameCache::Slot& reused = cache.Acquire(1, desc);  // another frame in the only slot
+    CHECK(reused.passes.empty());  // a delayed depth must not leave frame 0's texture for frame 1's readers
+    CHECK(cache.Find(0) == nullptr);
 }

@@ -12,6 +12,7 @@
 
 #include "TestClips.h"
 #include "passes/Manifest.h"
+#include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/ProcessRunner.h"
 
@@ -500,4 +501,50 @@ TEST_CASE("RunProcess: an fg process that dies while completing color_fg in plac
     CHECK(r.finalPass == o.passesRoot / "color_nr");
     o.forceStages.clear();
     CHECK(Decision(PlanProcess(o), "fg").action == "reuse");  // the previous version is still current and valid
+}
+
+// Audit depth-7 (TASK-0038): the depth stage's own revision (tool.app "0.1.0+depth.2") recomputes depth passes made
+// before the centred alignment, and the stages that read them; with stabilize=none the depth is what it was.
+TEST_CASE("Depth passes made before the centred alignment are recomputed once (regression TASK-0038 depth-7)", "[integration][process][versions][depth]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("depth_rev");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o = Options(dir, clip);
+    RunProcess(o);
+    const std::string rev = std::string(kPassToolVersion) + "+depth.2";
+    CHECK(Manifest::Load(o.passesRoot / "depth_raw").tool["app"] == rev);
+    CHECK(Manifest::Load(o.passesRoot / "depth_dlss").tool["app"] == rev);
+
+    // a project from before: depth stamped with the plain version, flow made from that depth
+    std::string oldDepth;
+    for (const char* pass : {"depth_raw", "depth_dlss"}) {
+        Manifest m = Manifest::Load(o.passesRoot / pass);
+        m.tool["app"] = kPassToolVersion;
+        m.fingerprint = ComputeFingerprint("depth", m.sourceHash, m.paramsCanonical, m.inputs, ToolInfo::FromJson(m.tool), m.sourceFormat).value;
+        oldDepth = m.fingerprint;
+        m.Save(o.passesRoot / pass);
+    }
+    for (const char* pass : {"mv_raw", "mv_dlss"}) {
+        Manifest m = Manifest::Load(o.passesRoot / pass);
+        REQUIRE(m.inputs.count("depth_raw") == 1);
+        m.inputs["depth_raw"] = oldDepth;
+        m.fingerprint = ComputeFingerprint("flow", m.sourceHash, m.paramsCanonical, m.inputs, ToolInfo::FromJson(m.tool), m.sourceFormat).value;
+        m.Save(o.passesRoot / pass);
+    }
+    const ProcessPlan plan = PlanProcess(o);
+    const StageDecision& depth = Decision(plan, "depth");
+    CHECK(depth.action == "run");
+    CHECK(depth.kind == "tool_changed");  // before the fix: reuse - the old unaligned depth stayed
+    CHECK(depth.diff["tool"]["app"] == nlohmann::json::array({kPassToolVersion, rev}));
+    CHECK(Decision(plan, "flow").kind == "input_changed");
+
+    // unaligned depth keeps the plain version: its passes are not recomputed
+    const auto dir2 = Dir("depth_rev_none");
+    ProcessOptions o2 = Options(dir2, WriteClip(dir2 / "clip.mkv", spec));
+    ApplyParamSpec(o2.stages, "depth.stabilize=none");
+    RunProcess(o2);
+    CHECK(Manifest::Load(o2.passesRoot / "depth_raw").tool["app"] == kPassToolVersion);
 }

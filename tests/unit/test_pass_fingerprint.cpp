@@ -106,6 +106,15 @@ TEST_CASE("ToolInfo JSON round trip and ToolForStage from parameters", "[unit][f
     CHECK(ngx.backend == "ngx");
     CHECK(ngx.dllFile == "nvngx_dlssnr.dll");
     CHECK(ToolForStage("fg", nlohmann::json::object()).dllFile == "nvngx_dlssg.dll");
+    // a stage revision (TASK-0038): depth aligned over the centred window -> passes made before are recomputed once
+    const std::string depthRev = std::string(kPassToolVersion) + "+depth.2";
+    CHECK(ToolForStage("depth", nlohmann::json::object()).app == depthRev);
+    CHECK(ToolForStage("depth", {{"stabilize", "scale"}}).app == depthRev);
+    CHECK(ToolForStage("depth", {{"stabilize", "scale_shift"}}).app == depthRev);
+    CHECK(ToolForStage("depth", {{"backend", "stub"}}).app == depthRev);
+    CHECK(ToolForStage("depth", {{"stabilize", "none"}}).app == kPassToolVersion);  // unaligned depth is what it was
+    for (const char* stage : {"flow", "upscale", "nr", "fg"}) CHECK(ToolForStage(stage, nlohmann::json::object()).app == kPassToolVersion);
+    CHECK_THROWS(ToolForStage("depth", {{"stabilize", 5}}));
     CHECK(ToolForStage("upscale", nlohmann::json::object()).dllFile == "nvngx_dlss.dll");
     CHECK(ToolForStage("upscale", {{"backend", "nis"}}).dllFile.empty());
     CHECK(ToolForStage("fg", {{"backend", "rife"}, {"model", "rife-v4.6"}}).model == "rife-v4.6");

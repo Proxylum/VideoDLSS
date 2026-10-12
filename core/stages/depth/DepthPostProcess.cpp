@@ -1,6 +1,9 @@
 #include "stages/depth/DepthPostProcess.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <string>
 #include <limits>
 #include <queue>
 #include <vector>
@@ -109,35 +112,163 @@ double TemporalAlignmentError(const PassImage& prev, const PassImage& cur) {
     return (diff / n) / (mean / n);
 }
 
-ScaleShift TemporalStabilizer::Stabilize(PassImage& depth) {
+// ---- TemporalStabilizer ------------------------------------------------------------------------
+
+namespace {
+// lower median of a non-empty vector (reorders it)
+double LowerMedian(std::vector<double>& v) {
+    const auto mid = v.begin() + static_cast<std::ptrdiff_t>((v.size() - 1) / 2);
+    std::nth_element(v.begin(), mid, v.end());
+    return *mid;
+}
+}  // namespace
+
+void TemporalStabilizer::Reset() {
+    frames_.clear();
+    track_.clear();
+    prevLog_.clear();
+    width_ = height_ = 0;
+    step_ = 1;
+    trackBase_ = pushedEnd_ = next_ = 0;
+    pushedAny_ = closed_ = false;
+}
+
+void TemporalStabilizer::Measure(const PassImage& depth, Track& t) {
+    bool restart = false;
+    if (depth.width != width_ || depth.height != height_) {
+        // the grid of samples is fixed per resolution; a new resolution starts a segment
+        width_ = depth.width;
+        height_ = depth.height;
+        const double pixels = static_cast<double>(width_) * height_;
+        step_ = static_cast<uint32_t>(std::max(1.0, std::ceil(std::sqrt(pixels / static_cast<double>(kMaxSamples)))));
+        prevLog_.clear();
+        restart = true;
+    }
+    std::vector<double> cur;
+    cur.reserve(static_cast<size_t>((width_ + step_ - 1) / step_) * ((height_ + step_ - 1) / step_));
+    size_t valid = 0;
+    for (uint32_t y = 0; y < height_; y += step_)
+        for (uint32_t x = 0; x < width_; x += step_) {
+            const float d = depth.Get(x, y, 0);
+            if (Valid(d)) {
+                cur.push_back(std::log(static_cast<double>(d)));
+                ++valid;
+            } else {
+                cur.push_back(std::numeric_limits<double>::quiet_NaN());
+            }
+        }
+    t.valid = valid >= 16;
+    const Track* prev = track_.empty() ? nullptr : &track_.back();
+    const bool connectable = t.valid && !restart && prev && prev->valid;
+    t.segmentStart = true;
+    if (mode_ == Mode::ScaleOnly) {
+        t.logScale = 0.0;
+        if (connectable && prevLog_.size() == cur.size()) {
+            std::vector<double> diff;
+            diff.reserve(cur.size());
+            for (size_t i = 0; i < cur.size(); ++i)
+                if (std::isfinite(cur[i]) && std::isfinite(prevLog_[i])) diff.push_back(cur[i] - prevLog_[i]);
+            if (diff.size() >= std::max<size_t>(16, static_cast<size_t>(kMinOverlap * static_cast<double>(valid)))) {
+                const double delta = LowerMedian(diff);
+                if (std::fabs(delta) <= std::log(kBreakRatio)) {
+                    t.segmentStart = false;
+                    t.logScale = prev->logScale + delta;
+                }
+            }
+        }
+    } else if (mode_ == Mode::ScaleShift && t.valid) {
+        std::vector<double> logs;
+        logs.reserve(valid);
+        for (const double l : cur)
+            if (std::isfinite(l)) logs.push_back(l);
+        t.loc = std::exp(LowerMedian(logs));  // the median depth
+        std::vector<double> dev;
+        dev.reserve(valid);
+        for (const double l : cur)
+            if (std::isfinite(l)) dev.push_back(std::fabs(std::exp(l) - t.loc));
+        t.spread = LowerMedian(dev);  // median |d - loc|: robust to the sky / far outliers
+        if (connectable && prev->loc > 0.0 && t.loc > 0.0) t.segmentStart = std::max(t.loc / prev->loc, prev->loc / t.loc) > kBreakRatio;
+    }
+    prevLog_ = std::move(cur);
+}
+
+void TemporalStabilizer::Push(int64_t index, PassImage depth) {
+    if (pushedAny_ && index != pushedEnd_)
+        Throw("TemporalStabilizer: frame " + std::to_string(index) + " after " + std::to_string(pushedEnd_ - 1) + " (frames must come in order)");
+    if (!pushedAny_) {
+        trackBase_ = next_ = index;
+        pushedAny_ = true;
+    }
+    if (mode_ != Mode::None) {
+        if (depth.type != PixelType::F32) depth = depth.ConvertTo(PixelType::F32);
+        Track t;
+        Measure(depth, t);
+        track_.push_back(t);
+    }
+    frames_.emplace_back(index, std::move(depth));
+    pushedEnd_ = index + 1;
+}
+
+ScaleShift TemporalStabilizer::TransformFor(int64_t t) const {
     ScaleShift ss;
-    if (mode_ == Mode::None || window_ <= 0) return ss;
-    if (depth.type != PixelType::F32) depth = depth.ConvertTo(PixelType::F32);
-    if (!history_.empty() && (history_.front().width != depth.width || history_.front().height != depth.height)) Reset();
-    if (!history_.empty()) {
-        // reference = mean of the window
-        PassImage ref;
-        ref.Allocate(depth.width, depth.height, PixelType::F32, {"Z"});
-        const float* sum = referenceSum_.As<float>();
-        float* r = ref.As<float>();
-        const float inv = 1.f / static_cast<float>(history_.size());
-        for (size_t i = 0; i < ref.data.size() / 4; ++i) r[i] = sum[i] * inv;
-        ss = SolveScaleShift(depth, ref, mode_ == Mode::ScaleShift);
-        ApplyScaleShift(depth, ss);
+    const Track& cur = TrackAt(t);
+    if (!cur.valid) return ss;
+    int left = 0, right = 0;
+    while (left < radius_ && !TrackAt(t - left).segmentStart) ++left;
+    while (right < radius_ && t + right + 1 < pushedEnd_ && !TrackAt(t + right + 1).segmentStart) ++right;
+    const int r = std::min(left, right);
+    if (r == 0) return ss;  // at a segment's end: unchanged (no one-sided pull towards the neighbours)
+    double scale = 1.0, shift = 0.0;
+    if (mode_ == Mode::ScaleOnly) {
+        double sum = 0.0;
+        for (int64_t k = t - r; k <= t + r; ++k) sum += TrackAt(k).logScale;
+        scale = std::exp(sum / (2 * r + 1) - cur.logScale);
     } else {
-        referenceSum_.Allocate(depth.width, depth.height, PixelType::F32, {"Z"});
+        double loc = 0.0, spread = 0.0;
+        for (int64_t k = t - r; k <= t + r; ++k) {
+            loc += TrackAt(k).loc;
+            spread += TrackAt(k).spread;
+        }
+        loc /= (2 * r + 1);
+        spread /= (2 * r + 1);
+        if (cur.spread <= 1e-12 * cur.loc) return ss;
+        scale = spread / cur.spread;
+        shift = loc - scale * cur.loc;
     }
-    // push
-    history_.push_back(depth);
-    float* sum = referenceSum_.As<float>();
-    const float* d = depth.As<float>();
-    for (size_t i = 0; i < depth.data.size() / 4; ++i) sum[i] += Valid(d[i]) ? d[i] : 0.f;
-    if (static_cast<int>(history_.size()) > window_) {
-        const float* old = history_.front().As<float>();
-        for (size_t i = 0; i < depth.data.size() / 4; ++i) sum[i] -= Valid(old[i]) ? old[i] : 0.f;
-        history_.pop_front();
-    }
+    if (!std::isfinite(scale) || scale <= 0.0 || !std::isfinite(shift)) return ss;
+    ss.scale = static_cast<float>(scale);
+    ss.shift = static_cast<float>(shift);
+    ss.samples = 2 * static_cast<size_t>(r) + 1;
     return ss;
+}
+
+bool TemporalStabilizer::Pop(int64_t& index, PassImage& depth, ScaleShift* applied) {
+    if (frames_.empty()) return false;
+    if (mode_ != Mode::None && !closed_ && pushedEnd_ <= next_ + radius_) return false;  // frame next_+N not in yet
+    auto& [i, frame] = frames_.front();
+    ScaleShift ss;
+    if (mode_ != Mode::None) {
+        ss = TransformFor(i);
+        if (ss.scale != 1.f || ss.shift != 0.f) {
+            float* d = frame.As<float>();
+            const size_t n = frame.data.size() / sizeof(float);
+            for (size_t k = 0; k < n; ++k) {
+                if (!Valid(d[k])) continue;
+                const float v = ss.scale * d[k] + ss.shift;
+                d[k] = v > 0.f ? v : kMinAlignedDepth;
+            }
+        }
+    }
+    index = i;
+    depth = std::move(frame);
+    if (applied) *applied = ss;
+    frames_.pop_front();
+    next_ = index + 1;
+    while (!track_.empty() && trackBase_ < next_ - radius_) {  // the window of the next frames reaches back N frames
+        track_.pop_front();
+        ++trackBase_;
+    }
+    return true;
 }
 
 }  // namespace dlssvid

@@ -43,6 +43,13 @@ TEST_CASE("Every stage has a schema whose defaults mirror the stages and the pro
     CHECK(FindStageSchema("upscale")->Find("scale")->def == UpscaleStageOptions{}.scale);
     CHECK(FindStageSchema("upscale")->Find("sharpness")->def == UpscaleStageOptions{}.sharpness);
     CHECK(FindStageSchema("depth")->Find("backend")->def == DepthStageOptions{}.backend);
+    // temporal alignment (TASK-0038): the schema's default and choices are what the stage parses
+    const ParamSpec* stabilize = FindStageSchema("depth")->Find("stabilize");
+    REQUIRE(stabilize);
+    CHECK(stabilize->def == "auto");
+    CHECK(ParseDepthStabilize(stabilize->def.get<std::string>()) == DepthStageOptions{}.stabilize);
+    for (const auto& c : stabilize->choices) CHECK_NOTHROW(ParseDepthStabilize(c.value));
+    CHECK(FindStageSchema("depth")->Find("stabilize_window")->def == DepthStageOptions{}.stabilizeWindow);
     CHECK(FindStageSchema("flow")->Find("backend")->def == FlowStageOptions{}.backend);
     // human labels for the form, technical keys stay keys; the main form of nr is the intensity alone
     CHECK(FindStageSchema("nr")->Find("intensity")->label == "Интенсивность");

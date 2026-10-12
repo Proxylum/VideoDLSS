@@ -71,13 +71,8 @@ DepthStageOptions DepthOptions(const nlohmann::json& p, const std::filesystem::p
     o.writeDlss = !Get<bool>(p, "no_dlss", false);
     o.dlss.zNear = Get<float>(p, "z_near", 0.1f);
     o.dlss.zFar = Get<float>(p, "z_far", 1000.f);
-    const std::string stabilize = Get<std::string>(p, "stabilize", "auto");
-    if (stabilize == "none") o.stabilize = TemporalStabilizer::Mode::None;
-    else if (stabilize == "scale") o.stabilize = TemporalStabilizer::Mode::ScaleOnly;
-    else if (stabilize == "scale_shift" || stabilize == "auto") o.stabilize = TemporalStabilizer::Mode::ScaleShift;
-    else Throw("process: depth.stabilize must be auto|none|scale|scale_shift");
-    o.stabilizeMetric = stabilize == "scale" || stabilize == "scale_shift";
-    o.stabilizeWindow = Get<int>(p, "stabilize_window", 8);
+    o.stabilize = ParseDepthStabilize(Get<std::string>(p, "stabilize", "auto"));
+    o.stabilizeWindow = std::clamp(Get<int>(p, "stabilize_window", 8), 1, 64);  // the schema's range: the buffer holds N+1 frames
     o.fillHoles = !Get<bool>(p, "no_fill", false);
     o.format = ParsePassFormat(Get<std::string>(p, "format", "exr"), false);
     return o;
@@ -724,7 +719,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 const DepthRunResult r = RunDepth(decoder, device, o, options.frames, progressFor(name));
                 rep.frames = r.stats.frames;
                 rep.outDir = o.writeDlss ? r.dlssDir : r.rawDir;
-                rep.details = {{"estimator", r.estimator}, {"mean_tae", r.stats.MeanTae()}};
+                rep.details = {{"estimator", r.estimator}, {"mean_tae", r.stats.MeanTae()}, {"stabilize", r.stabilize}};
             } else if (name == "flow") {
                 VideoDecoder::Options dopt;
                 const std::string backend = Get<std::string>(p, "backend", "ofa");
