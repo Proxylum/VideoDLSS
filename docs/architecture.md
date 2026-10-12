@@ -47,6 +47,10 @@ convert/: DepthConvert (raw ↔ reverse-Z), MvConvert (InvertFlow, dilation, sca
 - Все формулы — `docs/conventions.md`; они реализованы один раз в `core/convert/` и не дублируются в стадиях.
 - `Manifest` — единственный источник геометрии для бинарных дампов и канонических имён каналов;
   `PassReader::Validate` формулирует несовпадения (разрешение, число кадров, пропуски) одним сообщением.
+- `ReadPassFile` отдаёт файл как он хранится, `PassReader::ReadFrame` — кадр в конвенции проекта: векторы пасса
+  с `mv.y_up` (ось `y` вверх, чужой инструмент) возвращаются с перевёрнутой `v` (`NegateChannel`). `Man()` описывает
+  диск, `FrameManifest()` — прочитанные кадры; `PassWriter` всегда пишет `mv.y_up = false` (TASK-0038, аудит
+  pass-mv-yup). Так флаг видят все читатели сразу: слоты стадий, convert / export, TAE глубины, вьюпорт.
 
 ### Стадия Depth (этап 2)
 
@@ -105,7 +109,7 @@ AppModel (Qt) ── ViewportWindow / панели ── TaskQueue (dlssvid <st
 - Один и тот же путь для GUI и CLI: `dlssvid render` собирает `ViewportState` из проекта и опций, ждёт
   `FrameStore::WaitForCurrent()` и рендерит offscreen; GUI рендерит в swapchain по таймеру 16 мс и
   подхватывает кадры по мере готовности (`FrameStore::Update()`).
-- Видео в кэше — CPU-декод (FFmpeg, frame/slice-потоки) → `Yuv420pToRgba16f` (F16C) → upload. На 1080p
+- Видео в кэше — CPU-декод (FFmpeg, frame/slice-потоки) → `YuvToRgba16f` (F16C, любая раскладка 8–16 бит) → upload. На 1080p
   (RTX 4070 Ti SUPER, Ryzen 7 7700X): холодный скраббинг одного источника 12 мс/кадр (82 fps), сетка 2x2
   из четырёх 1080p-источников 27 мс/кадр (37 fps), тёплый (кадры в кэше) < 1 мс, случайные прыжки по
   H.264 с GOP 250 — 40 мс (seek + декод от ключевого кадра); composite сам по себе 0.2–2.5 мс.
@@ -280,7 +284,7 @@ AppModel (Qt) ── ViewportWindow / панели ── TaskQueue (dlssvid <st
 ### Апскейл (этап 5)
 
 ```
-UpscaleStage ── YUV420P ─▶ Yuv420pToRgba16f ─▶ input RGBA16F ─┬─▶ [Resampler: сдвиг −j]  (только dlss)
+UpscaleStage ── YUV N бит ─▶ YuvToRgba16f ───▶ input RGBA16F ─┬─▶ [Resampler: сдвиг −j]  (только dlss)
                                                               ▼
    depth_dlss / mv_dlss (слот кэша или папки пассов) ─▶ IUpscaler::Evaluate(cmdlist) ─▶ output RGBA16F (UAV)
                                                               ▼
@@ -488,10 +492,10 @@ PlanProcess / RunProcess ── для каждой включённой ста�
 | `DepthStage`, `TrtFlowEstimator` | препроцессинг/апсемпл/guided filter на CPU; входы TensorRT копируются host→device | модели и контракты проверяются на CPU-пути; шейдерной инфраструктуры ещё нет | этап 4–5: препроцессинг compute-шейдером на общем D3D12-девайсе, вход TensorRT из CUDA-буфера |
 | `FlowStage::Process` | NV12-кадр копируется в собственный device-буфер стадии | декодер отдаёт один и тот же буфер на следующем кадре | этап 4+: кольцо NVDEC-кадров в `GpuFrameCache` |
 | `TemporalAlignmentError` | статичный прокси, если `--mv-dir` не задан | обратная совместимость | — (warp-версия есть) |
-| `FrameStore::LoadVideo` | видео для вьюпорта декодируется на CPU и конвертируется в RGBA16F (`Yuv420pToRgba16f`, F16C) перед upload | NVDEC-кольцо и YUV→RGB на GPU появятся вместе с GPU-препроцессингом этапа 5; CPU-путь укладывается в ≥ 30 fps на 1080p | этап 5: NVDEC → CUDA → D3D12-текстура, конверсия compute-шейдером |
+| `FrameStore::LoadVideo` | видео для вьюпорта декодируется на CPU и конвертируется в RGBA16F (`YuvToRgba16f`, F16C) перед upload | NVDEC-кольцо и YUV→RGB на GPU появятся вместе с GPU-препроцессингом этапа 5; CPU-путь укладывается в ≥ 30 fps на 1080p | этап 5: NVDEC → CUDA → D3D12-текстура, конверсия compute-шейдером |
 | `ViewportRenderer::RenderInto` | каждый кадр — `ExecuteAndWait` (синхронный submit) | простота; composite 0.2–2.5 мс, узкое место — загрузка кадров | этап 5+: fence-ринг и несколько кадров в полёте |
 | `ViewportWindow` | подписи ячеек и пробник — виджеты Qt рядом с вьюпортом, в PNG-скриншот их вписывает `QPainter` | Qt не рисует поверх дочернего нативного окна со swapchain | — (по плану этапа 4) |
-| `UpscaleStage` + `DlssUpscaler` | **эмуляция джиттера** (ТЗ §3): кадр видео пересемплируется Catmull-Rom со сдвигом −j (Halton(2,3), фаз = 8·(target/render)²), содержимое смещается на +j, DLSS получает `InJitterOffset = +j`; MV не джиттерятся (`MVJittered = 0`) | DLSS SR рассчитан на джиттерный рендер, у видео джиттера нет; знак выбран по PSNR на синтетическом эталоне (+1.7 дБ к прогону без джиттера, `--jitter-sign`) | остаётся как режим сравнения; RTX VSR — основной путь |
+| `UpscaleStage` + `DlssUpscaler` | **эмуляция джиттера** (ТЗ §3): кадр видео пересемплируется Catmull-Rom со сдвигом −j (Halton(2,3), фаз = 8·(target/render)²), содержимое смещается на +j, DLSS получает `InJitterOffset = +j`; MV не джиттерятся (`MVJittered = 0`) | DLSS SR рассчитан на джиттерный рендер, у видео джиттера нет; знак выбран по PSNR на синтетическом эталоне (+1.7 дБ к прогону без джиттера, `--jitter-sign`) | остаётся: DLSS SR — путь апскейла по умолчанию (RTX VSR убран в TASK-0021) |
 | `UpscaleStage::Process` | результат читается на CPU (readback) для записи пасса и заново грузится в слот кэша | простота; следующие стадии пока читают пассы с диска | этап 6–7: копия текстуры в слот без CPU, запись EXR в фоне |
 | `NisUpscaler` | масштаб > 2 — два прохода NVScaler (×2, затем остаток) | NIS принимает соотношение 1..2 за проход | — |
 | `VideoEncoder` (превью `--video`) | цветовые теги (matrix/range) не записываются в поток | превью без аудио, для просмотра; финальный мукс — этап 8 `process` | этап 8: теги и аудио |

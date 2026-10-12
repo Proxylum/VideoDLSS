@@ -422,3 +422,51 @@ TEST_CASE("Schema defaults are the same run; --force recomputes one stage in pla
     o.sourceHash = "garbage";  // not a hash: ignored, the file is hashed
     CHECK(PlanProcess(o).sourceHash == plan.sourceHash);
 }
+
+// Audit pass-mv-yup (TASK-0038): PassReader negates v of a y-up motion-vector pass, so toggling mv.y_up of an external
+// (legacy, unfingerprinted) mv_dlss changes what upscale / nr / fg read - the plan must recompute them, and the run agree.
+TEST_CASE("Regression (pass-mv-yup): toggling mv.y_up of a legacy mv_dlss recomputes the stages that read it", "[integration][process][versions][mv][y_up]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("legacy_yup");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o = Options(dir, clip);
+    RunProcess(o);
+    // mv_dlss becomes an external pass: no version block, and flow is off so nothing adopts it
+    const auto mvDir = o.passesRoot / "mv_dlss";
+    {
+        const auto file = mvDir / Manifest::kFileName;
+        nlohmann::json j;
+        std::ifstream(file) >> j;
+        for (const char* key : {"fingerprint", "inputs", "tool", "params_canonical", "created"}) j.erase(key);
+        std::ofstream(file) << j.dump(2);
+    }
+    for (auto& s : o.stages)
+        if (s.name == "flow") s.enabled = false;
+    RunProcess(o);
+    REQUIRE(PlanProcess(o).runCount == 0);
+    const std::string legacy = Manifest::Load(o.passesRoot / "color_sr").inputs.at("mv_dlss");
+    CHECK(legacy.rfind("legacy:", 0) == 0);
+
+    Manifest m = Manifest::Load(mvDir);
+    m.mv.yUp = true;
+    m.Save(mvDir);
+    const ProcessPlan plan = PlanProcess(o);
+    const StageDecision& up = Decision(plan, "upscale");
+    CHECK(up.action == "run");  // before the fix the pseudo-fingerprint ignored y_up: "reuse" with flipped vectors
+    CHECK(up.kind == "input_changed");
+    CHECK(up.inputs.at("mv_dlss") == legacy + ":y_up");
+    CHECK(Decision(plan, "nr").action == "run");
+    CHECK(Decision(plan, "fg").action == "run");
+
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "upscale").status == "ran");
+    CHECK(Manifest::Load(o.passesRoot / "color_sr").inputs.at("mv_dlss") == legacy + ":y_up");
+    CHECK(PlanProcess(o).runCount == 0);  // the plan and the run agree
+
+    m.mv.yUp = false;
+    m.Save(mvDir);
+    CHECK(Decision(PlanProcess(o), "upscale").action == "restore");  // the version made without the flag comes back
+}

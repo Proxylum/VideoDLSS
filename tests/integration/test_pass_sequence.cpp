@@ -8,7 +8,9 @@
 #include "TestClips.h"
 #include "convert/ColorConvert.h"
 #include "convert/DepthConvert.h"
+#include "convert/MvConvert.h"
 #include "io/VideoDecoder.h"
+#include "passes/PassFile.h"
 #include "passes/PassSequence.h"
 #include "passes/formats/ExrIO.h"
 
@@ -246,4 +248,92 @@ TEST_CASE("Preset formats: comfyui and rawdlss", "[integration][passes][preset]"
     PassImage ref;
     src(1, ref);
     CHECK(r.ReadFrame(1).data == ref.data);
+}
+
+// Audit pass-mv-yup (TASK-0038): a pass stored with y up (manifest mv.y_up, another tool's convention) comes out of
+// PassReader::ReadFrame in the DLSS convention (y down) for every consumer; the manifest keeps describing the files.
+namespace {
+void MarkYUp(const std::filesystem::path& dir) {  // the way a foreign tool or `import --y-up --write-manifest` marks it
+    Manifest m = Manifest::Load(dir);
+    m.mv.yUp = true;
+    m.Save(dir);
+}
+}  // namespace
+
+TEST_CASE("PassReader returns y_up motion vectors in the DLSS convention; the manifest keeps the stored flag",
+          "[integration][passes][mv][y_up]") {
+    SECTION("every format: frames come back y down, the files and the manifest keep y up") {
+        struct Case {
+            FileFormat format;
+            PassKind kind;
+            PixelType type;
+        };
+        for (const Case c : {Case{FileFormat::Exr, PassKind::MvRaw, PixelType::F32}, Case{FileFormat::Raw, PassKind::MvDlss, PixelType::F16},
+                             Case{FileFormat::Npz, PassKind::MvRaw, PixelType::F32}}) {
+            INFO(ToString(c.format) << " " << ToString(c.kind) << " " << ToString(c.type));
+            const auto a = Dir("yup_a");
+            const auto b = Dir("yup_b");
+            Manifest m = Manifest::ForPass(c.kind, 24, 16, c.format);
+            m.pixelType = c.type;
+            auto source = [&](bool flipped) {
+                return FrameSource([=](int64_t f, PassImage& out) {
+                    if (f >= 3) return false;
+                    out = SyntheticMv(f, 24, 16);
+                    out.channels = Spec(c.kind).channels;
+                    if (flipped) out = FlipMvY(out);
+                    return true;
+                });
+            };
+            REQUIRE(ExportPass(a, m, source(false), FrameRange{0, 2}) == 3);
+            Manifest yUp = m;
+            yUp.mv.yUp = true;  // a writer never stores the flag: frames reaching it are y down
+            REQUIRE(ExportPass(b, yUp, source(true), FrameRange{0, 2}) == 3);
+            CHECK_FALSE(Manifest::Load(b).mv.yUp);
+            MarkYUp(b);
+
+            const PassReader ra = PassReader::Open(a);
+            const PassReader rb = PassReader::Open(b);
+            CHECK(rb.Man().mv.yUp);
+            CHECK_FALSE(rb.FrameManifest().mv.yUp);
+            rb.Validate({24, 16, 3, c.kind});
+            PassImage viaSource;
+            const FrameSource fromB = SourceFromReader(rb);
+            for (int64_t f = 0; f < 3; ++f) {
+                const PassImage want = ra.ReadFrame(f);
+                const PassImage got = rb.ReadFrame(f);
+                REQUIRE(got.SameLayout(want));
+                CHECK(got.data == want.data);  // negated back exactly
+                CHECK(got.Get(3, 5, 1) == want.Get(3, 5, 1));
+                CHECK(got.Get(3, 5, 1) != 0.f);
+                // the file level is untouched: ReadPassFile returns what is stored (v pointing up)
+                const PassImage stored = ReadPassFile(rb.FramePath(f), &rb.Man());
+                CHECK(stored.Get(3, 5, 1) == -want.Get(3, 5, 1));
+                REQUIRE(fromB(f, viaSource));
+                CHECK(viaSource.data == want.data);
+            }
+        }
+    }
+
+    SECTION("y_up on a non-MV pass changes nothing") {
+        const auto d = Dir("yup_depth");
+        REQUIRE(ExportPass(d, Manifest::ForPass(PassKind::DepthRaw, 24, 16, FileFormat::Exr), DepthSource(24, 16, 2), FrameRange{0, 1}) == 2);
+        MarkYUp(d);
+        CHECK(PassReader::Open(d).ReadFrame(1).data == SyntheticDepth(1, 24, 16).data);
+    }
+
+    SECTION("y-up motion vectors in integer samples are refused at Validate and on read") {
+        const auto d = Dir("yup_png16");
+        Manifest m = Manifest::ForPass(PassKind::MvRaw, 24, 16, FileFormat::Png);
+        m.pixelType = PixelType::U16;
+        FrameSource positive = [](int64_t f, PassImage& out) {
+            if (f >= 1) return false;
+            out = MakePassImage(PassKind::MvRaw, 24, 16, PixelType::U16);
+            return true;
+        };
+        REQUIRE(ExportPass(d, m, positive, FrameRange{0, 0}) == 1);
+        MarkYUp(d);
+        const PassReader r = PassReader::Open(d);
+        CHECK_THROWS(r.Validate({}));
+        CHECK_THROWS(r.ReadFrame(0));
+    }
 }

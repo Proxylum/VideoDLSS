@@ -43,7 +43,7 @@ struct PassFingerprint {
     std::string sourceHash;                     // "sha256:<hex>" of the source video
     std::string stage;                          // depth | flow | upscale | nr | fg
     nlohmann::json params;                      // canonical stage parameters
-    std::map<std::string, std::string> inputs;  // input pass -> its fingerprint (legacy passes: "legacy:<hash>:<frames>")
+    std::map<std::string, std::string> inputs;  // input pass -> its fingerprint (legacy passes: "legacy:<hash>:<frames>[:y_up]")
     ToolInfo tool;
     std::string Short() const;  // first 8 hex digits of the value
 };

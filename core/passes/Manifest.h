@@ -31,7 +31,8 @@ struct DepthParams {
 
 struct MvParams {
     std::string direction = "forward";  // raw: "forward" (t -> t+1); dlss: "backward" (t -> t-1)
-    bool yUp = false;                   // false: y grows downwards (image rows), as DLSS expects
+    bool yUp = false;                   // false: y grows downwards (image rows), as DLSS expects; true: v points up in the
+                                        // files, PassReader::ReadFrame returns it negated (y down). dlssvid never writes true
     uint32_t refWidth = 0;              // resolution the vectors are expressed in (0 = image size)
     uint32_t refHeight = 0;
 };
@@ -81,6 +82,12 @@ struct Manifest {
 
     std::string FrameFileName(int64_t frame) const;
     std::optional<PassKind> Kind() const { return ParsePassKind(pass); }
+    // Motion vectors stored with y pointing up (mv.y_up on an mv_raw / mv_dlss pass): PassReader negates v on read
+    // (docs/conventions.md §3).
+    bool IsYUpMv() const {
+        const auto k = Kind();
+        return mv.yUp && k && (*k == PassKind::MvRaw || *k == PassKind::MvDlss);
+    }
 };
 
 }  // namespace dlssvid

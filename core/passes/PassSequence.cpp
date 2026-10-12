@@ -21,6 +21,9 @@ PassWriter::PassWriter(const std::filesystem::path& dir, Manifest manifest) : di
         manifest_.filePattern = manifest_.pass + "_%06d" + ExtensionFor(manifest_.format, manifest_.pixelType, manifest_.channels.size());
     if (manifest_.format == FileFormat::Png && manifest_.pixelType != PixelType::U8 && manifest_.pixelType != PixelType::U16)
         Throw("PassWriter: PNG cannot store " + std::string(ToString(manifest_.pixelType)));
+    // Frames reaching a writer are in the project convention (PassReader negates y-up motion vectors on read), so a pass
+    // written by dlssvid never carries mv.y_up - even when its manifest was copied from a y-up reader.
+    manifest_.mv.yUp = false;
     std::filesystem::create_directories(dir_);
     manifest_.frameCount = 0;
     manifest_.firstFrame = 0;
@@ -149,7 +152,21 @@ PassImage PassReader::ReadFrame(int64_t frame) const {
     if (img.width != manifest_.width || img.height != manifest_.height)
         Throw("pass frame " + std::to_string(frame) + " is " + std::to_string(img.width) + "x" + std::to_string(img.height) +
               " but the manifest says " + std::to_string(manifest_.width) + "x" + std::to_string(manifest_.height));
+    if (manifest_.IsYUpMv()) {
+        // a y-up pass comes back in the DLSS convention (y down); the type is checked again here because NPZ / TIFF
+        // files may carry another sample type than the manifest says
+        if (img.type != PixelType::F16 && img.type != PixelType::F32)
+            Throw("pass '" + manifest_.pass + "' has mv.y_up = true but " + std::string(ToString(img.type)) +
+                  " samples; y-up motion vectors must be f16 or f32: " + path.string());
+        NegateChannel(img, 1);
+    }
     return img;
+}
+
+Manifest PassReader::FrameManifest() const {
+    Manifest m = manifest_;
+    m.mv.yUp = false;
+    return m;
 }
 
 std::vector<int64_t> PassReader::MissingFrames() const {
@@ -168,6 +185,8 @@ void PassReader::Validate(const Expect& expect) const {
         problems.push_back("frame count " + std::to_string(manifest_.frameCount) + " (expected " + std::to_string(expect.frameCount) + ")");
     if (expect.kind && manifest_.pass != Spec(*expect.kind).name)
         problems.push_back("pass '" + manifest_.pass + "' (expected '" + std::string(Spec(*expect.kind).name) + "')");
+    if (manifest_.IsYUpMv() && manifest_.pixelType != PixelType::F16 && manifest_.pixelType != PixelType::F32)
+        problems.push_back("mv.y_up = true needs f16/f32 samples (pixel_type " + std::string(ToString(manifest_.pixelType)) + ")");
     const auto missing = MissingFrames();
     if (!missing.empty()) {
         std::string list;
@@ -235,6 +254,7 @@ int64_t ExportLayeredExr(const std::filesystem::path& dir, const std::string& na
                          const FrameSource* depth, const FrameSource* mv, FrameRange range, const ProgressFn& progress) {
     std::filesystem::create_directories(dir);
     base.pass = name;
+    base.mv.yUp = false;  // the mv layer comes from PassReader frames: y down (see PassWriter)
     base.format = FileFormat::Exr;
     base.pixelType = PixelType::F16;
     base.channels = {"R", "G", "B"};

@@ -129,3 +129,32 @@ TEST_CASE("ScaleMv, FlipMvY and ZeroMv", "[convert][mv]") {
     CHECK_THROWS(ScaleMv(flow, 0, 4));
     CHECK_THROWS(InvertFlow(MakePassImage(PassKind::DepthRaw, 2, 2), nullptr, true));
 }
+
+// Audit pass-mv-yup (TASK-0038): PassReader negates v of y-up passes through NegateChannel / FlipMvYInPlace; the flip
+// must be exact (a double flip gives back the same bytes) and refuse integer samples instead of clamping.
+TEST_CASE("FlipMvYInPlace negates v only, bit-exact for f16 and f32, and refuses integer samples", "[convert][mv][y_up]") {
+    PassImage mv = MakePassImage(PassKind::MvRaw, 4, 2);
+    const float vs[] = {0.f, -0.f, 1.5f, -3.25f, 1e-30f, 7.f, -0.5f, 2.f};
+    for (uint32_t i = 0; i < 8; ++i) {
+        mv.Set(i % 4, i / 4, 0, 10.f + static_cast<float>(i));
+        mv.Set(i % 4, i / 4, 1, vs[i]);
+    }
+    for (const PixelType t : {PixelType::F32, PixelType::F16}) {
+        INFO(ToString(t));
+        const PassImage src = mv.ConvertTo(t);
+        PassImage flipped = src;
+        FlipMvYInPlace(flipped);
+        for (uint32_t i = 0; i < 8; ++i) {
+            CHECK(flipped.Get(i % 4, i / 4, 0) == src.Get(i % 4, i / 4, 0));  // u untouched
+            CHECK(flipped.Get(i % 4, i / 4, 1) == -src.Get(i % 4, i / 4, 1));
+        }
+        CHECK(FlipMvY(src).data == flipped.data);
+        FlipMvYInPlace(flipped);
+        CHECK(flipped.data == src.data);  // exact: the sign flip does not round
+    }
+    PassImage u16 = mv.ConvertTo(PixelType::U16);
+    CHECK_THROWS(FlipMvYInPlace(u16));
+    PassImage depth = MakePassImage(PassKind::DepthRaw, 2, 2);
+    CHECK_THROWS(FlipMvYInPlace(depth));  // not a (u, v) image
+    CHECK_THROWS(NegateChannel(depth, 1));  // channel out of range
+}

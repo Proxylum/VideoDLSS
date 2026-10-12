@@ -64,4 +64,4 @@
 - Smoke на 1280x720 H.264: `export` (EXR half, 10 кадров, SHA-256 источника в манифесте), `--preset comfyui`,
   `import --expect-size --expect-frames` — ок.
 - Отложено: GPU-текстуры пассов и дисковый кэш как часть `GpuFrameCache` (этап 2), импорт multi-layer EXR
-  обратно в отдельные пассы через CLI (сейчас — `ReadExrLayers` в API), y_up-переворот при импорте (флаг в манифесте есть, применяется стадиями).
+  обратно в отдельные пассы через CLI (сейчас — `ReadExrLayers` в API), y_up-переворот при импорте — сделан в TASK-0038: при чтении кадра (`PassReader::ReadFrame`), `--y-up` в CLI.

@@ -106,3 +106,19 @@ TEST_CASE("File formats parse and map to extensions", "[passes][manifest]") {
     CHECK(FormatFromExtension("x.txt") == std::nullopt);
     CHECK(ToString(FileFormat::Png) == "png16");
 }
+
+TEST_CASE("Manifest::IsYUpMv only for motion-vector passes with mv.y_up", "[passes][manifest][mv][y_up]") {
+    for (const PassKind k : {PassKind::MvRaw, PassKind::MvDlss}) {
+        Manifest m = Manifest::ForPass(k, 8, 4, FileFormat::Exr);
+        CHECK_FALSE(m.IsYUpMv());
+        m.mv.yUp = true;
+        CHECK(m.IsYUpMv());
+    }
+    Manifest depth = Manifest::ForPass(PassKind::DepthRaw, 8, 4, FileFormat::Exr);
+    depth.mv.yUp = true;
+    CHECK_FALSE(depth.IsYUpMv());
+    Manifest custom = Manifest::ForPass(PassKind::MvRaw, 8, 4, FileFormat::Exr);
+    custom.pass = "layered";
+    custom.mv.yUp = true;
+    CHECK_FALSE(custom.IsYUpMv());
+}

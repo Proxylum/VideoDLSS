@@ -290,6 +290,7 @@ uke --preset nuke --depth-dir passes\depth_raw --mv-dir passes\mv_raw
 dlssvid import  -i passes\depth_raw --expect-size 1920x1080 --expect-frames 300
 dlssvid convert -i passes\depth_raw -o passes\depth_dlss --to depth_dlss --near 0.1 --far 1000
 dlssvid convert -i passes\mv_raw -o passes\mv_dlss --to mv_dlss --target 3840x2160 --depth-dir passes\depth_raw
+dlssvid import  -i ext\mv --pass mv_raw --y-up --write-manifest     :: vectors from another tool with y up: read in the DLSS convention (y down)
 dlssvid depth   -i input.mp4 -o passes --backend da3                     :: DA3METRIC-LARGE via TensorRT -> depth_raw + depth_dlss
 dlssvid depth   -i input.mp4 -o passes --backend vda --model metric-vda-small
 dlssvid depth   -i input.mp4 -o passes --backend worker:da3              :: PyTorch reference path (depth_worker)
@@ -323,7 +324,7 @@ from the same pipeline, jitter emulation for DLSS.
 dlssvid upscale -i input.mp4 -o passes --backend nis --scale 2                         :: NVIDIA Image Scaling (any GPU, WARP)
 dlssvid upscale -i input.mp4 -o passes --backend dlss --scale 2 --depth-dir passes\depth_dlss --mv-dir passes\mv_dlss --preset K
 dlssvid upscale -i input.mp4 -o passes --scale 2                                       :: DLSS SR (default); --backend trt [--model realesrgan-x2plus | realesr-general-x4v3 | realesrgan-x4plus] | worker [--window 15 --overlap 3] | nis | bicubic
-dlssvid upscale -i input.mp4 -o passes --backend nis --artifact-reduction-only         :: no scaling (NVSharpen / VSR artifact reduction)
+dlssvid upscale -i input.mp4 -o passes --backend nis --no-scaling                      :: x1: NVSharpen (dlss: DLAA); not a compression-artifact filter
 dlssvid upscale -i input.mp4 -o passes --backend dlss --video sr.mp4 --codec hevc_nvenc  :: plus a preview video (no audio)
 dlssvid compare --ref reference.mp4 --test passes\color_sr --json ab.json              :: PSNR Y/RGB + SSIM per frame
 ```

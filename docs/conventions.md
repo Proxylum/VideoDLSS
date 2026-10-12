@@ -47,8 +47,15 @@ z = near · far / (d · (far − near) + near)            обратное пр�
 | `mv_raw` | forward optical flow `F_t` | `p(t+1) = p(t) + F_t(p(t))` (t → t+1) | пиксели исходного разрешения |
 | `mv_dlss` | backward-векторы `B_t` | `p(t−1) = p(t) + B_t(p(t))` (t → t−1) | пиксели целевого (render) разрешения |
 
-Оба — 2 канала `u` (x) и `v` (y), `y` вниз (`mv.y_up = false`). Если внешний пасс задан с `y`
-вверх, установите `mv.y_up = true` — при импорте ось переворачивается (`FlipMvY`).
+Оба — 2 канала `u` (x) и `v` (y), `y` вниз (`mv.y_up = false`). Внешний пасс с `y` вверх помечается
+`mv.y_up = true` (папке без манифеста флаг задаёт `import` / `convert` / `export --from-dir` с `--y-up`); флаг
+описывает только знак `v`, строки изображения по-прежнему идут сверху вниз. Любое чтение кадра такого пасса
+(`PassReader::ReadFrame`: слоты upscale / nr / fg, `depth --mv-dir`, `convert`, `import --to-dlss`,
+`export --from-dir`, вьюпорт и его пробник, `render`) меняет знак `v` (`FlipMvY`), дальше данные уже в конвенции
+DLSS; манифест папки при этом не переписывается. Пассы, которые пишет dlssvid (flow, convert, export), всегда
+несут `y_up = false`. Флаг требует сэмплов f16 / f32 — с u8 / u16 пасс отклоняется. Флаг задаётся при импорте, а не
+правкой манифеста пасса с отпечатком: смена флага у внешнего пасса без отпечатка пересчитывает стадии ниже
+(псевдо-отпечаток `legacy:<hash>:<frames>:y_up`).
 
 Конвертация `mv_raw` → `mv_dlss` (кадр `t+1` получается из flow кадра `t`):
 
@@ -143,8 +150,9 @@ BT.709: Kr = 0.2126, Kb = 0.0722;  BT.601: Kr = 0.299, Kb = 0.114;  Kg = 1 − K
 `<pass>.v/<YYYYMMDD-HHMMSS_<fp8>>/` (тот же формат папки).
 
 Импорт без манифеста: папка сканируется по нумерованным файлам одного формата, пользователь
-указывает `--pass` (и `--convention`, `--size WxH` для бинарных дампов); `--write-manifest`
-сохраняет восстановленный манифест. При импорте проверяются разрешение, число кадров и
+указывает `--pass` (и `--convention`, `--size WxH` для бинарных дампов, `--y-up` для векторов с осью `y` вверх);
+`--write-manifest` сохраняет восстановленный манифест. `--y-up` у папки, в манифесте которой `y_up = false`,
+действует только на этот прогон: манифест не меняется, CLI предупреждает. При импорте проверяются разрешение, число кадров и
 непрерывность нумерации — несовпадение перечисляется в ошибке.
 
 ## 7. CLI
@@ -155,5 +163,6 @@ dlssvid export  --from-dir out/depth_raw -o out/depth_npz --format npz
 dlssvid export  -i clip.mp4 -o out/nuke --preset nuke --depth-dir out/depth_raw --mv-dir out/mv_raw
 dlssvid import  -i out/depth_raw [--expect-size 1920x1080 --expect-frames 300] [--to-dlss out/depth_dlss --near 0.1 --far 1000]
 dlssvid convert -i out/mv_raw -o out/mv_dlss --to mv_dlss --target 3840x2160 --depth-dir out/depth_raw --dilate 1
+dlssvid import  -i ext/mv --pass mv_raw --y-up --write-manifest           (векторы другого инструмента с осью y вверх)
 dlssvid passes  list|use <pass|stage> <version>|gc [--keep N] [--dry-run]  --passes out | --project clip.dlssvid.json   (этап 9: версии пассов)
 ```

@@ -46,8 +46,12 @@ public:
     };
     static PassReader OpenWithoutManifest(const std::filesystem::path& dir, const ScanHints& hints);
 
+    // Man() describes the files on disk (mv.y_up as stored). ReadFrame returns frames in the project convention:
+    // motion vectors of a pass stored with mv.y_up come back with v negated (DLSS convention, y down).
+    // FrameManifest() describes those frames (mv.y_up = false) - what a pass written from them carries.
     const Manifest& Man() const { return manifest_; }
     Manifest& Man() { return manifest_; }
+    Manifest FrameManifest() const;
     const std::filesystem::path& Dir() const { return dir_; }
     bool HadManifest() const { return hadManifest_; }
 

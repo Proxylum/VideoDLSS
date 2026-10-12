@@ -96,9 +96,26 @@ void PrintManifest(const PassReader& r) {
     if (m.pass == "depth_raw" || m.pass == "depth_dlss")
         std::printf("depth:       %s near=%g far=%g%s\n", m.depth.units.c_str(), m.depth.zNear, m.depth.zFar,
                     m.depth.relative ? (" min=" + std::to_string(m.depth.minValue) + " max=" + std::to_string(m.depth.maxValue)).c_str() : "");
-    if (m.pass == "mv_raw" || m.pass == "mv_dlss") std::printf("mv:          %s, y_up=%d\n", m.mv.direction.c_str(), m.mv.yUp ? 1 : 0);
+    if (m.pass == "mv_raw" || m.pass == "mv_dlss")
+        std::printf("mv:          %s, y_up=%d%s\n", m.mv.direction.c_str(), m.mv.yUp ? 1 : 0,
+                    m.mv.yUp ? "  (v negated on read: DLSS convention, y down)" : "");
     if (!m.model.empty()) std::printf("model:       %s %s\n", m.model.c_str(), m.modelVersion.c_str());
     if (!m.sourceHash.empty()) std::printf("source:      %s %s\n", m.sourceFile.c_str(), m.sourceHash.c_str());
+}
+
+// --y-up: the folder's motion vectors point y up (another tool's convention). PassReader then negates v on read, so
+// everything downstream sees the DLSS convention; passes dlssvid writes from them carry y_up = false.
+void ApplyYUp(PassReader& r, bool yUp) {
+    if (!yUp) return;
+    const auto k = r.Man().Kind();
+    if (!k || (*k != PassKind::MvRaw && *k != PassKind::MvDlss))
+        Throw("--y-up applies to mv_raw / mv_dlss passes (got '" + r.Man().pass + "')");
+    if (r.Man().pixelType != PixelType::F16 && r.Man().pixelType != PixelType::F32)
+        Throw("--y-up needs f16/f32 motion vectors (the pass is " + std::string(ToString(r.Man().pixelType)) + ")");
+    if (r.HadManifest() && !r.Man().mv.yUp)
+        Log()->warn("--y-up: {} has a manifest with y_up=false; the flag applies to this run only, manifest.json is not changed",
+                    r.Dir().string());
+    r.Man().mv.yUp = true;
 }
 
 // ---- info -----------------------------------------------------------------------------------
@@ -321,10 +338,12 @@ struct ExportArgs {
     std::string colorRange = "auto";
     std::string pixelType;  // override sample type
     std::string passName, convention, size;  // for --from-dir without manifest
+    bool yUp = false;                        // --from-dir motion vectors point y up (sets mv.y_up)
 };
 
 int CmdExport(const ExportArgs& a) {
     if (a.input.empty() == a.fromDir.empty()) Throw("export: give exactly one of --input <video> or --from-dir <pass folder>");
+    if (a.yUp && a.fromDir.empty()) Throw("export: --y-up applies to a --from-dir motion-vector folder");
     const auto preset = ParseExportPreset(a.preset);
     if (!preset) Throw("--preset must be nuke|comfyui|rawdlss");
     const FrameRange range = ParseRangeOrThrow(a.range);
@@ -368,7 +387,8 @@ int CmdExport(const ExportArgs& a) {
         };
     } else {
         reader.emplace(OpenReader(a.fromDir, a.passName, a.convention, a.size));
-        base = reader->Man();
+        ApplyYUp(*reader, a.yUp);
+        base = reader->FrameManifest();  // frames come back y down (PassReader applies mv.y_up): the export must not carry the flag
         const auto k = base.Kind();
         if (!k) Throw("cannot re-export custom pass '" + base.pass + "'");
         kind = *k;
@@ -457,12 +477,14 @@ struct ImportArgs {
     std::string target;    // WxH for mv_dlss
     int dilate = 1;
     bool writeManifest = false;
+    bool yUp = false;  // the folder's motion vectors point y up (sets mv.y_up; read with v negated)
 };
 
 int ConvertFolder(const PassReader& in, const std::string& outDir, PassKind toKind, const ImportArgs& a);
 
 int CmdImport(const ImportArgs& a) {
     PassReader r = OpenReader(a.dir, a.pass, a.convention, a.size);
+    ApplyYUp(r, a.yUp);  // before PrintManifest / --write-manifest: the flag describes the files
     if (a.zNear > 0.f) r.Man().depth.zNear = a.zNear;
     if (a.zFar > 0.f) r.Man().depth.zFar = a.zFar;
     if (a.relative) {
@@ -498,7 +520,7 @@ int CmdImport(const ImportArgs& a) {
 // ---- convert --------------------------------------------------------------------------------
 
 int ConvertFolder(const PassReader& in, const std::string& outDir, PassKind toKind, const ImportArgs& a) {
-    const Manifest& src = in.Man();
+    const Manifest src = in.FrameManifest();  // in.ReadFrame() returns y-down vectors: the result must not carry mv.y_up
     const auto fromKind = src.Kind();
     if (!fromKind) Throw("cannot convert custom pass '" + src.pass + "'");
     Manifest out = Manifest::ForPass(toKind, src.width, src.height, src.format == FileFormat::Png ? FileFormat::Exr : src.format);
@@ -594,6 +616,7 @@ int CmdConvert(const ConvertArgs& a) {
     const auto toKind = ParsePassKind(a.to);
     if (!toKind) Throw("--to must be depth_dlss|depth_raw|mv_dlss|mv_raw");
     PassReader r = OpenReader(a.in.dir, a.in.pass, a.in.convention, a.in.size);
+    ApplyYUp(r, a.in.yUp);
     if (a.in.zNear > 0.f) r.Man().depth.zNear = a.in.zNear;
     if (a.in.zFar > 0.f) r.Man().depth.zFar = a.in.zFar;
     if (a.in.relative) {
@@ -615,6 +638,9 @@ void AddImportOptions(CLI::App* cmd, ImportArgs& a) {
     cmd->add_option("--depth-dir", a.depthDir, "depth_raw folder used to resolve occlusions when converting motion vectors");
     cmd->add_option("--target", a.target, "WxH target resolution for mv_dlss");
     cmd->add_option("--dilate", a.dilate, "MV dilation radius at depth edges (0-2)")->default_val(1);
+    cmd->add_flag("--y-up", a.yUp,
+                  "the motion vectors point y up (another tool's convention): sets mv.y_up, frames are read with v negated "
+                  "(DLSS convention, y down)");
 }
 
 }  // namespace
@@ -654,6 +680,7 @@ int main(int argc, char** argv) {
     exp->add_option("--scan-pass", ea.passName, "--from-dir without manifest: pass name");
     exp->add_option("--scan-convention", ea.convention, "--from-dir without manifest: raw | dlss");
     exp->add_option("--scan-size", ea.size, "--from-dir without manifest: WxH for raw dumps");
+    exp->add_flag("--y-up", ea.yUp, "--from-dir motion vectors point y up: read with v negated, exported y down (y_up = false)");
 
     ImportArgs ia;
     auto* imp = app.add_subcommand("import", "validate a pass folder and optionally convert it to / from the DLSS convention");

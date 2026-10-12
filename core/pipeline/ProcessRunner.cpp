@@ -132,7 +132,13 @@ struct PlanState {
     std::set<std::string> ran;
 };
 
-std::string LegacyId(const Manifest& m) { return "legacy:" + m.sourceHash + ":" + std::to_string(m.frameCount); }
+// A pass without a fingerprint stands for its source and length; a y-up motion-vector pass also for its orientation:
+// PassReader negates v on read, so toggling mv.y_up changes what the stages below read and must recompute them.
+std::string LegacyId(const Manifest& m) {
+    std::string id = "legacy:" + m.sourceHash + ":" + std::to_string(m.frameCount);
+    if (m.IsYUpMv()) id += ":y_up";
+    return id;
+}
 
 void RefreshFromDisk(PlanState& s, const std::filesystem::path& root) {
     s.fp.clear();

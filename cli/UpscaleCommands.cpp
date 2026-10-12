@@ -194,7 +194,9 @@ void UpscaleCommands::Register(CLI::App& app) {
     upscale_->add_option("--mv-dir", ua_.mvDir, "mv_dlss pass folder (dlss)");
     upscale_->add_option("--sharpness", ua_.sharpness, "nis sharpness 0..1")->default_val(0.5f);
     upscale_->add_option("--preset", ua_.preset, "dlss render preset: default | J | K | L | M")->default_val("default");
-    upscale_->add_flag("--artifact-reduction-only", ua_.artifactReductionOnly, "no scaling: nis sharpen (NVSharpen)");
+    upscale_->add_flag("--no-scaling,--artifact-reduction-only", ua_.artifactReductionOnly,
+                       "no scaling (x1): dlss = DLAA anti-aliasing, nis = NVSharpen; does not remove compression artifacts "
+                       "(--artifact-reduction-only is the old name)");
     upscale_->add_flag("--no-jitter", ua_.noJitter, "dlss: feed frames without the jitter emulation");
     upscale_->add_option("--jitter-sign", ua_.jitterSign, "dlss: sign of the reported jitter offset (+1 | -1)")->default_val(1.f);
     upscale_->add_flag("--no-fallback", ua_.noFallback, "fail instead of falling back to nis when the backend is unavailable");
