@@ -40,7 +40,7 @@ nlohmann::json OtherValue(const ParamSpec& p) {
             for (const auto& c : p.choices)
                 if (nlohmann::json(c.value) != p.def) return c.value;
             return "x";
-        case ParamType::Int:
+        case ParamType::Int: return static_cast<int>(p.def.is_number() && p.def.get<double>() == p.max ? p.min : p.max);
         case ParamType::Float: return p.def.is_number() && p.def.get<double>() == p.max ? p.min : p.max;
         default: return "x";
     }
@@ -57,10 +57,20 @@ TEST_CASE("StageCliArgs: every schema parameter becomes an option its CLI comman
         for (const ParamSpec& p : s.params) {
             nlohmann::json params{{p.key, OtherValue(p)}};
             if (p.key == "target_width" || p.key == "target_height") params = {{"target_width", 1920}, {"target_height", 1080}};
+            if (!p.backends.empty()) params["backend"] = p.backends.front();  // a parameter of some backends (tile, window)
+            if (!p.formChoices.empty()) {  // a form list (depth.model of VDA): one of its models
+                params["backend"] = p.formChoices.begin()->first;
+                params[p.key] = p.formChoices.begin()->second.back().value;
+            }
             const std::vector<std::string> args = StageCliArgs(s.stage, params);
             INFO(s.stage << " " << params.dump());
-            REQUIRE(!args.empty());
-            CHECK(std::regex_search(help, std::regex(args[0] + "([^a-z0-9_-]|$)")));
+            int options = 0;
+            for (const std::string& a : args) {
+                if (a.rfind("--", 0) != 0) continue;
+                ++options;
+                CHECK(std::regex_search(help, std::regex(a + "([^a-z0-9_-]|$)")));
+            }
+            CHECK(options == (p.key != "backend" && params.contains("backend") ? 2 : 1));  // the parameter's own option (and --backend)
         }
     }
 }
@@ -74,6 +84,11 @@ TEST_CASE("StageCliArgs maps defaults, cleared default-on flags, empty strings a
           std::vector<std::string>{"--scale", "2", "--target", "1920x1080"});
     CHECK(StageCliArgs("upscale", {{"target_width", 1920}, {"target_height", 0}}).empty());  // 0 = by the scale
     CHECK(StageCliArgs("depth", {{"backend", "vda"}, {"model", ""}}) == std::vector<std::string>{"--backend", "vda"});
+    // TASK-0039: a window left after a switch to DA3, and the default window, are not passed
+    CHECK(StageCliArgs("depth", {{"backend", "da3"}, {"window", 16}, {"model", ""}}) == std::vector<std::string>{"--backend", "da3"});
+    CHECK(StageCliArgs("depth", {{"backend", "vda"}, {"window", 0}}) == std::vector<std::string>{"--backend", "vda"});
+    CHECK(StageCliArgs("depth", {{"backend", "vda"}, {"window", 16}, {"model", "metric-vda-large"}}) ==
+          std::vector<std::string>{"--backend", "vda", "--model", "metric-vda-large", "--window", "16"});
 }
 
 TEST_CASE("dlssvid --version and info run", "[integration][cli]") {

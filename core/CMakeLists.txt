@@ -118,6 +118,7 @@ add_library(dlssvid_core STATIC
   ml/ModelRegistry.h ml/ModelRegistry.cpp
   stages/depth/IDepthEstimator.h
   stages/depth/DepthPreprocess.h stages/depth/DepthPreprocess.cpp
+  stages/depth/DepthModels.h stages/depth/DepthModels.cpp
   stages/depth/DepthPostProcess.h stages/depth/DepthPostProcess.cpp
   stages/depth/StubDepthEstimator.h stages/depth/StubDepthEstimator.cpp
   stages/depth/WorkerDepthEstimator.h stages/depth/WorkerDepthEstimator.cpp

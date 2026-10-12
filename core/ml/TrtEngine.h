@@ -52,6 +52,11 @@ public:
 
     // Expected cache path for an ONNX file with these options (without building anything).
     static std::filesystem::path CachePathFor(const std::filesystem::path& onnx, const Options& options);
+    // cudaMemGetInfo of the current device: {free, total} bytes; {0, 0} when CUDA is unavailable.
+    static std::pair<uint64_t, uint64_t> DeviceMemoryInfo();
+    // Device memory the engine took when it was loaded (weights, activations, IO buffers): the drop of free memory
+    // between before deserialisation and after the IO buffers (TASK-0039: VRAM of the depth models). 0 = unknown.
+    uint64_t DeviceBytes() const { return deviceBytes_; }
 
 private:
     struct Impl;
@@ -59,6 +64,7 @@ private:
     std::unique_ptr<Impl> impl_;
     std::vector<Binding> inputs_, outputs_;
     std::filesystem::path enginePath_;
+    uint64_t deviceBytes_ = 0;
 };
 
 }  // namespace dlssvid

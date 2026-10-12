@@ -102,6 +102,12 @@ struct TrtEngine::Impl {
 TrtEngine::TrtEngine() = default;
 TrtEngine::~TrtEngine() = default;
 
+std::pair<uint64_t, uint64_t> TrtEngine::DeviceMemoryInfo() {
+    size_t free = 0, total = 0;
+    if (cudaMemGetInfo(&free, &total) != cudaSuccess) return {0, 0};
+    return {free, total};
+}
+
 std::filesystem::path TrtEngine::CachePathFor(const std::filesystem::path& onnx, const Options& options) {
     const std::filesystem::path dir = options.cacheDir.empty() ? onnx.parent_path() : options.cacheDir;
     const std::string hash = Sha256File(onnx).substr(0, 16);
@@ -174,7 +180,11 @@ std::unique_ptr<TrtEngine> TrtEngine::FromOnnx(const std::filesystem::path& onnx
     }
 
     std::unique_ptr<nvinfer1::IHostMemory> plan(builder->buildSerializedNetwork(*network, *config));
-    if (!plan) Throw("buildSerializedNetwork failed for " + onnxStr);
+    if (!plan) {
+        const auto [free, total] = DeviceMemoryInfo();
+        Throw("buildSerializedNetwork failed for " + onnxStr + " (GPU memory free " + std::to_string(free >> 20) + " of " + std::to_string(total >> 20) +
+              " MiB; a smaller window or input of the model needs less)");
+    }
     std::filesystem::create_directories(Win32LongPath(cache.parent_path()));
     {
         std::ofstream out(Win32LongPath(cache), std::ios::binary);
@@ -194,12 +204,17 @@ std::unique_ptr<TrtEngine> TrtEngine::FromEngineFile(const std::filesystem::path
     self->enginePath_ = path;
 
     const std::vector<char> blob = ReadAll(path);
+    const uint64_t freeBefore = DeviceMemoryInfo().first;
     im.runtime.reset(nvinfer1::createInferRuntime(im.logger));
     if (!im.runtime) Throw("createInferRuntime failed");
     im.engine.reset(im.runtime->deserializeCudaEngine(blob.data(), blob.size()));
     if (!im.engine) Throw("deserializeCudaEngine failed: " + path.string() + " (delete the cache file to rebuild)");
     im.context.reset(im.engine->createExecutionContext());
-    if (!im.context) Throw("createExecutionContext failed");
+    if (!im.context) {
+        const auto [free, total] = DeviceMemoryInfo();
+        Throw("createExecutionContext failed: the engine needs " + std::to_string(im.engine->getDeviceMemorySizeV2() >> 20) + " MiB of activations, GPU memory free " +
+              std::to_string(free >> 20) + " of " + std::to_string(total >> 20) + " MiB");
+    }
     CheckCudaRt(cudaStreamCreate(&im.stream), "cudaStreamCreate");
 
     const int n = im.engine->getNbIOTensors();
@@ -235,7 +250,10 @@ std::unique_ptr<TrtEngine> TrtEngine::FromEngineFile(const std::filesystem::path
         if (!im.context->setTensorAddress(name, b.device)) Throw("setTensorAddress failed for " + b.name);
         (b.isInput ? self->inputs_ : self->outputs_).push_back(b);
     }
-    Log()->info("TensorRT engine {}: {} inputs, {} outputs", path.filename().string(), self->inputs_.size(), self->outputs_.size());
+    const uint64_t freeAfter = DeviceMemoryInfo().first;
+    self->deviceBytes_ = freeBefore > freeAfter ? freeBefore - freeAfter : 0;
+    Log()->info("TensorRT engine {}: {} inputs, {} outputs, {} MiB of GPU memory (weights, activations, IO)", path.filename().string(),
+                self->inputs_.size(), self->outputs_.size(), self->deviceBytes_ >> 20);
     return self;
 }
 

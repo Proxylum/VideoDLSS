@@ -92,6 +92,8 @@ public:
     const RunOutcome& outcome() const { return outcome_; }  // what the run gives: size, rate, time, disk
     const SourceInfo& sourceInfo() const { return sourceInfo_; }
     QString planError() const { return planError_; }         // why there is no plan (bad parameters, no video)
+    // a stage the run would refuse although the plan exists (depth does not fit the GPU, TASK-0039): «Обработать» waits
+    QString planBlocker() const;
     QString sourceHashStatus() const;                        // «совпадает с пассами» / «N пассов от другого исходника» / «пассов нет»
     StageCardState cardState(const std::string& stage) const;
     StageEntry* stageEntry(const std::string& stage);

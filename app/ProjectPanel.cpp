@@ -62,10 +62,14 @@ QLabel* Title(const QString& text, QWidget* parent) {
 // «Интенсивность 1.4 · Стиль естественный»: the visible parameters of a pass version in the schema's words.
 QString HumanParams(const std::string& stage, const nlohmann::json& params) {
     QStringList parts;
+    const std::string backend = StageBackend(stage, params);
     if (const StageSchema* schema = FindStageSchema(stage))
         for (const auto& spec : schema->params) {
             if (spec.advanced || !params.is_object() || !params.contains(spec.key)) continue;
-            parts << QString("%1 %2").arg(QString::fromStdString(spec.label), QString::fromStdString(ParamValueLabel(spec, params[spec.key])));
+            // the card's rows of this backend only (depth.model is a list for VDA, hidden for DA3)
+            if (!spec.backends.empty() && std::find(spec.backends.begin(), spec.backends.end(), backend) == spec.backends.end()) continue;
+            if (!spec.formChoices.empty() && !FormChoicesFor(spec, backend)) continue;
+            parts << QString("%1 %2").arg(QString::fromStdString(spec.label), QString::fromStdString(ParamValueLabel(spec, params[spec.key], backend)));
         }
     return parts.join(" · ");
 }
@@ -353,7 +357,11 @@ void ProjectPanel::refresh() {
     outError_->setVisible(!model_.planError().isEmpty() && hasSource);
     const int toRun = std::max(0, out.stagesToRun - 1);  // the encode is not a «stage» for the button
     process_->setText(toRun > 0 ? tr("Обработать · %1").arg(Plural(toRun, tr("стадия"), tr("стадии"), tr("стадий"))) : tr("Обработать · только кодирование"));
-    process_->setEnabled(hasSource && model_.planError().isEmpty() && !tasks_.busy());
+    process_->setEnabled(hasSource && model_.planError().isEmpty() && model_.planBlocker().isEmpty() && !tasks_.busy());
+    if (hasSource && model_.planError().isEmpty() && !model_.planBlocker().isEmpty()) {  // a stage the run would refuse
+        outError_->setText(model_.planBlocker());
+        outError_->setVisible(true);
+    }
 
     for (StageCard* c : cards_) c->refresh();
     {

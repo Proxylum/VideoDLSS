@@ -33,8 +33,9 @@ def sha256_file(path, chunk=1 << 20):
     return h.hexdigest()
 
 
-def hf_download(repo, filename, cache_dir, log=print):
-    """Download one file from a HuggingFace repo into cache_dir (flat layout). Returns the path."""
+def hf_download(repo, filename, cache_dir, log=print, revision=None):
+    """Download one file from a HuggingFace repo into cache_dir (flat layout). Returns the path. `revision` (a commit of
+    the repo, registry `hf_revision`) pins the file to the version whose sha256 the registry records."""
     from huggingface_hub import hf_hub_download
 
     cache_dir = Path(cache_dir)
@@ -42,13 +43,42 @@ def hf_download(repo, filename, cache_dir, log=print):
     dest = cache_dir / f"{repo.replace('/', '__')}__{filename}"
     if dest.exists():
         return dest
-    log(f"downloading {repo}/{filename} ...")
-    got = hf_hub_download(repo_id=repo, filename=filename, cache_dir=str(cache_dir / "hf"), token=os.environ.get("HF_TOKEN"))
+    log(f"downloading {repo}/{filename}{' @ ' + revision[:12] if revision else ''} ...")
+    got = hf_hub_download(repo_id=repo, filename=filename, cache_dir=str(cache_dir / "hf"), token=os.environ.get("HF_TOKEN"), revision=revision)
     # copy out of the hub cache into a flat, predictable file
     import shutil
 
     shutil.copyfile(got, dest)
     return dest
+
+
+def verify_sha256(path, expected, log=print):
+    """Checks a downloaded file against the registry's sha256: a mismatch removes the file and raises; without a pinned
+    hash the hash is printed so it can be pinned. A sidecar <file>.sha256 (hash, size, mtime) skips re-hashing an
+    unchanged file - the Large VDA checkpoint is 1.5 GB and is loaded by every export and worker start."""
+    path = Path(path)
+    st = path.stat()
+    side = path.with_name(path.name + ".sha256")
+    got = ""
+    try:
+        h, size, mtime = side.read_text(encoding="utf-8").split()
+        if int(size) == st.st_size and int(mtime) == st.st_mtime_ns:
+            got = h
+    except (OSError, ValueError):
+        pass
+    if not got:
+        got = sha256_file(path)
+        try:
+            side.write_text(f"{got} {st.st_size} {st.st_mtime_ns}\n", encoding="utf-8")
+        except OSError:
+            pass
+    if expected and got != expected:
+        path.unlink()
+        side.unlink(missing_ok=True)
+        raise RuntimeError(f"{path.name}: sha256 {got} does not match the registry ({expected}); the file was removed")
+    if not expected:
+        log(f"{path.name}: sha256 {got} (not pinned in the registry yet)")
+    return got
 
 
 def download_url(url, dest, sha256="", log=print):

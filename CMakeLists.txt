@@ -248,6 +248,8 @@ if(DLSSVID_PACKAGE_FULL)
     set(_models "${CMAKE_SOURCE_DIR}/models/cache")
   endif()
   file(GLOB _onnx "${_models}/*.onnx")
+  # VDA Base and Large (TASK-0039): CC-BY-NC-4.0 (non-commercial) - not shipped, exported on the user's machine on first use
+  list(FILTER _onnx EXCLUDE REGEX "/metric-vda-(base|large)_[^/]*\\.onnx$")
   if(NOT _onnx)
     message(FATAL_ERROR "DLSSVID_PACKAGE_FULL: no ONNX models in ${_models} — run the pipeline once or set DLSSVID_PACKAGE_MODELS_CACHE")
   endif()

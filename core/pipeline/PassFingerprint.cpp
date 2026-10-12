@@ -8,7 +8,7 @@
 #include <mutex>
 
 #include "ml/ModelRegistry.h"
-#include "stages/depth/TrtDepthEstimator.h"
+#include "stages/depth/DepthModels.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "stages/flow/TrtFlowEstimator.h"
 #include "stages/nr/INrBackend.h"
@@ -129,7 +129,9 @@ ToolInfo ToolForStage(const std::string& stage, const nlohmann::json& p) {
     t.backend = Str(p, "backend", def);
     const std::string model = Str(p, "model", "");
     const std::filesystem::path dllDir = Str(p, "dll_dir", "");
-    if (stage == "depth" && (t.backend == "da3" || t.backend == "vda")) t.model = model.empty() ? TrtDepthEstimator::DefaultModel(t.backend) : model;
+    // da3 / vda / worker:vda name their model; plain `worker` (DA3) keeps an empty model as before (its fingerprints stay)
+    if (stage == "depth" && (t.backend == "da3" || t.backend == "vda" || t.backend == "worker:vda"))
+        t.model = model.empty() ? DefaultDepthModel(DepthFamilyOf(t.backend)) : model;
     else if (stage == "flow" && t.backend == "searaft") t.model = model.empty() ? TrtFlowEstimator::DefaultModel("searaft") : model;
     else if (stage == "upscale" && t.backend == "trt") t.model = model.empty() ? std::string(kTrtDefaultUpscaleModel) : model;
     else if (stage == "upscale" && t.backend == "worker") t.model = model.empty() ? std::string(kWorkerDefaultUpscaleModel) : model;

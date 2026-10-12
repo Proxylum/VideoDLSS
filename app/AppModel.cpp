@@ -490,6 +490,7 @@ void AppModel::refreshPlan() {
         o.keepVersions = project_.passVersionsKeep;
         o.forceStages = force_;
         o.sourceHash = project_.SourceHash();
+        o.vramBytes = device_ && !device_->IsWarp() ? device_->DedicatedVideoMemory() : 0;  // the VRAM advice of depth
         plan_ = PlanProcess(o);
         outcome_ = EstimateRun(plan_, o.stages, sourceInfo_);
         // the result's layout: the encoder card's choice against the codec and the source (an impossible pair is a plan error)
@@ -508,6 +509,12 @@ void AppModel::refreshPlan() {
 
 void AppModel::schedulePlan() { planTimer_.start(); }
 
+QString AppModel::planBlocker() const {
+    for (const auto& d : plan_.stages)
+        if (!d.error.empty()) return QString::fromStdString(d.error);
+    return {};
+}
+
 void AppModel::setStageEnabled(const std::string& stage, bool on) {
     if (StageEntry* e = stageEntry(stage); e && e->enabled != on) {
         e->enabled = on;
@@ -521,6 +528,8 @@ void AppModel::setStageParam(const std::string& stage, const std::string& key, c
     StageEntry* e = stageEntry(stage);
     if (!e) return;
     if (e->params.contains(key) && e->params[key] == value) return;
+    // another backend: a model from the old backend's list goes (VDA Large -> DA3 leaves no VDA model in the project)
+    if (key == "backend" && value.is_string()) e->params = ParamsForBackendChange(stage, e->params, value.get<std::string>());
     e->params[key] = value;
     markDirty();
     emit projectChanged();
@@ -665,8 +674,12 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
                     const ParamSpec* spec = schema ? schema->Find(key) : nullptr;
                     const QString label = spec ? QString::fromStdString(spec->label) : QString::fromStdString(key);
                     const nlohmann::json o = pair.is_array() && pair.size() > 0 ? pair[0] : nlohmann::json(), n = pair.is_array() && pair.size() > 1 ? pair[1] : nlohmann::json();
-                    parts << QString("%1 %2 → %3").arg(label, spec ? QString::fromStdString(ParamValueLabel(*spec, o)) : QString::fromStdString(o.dump()),
-                                                          spec ? QString::fromStdString(ParamValueLabel(*spec, n)) : QString::fromStdString(n.dump()));
+                    // labels of the backend each value belongs to (depth.model: «Small» of VDA, a raw id of DA3)
+                    const std::string newBackend = StageBackend(stage, d->params);
+                    const nlohmann::json& bd = d->diff["params"].contains("backend") ? d->diff["params"]["backend"] : nlohmann::json();
+                    const std::string oldBackend = bd.is_array() && !bd.empty() && bd[0].is_string() ? bd[0].get<std::string>() : newBackend;
+                    parts << QString("%1 %2 → %3").arg(label, spec ? QString::fromStdString(ParamValueLabel(*spec, o, oldBackend)) : QString::fromStdString(o.dump()),
+                                                          spec ? QString::fromStdString(ParamValueLabel(*spec, n, newBackend)) : QString::fromStdString(n.dump()));
                 }
             st.state = tr("пересчёт: %1").arg(parts.isEmpty() ? QString::fromStdString(d->detail) : parts.join(", "));
         } else if (d->kind == "input_changed") {
@@ -697,6 +710,13 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
         for (const auto& g : schema->guides) any = any || d->inputs.count(g) > 0;
         if (!any) st.warning = tr("без глубины и векторов: качество ниже");
     }
+    // the advice of the plan (TASK-0039, depth): licence, VRAM; an error blocks «Обработать»
+    QStringList warn;
+    if (!st.warning.isEmpty()) warn << st.warning;
+    if (!d->error.empty()) warn << QString::fromStdString(d->error);
+    for (const auto& w : d->warnings) warn << QString::fromStdString(w);
+    st.warning = warn.join("\n");
+    if (st.runs && !d->info.empty()) st.sub = st.sub.isEmpty() ? QString::fromStdString(d->info) : st.sub + " · " + QString::fromStdString(d->info);
     return st;
 }
 

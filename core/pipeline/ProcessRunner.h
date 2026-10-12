@@ -52,6 +52,8 @@ struct ProcessOptions {
     int keepVersions = 2;              // pass versions kept per pass after the run, the current one included; 0 = keep all
     std::set<std::string> forceStages;  // recompute these stages even when their pass matches (a per-stage --no-skip-existing)
     std::string sourceHash;             // "sha256:<hex>" of the input when the caller knows it (Project::SourceHash); empty = hash the file
+    uint64_t vramBytes = 0;             // GPU memory for the VRAM advice of the plan (TASK-0039); 0: RunProcess takes the device's, a
+                                        // plan without it has no VRAM error (WARP, unknown)
     std::function<void(const std::string& stage, int64_t done, int64_t total)> progress;
     std::filesystem::path fgExecutable;  // dlssvid.exe: FG runs as `<exe> fg --as-stage` (its crash ends only that process); empty: in this process
     int64_t fgCrashAfter = -1;           // test hooks of the fg process (isolation tests): die after N real frames,
@@ -109,6 +111,11 @@ struct StageDecision {
     nlohmann::json params = nlohmann::json::object();   // canonical parameters the fingerprint hashed
     std::map<std::string, std::string> inputs;          // input pass -> fingerprint the fingerprint hashed
     nlohmann::json tool = nlohmann::json::object();     // ToolInfo::ToJson()
+    // advice (TASK-0039, depth): licence and VRAM warnings, «≈ 5.2 ГБ видеопамяти из 16», and an error when a run does
+    // not fit the GPU - a run with an error is refused before anything is retired (a reuse or a restore never errs)
+    std::vector<std::string> warnings;
+    std::string info;
+    std::string error;
     nlohmann::json ToJson() const;
 };
 

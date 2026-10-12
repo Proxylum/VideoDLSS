@@ -23,6 +23,8 @@
 #include "passes/PassSequence.h"
 #include "pipeline/Pipeline.h"
 #include "ml/ModelRegistry.h"
+#include "stages/depth/DepthModels.h"
+#include "stages/depth/DepthPreprocess.h"
 #include "stages/depth/DepthStage.h"
 #include "stages/flow/FlowStage.h"
 #include "util/Error.h"
@@ -178,6 +180,7 @@ struct DepthArgs {
     std::string input, output;
     std::string backend = "da3";
     std::string model;
+    int window = 0;  // VDA: frames per window, 0 = the registry's
     int inputSize = 518;
     int maxRes = 1080;
     bool fp32 = false;
@@ -195,11 +198,16 @@ struct DepthArgs {
 };
 
 int CmdDepth(const DepthArgs& a) {
+    // the model first (TASK-0039): an unknown or foreign id, a bad window - before the decoder and the source hash
+    const DepthModelChoice choice = ResolveDepthModel(a.modelsDir, a.backend, a.model, a.window, a.backend == "worker:vda");
+    if (!choice.family.empty())
+        Log()->info("depth: model {} ({}), window {} / overlap {}", choice.modelId, choice.license, choice.window, choice.overlap);
     VideoDecoder decoder(a.input);
     const auto& info = decoder.Info();
     DepthStageOptions o;
     o.backend = a.backend;
     o.estimator.modelId = a.model;
+    o.estimator.window = choice.family == "vda" ? a.window : 0;
     o.estimator.inputSize = a.inputSize;
     o.estimator.maxInputRes = a.maxRes;
     o.estimator.fp16 = !a.fp32;
@@ -224,6 +232,14 @@ int CmdDepth(const DepthArgs& a) {
     };
 
     D3D12Device device({a.warp, false});
+    {  // licence and VRAM, as the plan of `process` says them («Запустить этап» of the GUI runs this command)
+        const ModelInputSize in = ComputeModelInputSize(info.width, info.height, EffectiveDepthInputSize(choice, a.inputSize));
+        const DepthAdvice advice = AdviseDepth(choice, EstimateDepthVramMiB(choice, a.backend == "worker:vda", in.width, in.height, !a.fp32),
+                                               device.IsWarp() ? 0 : device.DedicatedVideoMemory(), in.width, in.height);
+        for (const auto& w : advice.warnings) Log()->warn("{}", w);
+        if (!advice.info.empty()) Log()->info("depth: {}", advice.info);
+        if (!advice.error.empty()) Throw("depth: " + advice.error);
+    }
     const auto t0 = std::chrono::steady_clock::now();
     const DepthRunResult r = RunDepth(decoder, device, o, a.frames, [total](int64_t n) { PrintProgress(n, total); });
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -714,7 +730,10 @@ int main(int argc, char** argv) {
     depth->add_option("-i,--input", da.input, "input video file")->required()->check(CLI::ExistingFile);
     depth->add_option("-o,--output", da.output, "pass root folder (writes depth_raw/ and depth_dlss/)")->required();
     depth->add_option("--backend", da.backend, "da3 | vda | worker | worker:da3 | worker:vda | worker:icdepth | stub")->default_val("da3");
-    depth->add_option("--model", da.model, "registry model id (default per backend)");
+    depth->add_option("--model", da.model,
+                      "registry id; vda: metric-vda-small (default) | metric-vda-base | metric-vda-large (CC-BY-NC-4.0) | vda-small; "
+                      "da3: da3metric-large (default) | da3mono-large");
+    depth->add_option("--window", da.window, "VDA: frames per window, a multiple of 4 above 4 (0 = the registry's: 32)")->check(CLI::Range(0, 32));
     depth->add_option("--input-size,--input_size", da.inputSize, "model input on the shorter side (multiple of 14)")->default_val(518);
     depth->add_option("--max-res,--max_res", da.maxRes, "downscale frames above this shorter side before the model")->default_val(1080);
     depth->add_flag("--fp32", da.fp32, "build/run the model in fp32");

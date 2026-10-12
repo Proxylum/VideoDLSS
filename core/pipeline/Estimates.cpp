@@ -14,9 +14,17 @@ namespace {
 
 constexpr double kReferenceMegapixels = 1920.0 * 800.0 / 1e6;  // the face clip of docs/benchmarks.md
 constexpr double kReferenceOutputMegapixels = 3840.0 * 1600.0 / 1e6;
+constexpr double kVdaBaseMs = 330.0;   // preliminary until the TASK-0039 measurement
+constexpr double kVdaLargeMs = 450.0;  // preliminary until the TASK-0039 measurement
 
-double Baseline(const std::string& stage, const std::string& backend) {
-    if (stage == "depth") return backend == "vda" ? 300.0 : backend == "worker" ? 600.0 : backend == "stub" ? 5.0 : 350.0;
+double Baseline(const std::string& stage, const std::string& backend, const std::string& model) {
+    if (stage == "depth") {
+        // VDA by model: Small measured (docs/benchmarks.md); Base and Large - TASK-0039 measurement on the reference GPU
+        const double vda = model == "metric-vda-large" ? kVdaLargeMs : model == "metric-vda-base" ? kVdaBaseMs : 300.0;
+        if (backend == "vda") return vda;
+        if (backend == "worker:vda") return vda * 2.3;  // PyTorch fp16 against TensorRT
+        return backend == "worker" ? 600.0 : backend == "stub" ? 5.0 : 350.0;
+    }
     if (stage == "flow") return backend == "searaft" ? 580.0 : backend == "stub" ? 5.0 : 500.0;
     if (stage == "upscale") return backend == "nis" ? 260.0 : backend == "bicubic" ? 250.0 : backend == "trt" ? 900.0 : backend == "worker" ? 1500.0 : 420.0;
     if (stage == "nr") return backend == "stub" ? 30.0 : 480.0;
@@ -32,19 +40,26 @@ double Scale(const nlohmann::json& p) {
 
 }  // namespace
 
-double BaselineMsPerFrame(const std::string& stage, const std::string& backend, double sourceMegapixels) {
+double BaselineMsPerFrame(const std::string& stage, const std::string& backend, double sourceMegapixels, const std::string& model) {
     const double ref = stage == "encode" ? kReferenceOutputMegapixels : kReferenceMegapixels;
     const double factor = sourceMegapixels > 0 ? sourceMegapixels / ref : 1.0;
-    return Baseline(stage, backend) * factor;
+    return Baseline(stage, backend, model) * factor;
 }
 
-std::optional<double> RecordedMsPerFrame(const std::filesystem::path& passesRoot, const std::string& stage) {
+std::optional<double> RecordedMsPerFrame(const std::filesystem::path& passesRoot, const std::string& stage, const nlohmann::json& tool) {
     const auto& family = StageFamilyPasses(stage);
     for (auto it = family.rbegin(); it != family.rend(); ++it) {
         const auto dir = passesRoot / *it;
         if (!Manifest::Exists(dir)) continue;
         try {
             const Manifest m = Manifest::Load(dir);
+            bool other = false;
+            for (const char* field : {"backend", "model"}) {
+                const std::string want = tool.is_object() ? tool.value(field, std::string()) : std::string();
+                const std::string made = m.tool.is_object() ? m.tool.value(field, std::string()) : std::string();
+                other = other || (!want.empty() && !made.empty() && want != made);
+            }
+            if (other) continue;  // another backend / model: its time says nothing about this one
             if (m.stageParams.contains("ms_per_frame") && m.stageParams["ms_per_frame"].is_number()) {
                 const double ms = m.stageParams["ms_per_frame"].get<double>();
                 if (ms > 0) return ms;
@@ -96,11 +111,11 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
         e.action = d.action;
         const nlohmann::json p = EffectiveStageParams(d.name, d.params);
         const std::string backend = p.value("backend", std::string());
-        if (const auto recorded = RecordedMsPerFrame(plan.passesRoot, d.name)) {
+        if (const auto recorded = RecordedMsPerFrame(plan.passesRoot, d.name, d.tool)) {
             e.msPerFrame = *recorded;
             e.recorded = true;
         } else {
-            e.msPerFrame = BaselineMsPerFrame(d.name, backend, megapixels);
+            e.msPerFrame = BaselineMsPerFrame(d.name, backend, megapixels, d.tool.is_object() ? d.tool.value("model", std::string()) : std::string());
         }
         e.frames = d.name == "fg" ? FgFrameCount(frames, multiplier) : frames;
         const double seconds = e.msPerFrame * static_cast<double>(frames) / 1000.0;  // the baselines are per source frame

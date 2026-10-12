@@ -11,6 +11,7 @@
 #include "io/OutputFormat.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/ProcessRunner.h"
+#include "stages/ParamSchema.h"
 #include "stages/nr/INrBackend.h"
 #include "util/Error.h"
 #include "util/Log.h"
@@ -78,6 +79,8 @@ void BuildStages(const std::string& projectFile, const std::string& stageList, c
     auto alias = [&](const std::string& stage, const std::string& key, const nlohmann::json& value) {
         for (auto& s : o.stages)
             if (s.name == stage) {
+                // another backend: a model from the old backend's list goes (a project with VDA Large + --depth-backend da3)
+                if (key == "backend" && value.is_string()) s.params = ParamsForBackendChange(stage, s.params, value.get<std::string>());
                 s.params[key] = value;
                 return;
             }
@@ -99,6 +102,11 @@ void PrintPlan(const ProcessPlan& p) {
         const std::string onDisk = !s.current ? "-" : s.currentFingerprint.empty() ? "legacy" : ShortFingerprint(s.currentFingerprint);
         std::printf("%-10s %-8s %-9s %-9s  %s%s%s\n", s.name.c_str(), s.action.c_str(), ShortFingerprint(s.fingerprint).c_str(), onDisk.c_str(), s.kind.c_str(),
                     s.detail.empty() ? "" : ": ", s.detail.c_str());
+    }
+    for (const auto& s : p.stages) {  // the advice of the stages (TASK-0039: licence, VRAM)
+        for (const auto& w : s.warnings) std::printf("warning: %s: %s\n", s.name.c_str(), w.c_str());
+        if (!s.info.empty()) std::printf("note: %s: %s\n", s.name.c_str(), s.info.c_str());
+        if (!s.error.empty()) std::printf("error: %s: %s\n", s.name.c_str(), s.error.c_str());
     }
     std::printf("plan: %d stage(s) to run, %d reused; result from %s; passes in %s\n", p.runCount, p.reuseCount,
                 p.finalPass.empty() ? "the source (passthrough)" : p.finalPass.c_str(), p.passesRoot.string().c_str());
@@ -162,9 +170,15 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     o.fgCrashOnExit = a.fgCrashOnExit;
     o.fgStall = a.fgStall;
     if (a.plan) {
+        {  // the VRAM advice needs the GPU's memory, as RunProcess has it
+            D3D12Device device({o.warp, false});
+            o.vramBytes = device.IsWarp() ? 0 : device.DedicatedVideoMemory();
+        }
         const ProcessPlan plan = PlanProcess(o);
         PrintPlan(plan);
         if (!a.json.empty()) std::ofstream(a.json) << DumpJson(plan.ToJson()) << "\n";
+        for (const auto& s : plan.stages)
+            if (!s.error.empty()) return 1;  // the run would be refused
         return 0;
     }
     const ProcessResult r = RunProcess(o);
@@ -224,7 +238,7 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_option("--project", pa_.project, "*.dlssvid.json: stages and their parameters as the GUI saved them")->check(CLI::ExistingFile);
     process_->add_option("--stages", pa_.stages, "comma list of stages to run (depth,flow,upscale,nr,fg); default: the project's enabled stages");
     process_->add_option("--param", pa_.params, "stage parameter stage.key=value (repeatable), e.g. nr.intensity=1.2, fg.backend=rife");
-    process_->add_option("--depth-backend,--depth_backend", pa_.depthBackend, "da3 | vda | worker | stub");
+    process_->add_option("--depth-backend,--depth_backend", pa_.depthBackend, "da3 | vda | worker | worker:vda | stub");
     process_->add_option("--flow-backend,--flow_backend", pa_.flowBackend, "ofa | searaft | stub");
     process_->add_option("--upscale-backend,--upscale_backend", pa_.upscaleBackend, "dlss | nis | bicubic | trt | worker");
     process_->add_option("--nr-backend,--nr_backend", pa_.nrBackend, "ngx | stub");

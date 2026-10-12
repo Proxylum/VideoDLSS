@@ -140,3 +140,47 @@ TEST_CASE("EffectiveStageParams keeps backend-scoped parameters for their backen
     CHECK(worker["models_dir"] == "");
     CHECK(s->Find("backend")->backends.empty());
 }
+
+// TASK-0039: the form lists the VDA models for vda and worker:vda; the key, its default and the window keep every
+// fingerprint made before (the literals are EffectiveStageParams of main before the change).
+TEST_CASE("Depth model: VDA lists Small / Base / Large for vda and worker:vda, the defaults and the fingerprints stay", "[unit][schema]") {
+    const StageSchema& depth = *FindStageSchema("depth");
+    const ParamSpec& model = *depth.Find("model");
+    const auto* vda = FormChoicesFor(model, "vda");
+    REQUIRE(vda != nullptr);
+    REQUIRE(vda->size() == 3);
+    CHECK((*vda)[0].value.empty());
+    CHECK((*vda)[1].value == "metric-vda-base");
+    CHECK((*vda)[2].value == "metric-vda-large");
+    CHECK(FormChoicesFor(model, "worker:vda") != nullptr);
+    CHECK(FormChoicesFor(model, "da3") == nullptr);
+    CHECK(ParamValueLabel(model, "metric-vda-large", "vda").find("CC-BY-NC-4.0") != std::string::npos);
+    CHECK(ParamValueLabel(model, "", "vda").rfind("Small", 0) == 0);
+    CHECK(ParamValueLabel(model, "da3mono-large", "da3") == "da3mono-large");
+    CHECK(ParamValueLabel(*depth.Find("window"), nlohmann::json(), "vda") == "по умолчанию");
+    CHECK(ValidateStageParams("depth", {{"backend", "worker:vda"}}).empty());
+    CHECK(ValidateStageParams("depth", {{"backend", "vda"}, {"window", 40}}).size() == 1);
+
+    const nlohmann::json before = {{"backend", "vda"}, {"format", "exr"},   {"fp32", false}, {"input_size", 518}, {"max_res", 1080},
+                                   {"model", ""},      {"models_dir", ""}, {"no_dlss", false}, {"no_fill", false}, {"python", ""},
+                                   {"stabilize", "auto"}, {"stabilize_window", 8}, {"z_far", 1000.0}, {"z_near", 0.1}};
+    CHECK(EffectiveStageParams("depth", {{"backend", "vda"}}) == before);  // no window key: VDA-Small passes are reused
+    nlohmann::json da3 = before;
+    da3["backend"] = "da3";
+    CHECK(EffectiveStageParams("depth", {{"backend", "da3"}}) == da3);
+    CHECK(EffectiveStageParams("depth", {{"backend", "vda"}, {"window", 0}}) == before);  // 0 = the registry's: the same run
+    CHECK(EffectiveStageParams("depth", {{"backend", "vda"}, {"window", 16}})["window"] == 16);
+    CHECK(!EffectiveStageParams("depth", {{"backend", "da3"}, {"window", 16}}).contains("window"));
+}
+
+TEST_CASE("ParamsForBackendChange drops a model of the previous backend's list", "[unit][schema]") {
+    const nlohmann::json large = {{"backend", "vda"}, {"model", "metric-vda-large"}, {"window", 16}};
+    CHECK(!ParamsForBackendChange("depth", large, "da3").contains("model"));          // a VDA model means nothing to DA3
+    CHECK(ParamsForBackendChange("depth", large, "worker:vda")["model"] == "metric-vda-large");  // the same list
+    CHECK(ParamsForBackendChange("depth", large, "da3")["window"] == 16);  // kept: OnlyFor drops it from the run
+    CHECK(!ParamsForBackendChange("depth", {{"backend", "da3"}, {"model", "da3mono-large"}}, "vda").contains("model"));
+    CHECK(ParamsForBackendChange("depth", {{"backend", "vda"}, {"model", ""}}, "da3")["model"] == "");
+    CHECK(ParamsForBackendChange("depth", {{"backend", "da3"}, {"model", "da3mono-large"}}, "stub")["model"] == "da3mono-large");
+    CHECK(StageBackend("depth", nlohmann::json::object()) == "da3");
+    CHECK(StageBackend("depth", {{"backend", "vda"}}) == "vda");
+}

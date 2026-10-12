@@ -17,6 +17,9 @@
 #include "pipeline/PassVersions.h"
 #include "pipeline/Pipeline.h"
 #include "stages/ParamSchema.h"
+#include "ml/ModelRegistry.h"
+#include "stages/depth/DepthModels.h"
+#include "stages/depth/DepthPreprocess.h"
 #include "stages/depth/DepthStage.h"
 #include "stages/fg/FgStage.h"
 #include "stages/flow/FlowStage.h"
@@ -67,6 +70,8 @@ DepthStageOptions DepthOptions(const nlohmann::json& p, const std::filesystem::p
     o.estimator.fp16 = !Get<bool>(p, "fp32", false);
     o.estimator.modelsDir = Get<std::string>(p, "models_dir", "");
     if (p.contains("python")) o.estimator.extra["python"] = p["python"];
+    // a project keeps depth.window after a switch from VDA: only a VDA backend reads it (the plan's parameters drop it too)
+    o.estimator.window = DepthFamilyOf(o.backend) == "vda" ? Get<int>(p, "window", 0) : 0;
     o.outputDir = passesRoot;
     o.writeDlss = !Get<bool>(p, "no_dlss", false);
     o.dlss.zNear = Get<float>(p, "z_near", 0.1f);
@@ -117,6 +122,8 @@ struct RunContext {
     std::string sourceHash;
     std::string sourceFormat;  // the layout the source decodes into (FrameDesc::Name()): part of the fingerprints
     int64_t needed = -1;  // source frames the run covers (-1: unknown)
+    uint32_t sourceWidth = 0, sourceHeight = 0;  // the model input of depth follows from them (VRAM advice)
+    uint64_t vramBytes = 0;                      // 0: unknown, no VRAM error
     bool skipExisting = true;
     std::set<std::string> force;  // stages recomputed on request
 };
@@ -391,6 +398,25 @@ Prepared Prepare(const ProcessOptions& options) {
     std::vector<std::string> problems;
     for (const auto& [name, s] : r.wanted)
         for (const auto& p : ValidateStageParams(name, s.params)) problems.push_back(p);
+    // the depth model against the registry (TASK-0039): a foreign or unknown id, a bad window - before anything runs
+    if (const auto it = r.wanted.find("depth"); it != r.wanted.end() && problems.empty()) {
+        const nlohmann::json p = EffectiveStageParams("depth", it->second.params);
+        const std::string backend = Get<std::string>(p, "backend", "da3");
+        if (!DepthFamilyOf(backend).empty()) {
+            std::optional<ModelRegistry> registry;
+            try {
+                registry.emplace(ModelRegistry::Load(DepthRegistryPath(Get<std::string>(p, "models_dir", ""))));
+            } catch (const std::exception&) {  // no registry here: the estimator checks the model when it runs
+            }
+            if (registry) {
+                try {
+                    ResolveDepthModel(*registry, backend, Get<std::string>(p, "model", ""), Get<int>(p, "window", 0), backend == "worker:vda");
+                } catch (const std::exception& e) {
+                    problems.push_back(e.what());
+                }
+            }
+        }
+    }
     if (!problems.empty()) Throw("process: " + Join(problems));
     for (const auto& f : options.forceStages)
         if (std::find(ProcessStageOrder().begin(), ProcessStageOrder().end(), f) == ProcessStageOrder().end())
@@ -398,7 +424,30 @@ Prepared Prepare(const ProcessOptions& options) {
     r.sourceFile = options.input.filename().string();
     r.ctx.sourceHash = options.sourceHash.rfind("sha256:", 0) == 0 ? options.sourceHash : "sha256:" + Sha256FileCached(options.input);
     r.ctx.sourceFormat = r.info.decoded.Name();
+    r.ctx.sourceWidth = r.info.width;
+    r.ctx.sourceHeight = r.info.height;
+    r.ctx.vramBytes = options.vramBytes;
     return r;
+}
+
+// Licence and VRAM advice of a depth decision (TASK-0039). An error only for a run: a reused or restored pass needs no GPU.
+void AdviseStage(const RunContext& ctx, StageDecision& d) {
+    if (d.name != "depth") return;
+    const std::string backend = Get<std::string>(d.params, "backend", "da3");
+    if (DepthFamilyOf(backend).empty()) return;
+    DepthModelChoice choice;
+    try {
+        choice = ResolveDepthModel(Get<std::string>(d.params, "models_dir", ""), backend, Get<std::string>(d.params, "model", ""),
+                                   Get<int>(d.params, "window", 0), backend == "worker:vda");
+    } catch (const std::exception&) {  // no registry: nothing to advise (a bad model was refused by Prepare)
+        return;
+    }
+    const ModelInputSize in = ComputeModelInputSize(ctx.sourceWidth, ctx.sourceHeight, EffectiveDepthInputSize(choice, Get<int>(d.params, "input_size", 518)));
+    const auto need = EstimateDepthVramMiB(choice, backend == "worker:vda", in.width, in.height, !Get<bool>(d.params, "fp32", false));
+    DepthAdvice a = AdviseDepth(choice, need, ctx.vramBytes, in.width, in.height);
+    d.warnings = std::move(a.warnings);
+    d.info = std::move(a.info);
+    if (d.action == "run") d.error = std::move(a.error);
 }
 
 std::string ProjectedFinalPass(const PlanState& s) {
@@ -427,7 +476,8 @@ nlohmann::json ProcessResult::ToJson() const {
 nlohmann::json StageDecision::ToJson() const {
     return {{"name", name},       {"action", action},   {"kind", kind},         {"detail", detail},   {"diff", diff},
             {"fingerprint", fingerprint}, {"source_format", sourceFormat}, {"current", current}, {"current_fingerprint", currentFingerprint}, {"version", version},
-            {"outputs", outputs}, {"out_dir", outDir.string()}, {"frames", frames}, {"retire", retire}, {"params", params}, {"inputs", inputs}, {"tool", tool}};
+            {"outputs", outputs}, {"out_dir", outDir.string()}, {"frames", frames}, {"retire", retire}, {"params", params}, {"inputs", inputs}, {"tool", tool},
+            {"warnings", warnings}, {"info", info}, {"error", error}};
 }
 
 nlohmann::json ProcessPlan::ToJson() const {
@@ -469,6 +519,8 @@ void ApplyParamSpec(std::vector<ProcessStage>& stages, const std::string& spec) 
     }
     for (auto& s : stages)
         if (s.name == stage) {
+            // another backend: a model from the old backend's list goes (vda + metric-vda-large -> da3)
+            if (key == "backend" && v.is_string()) s.params = ParamsForBackendChange(stage, s.params, v.get<std::string>());
             s.params[key] = v;
             s.enabled = true;
             return;
@@ -577,6 +629,7 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
         const auto it = pr.wanted.find(name);
         if (it == pr.wanted.end()) continue;
         StageDecision d = DecideStage(pr.ctx, it->second, state);
+        AdviseStage(pr.ctx, d);
         Advance(state, d);
         (d.action == "run" ? plan.runCount : plan.reuseCount)++;
         plan.stages.push_back(std::move(d));
@@ -650,13 +703,14 @@ ProcessResult RunProcess(const ProcessOptions& options) {
     }
 
     // ---- stages over the pass cache ----
-    const Prepared pr = Prepare(options);
+    Prepared pr = Prepare(options);
+    D3D12Device device({options.warp, false});
+    if (!pr.ctx.vramBytes && !device.IsWarp()) pr.ctx.vramBytes = device.DedicatedVideoMemory();
     const RunContext& ctx = pr.ctx;
     const std::filesystem::path& root = ctx.root;
     std::filesystem::create_directories(root);
     const std::string& sourceFile = pr.sourceFile;
     const std::string& sourceHash = ctx.sourceHash;
-    D3D12Device device({options.warp, false});
     auto progressFor = [&](const std::string& stage) {
         return [&, stage](int64_t n) {
             if (options.progress) options.progress(stage, n, needed);
@@ -672,7 +726,13 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         if (it == pr.wanted.end()) continue;
         const nlohmann::json& p = it->second.params;
         RefreshFromDisk(state, root);  // the decision looks at what is really on disk now (a stage may have been disabled)
-        const StageDecision d = DecideStage(ctx, it->second, state);
+        StageDecision d = DecideStage(ctx, it->second, state);
+        AdviseStage(ctx, d);
+        if (!d.error.empty()) Throw("process: " + d.error);  // before anything is retired
+        for (const auto& w : d.warnings) {
+            Log()->warn("process: {}", w);
+            result.warnings.push_back(w);
+        }
         ProcessStageReport rep;
         rep.name = name;
         rep.decision = d.ToJson();
