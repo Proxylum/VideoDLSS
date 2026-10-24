@@ -23,13 +23,15 @@ using namespace dlssvid::test;
 #ifdef DLSSVID_WITH_CUDA
 
 namespace {
-std::filesystem::path H264Clip() {
+// One clip per test case: ctest runs the cases as parallel processes, and a shared gpu_src.mp4 rewritten by one was
+// read half-written by another ("avformat_open_input failed: Invalid data found when processing input").
+std::filesystem::path H264Clip(const std::string& name) {
     ClipSpec spec;
     spec.frames = 12;
     spec.width = 320;
     spec.height = 192;
-    const auto src = WriteClip(TempDir() / "gpu_src.mkv", spec);
-    const auto h264 = TempDir() / "gpu_src.mp4";
+    const auto src = WriteClip(TempDir() / (name + ".mkv"), spec);
+    const auto h264 = TempDir() / (name + ".mp4");
     VideoDecoder decoder(src);
     VideoEncoder::Options eopt;
     eopt.codec = "h264_nvenc";
@@ -53,7 +55,7 @@ TEST_CASE("GPU frames from NVDEC match the CPU decode and reach D3D12 without a 
     std::string reason;
     if (dev.IsWarp() || !dev.IsNvidia() || !CudaInterop::Available(&reason)) SKIP("no NVIDIA GPU / CUDA: " << reason);
     if (!VideoEncoder::EncoderAvailable("h264_nvenc")) SKIP("h264_nvenc unavailable");
-    const auto clip = H264Clip();
+    const auto clip = H264Clip("gpu_src_frames");
 
     VideoDecoder hw(clip, VideoDecoder::Options{HwAccel::Cuda});
     if (!hw.UsingHwAccel()) SKIP("CUDA hwaccel not available");
@@ -110,7 +112,7 @@ TEST_CASE("NVDEC still opens after the CUDA runtime created the primary context 
     std::string reason;
     if (dev.IsWarp() || !dev.IsNvidia() || !CudaInterop::Available(&reason)) SKIP("no NVIDIA GPU / CUDA: " << reason);
     if (!VideoEncoder::EncoderAvailable("h264_nvenc")) SKIP("h264_nvenc unavailable");
-    const auto clip = H264Clip();
+    const auto clip = H264Clip("gpu_src_flags");
     // what a stage before the decoder does: the primary context comes up with a scheduling FFmpeg does not want
     REQUIRE(cudaSetDeviceFlags(cudaDeviceScheduleSpin) == cudaSuccess);
     REQUIRE(cudaFree(nullptr) == cudaSuccess);
