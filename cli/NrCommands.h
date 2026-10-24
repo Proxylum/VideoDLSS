@@ -29,7 +29,7 @@ public:
         bool noGuides = false;
         float temporal = 0.f, temporalThreshold = 0.1f, skinBlend = 1.f;
         std::string tonemap = "passthrough", inputTransfer = "srgb";
-        float exposure = 1.f;
+        float exposure = 0.f;  // EV
         std::string format = "exr", video, codec = "h264_nvenc";
         int64_t frames = -1;
         bool warp = false;

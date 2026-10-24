@@ -39,33 +39,35 @@ NrStage::NrStage(NrStageOptions options, std::vector<std::unique_ptr<INrBackend>
 
 NrStage::~NrStage() { Shutdown(); }
 
-void NrStage::ApplyParams(const nlohmann::json& p) {
+void NrStage::ApplyParams(const nlohmann::json& p) { ApplyNrParams(p, options_); }
+
+void ApplyNrParams(const nlohmann::json& p, NrStageOptions& o) {
     // The same keys the GUI stores in the project (stage params -> CLI options).
     auto get = [&](const char* a, const char* b, auto& dst) {
         using T = std::decay_t<decltype(dst)>;
         if (p.contains(a)) dst = p[a].get<T>();
         else if (b && p.contains(b)) dst = p[b].get<T>();
     };
-    get("backend", nullptr, options_.backend);
-    get("intensity", nullptr, options_.intensity);
-    get("style", nullptr, options_.style);
-    get("preset", nullptr, options_.preset);
-    get("local_tone", "local-tone", options_.localTone);
-    get("local_structure", "local-structure", options_.localStructure);
-    get("skin_structure", "skin-structure", options_.skinStructure);
-    get("auto_mask", "auto-mask", options_.autoMask);
-    get("passes", nullptr, options_.passes);
-    get("model_scale", "model-scale", options_.modelScale);
-    get("transfer", nullptr, options_.transfer);
-    get("max_ratio", "max-ratio", options_.maxRatio);
-    get("temporal", nullptr, options_.temporal);
-    get("temporal_threshold", "temporal-threshold", options_.temporalThreshold);
-    get("skin_blend", "skin-blend", options_.skinBlend);
-    get("tonemap", nullptr, options_.tonemap.curve);
-    get("exposure", nullptr, options_.tonemap.exposure);
-    get("input_transfer", "input-transfer", options_.tonemap.inputTransfer);
-    if (p.contains("no_guides") || p.contains("no-guides")) options_.useGuides = !(p.contains("no_guides") ? p["no_guides"].get<bool>() : p["no-guides"].get<bool>());
-    if (p.contains("guides")) options_.useGuides = p["guides"].get<bool>();
+    get("backend", nullptr, o.backend);
+    get("intensity", nullptr, o.intensity);
+    get("style", nullptr, o.style);
+    get("preset", nullptr, o.preset);
+    get("local_tone", "local-tone", o.localTone);
+    get("local_structure", "local-structure", o.localStructure);
+    get("skin_structure", "skin-structure", o.skinStructure);
+    get("auto_mask", "auto-mask", o.autoMask);
+    get("passes", nullptr, o.passes);
+    get("model_scale", "model-scale", o.modelScale);
+    get("transfer", nullptr, o.transfer);
+    get("max_ratio", "max-ratio", o.maxRatio);
+    get("temporal", nullptr, o.temporal);
+    get("temporal_threshold", "temporal-threshold", o.temporalThreshold);
+    get("skin_blend", "skin-blend", o.skinBlend);
+    get("tonemap", nullptr, o.tonemap.curve);
+    get("exposure", nullptr, o.tonemap.exposureEv);  // stops (TASK-0043)
+    get("input_transfer", "input-transfer", o.tonemap.inputTransfer);
+    if (p.contains("no_guides") || p.contains("no-guides")) o.useGuides = !(p.contains("no_guides") ? p["no_guides"].get<bool>() : p["no-guides"].get<bool>());
+    if (p.contains("guides")) o.useGuides = p["guides"].get<bool>();
 }
 
 void NrStage::Init(const StageConfig& config, D3D12Device& device) {
@@ -201,7 +203,7 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["transfer"] = options_.transfer;
         m.stageParams["temporal"] = options_.temporal;
         m.stageParams["skin_blend"] = options_.skinBlend;
-        m.stageParams["tonemap"] = {{"curve", options_.tonemap.curve}, {"input_transfer", options_.tonemap.inputTransfer}, {"exposure", options_.tonemap.exposure}};
+        m.stageParams["tonemap"] = {{"curve", options_.tonemap.curve}, {"input_transfer", options_.tonemap.inputTransfer}, {"exposure_ev", options_.tonemap.exposureEv}};
         m.stageParams["guides"] = options_.useGuides;
         m.stageParams["masks"] = stats_.masks;
         writer_ = std::make_unique<PassWriter>(OutDir(), m);

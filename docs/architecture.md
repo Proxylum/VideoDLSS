@@ -399,7 +399,8 @@ NrStage ── цвет: color_sr (папка / слот кэша) или дек
 INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминированная правка для тестов, только явно)
 ```
 
-- `Tonemapper` (`Tonemap.hlsl`): вход `srgb | linear | pq | hlg`, экспозиция, кривая `passthrough | aces | reinhard`, выход
+- `Tonemapper` (`Tonemap.hlsl`): вход `srgb | linear | pq | hlg`, экспозиция в ступенях EV (`nr.exposure`, свет × 2^EV; до
+  TASK-0043 — линейный множитель), кривая `passthrough | aces | reinhard`, выход
   display-referred sRGB [0, 1] — то, что принимает модель (ComfyUI подаёт clamp [0,1]). Для SDR-источников по умолчанию
   passthrough (точная копия); PQ/HLG ждут 10-битного декодера. CPU-эталон `TonemapReference` — для тестов.
 - `NgxNrBackend` — Feature 18 по образцу ComfyUI-DLSS5-NR (последовательность вызовов) и OptiScaler_DLSSNR (имена параметров):

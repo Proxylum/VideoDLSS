@@ -127,6 +127,11 @@ TEST_CASE("ToolInfo JSON round trip and ToolForStage from parameters", "[unit][f
         CHECK(ToolForStage(stage, {{"format", "png"}}).app == std::string(kPassToolVersion) + "+png.2");
         CHECK(ToolForStage(stage, {{"format", "exr"}}).app == kPassToolVersion);
     }
+    // TASK-0043: nr.exposure in stops - {"exposure": 1} made with the old multiplier was the identity, now it is +1 EV
+    CHECK(ToolForStage("nr", {{"exposure", 0.0}}).app == kPassToolVersion);
+    CHECK(ToolForStage("nr", {{"exposure", 1.0}}).app == std::string(kPassToolVersion) + "+nr.ev");
+    CHECK(ToolForStage("nr", {{"exposure", -0.5}, {"format", "png"}}).app == std::string(kPassToolVersion) + "+nr.ev+png.2");
+    CHECK(ToolForStage("upscale", {{"exposure", 1.0}}).app == kPassToolVersion);
     CHECK_THROWS(ToolForStage("depth", {{"stabilize", 5}}));
     CHECK(ToolForStage("upscale", nlohmann::json::object()).dllFile == "nvngx_dlss.dll");
     CHECK(ToolForStage("upscale", {{"backend", "nis"}}).dllFile.empty());

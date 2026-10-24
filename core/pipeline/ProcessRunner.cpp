@@ -69,7 +69,8 @@ DepthStageOptions DepthOptions(const nlohmann::json& p, const std::filesystem::p
     o.estimator.maxInputRes = Get<int>(p, "max_res", 1080);
     o.estimator.fp16 = !Get<bool>(p, "fp32", false);
     o.estimator.modelsDir = Get<std::string>(p, "models_dir", "");
-    if (p.contains("python")) o.estimator.extra["python"] = p["python"];
+    // "" is the schema's default: the interpreter is found as without the key (DLSSVID_PYTHON, the venv, python)
+    if (const std::string python = Get<std::string>(p, "python", ""); !python.empty()) o.estimator.extra["python"] = python;
     // a project keeps depth.window after a switch from VDA: only a VDA backend reads it (the plan's parameters drop it too)
     o.estimator.window = DepthFamilyOf(o.backend) == "vda" ? Get<int>(p, "window", 0) : 0;
     o.outputDir = passesRoot;
@@ -133,6 +134,8 @@ struct RunContext {
 struct PlanState {
     std::map<std::string, std::string> fp;
     std::set<std::string> ran;
+    std::set<std::string> staleRan;  // passes rerun because they were stale (StageDecision::stale): a later stage built on
+                                     // them is stale too although every fingerprint matches
 };
 
 // A pass without a fingerprint stands for its source and length; a y-up motion-vector pass also for its orientation:
@@ -167,6 +170,7 @@ void Advance(PlanState& s, const StageDecision& d) {
     for (const auto& out : d.outputs) {
         s.fp[out] = d.fingerprint;
         s.ran.insert(out);
+        if (d.stale) s.staleRan.insert(out);
     }
 }
 
@@ -196,12 +200,30 @@ bool OldPngColourPass(const std::string& stage, const Manifest& m) {
 }
 constexpr const char* kOldPng = "PNG16 colour pass written before TASK-0042 (unscaled, black)";
 
+// An nr pass made while exposure was a linear multiplier (before TASK-0043) with a value other than 1. An explicit 0 -
+// the default the schema showed - gave black frames under the fingerprint of the identity run: such a pass is not
+// reused, restored or adopted. Passes made with the old default (multiplier 1) stay valid.
+bool OldExposurePass(const std::string& stage, const Manifest& m) {
+    if (stage != "nr" || !m.stageParams.is_object() || !m.stageParams.contains("tonemap")) return false;
+    const nlohmann::json& t = m.stageParams["tonemap"];
+    if (!t.is_object() || t.contains("exposure_ev") || !t.contains("exposure") || !t["exposure"].is_number()) return false;
+    return t["exposure"].get<double>() != 1.0;
+}
+constexpr const char* kOldExposure = "made with the old linear exposure (TASK-0043: exposure is in stops now)";
+
+// A pass the planner must not reuse, restore or adopt although its fingerprint may match: the reason, else nullptr.
+const char* StalePassReason(const std::string& stage, const Manifest& m) {
+    if (OldPngColourPass(stage, m)) return kOldPng;
+    if (OldExposurePass(stage, m)) return kOldExposure;
+    return nullptr;
+}
+
 // A complete history version of `pass` with this fingerprint, if any.
 std::optional<PassVersionInfo> RestorableVersion(const RunContext& ctx, const std::string& stage, const std::string& pass, const std::string& fp, int64_t frames) {
     for (const auto& v : ListPassVersions(ctx.root, pass)) {
         if (v.current || v.fingerprint != fp || !PassComplete(v.dir, frames, ctx.sourceHash)) continue;
         try {
-            if (OldPngColourPass(stage, Manifest::Load(v.dir))) continue;
+            if (StalePassReason(stage, Manifest::Load(v.dir))) continue;
         } catch (const std::exception&) {
             continue;
         }
@@ -227,6 +249,9 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             if (state.ran.count(cand)) inputsRan.push_back(cand);
             break;
         }
+    std::vector<std::string> inputsStale;  // inputs rerun in this plan because they were stale (PlanState::staleRan)
+    for (const auto& [input, inputFp] : d.inputs)
+        if (state.staleRan.count(input)) inputsStale.push_back(input);
     const PassFingerprint fp = ComputeFingerprint(name, ctx.sourceHash, p, d.inputs, ToolForStage(name, p), ctx.sourceFormat);
     d.fingerprint = fp.value;
     d.sourceFormat = ctx.sourceFormat;
@@ -269,6 +294,15 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
 
     if (!ctx.skipExisting || ctx.force.count(name)) {
         run("forced", ctx.skipExisting ? "recomputed on request (--force)" : "every stage recomputed (--no-skip-existing)", have && m.fingerprint != fp.value);
+        d.stale = !inputsStale.empty() || (have && StalePassReason(name, m));
+        return d;
+    }
+    // Every fingerprint may match, yet an input was stale when this pass (or a history version under the same fingerprint)
+    // was made from it: a black color_fg from a black color_nr stayed after nr was recomputed (review of TASK-0043).
+    if (!inputsStale.empty()) {
+        d.diff["inputs"] = inputsStale;
+        run("input_changed", "built on a stale pass that is recomputed: " + Join(inputsStale), false);
+        d.stale = true;
         return d;
     }
     if (!have) {
@@ -277,8 +311,9 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         return d;
     }
     if (m.fingerprint == fp.value) {
-        if (OldPngColourPass(name, m)) {
-            run("tool_changed", kOldPng, true);
+        if (const char* stale = StalePassReason(name, m)) {
+            run("tool_changed", stale, false);
+            d.stale = true;
         } else if (complete) {
             d.action = "reuse";
             d.kind = "exact";
@@ -302,8 +337,9 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             // then - adopting it would stamp the old depth with the depth.2 revision
             d.diff["tool"]["app"] = nlohmann::json::array({kPassToolVersion, PassToolVersionFor(name, p)});
             run("tool_changed", "depth made before the temporal alignment of TASK-0038", true);
-        } else if (OldPngColourPass(name, m)) {
-            run("tool_changed", kOldPng, true);
+        } else if (const char* stale = StalePassReason(name, m)) {
+            run("tool_changed", stale, false);
+            d.stale = true;
         } else if (!complete) {
             run("incomplete", incomplete, false);
         } else {
@@ -497,7 +533,7 @@ nlohmann::json ProcessResult::ToJson() const {
 nlohmann::json StageDecision::ToJson() const {
     return {{"name", name},       {"action", action},   {"kind", kind},         {"detail", detail},   {"diff", diff},
             {"fingerprint", fingerprint}, {"source_format", sourceFormat}, {"current", current}, {"current_fingerprint", currentFingerprint}, {"version", version},
-            {"outputs", outputs}, {"out_dir", outDir.string()}, {"frames", frames}, {"retire", retire}, {"params", params}, {"inputs", inputs}, {"tool", tool},
+            {"outputs", outputs}, {"out_dir", outDir.string()}, {"frames", frames}, {"retire", retire}, {"stale", stale}, {"params", params}, {"inputs", inputs}, {"tool", tool},
             {"warnings", warnings}, {"info", info}, {"error", error}};
 }
 
@@ -745,7 +781,8 @@ ProcessResult RunProcess(const ProcessOptions& options) {
     for (const std::string& name : ProcessStageOrder()) {
         const auto it = pr.wanted.find(name);
         if (it == pr.wanted.end()) continue;
-        const nlohmann::json& p = it->second.params;
+        // what the fingerprint hashes is what the stage runs with: defaults filled, aliases normalised (TASK-0043)
+        const nlohmann::json p = EffectiveStageParams(name, it->second.params);
         RefreshFromDisk(state, root);  // the decision looks at what is really on disk now (a stage may have been disabled)
         StageDecision d = DecideStage(ctx, it->second, state);
         AdviseStage(ctx, d);
@@ -788,7 +825,13 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             result.stages.push_back(rep);
             continue;
         }
-        if (d.retire)
+        if (d.stale) {  // wrong under its own fingerprint: discarded, not kept as a version a later run would restore
+            for (const auto& pass : StageFamilyPasses(name)) {
+                std::error_code ec;
+                std::filesystem::remove_all(root / pass, ec);
+                if (ec) Throw("process: cannot remove the stale pass " + (root / pass).string() + ": " + ec.message());
+            }
+        } else if (d.retire)
             for (const auto& pass : StageFamilyPasses(name))
                 if (const auto id = RetirePassVersion(root, pass)) {
                     if (pass == d.outputs.back() || rep.retired.empty()) rep.retired = *id;
@@ -997,6 +1040,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             for (const auto& pass : StageFamilyPasses(name))
                 if (Manifest::Exists(root / pass)) StampPass(root / pass, d, created, rep.msPerFrame);
             state.ran.insert(d.outputs.begin(), d.outputs.end());
+            if (d.stale) state.staleRan.insert(d.outputs.begin(), d.outputs.end());
         } else {
             rep.fingerprint.clear();  // disabled / failed: no pass of this run
         }

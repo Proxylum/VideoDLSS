@@ -61,6 +61,80 @@ TEST_CASE("Every stage has a schema whose defaults mirror the stages and the pro
     CHECK(FindStageSchema("nr")->guides == std::vector<std::string>{"depth_dlss", "mv_dlss"});
 }
 
+// TASK-0043 (the root of the exposure defect): every nr key at its schema default is the run without the key - the
+// stage options from the effective parameters equal the options' own defaults, field by field.
+TEST_CASE("NR: the options from the schema's defaults are the stage's defaults, for every key", "[unit][schema][nr][regression]") {
+    const NrStageOptions def;
+    NrStageOptions o;
+    ApplyNrParams(EffectiveStageParams("nr", nlohmann::json::object()), o);
+    CHECK(o.backend == def.backend);
+    CHECK(o.intensity == def.intensity);
+    CHECK(o.style == def.style);
+    CHECK(o.preset == def.preset);
+    CHECK(o.localTone == def.localTone);
+    CHECK(o.localStructure == def.localStructure);
+    CHECK(o.skinStructure == def.skinStructure);
+    CHECK(o.autoMask == def.autoMask);
+    CHECK(o.passes == def.passes);
+    CHECK(o.modelScale == def.modelScale);
+    CHECK(o.transfer == def.transfer);
+    CHECK(o.maxRatio == def.maxRatio);
+    CHECK(o.useGuides == def.useGuides);
+    CHECK(o.temporal == def.temporal);
+    CHECK(o.temporalThreshold == def.temporalThreshold);
+    CHECK(o.skinBlend == def.skinBlend);
+    CHECK(o.tonemap.curve == def.tonemap.curve);
+    CHECK(o.tonemap.inputTransfer == def.tonemap.inputTransfer);
+    CHECK(o.tonemap.exposureEv == def.tonemap.exposureEv);  // was 0.0 against a multiplier of 1: black frames
+    CHECK(o.tonemap.IsIdentity());
+    // every schema key of nr is read by ApplyNrParams (format: by ProcessRunner)
+    for (const auto& spec : FindStageSchema("nr")->params) {
+        if (spec.key == "format") continue;
+        nlohmann::json one = EffectiveStageParams("nr", nlohmann::json::object());
+        nlohmann::json changed;  // another valid value
+        if (spec.type == ParamType::Bool) changed = !spec.def.get<bool>();
+        else if (spec.type == ParamType::Enum) changed = spec.choices.back().value == spec.def.get<std::string>() ? spec.choices.front().value : spec.choices.back().value;
+        else changed = spec.def.get<double>() == spec.max ? spec.min : spec.max;
+        one[spec.key] = changed;
+        NrStageOptions a, b;
+        ApplyNrParams(EffectiveStageParams("nr", nlohmann::json::object()), a);
+        ApplyNrParams(one, b);
+        const auto key = [](const NrStageOptions& x) {
+            return nlohmann::json{x.backend, x.intensity, x.style, x.preset, x.localTone, x.localStructure, x.skinStructure, x.autoMask, x.passes, x.modelScale,
+                                  x.transfer, x.maxRatio, x.useGuides, x.temporal, x.temporalThreshold, x.skinBlend, x.tonemap.curve, x.tonemap.inputTransfer,
+                                  x.tonemap.exposureEv};
+        };
+        INFO("nr." << spec.key);
+        CHECK(key(a) != key(b));
+    }
+}
+
+// TASK-0043: the stages took kebab-case aliases and nr's inverse no_guides that the validation and the defaults did not
+// see - {"model-scale": 0.5} ran at 0.5 under a fingerprint saying 1.0, {"local-tone": 5} was never range-checked.
+TEST_CASE("NormalizeStageParams: aliases take the schema's key; validation and the effective parameters see them", "[unit][schema][regression]") {
+    CHECK(NormalizeStageParams("nr", {{"model-scale", 0.5}}) == nlohmann::json{{"model_scale", 0.5}});
+    CHECK(NormalizeStageParams("nr", {{"model-scale", 0.5}, {"model_scale", 2.0}}) == nlohmann::json{{"model_scale", 2.0}});  // the schema key wins
+    CHECK(NormalizeStageParams("nr", {{"no-guides", true}}) == nlohmann::json{{"guides", false}});
+    CHECK(NormalizeStageParams("nr", {{"no_guides", false}}) == nlohmann::json{{"guides", true}});
+    CHECK(NormalizeStageParams("nr", {{"no_guides", true}, {"guides", true}}) == nlohmann::json{{"guides", true}});
+    CHECK(NormalizeStageParams("fg", {{"backbuffer-format", "rgba8"}}) == nlohmann::json{{"backbuffer_format", "rgba8"}});
+    CHECK(NormalizeStageParams("depth", {{"z-near", 1}}) == nlohmann::json{{"z-near", 1}});  // no aliases there: unknown keys stay
+    CHECK(EffectiveStageParams("nr", {{"model-scale", 0.5}})["model_scale"] == 0.5);
+    CHECK_FALSE(EffectiveStageParams("nr", {{"model-scale", 0.5}}).contains("model-scale"));
+    CHECK_FALSE(ValidateStageParams("nr", {{"local-tone", 5.0}}).empty());  // out of range under its alias too
+    CHECK_FALSE(ValidateStageParams("nr", {{"no-guides", "yes"}}).empty());  // a non-boolean inverse: guides of the wrong type
+    // an alias and its key are one run: one fingerprint
+    CHECK(ComputeFingerprint("nr", "sha256:x", EffectiveStageParams("nr", {{"skin-blend", 0.5}}), {}, ToolInfo{}, "").value ==
+          ComputeFingerprint("nr", "sha256:x", EffectiveStageParams("nr", {{"skin_blend", 0.5}}), {}, ToolInfo{}, "").value);
+}
+
+// TASK-0043: flow.hwaccel was hashed as "cuda" for searaft / stub, which decode on the CPU: it belongs to OFA alone.
+TEST_CASE("flow.hwaccel belongs to the OFA backend", "[unit][schema][regression]") {
+    CHECK(EffectiveStageParams("flow", nlohmann::json::object())["hwaccel"] == "cuda");
+    CHECK_FALSE(EffectiveStageParams("flow", {{"backend", "searaft"}}).contains("hwaccel"));
+    CHECK_FALSE(EffectiveStageParams("flow", {{"backend", "stub"}, {"hwaccel", "cuda"}}).contains("hwaccel"));
+}
+
 TEST_CASE("ValidateStageParams catches types, ranges and choices; unknown keys pass", "[unit][schema]") {
     CHECK(ValidateStageParams("nr", {{"intensity", 1.4}}).empty());
     CHECK(ValidateStageParams("nr", nlohmann::json::object()).empty());

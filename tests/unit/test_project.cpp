@@ -66,7 +66,7 @@ TEST_CASE("Project saves relative paths and loads them back absolute", "[viewpor
     std::ifstream in(d / "sub" / "proj.dlssvid.json");
     nlohmann::json j;
     in >> j;
-    CHECK(j["schema_version"] == 1);
+    CHECK(j["schema_version"] == kProjectSchemaVersion);
     CHECK(j["source"] == "../clip.mp4");
     CHECK(j["passes"] == "../passes");
     CHECK(j["result"] == "../out/result.mp4");
@@ -89,6 +89,33 @@ TEST_CASE("Project saves relative paths and loads them back absolute", "[viewpor
     std::ofstream(d / "broken.json") << "{";
     CHECK_THROWS(Project::Load(d / "broken.json"));
     CHECK_THROWS(Project::Load(d / "missing.json"));
+}
+
+// TASK-0043: nr.exposure is in stops; a version-1 project carried a linear multiplier (an explicit 0 gave black frames).
+TEST_CASE("Project v1 -> v2: nr.exposure x becomes log2(x), x <= 0 is dropped, skin_structure below 0 becomes -1", "[viewport][project][regression]") {
+    const auto d = Dir("migrate_v1");
+    auto nrOf = [&](const nlohmann::json& params) {
+        const nlohmann::json j = {{"schema_version", 1}, {"stages", nlohmann::json::array({{{"name", "nr"}, {"params", params}}, {{"name", "fg"}, {"params", {{"exposure", 0}}}}})}};
+        const Project p = Project::FromJson(j, d);
+        REQUIRE(p.stages.size() == 2);
+        CHECK(p.stages[1].params == nlohmann::json{{"exposure", 0}});  // only nr is migrated
+        return p.stages[0].params;
+    };
+    CHECK(nrOf({{"exposure", 2.0}, {"intensity", 1.2}}) == nlohmann::json{{"exposure", 1.0}, {"intensity", 1.2}});
+    CHECK(nrOf({{"exposure", 0.5}}) == nlohmann::json{{"exposure", -1.0}});
+    CHECK(nrOf({{"exposure", 3.0}})["exposure"] == 1.58);  // log2(3) to 0.01
+    CHECK(nrOf({{"exposure", 1.0}}) == nlohmann::json::object());   // the identity: the key goes
+    CHECK(nrOf({{"exposure", 0.0}}) == nlohmann::json::object());   // black frames before: the identity now
+    CHECK(nrOf({{"exposure", -2.0}}) == nlohmann::json::object());
+    CHECK(nrOf({{"exposure", 1e6}}) == nlohmann::json{{"exposure", 8.0}});  // clamped to the range
+    CHECK(nrOf({{"skin_structure", -0.5}}) == nlohmann::json{{"skin_structure", -1.0}});
+    CHECK(nrOf({{"skin_structure", -1.0}}) == nlohmann::json{{"skin_structure", -1.0}});
+    CHECK(nrOf({{"skin_structure", 0.4}}) == nlohmann::json{{"skin_structure", 0.4}});
+    // a version-2 file is taken as it is; a newer one is refused
+    const nlohmann::json v2 = {{"schema_version", 2}, {"stages", nlohmann::json::array({{{"name", "nr"}, {"params", {{"exposure", 0.0}}}}})}};
+    CHECK(Project::FromJson(v2, d).stages[0].params == nlohmann::json{{"exposure", 0.0}});
+    CHECK_THROWS(Project::FromJson(nlohmann::json{{"schema_version", kProjectSchemaVersion + 1}}, d));
+    CHECK_THROWS(Project::FromJson(nlohmann::json{{"schema_version", 0}}, d));
 }
 
 TEST_CASE("Project::Sources lists the passes found under the root", "[viewport][project]") {

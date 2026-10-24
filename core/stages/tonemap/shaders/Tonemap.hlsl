@@ -1,8 +1,8 @@
 // Tonemap compute shader (stage 6, ТЗ §4 «Tonemap»): colour HDR / linear / SDR -> display-referred sRGB
 // [0, 1], what Neural Rendering expects. Input transfer: 0 sRGB (decoded SDR video), 1 linear,
 // 2 PQ (SMPTE ST 2084, reference white 203 nits), 3 HLG (BT.2100, 1000-nit peak). Curve: 0 passthrough,
-// 1 ACES (Narkowicz fit), 2 Reinhard. Exposure multiplies linear light. sRGB in + passthrough + exposure 1
-// is an exact copy (no decode / encode round trip).
+// 1 ACES (Narkowicz fit), 2 Reinhard. Exposure multiplies linear light (gExposure = 2^EV, set by Tonemapper.cpp).
+// sRGB in + passthrough + EV 0 is an exact copy (no decode / encode round trip).
 
 cbuffer Constants : register(b0) {
     uint2 gSize;

@@ -115,7 +115,7 @@ int CmdNr(const NrCommands::NrArgs& a) {
     o.skinBlend = a.skinBlend;
     o.tonemap.curve = a.tonemap;
     o.tonemap.inputTransfer = a.inputTransfer;
-    o.tonemap.exposure = a.exposure;
+    o.tonemap.exposureEv = a.exposure;
     o.paramsBlock = a.paramsBlock;
     o.requireDriver = !a.skipDriverCheck;
     o.dllDir = a.dllDir;
@@ -230,7 +230,7 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_option("--skin-blend,--skin_blend", na_.skinBlend, "edit strength inside mask_face / mask_skin (0 = keep the input)")->default_val(1.f);
     nr_->add_option("--tonemap", na_.tonemap, "passthrough | aces | reinhard")->default_val("passthrough");
     nr_->add_option("--input-transfer,--input_transfer", na_.inputTransfer, "srgb | linear | pq | hlg")->default_val("srgb");
-    nr_->add_option("--exposure", na_.exposure, "exposure multiplier on linear light")->default_val(1.f);
+    nr_->add_option("--exposure", na_.exposure, "exposure in stops (EV) before the tonemap: +1 doubles linear light, 0 = unchanged")->default_val(0.f);
     nr_->add_option("--format", na_.format, "exr | png16")->default_val("exr");
     nr_->add_option("--video", na_.video, "also encode the result into this video file (no audio)");
     nr_->add_option("--codec", na_.codec, "encoder for --video: h264_nvenc | hevc_nvenc | av1_nvenc | ffv1")->default_val("h264_nvenc");

@@ -108,6 +108,10 @@ struct StageDecision {
     std::filesystem::path outDir;                    // the last of them, the one checked for completeness
     int64_t frames = -1;                             // frames the pass needs (-1: every frame of a source of unknown length)
     bool retire = false;                             // the folder on disk goes to the history before the run
+    // The pass on disk - or an input it was built from - is wrong under an unchanged fingerprint (a PNG16 colour pass
+    // from before TASK-0042, nr with the old linear exposure, TASK-0043): the run discards it instead of retiring it
+    // (a history version under this fingerprint would be restored later), and the stages built on it rerun too.
+    bool stale = false;
     nlohmann::json params = nlohmann::json::object();   // canonical parameters the fingerprint hashed
     std::map<std::string, std::string> inputs;          // input pass -> fingerprint the fingerprint hashed
     nlohmann::json tool = nlohmann::json::object();     // ToolInfo::ToJson()

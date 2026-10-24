@@ -12,8 +12,9 @@ namespace dlssvid {
 struct TonemapOptions {
     std::string curve = "passthrough";    // passthrough | aces | reinhard
     std::string inputTransfer = "srgb";   // srgb (decoded video) | linear | pq | hlg
-    float exposure = 1.f;                 // multiplies linear light
-    bool IsIdentity() const { return curve == "passthrough" && inputTransfer == "srgb" && exposure == 1.f; }
+    float exposureEv = 0.f;               // stops: linear light x 2^EV (TASK-0043: was a multiplier with the schema saying 0)
+    bool IsIdentity() const { return curve == "passthrough" && inputTransfer == "srgb" && exposureEv == 0.f; }
+    float ExposureGain() const;           // 2^EV
 };
 std::optional<int> TonemapCurveId(const std::string& s);
 std::optional<int> TonemapTransferId(const std::string& s);
