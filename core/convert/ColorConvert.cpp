@@ -97,7 +97,7 @@ void ForEachRgbOf(const CpuFrame& frame, const ColorInfo& info, Emit emit, uint3
 // 4 floats -> 4 halves (round to nearest even), F16C or the portable routine.
 inline void StoreHalf4(uint16_t* d, float r, float g, float b, float a, bool f16c) {
     if (f16c) {
-        const __m128i h = _mm_cvtps_ph(_mm_set_ps(a, b, g, r), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+        const __m128i h = _mm_cvtps_ph(_mm_set_ps(a, b, g, r), _MM_FROUND_TO_NEAREST_INT);  // imm8 0..7: vcvtps2ph raises no exceptions anyway
         _mm_storel_epi64(reinterpret_cast<__m128i*>(d), h);
     } else {
         d[0] = FloatToHalf(r);

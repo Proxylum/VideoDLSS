@@ -464,21 +464,7 @@ int CmdExport(const ExportArgs& a) {
         Throw("the rawdlss preset expects depth_dlss / mv_dlss passes: run `dlssvid convert` first");
     m.channels = Spec(kind).channels;
     m.filePattern = m.pass + "_%06d" + ExtensionFor(m.format, m.pixelType, m.channels.size());
-    if (Spec(kind).isColor && (m.pixelType == PixelType::U16 || m.pixelType == PixelType::U8) && base.Kind() && Spec(*base.Kind()).isColor &&
-        base.pixelType != m.pixelType) {
-        // colour float [0,1] -> integer scale
-        const float scale = m.pixelType == PixelType::U16 ? 65535.f : 255.f;
-        FrameSource inner = source;
-        source = [inner, scale](int64_t f, PassImage& out) {
-            if (!inner(f, out)) return false;
-            if (out.type == PixelType::F16 || out.type == PixelType::F32) {
-                for (uint32_t y = 0; y < out.height; ++y)
-                    for (uint32_t x = 0; x < out.width; ++x)
-                        for (size_t c = 0; c < out.channels.size(); ++c) out.Set(x, y, c, out.Get(x, y, c) * scale);
-            }
-            return true;
-        };
-    }
+    // colour float [0,1] <-> integer full range: the PassWriter of a colour pass does it in both directions
     const int64_t n = ExportPass(a.output, m, source, range, PrintProgress);
     std::fprintf(stderr, "\n");
     Log()->info("exported {} frames of {} as {} -> {}", n, m.pass, ToString(m.format), a.output);

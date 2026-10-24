@@ -49,6 +49,10 @@ struct PassImage {
     // Deep conversion of the sample type; integer <-> float conversions are value-preserving
     // (no normalisation), float -> integer rounds and clamps.
     PassImage ConvertTo(PixelType t) const;
+    // The same for samples that mean [0,1] (colour, masks: NormalizedSamples): integers are full range, U8 255 and
+    // U16 65535 = 1.0, as the readers take them (ToRgba16f, RgbToYuv, the mask loaders); float -> integer rounds and
+    // clamps. ConvertTo on a colour pass wrote 0.5 as 1 out of 65535 into PNG16 (TASK-0042).
+    PassImage ConvertNormalizedTo(PixelType t) const;
 
     // Max absolute difference over all samples (both images must have the same layout).
     static double MaxAbsDiff(const PassImage& a, const PassImage& b);
@@ -85,6 +89,9 @@ struct PassSpec {
 };
 
 const PassSpec& Spec(PassKind kind);
+// Colour and mask samples mean [0,1]: integer storage is full range (PassImage::ConvertNormalizedTo). Depth and
+// motion vectors keep their values (ConvertTo).
+inline bool NormalizedSamples(PassKind kind) { return Spec(kind).isColor || kind == PassKind::Mask; }
 std::string_view ToString(PassKind kind);
 std::optional<PassKind> ParsePassKind(std::string_view name);
 std::string_view ToString(Convention c);

@@ -97,6 +97,29 @@ PassImage PassImage::ConvertTo(PixelType t) const {
     return out;
 }
 
+PassImage PassImage::ConvertNormalizedTo(PixelType t) const {
+    if (t == type) return *this;
+    PassImage out;
+    out.Allocate(width, height, t, channels);
+    const size_t n = static_cast<size_t>(width) * height * channels.size();
+    for (size_t i = 0; i < n; ++i) {
+        float v = 0.f;  // [0,1]
+        switch (type) {
+            case PixelType::U8: v = static_cast<float>(As<uint8_t>()[i]) * (1.f / 255.f); break;
+            case PixelType::U16: v = static_cast<float>(As<uint16_t>()[i]) * (1.f / 65535.f); break;
+            case PixelType::F16: v = HalfToFloat(As<uint16_t>()[i]); break;
+            case PixelType::F32: v = As<float>()[i]; break;
+        }
+        switch (t) {
+            case PixelType::U8: out.As<uint8_t>()[i] = static_cast<uint8_t>(std::clamp(std::lround(v * 255.f), 0L, 255L)); break;
+            case PixelType::U16: out.As<uint16_t>()[i] = static_cast<uint16_t>(std::clamp(std::lround(v * 65535.f), 0L, 65535L)); break;
+            case PixelType::F16: out.As<uint16_t>()[i] = FloatToHalf(v); break;
+            case PixelType::F32: out.As<float>()[i] = v; break;
+        }
+    }
+    return out;
+}
+
 double PassImage::MaxAbsDiff(const PassImage& a, const PassImage& b) {
     if (!a.SameLayout(b)) Throw("PassImage::MaxAbsDiff: layout mismatch");
     double m = 0.0;

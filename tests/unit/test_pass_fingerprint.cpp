@@ -122,6 +122,11 @@ TEST_CASE("ToolInfo JSON round trip and ToolForStage from parameters", "[unit][f
     CHECK(ToolForStage("depth", {{"backend", "stub"}}).app == depthRev);
     CHECK(ToolForStage("depth", {{"stabilize", "none"}}).app == kPassToolVersion);  // unaligned depth is what it was
     for (const char* stage : {"flow", "upscale", "nr", "fg"}) CHECK(ToolForStage(stage, nlohmann::json::object()).app == kPassToolVersion);
+    // TASK-0042: colour passes written as PNG16 before the fix are black - a revision of their own; EXR passes stay
+    for (const char* stage : {"upscale", "nr", "fg"}) {
+        CHECK(ToolForStage(stage, {{"format", "png"}}).app == std::string(kPassToolVersion) + "+png.2");
+        CHECK(ToolForStage(stage, {{"format", "exr"}}).app == kPassToolVersion);
+    }
     CHECK_THROWS(ToolForStage("depth", {{"stabilize", 5}}));
     CHECK(ToolForStage("upscale", nlohmann::json::object()).dllFile == "nvngx_dlss.dll");
     CHECK(ToolForStage("upscale", {{"backend", "nis"}}).dllFile.empty());

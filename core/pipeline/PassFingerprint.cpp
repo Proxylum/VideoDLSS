@@ -119,6 +119,8 @@ std::string Sha256FileCached(const std::filesystem::path& path) {
 
 std::string PassToolVersionFor(const std::string& stage, const nlohmann::json& p) {
     if (stage == "depth" && Str(p, "stabilize", "auto") != "none") return std::string(kPassToolVersion) + "+depth.2";
+    // colour passes in PNG16 were written unscaled (black) before TASK-0042: those passes are not reused
+    if ((stage == "upscale" || stage == "nr" || stage == "fg") && Str(p, "format", "exr") == "png") return std::string(kPassToolVersion) + "+png.2";
     return kPassToolVersion;
 }
 

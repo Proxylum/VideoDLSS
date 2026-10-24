@@ -28,6 +28,7 @@ public:
 private:
     std::filesystem::path dir_;
     Manifest manifest_;
+    bool normalized_ = false;  // colour / mask samples: [0,1] <-> the full integer range
     int64_t count_ = 0;
     bool finished_ = false;
 };

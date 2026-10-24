@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 
@@ -165,26 +166,45 @@ TEST_CASE("Colour export from a clip round-trips as EXR half and PNG16", "[integ
     const PassReader r = PassReader::Open(exr);
     for (int64_t i = 0; i < 6; ++i) REQUIRE(r.ReadFrame(i).data == frames[static_cast<size_t>(i)].data);
 
-    // PNG16: scaled to integers, reversible within 1/65535
+    // PNG16 from the half frames as the stages write them (TASK-0042: they came out as 0 / 1 of 65535 - black):
+    // [0,1] scaled to the full range by the writer, reversible within 1/65535
     const auto png = Dir("color_png");
     Manifest p = Manifest::ForPass(PassKind::ColorSource, 64, 36, FileFormat::Png);
-    FrameSource scaled = [&](int64_t i, PassImage& out) {
-        if (!src(i, out)) return false;
-        PassImage u = MakePassImage(PassKind::ColorSource, 64, 36, PixelType::U16);
-        for (uint32_t y = 0; y < 36; ++y)
-            for (uint32_t x = 0; x < 64; ++x)
-                for (size_t c = 0; c < 3; ++c) u.Set(x, y, c, out.Get(x, y, c) * 65535.f);
-        out = u;
-        return true;
-    };
-    CHECK(ExportPass(png, p, scaled, FrameRange{}) == 6);
+    CHECK(ExportPass(png, p, src, FrameRange{}) == 6);
     const PassReader rp = PassReader::Open(png);
     CHECK(rp.Man().pixelType == PixelType::U16);
     const PassImage b = rp.ReadFrame(2);
     CHECK(b.channels == std::vector<std::string>{"R", "G", "B"});
+    double maxErr = 0.0;
     for (uint32_t y = 0; y < 36; ++y)
         for (uint32_t x = 0; x < 64; ++x)
-            for (size_t c = 0; c < 3; ++c) CHECK(std::fabs(b.Get(x, y, c) / 65535.f - frames[2].Get(x, y, c)) <= 1.f / 65535.f + 1e-3f);
+            for (size_t c = 0; c < 3; ++c) maxErr = std::max(maxErr, std::fabs(b.Get(x, y, c) / 65535.0 - frames[2].Get(x, y, c)));
+    CHECK(maxErr <= 1.0 / 65535.0);
+
+    // and back: PNG16 -> EXR half gives the same colour (was 0..65535 in the half file)
+    const auto exr2 = Dir("color_png_exr");
+    CHECK(ExportPass(exr2, Manifest::ForPass(PassKind::ColorSource, 64, 36, FileFormat::Exr), SourceFromReader(rp), FrameRange{}) == 6);
+    const PassImage e2 = PassReader::Open(exr2).ReadFrame(2);
+    REQUIRE(e2.type == PixelType::F16);
+    maxErr = 0.0;
+    for (uint32_t y = 0; y < 36; ++y)
+        for (uint32_t x = 0; x < 64; ++x)
+            for (size_t c = 0; c < 3; ++c) maxErr = std::max(maxErr, std::fabs(static_cast<double>(e2.Get(x, y, c)) - frames[2].Get(x, y, c)));
+    CHECK(maxErr <= 1e-3);  // half rounding
+
+    // a mask written from float samples: 1.0 -> 255
+    const auto mask = Dir("mask_png");
+    {
+        PassWriter w(mask, Manifest::ForPass(PassKind::Mask, 4, 2, FileFormat::Png));
+        PassImage mf = MakePassImage(PassKind::Mask, 4, 2, PixelType::F32);
+        for (uint32_t x = 0; x < 4; ++x) mf.Set(x, 0, 0, 0.25f * static_cast<float>(x + 1));
+        w.WriteFrame(0, mf);
+        w.Finish();
+    }
+    const PassImage mr = PassReader::Open(mask).ReadFrame(0);
+    REQUIRE(mr.type == PixelType::U8);
+    CHECK(mr.Get(3, 0, 0) == 255.f);
+    CHECK(mr.Get(1, 0, 0) == 128.f);
 }
 
 TEST_CASE("Nuke preset writes multi-layer EXR with colour, depth and mv", "[integration][passes][preset]") {
@@ -219,6 +239,22 @@ TEST_CASE("Nuke preset writes multi-layer EXR with colour, depth and mv", "[inte
     CHECK(layers.at("").data == color[2].data);
     CHECK(layers.at("depth").data == SyntheticDepth(2, w, h).data);
     CHECK(layers.at("mv").data == SyntheticMv(2, w, h).data);
+
+    // colour from a PNG16 pass (u16, full range) lands in the colour layer as [0,1] (TASK-0042: was 0..65535)
+    const auto png = Dir("nuke_png_src");
+    CHECK(ExportPass(png, Manifest::ForPass(PassKind::ColorSource, w, h, FileFormat::Png), cs, FrameRange{}) == 4);
+    const PassReader rp = PassReader::Open(png);
+    const auto dir2 = Dir("nuke_from_png");
+    CHECK(ExportLayeredExr(dir2, "layered", base, SourceFromReader(rp), &ds, &ms, FrameRange{}) == 4);
+    const auto layers2 = ReadExrLayers(dir2 / m.FrameFileName(2));
+    const PassImage& c2 = layers2.at("");
+    REQUIRE(c2.width == w);
+    REQUIRE(c2.ChannelCount() == 3);
+    float maxErr = 0.f;
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x)
+            for (size_t c = 0; c < 3; ++c) maxErr = std::max(maxErr, std::fabs(c2.Get(x, y, c) - color[2].Get(x, y, c)));
+    CHECK(maxErr <= 1e-3f);
 }
 
 TEST_CASE("Preset formats: comfyui and rawdlss", "[integration][passes][preset]") {

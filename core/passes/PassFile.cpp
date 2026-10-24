@@ -63,10 +63,11 @@ void WritePassFile(const std::filesystem::path& path, const PassImage& img) {
     }
 }
 
-PassImage PrepareForFormat(const PassImage& img, FileFormat format, PixelType wanted) {
+PassImage PrepareForFormat(const PassImage& img, FileFormat format, PixelType wanted, bool normalized) {
     if (format == FileFormat::Png && wanted != PixelType::U8 && wanted != PixelType::U16)
         Throw("PNG cannot store " + std::string(ToString(wanted)) + " samples");
-    return img.type == wanted ? img : img.ConvertTo(wanted);
+    if (img.type == wanted) return img;
+    return normalized ? img.ConvertNormalizedTo(wanted) : img.ConvertTo(wanted);
 }
 
 }  // namespace dlssvid

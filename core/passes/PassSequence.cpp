@@ -21,6 +21,9 @@ PassWriter::PassWriter(const std::filesystem::path& dir, Manifest manifest) : di
         manifest_.filePattern = manifest_.pass + "_%06d" + ExtensionFor(manifest_.format, manifest_.pixelType, manifest_.channels.size());
     if (manifest_.format == FileFormat::Png && manifest_.pixelType != PixelType::U8 && manifest_.pixelType != PixelType::U16)
         Throw("PassWriter: PNG cannot store " + std::string(ToString(manifest_.pixelType)));
+    // A pass name we do not know is colour when its manifest says so (an imported sRGB sequence).
+    const auto kind = manifest_.Kind();
+    normalized_ = kind ? NormalizedSamples(*kind) : manifest_.colorspace == "srgb";
     // Frames reaching a writer are in the project convention (PassReader negates y-up motion vectors on read), so a pass
     // written by dlssvid never carries mv.y_up - even when its manifest was copied from a y-up reader.
     manifest_.mv.yUp = false;
@@ -48,7 +51,7 @@ void PassWriter::WriteFrame(int64_t frame, const PassImage& img) {
     if (img.channels.size() != manifest_.channels.size())
         Throw("PassWriter: frame " + std::to_string(frame) + " has " + std::to_string(img.channels.size()) + " channels, pass has " +
               std::to_string(manifest_.channels.size()));
-    PassImage stored = PrepareForFormat(img, manifest_.format, manifest_.pixelType);
+    PassImage stored = PrepareForFormat(img, manifest_.format, manifest_.pixelType, normalized_);
     stored.channels = manifest_.channels;
     WritePassFile(dir_ / manifest_.FrameFileName(frame), stored);
     if (count_ == 0) {
@@ -279,7 +282,7 @@ int64_t ExportLayeredExr(const std::filesystem::path& dir, const std::string& na
         }
         if (c.width != base.width || c.height != base.height) Throw("export: colour frame size mismatch at " + std::to_string(f));
         ExrLayers layers;
-        layers.emplace_back("", c.type == PixelType::F16 || c.type == PixelType::F32 ? c : c.ConvertTo(PixelType::F16));
+        layers.emplace_back("", c.type == PixelType::F16 || c.type == PixelType::F32 ? c : c.ConvertNormalizedTo(PixelType::F16));
         if (depth) {
             if (!(*depth)(f, d)) Throw("export: depth source has no frame " + std::to_string(f));
             layers.emplace_back("depth", d);
