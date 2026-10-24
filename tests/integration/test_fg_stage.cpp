@@ -4,6 +4,7 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <cmath>
@@ -95,17 +96,20 @@ TEST_CASE("FgStage with the blend baseline on WARP: x2 frames, doubled fps, mani
     CHECK(vd.Info().frameRate.num == spec.fpsNum * 2 * vd.Info().frameRate.den / spec.fpsDen);
 }
 
-TEST_CASE("FgStage: x3 from a colour pass folder, frame layout and weights", "[integration][fg]") {
+// The colour pass in EXR half and in PNG16 (TASK-0042: PNG16 was written as 0 / 1 of 65535 and the real frames were
+// copied from it unscaled).
+TEST_CASE("FgStage: x3 from a colour pass folder, frame layout and weights", "[integration][fg][regression]") {
     const uint32_t w = 32, h = 16;
     const int frames = 4;
     ClipSpec spec;
     spec.frames = frames;
     spec.width = w;
     spec.height = h;
-    const auto dir = Dir("x3");
+    const FileFormat format = GENERATE(FileFormat::Exr, FileFormat::Png);
+    const auto dir = Dir(format == FileFormat::Exr ? "x3" : "x3_png16");
     const auto clip = WriteClip(dir / "clip.mkv", spec);
     {
-        PassWriter writer(dir / "passes" / "color_nr", Manifest::ForPass(PassKind::ColorNr, w, h, FileFormat::Exr));
+        PassWriter writer(dir / "passes" / "color_nr", Manifest::ForPass(PassKind::ColorNr, w, h, format));
         for (int i = 0; i < frames; ++i) {
             PassImage img = MakePassImage(PassKind::ColorNr, w, h, PixelType::F16);
             for (uint32_t y = 0; y < h; ++y)

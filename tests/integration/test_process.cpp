@@ -9,6 +9,7 @@
 
 #include "TestClips.h"
 #include "passes/PassSequence.h"
+#include "pipeline/PassFingerprint.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "viewport/Project.h"
@@ -117,6 +118,46 @@ TEST_CASE("RunProcess: stub stages on WARP produce a result with doubled frames 
     ProcessOptions forced = o;
     forced.skipExisting = false;
     CHECK(Report(RunProcess(forced), "depth").status == "ran");
+}
+
+// TASK-0042 (review): a PNG16 colour pass written before the fix is black. The "+png.2" revision changes the fingerprint
+// of PNG runs, but a pass without a fingerprint (a standalone `dlssvid nr --format png16`) would be adopted and stamped
+// with it - and a pass adopted under exr parameters is PNG all the same. Judged by the file: not reused, not adopted.
+TEST_CASE("RunProcess: a PNG16 colour pass from before TASK-0042 is recomputed, with or without a fingerprint", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("old_png");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    ApplyParamSpec(o.stages, "nr.format=png");
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    const auto nrDir = o.passesRoot / "color_nr";
+    REQUIRE(Manifest::Load(nrDir).format == FileFormat::Png);
+    CHECK(Report(RunProcess(o), "nr").status == "reused");  // written by this build: +png.2
+    auto stampOld = [&](bool keepFingerprint) {
+        Manifest m = Manifest::Load(nrDir);
+        m.tool["app"] = std::string(kPassToolVersion);  // what the builds before stamped
+        if (!keepFingerprint) {
+            m.fingerprint.clear();
+            m.tool = nlohmann::json::object();
+        }
+        m.Save(nrDir);
+    };
+    stampOld(true);
+    ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK(Report(r, "nr").reason.find("TASK-0042") != std::string::npos);
+    stampOld(false);
+    CHECK(Report(RunProcess(o), "nr").status == "ran");  // before: adopted as legacy and stamped +png.2 for good
+    CHECK(Report(RunProcess(o), "nr").status == "reused");
 }
 
 TEST_CASE("RunProcess: --frames, passthrough, an unavailable nr stage and a run without colour stages", "[integration][process]") {

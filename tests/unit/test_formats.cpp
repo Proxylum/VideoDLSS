@@ -188,6 +188,41 @@ TEST_CASE("Raw dumps are the bare bytes and need geometry", "[formats][raw]") {
     CHECK(SameBytes(ReadPassFile(path, &m), img));
 }
 
+// TASK-0042: a colour pass written as PNG16 stored 0.5 as 1 of 65535 (ConvertTo keeps values) - black frames from
+// `nr/upscale/fg --format png16`. Colour and mask samples mean [0,1]: integer storage is the full range.
+TEST_CASE("Colour and mask samples map [0,1] to the full integer range; depth and mv keep their values", "[formats][regression]") {
+    CHECK(NormalizedSamples(PassKind::ColorSr));
+    CHECK(NormalizedSamples(PassKind::ColorNr));
+    CHECK(NormalizedSamples(PassKind::Mask));
+    CHECK_FALSE(NormalizedSamples(PassKind::DepthDlss));
+    CHECK_FALSE(NormalizedSamples(PassKind::MvDlss));
+
+    PassImage c;
+    c.Allocate(6, 1, PixelType::F16, {"R", "G", "B"});
+    const float values[] = {0.f, 0.25f, 0.5f, 1.f, 1.5f, -0.1f};
+    for (uint32_t x = 0; x < 6; ++x)
+        for (size_t ch = 0; ch < 3; ++ch) c.Set(x, 0, ch, values[x]);
+    const PassImage u16 = c.ConvertNormalizedTo(PixelType::U16);
+    const uint16_t want16[] = {0, 16384, 32768, 65535, 65535, 0};  // rounded, clamped
+    for (uint32_t x = 0; x < 6; ++x) CHECK(u16.As<uint16_t>()[x * 3] == want16[x]);
+    const PassImage u8 = c.ConvertNormalizedTo(PixelType::U8);
+    const uint8_t want8[] = {0, 64, 128, 255, 255, 0};
+    for (uint32_t x = 0; x < 6; ++x) CHECK(u8.As<uint8_t>()[x * 3] == want8[x]);
+    // back to float: [0,1] again
+    const PassImage back = u16.ConvertNormalizedTo(PixelType::F32);
+    for (uint32_t x = 0; x < 4; ++x) CHECK(std::fabs(back.Get(x, 0, 1) - values[x]) <= 1.f / 65535.f);
+    CHECK(u8.ConvertNormalizedTo(PixelType::F16).Get(3, 0, 2) == 1.f);
+
+    // the format preparation of a pass: normalised for colour / masks, value-preserving for depth
+    CHECK(PrepareForFormat(c, FileFormat::Png, PixelType::U16, true).data == u16.data);
+    CHECK(PrepareForFormat(c, FileFormat::Png, PixelType::U16).data == c.ConvertTo(PixelType::U16).data);
+    PassImage depth;
+    depth.Allocate(2, 1, PixelType::F32, {"Z"});
+    depth.Set(0, 0, 0, 3.f);
+    depth.Set(1, 0, 0, 120.f);
+    CHECK(PrepareForFormat(depth, FileFormat::Exr, PixelType::F16).Get(1, 0, 0) == 120.f);
+}
+
 TEST_CASE("PassFile dispatch by extension", "[formats]") {
     const PassImage img = Pattern(5, 4, PixelType::F32, {"Z"});
     for (const char* name : {"d.exr", "d.tif", "d_000001.npz"}) {

@@ -11,6 +11,7 @@
 
 #include "TestClips.h"
 #include "passes/Manifest.h"
+#include "passes/PassSequence.h"
 #include "util/Sha256.h"
 #include "util/Subprocess.h"
 
@@ -67,6 +68,14 @@ TEST_CASE("dlssvid nr --backend stub --warp writes color_nr and a JSON summary",
     CHECK(r.out.find("color_nr:") != std::string::npos);
     CHECK(r.out.find("backend:     stub") != std::string::npos);
     CHECK(std::filesystem::exists(passes / "color_nr" / Manifest::kFileName));
+    {
+        // png16 colour is the full 16-bit range (TASK-0042: 0 / 1 of 65535 - black frames)
+        const PassImage f = PassReader::Open(passes / "color_nr").ReadFrame(0).ConvertNormalizedTo(PixelType::F32);
+        double mean = 0.0;
+        for (uint32_t y = 0; y < f.height; ++y)
+            for (uint32_t x = 0; x < f.width; ++x) mean += f.Get(x, y, 1);
+        CHECK(mean / (static_cast<double>(f.width) * f.height) > 0.05);
+    }
     const nlohmann::json j = ReadJson(json);
     CHECK(j["stats"]["frames"] == 3);
     CHECK(j["stats"]["color_source"] == "video");

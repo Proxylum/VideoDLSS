@@ -204,6 +204,16 @@ TEST_CASE("UpscaleStage: an unavailable backend (dlss on WARP) falls back to nis
         CHECK_THROWS(RunUpscale(dec, dev, o));
     }
     {
+        // png16 holds the same colour as EXR half (TASK-0042: it held 0 / 1 of 65535 - a black pass)
+        PassImage exrFrame;
+        {
+            VideoDecoder dec(clip);
+            UpscaleStageOptions o;
+            o.backend = "bicubic";
+            o.scale = 1.5;
+            o.outputDir = dir / "bicubic_exr";
+            exrFrame = PassReader::Open(RunUpscale(dec, dev, o).outDir).ReadFrame(1);
+        }
         VideoDecoder dec(clip);
         UpscaleStageOptions o;
         o.backend = "bicubic";
@@ -217,6 +227,13 @@ TEST_CASE("UpscaleStage: an unavailable backend (dlss on WARP) falls back to nis
         sr.Validate({60, 36, 2, PassKind::ColorSr});
         CHECK(sr.Man().format == FileFormat::Png);
         CHECK(sr.Man().pixelType == PixelType::U16);
+        const PassImage png = sr.ReadFrame(1).ConvertNormalizedTo(PixelType::F32);
+        const PassImage exr = exrFrame.ConvertNormalizedTo(PixelType::F32);
+        CHECK(PassImage::MaxAbsDiff(png, exr) <= 1e-3);  // half vs 16-bit rounding
+        double mean = 0.0;
+        for (uint32_t y = 0; y < 36; ++y)
+            for (uint32_t x = 0; x < 60; ++x) mean += png.Get(x, y, 1);
+        CHECK(mean / (60.0 * 36.0) > 0.05);  // not a black pass
     }
     {
         // explicit target above the cap is clamped, aspect kept

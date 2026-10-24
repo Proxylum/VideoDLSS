@@ -17,7 +17,8 @@ PassImage ReadPassFile(const std::filesystem::path& path, const Manifest* manife
 void WritePassFile(const std::filesystem::path& path, const PassImage& img);
 
 // Converts an image to the sample type a format can store for a given pass, e.g. colour ->
-// u16 for PNG, depth -> f32 for EXR. Value-preserving where the format allows it.
-PassImage PrepareForFormat(const PassImage& img, FileFormat format, PixelType wanted);
+// u16 for PNG, depth -> f32 for EXR. Value-preserving where the format allows it; `normalized` samples (colour,
+// masks: NormalizedSamples) map [0,1] to the full integer range instead.
+PassImage PrepareForFormat(const PassImage& img, FileFormat format, PixelType wanted, bool normalized = false);
 
 }  // namespace dlssvid

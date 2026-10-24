@@ -220,7 +220,7 @@ void FgStage::Process(FrameContext& ctx) {
             ++stats_.generated;
         }
     }
-    PassImage real = cpuCur_.type == PixelType::F16 ? cpuCur_ : cpuCur_.ConvertTo(PixelType::F16);
+    PassImage real = cpuCur_.type == PixelType::F16 ? cpuCur_ : cpuCur_.ConvertNormalizedTo(PixelType::F16);  // a PNG16 colour pass is U16
     if (writer_) writer_->WriteFrame(FgRealIndex(i, options_.multiplier), real);
     if (encoder_) {
         CpuFrame yuv;
