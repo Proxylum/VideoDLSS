@@ -791,6 +791,8 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
             st.state = tr("пересчёт (принудительно)");
         } else if (d->kind == "incomplete") {
             st.state = tr("досчитать: %1").arg(QString::fromStdString(d->detail));
+        } else if (d->kind == "ab_pass") {
+            st.state = tr("пересчёт: пасс снят с переключателями A/B отдельного dlssvid nr");
         } else if (d->kind == "tool_changed") {
             st.state = tr("пересчёт: другая версия инструмента");
         } else {

@@ -61,10 +61,12 @@ void PrintDiagnostics(const NrDiagnostics& d, const std::string& error, double d
     if (!d.createResult.empty()) std::printf("create(18):   %s [%s block]\n", d.createResult.c_str(), d.paramsBlock.c_str());
     if (d.initMs >= 0) {  // the backend reached its init: the cost of creating the feature (spec E8, E6)
         std::printf("time:         device %s, init %s, create %s\n", Ms(deviceMs).c_str(), Ms(d.initMs).c_str(), Ms(d.createMs).c_str());
-        if (d.vramFeatureBytes < 0) std::printf("vram:         unknown (the adapter does not report it)\n");
+        // «unknown» only when DXGI gave no reading at all: a CreateFeature that failed leaves the feature unmeasured, not the
+        // adapter (review of TASK-0048: the unpatched DLL on RTX 40 read as «the adapter does not report it»)
+        if (d.vramBudgetBytes < 0 && d.vramInitBytes < 0 && d.vramFeatureBytes < 0) std::printf("vram:         unknown (the adapter does not report it)\n");
         else
-            std::printf("vram:         feature %s, init %s, budget %s (DXGI, this process)\n", MiB(d.vramFeatureBytes).c_str(), MiB(d.vramInitBytes).c_str(),
-                        MiB(d.vramBudgetBytes).c_str());
+            std::printf("vram:         feature %s%s, init %s, budget %s (DXGI, this process)\n", MiB(d.vramFeatureBytes).c_str(),
+                        d.vramFeatureBytes < 0 ? " (not created)" : "", MiB(d.vramInitBytes).c_str(), MiB(d.vramBudgetBytes).c_str());
     }
     if (d.ok) std::printf("status:       ok\n");
     else std::printf("status:       FAILED: %s\n", !d.hint.empty() ? d.hint.c_str() : error.c_str());
@@ -158,6 +160,22 @@ void CheckCoverage(const std::filesystem::path& dir, const char* what, int64_t f
     Log()->warn("nr: {}; frames outside go without it", text);
 }
 
+// A range or an A/B run replaces color_nr with a pass process never takes as the project's: never over the pass of a processed
+// project (it has a fingerprint) - written in place, it would be lost; such runs go under their own -o with --color-dir /
+// --depth-dir / --mv-dir / --masks-dir (TASK-0047; A/B runs: review of TASK-0048)
+void GuardProcessedPass(const NrStageOptions& o, const char* what) {
+    const auto out = o.outputDir / "color_nr";
+    if (!Manifest::Exists(out)) return;
+    std::string fp;
+    try {
+        fp = Manifest::Load(out).fingerprint;
+    } catch (const std::exception&) {
+    }
+    if (!fp.empty())
+        Throw("nr: " + out.string() + " is the pass of a processed project; write " + what + " under another -o (inputs with --color-dir / --depth-dir / " +
+              "--mv-dir / --masks-dir)");
+}
+
 NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStageOptions& o) {
     NrRange r;
     r.first = a.start;
@@ -171,18 +189,7 @@ NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStage
     const int64_t clipFrames = decoder.Info().frameCount;  // 0: unknown (mkv)
     if (clipFrames > 0 && r.first >= clipFrames)
         Throw("nr: --start " + std::to_string(r.first) + " is past the end of the clip (" + std::to_string(clipFrames) + " frames)");
-    // a range replaces color_nr with a part of the clip: never over the pass of a processed project (it has a fingerprint) -
-    // the project would lose it; a range goes under its own -o with --color-dir / --depth-dir / --mv-dir / --masks-dir
-    if (const auto out = o.outputDir / "color_nr"; Manifest::Exists(out)) {
-        std::string fp;
-        try {
-            fp = Manifest::Load(out).fingerprint;
-        } catch (const std::exception&) {
-        }
-        if (!fp.empty())
-            Throw("nr: " + out.string() + " is the pass of a processed project; write the range under another -o (inputs with --color-dir / --depth-dir / " +
-                  "--mv-dir / --masks-dir)");
-    }
+    GuardProcessedPass(o, "the range");
     // the last frame the run reads: --frames is «at most N», the clip may end first; with the clip's length unknown (mkv) only
     // the start of a pass is checked - a short colour pass still stops the run at «has no frame N» (review of TASK-0047)
     int64_t last = a.frames > 0 ? r.first + a.frames - 1 : -1;
@@ -274,6 +281,7 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     o.sourceFile = std::filesystem::path(a.input).filename().string();
     o.sourceHash = "sha256:" + Sha256File(a.input);
     const NrRange range = PrepareRange(a, decoder, o);
+    if (!range.Ranged() && !NrAbJson(o).empty()) GuardProcessedPass(o, "an A/B run");
     const int64_t total = range.maxFrames >= 0 ? range.maxFrames : info.frameCount > 0 ? info.frameCount - range.from : 0;
     o.onFrame = [](int64_t frame, double ms) {
         if (frame % 10 == 0) std::fprintf(stderr, "  frame %lld %.1f ms\n", static_cast<long long>(frame), ms);

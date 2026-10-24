@@ -452,6 +452,15 @@ TEST_CASE("dlssvid nr A/B switches on the stub: --mv-scale, --create-with-mv, --
         CHECK(ReadJson(dir / "plain.json")["ab"].empty());
         CHECK_FALSE(Manifest::Load(dir / "plain" / "color_nr").stageParams.contains("ab"));
     }
+    {  // never over the pass of a processed project, as a range (review of TASK-0048: an A/B run overwrote it in place)
+        Manifest m = Manifest::Load(dir / "plain" / "color_nr");
+        m.fingerprint = "sha256:processed";
+        m.Save(dir / "plain" / "color_nr");
+        const CliResult r = run("plain", {"--mv-scale", "auto"});
+        CHECK(r.code != 0);
+        CHECK(r.out.find("processed project") != std::string::npos);
+        CHECK(Manifest::Load(dir / "plain" / "color_nr").fingerprint == "sha256:processed");  // left as it was
+    }
     const CliResult pixels = run("pixels", {"--mv-scale", "pixels"});
     CHECK(pixels.code != 0);
     CHECK(pixels.out.find("must be unit | auto") != std::string::npos);

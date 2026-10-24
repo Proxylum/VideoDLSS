@@ -558,7 +558,7 @@ PlanProcess / RunProcess ── для каждой включённой ста�
    `tool.app` — версия алгоритма пассов `kPassToolVersion` (с 0.2.0 не равна версии релиза: релиз не обесценивает пассы)
    манифест <root>/<pass>/:  совпал и полный ─▶ reuse (exact)          │ совпал, кадров мало ─▶ run (incomplete, на месте)
                              без отпечатка   ─▶ reuse (legacy, штамп)  │ другой ─▶ такая версия в истории ─▶ restore
-                                                                       │         иначе run (source_changed | params_changed | input_changed | tool_changed) + retire
+                                                                       │         иначе run (source_changed | params_changed | input_changed | tool_changed | ab_pass) + retire
    run: <root>/<pass>/ ─▶ <root>/<pass>.v/<YYYYMMDD-HHMMSS_<fp8>>/, стадия пишет на место, манифест получает
         fingerprint / inputs / tool / params_canonical / created; после прогона gc (keepVersions, по умолчанию 2)
 ```

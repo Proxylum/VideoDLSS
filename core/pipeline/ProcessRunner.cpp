@@ -110,11 +110,16 @@ FlowStageOptions FlowOptions(const nlohmann::json& p, const std::filesystem::pat
     return o;
 }
 
-// A pass of the clip starts at frame 0: a part of it (dlssvid nr --start, export --range) is no stage's input and not the
-// result - fg read a color_nr of frames F..L («has no frame 0») and the encode put frame F at t=0 (review of TASK-0047)
+// A pass a standalone run made with the A/B switches of dlssvid nr (stage_params.ab, TASK-0048): not the project's run.
+bool AbPassManifest(const Manifest& m) { return m.stageParams.is_object() && m.stageParams.contains("ab"); }
+
+// A pass that stands for the clip's run of its stage: it starts at frame 0 - a part of the clip (dlssvid nr --start, export
+// --range) does not (review of TASK-0047: fg read frames F..L, «has no frame 0», the encode put frame F at t=0) - and it is
+// no A/B run (review of TASK-0048). Anything else is no stage's input and not the result.
+bool PassOfClip(const Manifest& m) { return m.firstFrame == 0 && !AbPassManifest(m); }
 bool PassOfClip(const std::filesystem::path& dir) {
     try {
-        return Manifest::Load(dir).firstFrame == 0;
+        return PassOfClip(Manifest::Load(dir));
     } catch (const std::exception&) {
         return true;  // unreadable: the stage that reads it says so, as before
     }
@@ -161,8 +166,9 @@ void RefreshFromDisk(PlanState& s, const std::filesystem::path& root) {
     for (const auto& name : PassesUnderRoot(root)) {
         try {
             const Manifest m = Manifest::Load(root / name);
-            if (m.firstFrame != 0) {  // a part of the clip: no input of the stages below (its own stage still sees it: incomplete)
-                Log()->info("process: {} holds frames {}..{} only, not used as the clip's pass", (root / name).string(), m.firstFrame, m.lastFrame);
+            if (!PassOfClip(m)) {  // a part of the clip or an A/B run: no input of the stages below (its own stage still sees it)
+                Log()->info("process: {} is not used as the clip's pass ({})", (root / name).string(),
+                            m.firstFrame != 0 ? "frames " + std::to_string(m.firstFrame) + ".." + std::to_string(m.lastFrame) + " only" : std::string("A/B switches, stage_params.ab"));
                 continue;
             }
             s.fp[name] = m.fingerprint.empty() ? LegacyId(m) : m.fingerprint;
@@ -226,14 +232,21 @@ bool OldExposurePass(const std::string& stage, const Manifest& m) {
 constexpr const char* kOldExposure = "made with the old linear exposure (TASK-0043: exposure is in stops now)";
 
 // An nr pass a standalone `dlssvid nr` made with its A/B switches (spec §2e: --mv-scale auto, --create-with-mv, --no-depth-guide):
-// the switches are not parameters, so adopting it - it has no fingerprint - would claim the default run (TASK-0048).
-bool AbNrPass(const std::string& stage, const Manifest& m) { return stage == "nr" && m.stageParams.is_object() && m.stageParams.contains("ab"); }
+// the switches are not parameters, so adopting it - it has no fingerprint - would claim the default run (TASK-0048). It is a
+// real result of an experiment, not a broken pass: it goes to the history (kind ab_pass), the stages below are not stale.
+bool AbNrPass(const std::string& stage, const Manifest& m) { return stage == "nr" && AbPassManifest(m); }
 constexpr const char* kAbPass = "made with the A/B switches of a standalone dlssvid nr (stage_params.ab)";
+
+// A pass wrong under its own fingerprint: discarded (not kept as a version), and what was made from it is stale too.
+const char* BrokenPassReason(const std::string& stage, const Manifest& m) {
+    if (OldPngColourPass(stage, m)) return kOldPng;
+    if (OldExposurePass(stage, m)) return kOldExposure;
+    return nullptr;
+}
 
 // A pass the planner must not reuse, restore or adopt although its fingerprint may match: the reason, else nullptr.
 const char* StalePassReason(const std::string& stage, const Manifest& m) {
-    if (OldPngColourPass(stage, m)) return kOldPng;
-    if (OldExposurePass(stage, m)) return kOldExposure;
+    if (const char* broken = BrokenPassReason(stage, m)) return broken;
     if (AbNrPass(stage, m)) return kAbPass;
     return nullptr;
 }
@@ -316,7 +329,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
 
     if (!ctx.skipExisting || ctx.force.count(name)) {
         run("forced", ctx.skipExisting ? "recomputed on request (--force)" : "every stage recomputed (--no-skip-existing)", have && m.fingerprint != fp.value);
-        d.stale = !inputsStale.empty() || (have && StalePassReason(name, m));
+        d.stale = !inputsStale.empty() || (have && BrokenPassReason(name, m));
         return d;
     }
     // Every fingerprint may match, yet an input was stale when this pass (or a history version under the same fingerprint)
@@ -333,9 +346,11 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         return d;
     }
     if (m.fingerprint == fp.value) {
-        if (const char* stale = StalePassReason(name, m)) {
-            run("tool_changed", stale, false);
+        if (const char* broken = BrokenPassReason(name, m)) {
+            run("tool_changed", broken, false);
             d.stale = true;
+        } else if (AbNrPass(name, m)) {
+            run("ab_pass", kAbPass, true);
         } else if (complete) {
             d.action = "reuse";
             d.kind = "exact";
@@ -359,8 +374,11 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             // then - adopting it would stamp the old depth with the depth.2 revision
             d.diff["tool"]["app"] = nlohmann::json::array({kPassToolVersion, PassToolVersionFor(name, p)});
             run("tool_changed", "depth made before the temporal alignment of TASK-0038", true);
-        } else if (const char* stale = StalePassReason(name, m)) {
-            run("tool_changed", stale, false);
+        } else if (AbNrPass(name, m)) {  // kept in the history to compare; the run of the project is restored or recomputed
+            if (restore()) return d;
+            run("ab_pass", kAbPass, true);
+        } else if (const char* broken = BrokenPassReason(name, m)) {
+            run("tool_changed", broken, false);
             d.stale = true;
         } else if (!complete) {
             run("incomplete", incomplete, false);
