@@ -82,7 +82,8 @@ private:
     QPushButton* run_;
     QPushButton* patch_ = nullptr;
     QPushButton* resetCard_ = nullptr;
-    QToolButton* moreToggle_ = nullptr;  // «Ещё настройки ▸ · изменено: …»
+    QToolButton* moreToggle_ = nullptr;  // «Ещё настройки ▸/▾»
+    QLabel* moreSummary_ = nullptr;      // «изменено: … · не действует: …», wrapped: it never sets the card's width
     QWidget* more_ = nullptr;
     std::vector<Row> rows_;
     std::vector<std::function<void()>> pull_;  // per form widget: show the project's value

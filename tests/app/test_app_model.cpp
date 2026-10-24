@@ -7,6 +7,8 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QDoubleSpinBox>
+#include <QLocale>
+#include <QMouseEvent>
 #include <QElapsedTimer>
 #include <QFormLayout>
 #include <QLabel>
@@ -1202,7 +1204,11 @@ TEST_CASE("StageCard NR: groups, the collapsed more block, conditions, reset and
     CHECK_FALSE(labelOf("Экспозиция")->isVisibleTo(&card));
     model.setStageParam("nr", "exposure", 1.0);
     card.refresh();
-    CHECK(more->text().contains(QString::fromUtf8("изменено: экспозиция 1 EV")));
+    QLabel* summary = card.findChild<QLabel*>("moreSummary");
+    REQUIRE(summary);
+    // the summary sits beside the toggle, wrapped: a long one no longer widens the card (final review of TASK-0046)
+    CHECK(summary->text().contains(QString::fromUtf8("изменено: экспозиция ") + QLocale().toString(1.0, 'f', 2) + " EV"));
+    CHECK(more->toolTip().contains(QString::fromUtf8("экспозиция")));
     more->click();
     CHECK(labelOf("Экспозиция")->isVisibleTo(&card));
     CHECK(labelOf("Экспозиция")->property("role").toString() == "changed");
@@ -1282,7 +1288,9 @@ TEST_CASE("StageCard NR: hidden changed values, folded aliases, the followed val
     model.setStageParams("nr", {{"backend", "ngx"}, {"temporal", 0.3}, {"temporal_threshold", 0.2}});
     model.setStageParams("nr", {{"backend", "ngx"}, {"temporal_threshold", 0.2}});
     card.refresh();
-    CHECK(more->text().contains(QString::fromUtf8("не действует: порог подавления мерцания 0.2")));
+    QLabel* summary = card.findChild<QLabel*>("moreSummary");
+    REQUIRE(summary);
+    CHECK(summary->text().contains(QString::fromUtf8("не действует: порог подавления мерцания ") + QLocale().toString(0.2, 'f', 2)));
     CHECK(resetCard->isVisibleTo(&card));  // before: hidden, the card had no way back
     resetCard->click();
     CHECK(model.stageEntry("nr")->params == nlohmann::json{{"backend", "ngx"}});
@@ -1314,6 +1322,26 @@ TEST_CASE("StageCard NR: hidden changed values, folded aliases, the followed val
     model.setStageParam("nr", "exposure", 0.58);
     card.refresh();
     CHECK(named(static_cast<QDoubleSpinBox*>(nullptr), "Экспозиция")->value() == Approx(0.58));
+
+    // a long summary wraps instead of widening the card
+    const int narrow = card.minimumSizeHint().width();
+    model.setStageParams("nr", {{"backend", "ngx"}, {"preset", 0}, {"tonemap", "aces"}, {"input_transfer", "pq"}, {"exposure", 0.5},
+                                {"temporal_threshold", 0.2}, {"transfer", 0.8}, {"max_ratio", 6}});
+    card.refresh();
+    CHECK(card.minimumSizeHint().width() <= narrow);
+    model.setStageParams("nr", {{"backend", "ngx"}});
+    card.refresh();
+
+    // a double click on a slider resets its row
+    model.setStageParam("nr", "intensity", 1.4);
+    card.refresh();
+    QSlider* intensity = nullptr;
+    for (QSlider* s : card.findChildren<QSlider*>())
+        if (s->accessibleName() == QString::fromUtf8("Интенсивность")) intensity = s;
+    REQUIRE(intensity);
+    QMouseEvent dbl(QEvent::MouseButtonDblClick, QPointF(5, 5), QPointF(5, 5), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(intensity, &dbl);
+    CHECK_FALSE(model.stageEntry("nr")->params.contains("intensity"));
 
     // the label's context menu resets the row
     model.setStageParam("nr", "local_tone", 1.5);
@@ -1348,6 +1376,20 @@ TEST_CASE("StageCard: the reset of the backend drops the old backend's model, as
     const nlohmann::json p = model.stageEntry("depth")->params;
     CHECK_FALSE(p.contains("backend"));
     CHECK_FALSE(p.contains("model"));  // before: metric-vda-large under DA3
+
+    // «Сбросить» shows for what it removes: not for the backend alone (it keeps it), and a DA3 model from the JSON stays
+    QPushButton* resetCard = nullptr;
+    for (QPushButton* b : card.findChildren<QPushButton*>())
+        if (b->text() == QString::fromUtf8("Сбросить")) resetCard = b;
+    REQUIRE(resetCard);
+    model.setStageParams("depth", {{"backend", "vda"}});
+    card.refresh();
+    CHECK_FALSE(resetCard->isVisibleTo(&card));  // before: shown, and a click did nothing
+    model.setStageParams("depth", {{"backend", "da3"}, {"model", "da3mono-large"}, {"stabilize", "none"}});
+    card.refresh();
+    CHECK(resetCard->isVisibleTo(&card));
+    resetCard->click();
+    CHECK(model.stageEntry("depth")->params == nlohmann::json{{"backend", "da3"}, {"model", "da3mono-large"}});
 }
 
 // TASK-0046: an experimental style (3..6, not documented by NVIDIA) warns on the card.
@@ -1393,6 +1435,10 @@ TEST_CASE("Versions panel names the values other than the default, the basic one
     CHECK(tip.contains("format = "));
     CHECK(dlssvid::HumanStageParams("nr", {{"backend", "ngx"}, {"format", "png"}}).contains(QString::fromUtf8("Формат пасса")));  // engineer keys too
     CHECK(dlssvid::HumanStageParams("nr", {{"backend", "ngx"}}).isEmpty());
+    // a DA3 model set in the JSON sets two depth versions apart too (final review)
+    QString depthTip;
+    CHECK(dlssvid::HumanStageParams("depth", {{"backend", "da3"}, {"model", "da3mono-large"}}, &depthTip).contains("da3mono-large"));
+    CHECK(depthTip.contains("model = da3mono-large"));
 }
 
 // TASK-0039: the VDA models in the depth card - Small / Base / Large for vda and worker:vda, hidden for DA3; a switch to

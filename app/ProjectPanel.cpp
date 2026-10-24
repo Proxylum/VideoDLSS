@@ -75,9 +75,8 @@ QString HumanStageParams(const std::string& stage, const nlohmann::json& rawPara
     if (const StageSchema* schema = FindStageSchema(stage); schema && params.is_object())
         for (const auto& spec : schema->params) {
             if (!params.contains(spec.key)) continue;
-            // the keys of this backend only (depth.model is a list for VDA, not a key of DA3)
+            // the keys of this backend only (depth.window is VDA's); depth.model counts for every backend, DA3 included
             if (!spec.backends.empty() && std::find(spec.backends.begin(), spec.backends.end(), backend) == spec.backends.end()) continue;
-            if (!spec.formChoices.empty() && !FormChoicesFor(spec, backend)) continue;
             const nlohmann::json& v = params[spec.key];
             const QString value = QString::fromStdString(ParamValueLabel(spec, v, backend));
             all << QString("%1 = %2").arg(QString::fromStdString(spec.key), value);

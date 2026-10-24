@@ -9,6 +9,7 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLineEdit>
+#include <QLocale>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSlider>
@@ -17,6 +18,7 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <set>
 
 #include "AppModel.h"
@@ -56,6 +58,38 @@ int ChoiceIndex(const ParamSpec& spec, const nlohmann::json& value) {
     }
     return -1;
 }
+
+// The keys «Сбросить» removes: the form's rows, not the backend - the method is switched back by its own ↺ (TASK-0046)
+bool CardResets(const ParamSpec& spec) { return !spec.advanced && spec.key != "backend"; }
+
+// A value as the card's fields show it (the locale's decimal separator, the field's decimals, the suffix), for the
+// summary of «Ещё настройки» and the ↺ text; the special values and the lists keep their words (ParamValueLabel)
+QString CardValueLabel(const ParamSpec& spec, const nlohmann::json& v, const std::string& backend) {
+    if (v.is_number() && spec.choices.empty() && spec.formChoices.empty()) {
+        const double d = v.get<double>();
+        const bool special = (spec.sentinel && d == *spec.sentinel && !spec.sentinelLabel.empty()) || (!spec.zeroLabel.empty() && d == spec.min);
+        if (!special) return QLocale().toString(d, 'f', spec.type == ParamType::Int ? 0 : ParamDecimals(spec)) + QString::fromStdString(spec.suffix);
+    }
+    return QString::fromStdString(ParamValueLabel(spec, v, backend));
+}
+
+// A double click on a slider resets its row (spec §1.1: the mouse's extra way; ↺ and the label's menu are the others)
+class DoubleClickFilter : public QObject {
+public:
+    DoubleClickFilter(QObject* parent, std::function<void()> f) : QObject(parent), f_(std::move(f)) {}
+    bool eventFilter(QObject*, QEvent* e) override {
+        if (e->type() != QEvent::MouseButtonDblClick) return false;
+        f_();
+        return true;
+    }
+
+private:
+    std::function<void()> f_;
+};
+
+// The spin box shows the stored value already (to its decimals): leave it - a setValue while the user types rewrote the
+// text after each key («1» -> «1,00 EV», the comma then rejected)
+bool SpinShows(const QDoubleSpinBox* spin, double v) { return std::fabs(spin->value() - v) <= 0.5 * std::pow(10.0, -spin->decimals()); }
 
 const char* kToneRole[] = {"ok", "warn", "muted", "muted"};  // ok, run, off, none
 
@@ -149,6 +183,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
             row.reset = new QToolButton(cell);
             row.reset->setText(QString::fromUtf8("↺"));
             row.reset->setAutoRaise(true);
+            SetRole(row.reset, "reset");
             row.reset->setFocusPolicy(Qt::TabFocus);  // reachable from the keyboard
             row.reset->setToolTip(tr("Сбросить: %1").arg(QString::fromStdString(ParamValueLabel(spec, spec.def))));
             row.reset->setAccessibleName(tr("Сбросить «%1»").arg(QString::fromStdString(spec.label)));
@@ -177,7 +212,16 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
             moreToggle_->setAutoRaise(true);
             moreToggle_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
             SetRole(moreToggle_, "more");
-            column->addWidget(moreToggle_, 0, Qt::AlignLeft);
+            moreSummary_ = new QLabel(form_);
+            moreSummary_->setObjectName("moreSummary");
+            SetRole(moreSummary_, "hint");
+            moreSummary_->setWordWrap(true);
+            moreSummary_->hide();
+            auto* moreRow = new QHBoxLayout();
+            moreRow->setSpacing(8);
+            moreRow->addWidget(moreToggle_, 0, Qt::AlignLeft | Qt::AlignTop);
+            moreRow->addWidget(moreSummary_, 1);
+            column->addLayout(moreRow);
             more_ = new QWidget(form_);
             addRows(makeForm(more_), true);
             column->addWidget(more_);
@@ -386,6 +430,10 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
             auto* spin = new QDoubleSpinBox(row);
             spin->setRange(lo, spec.max);
             spin->setSingleStep(step);
+            spin->setKeyboardTracking(false);  // typed text is taken on Enter / leaving the field; arrows and wheel at once
+            slider->installEventFilter(new DoubleClickFilter(slider, [this, key] {
+                if (!updating_) resetParam(key);
+            }));
             const int decimals = ParamDecimals(spec);
             spin->setDecimals(decimals);
             if (!spec.zeroLabel.empty()) spin->setSpecialValueText(QString::fromStdString(spec.zeroLabel));  // «выкл» at the minimum
@@ -436,7 +484,7 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
                 if (spec.sentinel && d == *spec.sentinel) d = followedValue(spec);
                 const QSignalBlocker b1(slider), b2(spin);
                 slider->setValue(static_cast<int>(std::lround(d / step)));
-                spin->setValue(d);
+                if (!SpinShows(spin, d)) spin->setValue(d);
             });
             return row;
         }
@@ -459,6 +507,7 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
             auto* spin = new QDoubleSpinBox(form_);
             spin->setRange(spec.min, spec.max > spec.min ? spec.max : 1e9);
             spin->setSingleStep(spec.step > 0 ? spec.step : 0.1);
+            spin->setKeyboardTracking(false);
             const int decimals = ParamDecimals(spec);
             spin->setDecimals(decimals);
             if (!spec.zeroLabel.empty()) spin->setSpecialValueText(QString::fromStdString(spec.zeroLabel));
@@ -470,7 +519,8 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
                 const nlohmann::json raw = valueOf(spec);
                 const nlohmann::json v = raw.is_number() ? raw : spec.def;
                 const QSignalBlocker b(spin);
-                spin->setValue(v.is_number() ? v.get<double>() : 0.0);
+                const double d = v.is_number() ? v.get<double>() : 0.0;
+                if (!SpinShows(spin, d)) spin->setValue(d);
             });
             return spin;
         }
@@ -547,9 +597,13 @@ void StageCard::resetCard() {
     // whole object, so they are carried over (TASK-0046). Folded first: an alias of a form key goes with it.
     nlohmann::json params = nlohmann::json::object();
     const nlohmann::json current = stageParams();  // named: items() of a temporary dangles in the range-for (C++20)
+    const std::string backend = currentBackend();
     for (const auto& [key, value] : current.items()) {
         const ParamSpec* spec = schema_->Find(key);
-        if (!spec || spec->advanced || key == "backend") params[key] = value;
+        // a list key without a list for this backend (depth.model under DA3, from the JSON) has no row: the card neither
+        // shows nor counts it, so it stays like a key of the JSON editor
+        const bool noRow = spec && !spec->formChoices.empty() && !FormChoicesFor(*spec, backend);
+        if (!spec || !CardResets(*spec) || noRow) params[key] = value;
     }
     model_.setStageParams(stage_, params);
 }
@@ -590,25 +644,36 @@ void StageCard::refresh() {
         row.note->setText(QString::fromStdString(st.note));
         row.note->setVisible(!st.enabled && !st.note.empty());
         // a value of a row hidden by its condition (the threshold with the filter off) is still in the fingerprint:
-        // the card names it and «Сбросить» drops it; a key of another backend is not (EffectiveStageParams drops it)
+        // the card names it and «Сбросить» drops it. Not counted: a key of another backend (EffectiveStageParams drops
+        // it) and a list key without a list for this backend (no row; «Сбросить» keeps it)
         const bool differs = ofBackend && hasList && changed(spec);
         const bool isChanged = visible && differs;
-        SetRole(row.label, isChanged ? "changed" : "");
+        SetRole(row.label, isChanged ? "changed" : (st.enabled ? "" : "muted"));
         row.reset->setVisible(isChanged);
         row.resetAction->setEnabled(isChanged);
-        anyChanged = anyChanged || differs;
+        QString def = CardValueLabel(spec, spec.def, backend);
+        if (def.isEmpty()) def = tr("по умолчанию");
+        row.reset->setToolTip(tr("Сбросить: %1").arg(def));
+        row.resetAction->setText(row.reset->toolTip());
+        anyChanged = anyChanged || (differs && CardResets(spec));  // as resetCard: the backend's ↺ is its own
         const QString item = QString("%1 %2").arg(QString::fromStdString(spec.label).toLower(),
-                                                  QString::fromStdString(ParamValueLabel(spec, folded.contains(spec.key) ? folded[spec.key] : spec.def, backend)));
+                                                  CardValueLabel(spec, folded.contains(spec.key) ? folded[spec.key] : spec.def, backend));
         if (differs && !visible) hiddenChanged << item;
         else if (isChanged && spec.more) moreChanged << item;
     }
     auto list = [](const QStringList& l) { return l.size() > 3 ? l.mid(0, 3).join(", ") + ", …" : l.join(", "); };
     if (moreToggle_) {
         const bool open = moreToggle_->isChecked();
-        QString text = open ? tr("Ещё настройки ▾") : tr("Ещё настройки ▸");
-        if (!open && !moreChanged.isEmpty()) text += tr(" · изменено: %1").arg(list(moreChanged));  // the collapsed block says what it hides
-        if (!hiddenChanged.isEmpty()) text += tr(" · не действует: %1").arg(list(hiddenChanged));
-        moreToggle_->setText(text);
+        moreToggle_->setText(open ? tr("Ещё настройки ▾") : tr("Ещё настройки ▸"));
+        QStringList parts, full;
+        if (!open && !moreChanged.isEmpty()) parts << tr("изменено: %1").arg(list(moreChanged));  // the collapsed block says what it hides
+        if (!hiddenChanged.isEmpty()) parts << tr("не действует: %1").arg(list(hiddenChanged));
+        if (!moreChanged.isEmpty()) full << tr("изменено: %1").arg(moreChanged.join(", "));
+        if (!hiddenChanged.isEmpty()) full << tr("не действует: %1").arg(hiddenChanged.join(", "));
+        moreSummary_->setText(parts.join(" · "));
+        moreSummary_->setVisible(!parts.isEmpty());
+        moreToggle_->setToolTip(full.join("\n"));
+        moreSummary_->setToolTip(full.join("\n"));
     }
     resetCard_->setVisible(anyChanged);
     const AppModel::StageCardState st = model_.cardState(stage_);

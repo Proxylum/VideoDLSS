@@ -15,7 +15,7 @@ namespace dlssvid {
 // buttons 36 px high with 14 px side padding and a 6 px radius, the primary action in the accent colour, 24 px table
 // buttons, 32 px segments in a bordered group, 30 px rounded chips, 30 px selects and inputs, cards padded 9×14 px.
 // Variants are chosen with the `role` property (SetRole): "primary", "primary-big", "start", "start-primary", "small",
-// "tall", "quiet" for buttons; "segment", "chip", "icon" for tool buttons; "segments" for a group frame; "card",
+// "tall", "quiet" for buttons; "segment", "chip", "icon", "more", "reset" for tool buttons; "segments" for a group frame; "card",
 // "card-dashed" for frames; "muted", "hint", "title", "h1", "h2", "mono", "ok", "warn", "danger", "accent", "version",
 // "cell-label" for labels. The start screen (TASK-0020) adds "section", "text-13", "hint-13", "dropzone-title",
 // "dot-ok" / "dot-warn" / "dot-danger", "recent-title", "recent-meta", "preview" for labels and "recent" for a card.

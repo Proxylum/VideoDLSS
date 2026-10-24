@@ -38,11 +38,12 @@ void MigrateNrParamsV1(nlohmann::json& params) {
         else params["exposure"] = ev;
         Log()->info("project v1: nr.exposure {} (a multiplier) -> {} EV", x, ev);
     }
-    if (params.contains("skin_structure") && params["skin_structure"].is_number()) {
-        const double v = params["skin_structure"].get<double>();
+    for (const char* key : {"skin_structure", "skin-structure"}) {  // NrStage and NormalizeStageParams take the kebab alias too
+        if (!params.contains(key) || !params[key].is_number()) continue;
+        const double v = params[key].get<double>();
         if (v < 0.0 && v != -1.0) {
-            params["skin_structure"] = -1.0;
-            Log()->info("project v1: nr.skin_structure {} -> -1 (as the local structure)", v);
+            params[key] = -1.0;
+            Log()->info("project v1: nr.{} {} -> -1 (as the local structure)", key, v);
         }
     }
 }

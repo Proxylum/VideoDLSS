@@ -7,6 +7,7 @@
 #include <fstream>
 
 #include "passes/PassSequence.h"
+#include "stages/ParamSchema.h"
 #include "viewport/Project.h"
 
 using namespace dlssvid;
@@ -111,6 +112,8 @@ TEST_CASE("Project v1 -> v2: nr.exposure x becomes log2(x), x <= 0 is dropped, s
     CHECK(nrOf({{"skin_structure", -0.5}}) == nlohmann::json{{"skin_structure", -1.0}});
     CHECK(nrOf({{"skin_structure", -1.0}}) == nlohmann::json{{"skin_structure", -1.0}});
     CHECK(nrOf({{"skin_structure", 0.4}}) == nlohmann::json{{"skin_structure", 0.4}});
+    CHECK(nrOf({{"skin-structure", -0.5}}) == nlohmann::json{{"skin-structure", -1.0}});  // the alias the stage reads too (TASK-0046)
+    CHECK(ValidateStageParams("nr", nrOf({{"skin-structure", -0.5}})).empty());
     // a version-2 file is taken as it is; a newer one is refused
     const nlohmann::json v2 = {{"schema_version", 2}, {"stages", nlohmann::json::array({{{"name", "nr"}, {"params", {{"exposure", 0.0}}}}})}};
     CHECK(Project::FromJson(v2, d).stages[0].params == nlohmann::json{{"exposure", 0.0}});
