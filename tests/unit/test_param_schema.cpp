@@ -61,6 +61,21 @@ TEST_CASE("Every stage has a schema whose defaults mirror the stages and the pro
     CHECK(FindStageSchema("nr")->guides == std::vector<std::string>{"depth_dlss", "mv_dlss"});
 }
 
+// TASK-0048 (spec §0.1, §2e): the A/B switches of the standalone dlssvid nr are flags, not settings - no schema key, so a
+// project, a preset, --param or --params-file cannot set them, and ApplyNrParams never reads them.
+TEST_CASE("NR A/B switches are standalone flags: no schema key, ApplyNrParams ignores them", "[unit][schema][nr]") {
+    for (const char* k : {"mv_scale", "create_with_mv", "depth_guide", "no_depth_guide"}) {
+        INFO(k);
+        CHECK(FindStageSchema("nr")->Find(k) == nullptr);
+    }
+    NrStageOptions o;
+    ApplyNrParams({{"mv_scale", "auto"}, {"create_with_mv", true}, {"depth_guide", false}, {"no-depth-guide", true}}, o);
+    CHECK(o.mvScale == "unit");
+    CHECK_FALSE(o.createWithMv);
+    CHECK(o.depthGuide);
+    CHECK(NrAbJson(NrStageOptions{}).empty());
+}
+
 // TASK-0047: a file of one stage's settings (dlssvid nr --params-file) - one object of the schema's keys, aliases normalised;
 // keys the schema does not have are named for the caller to refuse; other files are refused with a message naming them.
 TEST_CASE("ReadStageParamsFile: one object of schema keys, aliases normalised, unknown keys named, other files refused", "[unit][schema][nr]") {

@@ -20,6 +20,7 @@ public:
     nlohmann::json Describe() const override;
     void Shutdown() override { kernel_.reset(); }
     int Calls() const { return calls_; }
+    const NrConfig& Config() const { return config_; }  // the A/B switches reach the backend (test_nr_stage)
     bool LastHadDepth() const { return lastDepth_; }
     bool LastHadMv() const { return lastMv_; }
     bool LastReset() const { return lastReset_; }

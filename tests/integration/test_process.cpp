@@ -237,6 +237,43 @@ TEST_CASE("RunProcess: a part of the clip under the passes root is neither fg's 
     CHECK(r.framesOut == 4);
 }
 
+// TASK-0048 (spec §2e): the A/B switches are not parameters - an nr pass a standalone run made with them (stage_params.ab) is
+// never reused, restored or adopted as the default run, with or without a fingerprint; fg built on it reruns.
+TEST_CASE("RunProcess: an nr pass made with the A/B switches of a standalone run is not adopted, reused or restored", "[integration][process][nr]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("ab_pass");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    const auto nrDir = o.passesRoot / "color_nr";
+    auto markAb = [&](bool keepFingerprint) {
+        Manifest m = Manifest::Load(nrDir);
+        m.stageParams["ab"] = {{"mv_scale", "auto"}};
+        if (!keepFingerprint) {
+            m.fingerprint.clear();
+            m.tool = nlohmann::json::object();
+        }
+        m.Save(nrDir);
+    };
+    markAb(true);
+    ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK(Report(r, "nr").reason.find("A/B") != std::string::npos);
+    CHECK(Report(r, "fg").status == "ran");
+    CHECK(Report(RunProcess(o), "nr").status == "reused");  // the rerun is the default run
+    markAb(false);  // what a standalone run leaves: no fingerprint
+    CHECK(Report(RunProcess(o), "nr").status == "ran");  // not adopted
+}
+
 // TASK-0043: the fingerprint hashed the schema's view of the parameters while the stages read the raw ones - an alias ran
 // at its value under a fingerprint saying the default. The parameters are normalised for both now (the handoff of the
 // effective parameters to the stages is covered by the mirror test in test_param_schema: with the defaults in agreement

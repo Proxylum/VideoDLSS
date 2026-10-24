@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "gpu/D3D12Device.h"
@@ -43,12 +44,18 @@ struct NrConfig {
     float skinStructure = -1.f;              // DLSSNR.SkinStructureStrength (-1 = model default)
     bool autoMask = false;                   // DLSSNR.UseAutoMask (the model's automatic skin mask)
     bool depthInverted = true;               // depth_dlss is reverse-Z (docs/conventions.md)
-    float mvScaleX = 1.f, mvScaleY = 1.f;    // DLSSNR.MVecScale: mv_dlss is in pixels -> 1
+    float mvScaleX = 1.f, mvScaleY = 1.f;    // DLSSNR.MVecScale base (x NrMvScale): mv_dlss is in pixels of its own size
     bool useGuides = true;                   // false: still-image mode (no depth / mv, history reset every frame)
     std::filesystem::path dllDir;            // nvngx_dlssnr.dll folder override (docs/dll-setup.md)
     std::string paramsBlock = "capability";  // NGX parameter block: capability (OptiScaler) | alloc (ComfyUI)
     bool requireDriver = true;               // enforce driver >= 616.56
     nlohmann::json extra = nlohmann::json::object();
+    // A/B switches of the standalone `dlssvid nr` (spec §2e: E3, E4, E5) - not schema keys, `process` leaves the defaults
+    std::string mvScale = "unit";            // unit: mv_dlss px as is, the sub-rect carries the size | auto: x model size / mv size
+    bool createWithMv = false;               // CreateFeature with zero guides bound instead of none (ComfyUI binds a zero MVec)
+    uint32_t createMvWidth = 0, createMvHeight = 0;        // the zero MVec at CreateFeature (0: the model size)
+    uint32_t createDepthWidth = 0, createDepthHeight = 0;  // the zero depth at CreateFeature (0: none bound)
+    bool depthGuide = true;                  // false: mv_dlss to the model, depth_dlss not (--no-depth-guide)
 };
 
 struct NrInputs {
@@ -73,6 +80,12 @@ struct NrDiagnostics {
     int initAbi = -1;          // argument order that worked (0 info,version | 1 version,info | 2 version,params)
     std::string paramsBlock;   // capability | alloc
     std::string createResult;  // CreateFeature(18) result
+    // Init's cost (spec E8 T_init, E6 VRAM per feature; `dlssvid nr --check`): -1 = not measured (Init stopped before)
+    double initMs = -1.0;           // NGX core (cold only for the first user in the process), snippet + forwarder, block, Init_Ext
+    double createMs = -1.0;         // CreateFeature(18), every attempt (the retry with the other block is part of the wait)
+    int64_t vramInitBytes = -1;     // this process's local video memory: growth over the init above
+    int64_t vramFeatureBytes = -1;  // ... over CreateFeature (our scratch textures and zero guides are made before, not counted)
+    int64_t vramBudgetBytes = -1;   // DXGI budget of the process at the start (what is left for passes 2..4, 4K)
     bool ok = false;
     std::string hint;          // instruction for the user when !ok
     nlohmann::json ToJson() const;
@@ -106,5 +119,9 @@ std::filesystem::path FindNrDll(const std::filesystem::path& dllDir = {});
 std::filesystem::path FindNrForwarder(const std::filesystem::path& dllDir = {});
 std::string NrDllInstruction();
 int ParseNrStyle(const std::string& s);  // default | natural | cinematic | integer
+// DLSSNR.MVecScale factor for a frame (A/B E3, spec §2e): "unit" {1,1} - mv_dlss pixels of its own resolution as is
+// (OptiScaler: the sub-rect carries the size, a ratio on top would count it twice); "auto" - the ratio model / mv size, vectors
+// in the model's pixels (ComfyUI: colour pixels). {1,1} without vectors. Throws on another mode.
+std::pair<float, float> NrMvScale(const std::string& mode, uint32_t modelWidth, uint32_t modelHeight, uint32_t mvWidth, uint32_t mvHeight);
 
 }  // namespace dlssvid

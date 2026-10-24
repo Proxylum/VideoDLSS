@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <optional>
 #include <numeric>
 #include <vector>
 
@@ -66,4 +67,21 @@ TEST_CASE("D3D12Device RGBA16F texture round trip", "[gpu]") {
     const auto out = dev.ReadbackTexture2D(tex.Get(), pitch);
     REQUIRE(pitch == rowBytes);
     REQUIRE(out == in);
+}
+
+// TASK-0048: this process's video memory on the adapter (DXGI QueryVideoMemoryInfo) - what `nr --check` reports for the NR
+// feature; per process, so the GPU the CI runner shares with other work does not skew it.
+TEST_CASE("D3D12Device reports the local video memory of this process and its growth", "[gpu]") {
+    const VideoMemoryInfo a{100, 1000}, b{50, 1000}, c{150, 1000};
+    CHECK(VideoMemoryGrowth(std::nullopt, a) == -1);
+    CHECK(VideoMemoryGrowth(a, std::nullopt) == -1);
+    CHECK(VideoMemoryGrowth(a, b) == 0);  // a release in between reads as no growth
+    CHECK(VideoMemoryGrowth(b, c) == 100);
+    D3D12Device dev({false, false});
+    if (dev.IsWarp()) SKIP("no hardware adapter: WARP may not report video memory");
+    const auto before = dev.LocalVideoMemory();
+    REQUIRE(before);
+    CHECK(before->budget > 0);
+    const auto tex = dev.CreateTexture2D(4096, 4096, DXGI_FORMAT_R8G8B8A8_UNORM);  // 64 MiB; the driver may sub-allocate or page lazily
+    CHECK(VideoMemoryGrowth(before, dev.LocalVideoMemory()) >= (32ll << 20));
 }

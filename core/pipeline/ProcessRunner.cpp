@@ -225,10 +225,16 @@ bool OldExposurePass(const std::string& stage, const Manifest& m) {
 }
 constexpr const char* kOldExposure = "made with the old linear exposure (TASK-0043: exposure is in stops now)";
 
+// An nr pass a standalone `dlssvid nr` made with its A/B switches (spec §2e: --mv-scale auto, --create-with-mv, --no-depth-guide):
+// the switches are not parameters, so adopting it - it has no fingerprint - would claim the default run (TASK-0048).
+bool AbNrPass(const std::string& stage, const Manifest& m) { return stage == "nr" && m.stageParams.is_object() && m.stageParams.contains("ab"); }
+constexpr const char* kAbPass = "made with the A/B switches of a standalone dlssvid nr (stage_params.ab)";
+
 // A pass the planner must not reuse, restore or adopt although its fingerprint may match: the reason, else nullptr.
 const char* StalePassReason(const std::string& stage, const Manifest& m) {
     if (OldPngColourPass(stage, m)) return kOldPng;
     if (OldExposurePass(stage, m)) return kOldExposure;
+    if (AbNrPass(stage, m)) return kAbPass;
     return nullptr;
 }
 

@@ -36,7 +36,21 @@ void ParseSize(const std::string& s, uint32_t& w, uint32_t& h) {
     h = static_cast<uint32_t>(std::stoul(s.substr(x + 1)));
 }
 
-void PrintDiagnostics(const NrDiagnostics& d, const std::string& error) {
+std::string MiB(int64_t b) {
+    if (b < 0) return "?";
+    char s[32];
+    std::snprintf(s, sizeof(s), "%.1f MiB", static_cast<double>(b) / 1048576.0);
+    return s;
+}
+
+std::string Ms(double v) {
+    if (v < 0) return "?";
+    char s[32];
+    std::snprintf(s, sizeof(s), "%.0f ms", v);
+    return s;
+}
+
+void PrintDiagnostics(const NrDiagnostics& d, const std::string& error, double deviceMs) {
     std::printf("GPU:          %s\n", d.gpu.c_str());
     std::printf("architecture: %s\n", d.architecture.empty() ? "?" : d.architecture.c_str());
     std::printf("driver:       %s%s\n", d.driver.ToString().c_str(), !d.driver.valid ? "" : d.driverOk ? " (>= 616.56)" : " (< 616.56 required)");
@@ -45,6 +59,13 @@ void PrintDiagnostics(const NrDiagnostics& d, const std::string& error) {
     std::printf("forwarder:    %s\n", d.forwarder.empty() ? "not found" : d.forwarder.string().c_str());
     if (!d.initResult.empty()) std::printf("init:         %s%s\n", d.initResult.c_str(), d.initAbi >= 0 ? (" (abi " + std::to_string(d.initAbi) + ")").c_str() : "");
     if (!d.createResult.empty()) std::printf("create(18):   %s [%s block]\n", d.createResult.c_str(), d.paramsBlock.c_str());
+    if (d.initMs >= 0) {  // the backend reached its init: the cost of creating the feature (spec E8, E6)
+        std::printf("time:         device %s, init %s, create %s\n", Ms(deviceMs).c_str(), Ms(d.initMs).c_str(), Ms(d.createMs).c_str());
+        if (d.vramFeatureBytes < 0) std::printf("vram:         unknown (the adapter does not report it)\n");
+        else
+            std::printf("vram:         feature %s, init %s, budget %s (DXGI, this process)\n", MiB(d.vramFeatureBytes).c_str(), MiB(d.vramInitBytes).c_str(),
+                        MiB(d.vramBudgetBytes).c_str());
+    }
     if (d.ok) std::printf("status:       ok\n");
     else std::printf("status:       FAILED: %s\n", !d.hint.empty() ? d.hint.c_str() : error.c_str());
 }
@@ -181,11 +202,21 @@ NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStage
 
 int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
     // the values were checked with the run's (ResolveNrParams); the feature is created with the run's tuning at --check-size
+    const auto t0 = std::chrono::steady_clock::now();
     D3D12Device device({a.warp, false});
+    const double deviceMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     std::unique_ptr<INrBackend> backend = CreateNrBackend(o.backend);
     uint32_t w = 0, h = 0;
     ParseSize(a.checkSize, w, h);
-    const NrConfig cfg = NrConfigFromOptions(o, w, h);
+    NrConfig cfg = NrConfigFromOptions(o, w, h);
+    if (cfg.createWithMv) {  // no pass folders here: zero guides at the check size (E4: the create time and VRAM with guides bound)
+        cfg.createMvWidth = w;
+        cfg.createMvHeight = h;
+        if (cfg.depthGuide) {
+            cfg.createDepthWidth = w;
+            cfg.createDepthHeight = h;
+        }
+    }
     std::string error;
     try {
         backend->Init(device, cfg);
@@ -194,10 +225,12 @@ int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
     }
     const NrDiagnostics d = backend->Diagnostics();
     backend->Shutdown();
-    PrintDiagnostics(d, error);
+    PrintDiagnostics(d, error, deviceMs);
     if (!a.json.empty()) {
         nlohmann::json j = d.ToJson();
         j["error"] = error;
+        j["device_ms"] = deviceMs;
+        j["ab"] = NrAbJson(o);
         std::ofstream(a.json) << j.dump(2) << "\n";
     }
     return d.ok ? 0 : 1;
@@ -210,6 +243,10 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     o.paramsBlock = a.paramsBlock;
     o.requireDriver = !a.skipDriverCheck;
     o.dllDir = a.dllDir;
+    o.mvScale = a.mvScale;  // the A/B switches: options of the run, never settings (spec §2e)
+    o.createWithMv = a.createWithMv;
+    o.depthGuide = !a.noDepthGuide;
+    if (const auto problems = NrAbProblems(o); !problems.empty()) Throw("nr: " + Join(problems));
     if (a.check) return CmdNrCheck(a, o);
     if (a.input.empty()) Throw("nr: -i/--input is required (or --check)");
     if (a.output.empty()) Throw("nr: -o/--output is required");
@@ -268,12 +305,15 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     if (range.Ranged())
         std::printf("range:       %lld..%lld (warm-up %lld)\n", static_cast<long long>(r.stats.firstWritten), static_cast<long long>(r.stats.lastWritten),
                     static_cast<long long>(r.stats.warmup));
+    if (r.stats.mvScaleX > 0) std::printf("mv scale:    %.3f x %.3f (%s)\n", r.stats.mvScaleX, r.stats.mvScaleY, a.mvScale.c_str());
+    if (const auto ab = NrAbJson(o); !ab.empty()) std::printf("a/b:         %s (the pass carries stage_params.ab: process never adopts it)\n", ab.dump().c_str());
     if (!a.video.empty()) std::printf("video:       %s\n", a.video.c_str());
     if (!a.json.empty()) {
         nlohmann::json j = {{"color_nr", r.outDir.string()},
                             {"backend", r.backend},
                             {"diagnostics", r.diagnostics},
                             {"params", EffectiveStageParams("nr", params)},  // the run's settings: defaults < --params-file < the options given
+                            {"ab", NrAbJson(o)},
                             {"stats",
                              {{"frames", r.stats.frames},  // through the model, warm-up included
                               {"frames_written", r.stats.written},
@@ -286,7 +326,8 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
                               {"depth_used", r.stats.depthUsed},
                               {"mv_used", r.stats.mvUsed},
                               {"masks", r.stats.masks},
-                              {"color_source", r.stats.colorSource}}}};
+                              {"color_source", r.stats.colorSource},
+                              {"mv_scale", r.stats.mvScaleX > 0 ? nlohmann::json::array({r.stats.mvScaleX, r.stats.mvScaleY}) : nlohmann::json(nullptr)}}}};
         if (range.Ranged()) j["range"] = {{"first", r.stats.firstWritten}, {"last", r.stats.lastWritten}, {"warmup", r.stats.warmup}};
         std::ofstream(a.json) << j.dump(2) << "\n";
     }
@@ -346,6 +387,12 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_option("--transfer", na_.transfer, "ratio transfer strength 0..1 (model-scale != 1)")->default_val(1.f);
     nr_->add_option("--max-ratio,--max_ratio", na_.maxRatio, "ratio transfer guard")->default_val(4.f);
     nr_->add_flag("--no-guides,--no_guides,!--guides", na_.noGuides, "A/B: no depth / motion vectors to the model (still-image mode); --guides overrides --params-file");
+    // A/B switches (spec §2e, E3-E5): standalone only, not schema keys - a project, a preset, --params-file or `process` never sets
+    // them, and a pass made with them (stage_params.ab) is never adopted by `process`; PR-7 wires the winner in and drops them
+    nr_->add_option("--mv-scale,--mv_scale", na_.mvScale, "A/B: DLSSNR.MVecScale - unit (mv_dlss pixels as is, the sub-rect carries the size) | auto (x model size / mv size)")
+        ->default_val("unit");
+    nr_->add_flag("--create-with-mv,--create_with_mv", na_.createWithMv, "A/B: CreateFeature with zero motion vectors (and depth) bound instead of none (ComfyUI)");
+    nr_->add_flag("--no-depth-guide,--no_depth_guide", na_.noDepthGuide, "A/B: motion vectors to the model, depth not");
     nr_->add_option("--temporal", na_.temporal, "temporal filter weight 0..1 (0 = off): blend with the previous frame warped by mv_dlss")->default_val(0.f);
     nr_->add_option("--temporal-threshold,--temporal_threshold", na_.temporalThreshold, "colour difference that rejects the temporal blend")->default_val(0.1f);
     nr_->add_option("--skin-blend,--skin_blend", na_.skinBlend, "edit strength inside mask_face / mask_skin (0 = keep the input)")->default_val(1.f);

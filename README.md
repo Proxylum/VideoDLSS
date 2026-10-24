@@ -342,7 +342,7 @@ Neural Rendering (stage 6): `color_nr` from `color_sr` (or the video) with `dept
 `bin\nvidia\nvngx_dlssnr.dll` (RTX 50: official; RTX 20/30/40: your copy patched with `nr-patch`).
 
 ```bat
-dlssvid nr --check                                                                    :: GPU, driver (>= 616.56), DLL + SHA-256, CreateFeature(18)
+dlssvid nr --check                                                                    :: GPU, driver (>= 616.56), DLL + SHA-256, CreateFeature(18); init / create times and the feature's VRAM
 dlssvid nr-patch --input C:\dlls\nvngx_dlssnr.dll --patcher <SDK>\dlssnr-patcher --cuda-bin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
 dlssvid nr -i input.mp4 -o passes                                                     :: color_sr + guides + masks under passes\ are picked up
 dlssvid nr -i input.mp4 -o passes --intensity 1.2 --style cinematic --passes 2 --model-scale 0.75 --temporal 0.4
@@ -350,12 +350,15 @@ dlssvid nr -i input.mp4 -o passes --no-guides --video nr.mp4                    
 dlssvid nr -i input.mp4 -o passes --backend stub --warp                               :: deterministic stand-in (tests, any GPU)
 dlssvid nr -i input.mp4 -o ab\a --no-auto --color-dir passes\color_sr --depth-dir passes\depth_dlss --mv-dir passes\mv_dlss --masks-dir passes --start 240 --frames 12 --warmup 6   :: frames 240..251 only; 234..239 build the model's history
 dlssvid nr -i input.mp4 -o ab\b ... --params-file tuned.json --intensity 1.4             :: the project's nr keys from a file; options on the command line win, even at their default
+dlssvid nr -i input.mp4 -o ab\c ... --mv-scale auto --create-with-mv --no-depth-guide   :: A/B switches (not project settings): MV units, zero MVs at CreateFeature, no depth
 ```
 
 `--start` counts frames as the pass folders and the viewport do, from 0; the seek assumes a constant frame rate (VFR is
 not detected yet). A part of the clip carries `stage_params.range`, `process` never takes it for the clip's pass, and a
 range is not written over a `color_nr` that `process` made. `--params-file` takes one JSON object of the project's keys
-(`stages.nr.params`); a key the schema does not have is refused, so a typo cannot pass unnoticed.
+(`stages.nr.params`); a key the schema does not have is refused, so a typo cannot pass unnoticed. The A/B switches
+(`--mv-scale`, `--create-with-mv`, `--no-depth-guide`) are options of the standalone run only, never settings: a pass written
+with them carries `stage_params.ab`, and `process` never adopts or reuses it.
 
 Frame Generation (stage 7): `color_fg` with `multiplier` x frames (real frame i at index i * multiplier), fps x multiplier;
 colour from `color_nr` / `color_sr` / the video, guides from `depth_dlss` / `mv_dlss` under the pass root.

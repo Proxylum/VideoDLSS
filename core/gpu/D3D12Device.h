@@ -8,12 +8,21 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace dlssvid {
 
 using Microsoft::WRL::ComPtr;
+
+// DXGI video memory of THIS process on the adapter (IDXGIAdapter3::QueryVideoMemoryInfo, local segment group): per process,
+// so a GPU shared with other work (the CI runner) does not skew it - cudaMemGetInfo (TrtEngine) would.
+struct VideoMemoryInfo {
+    uint64_t currentUsage = 0, budget = 0;
+};
+// Growth of CurrentUsage between two readings, bytes >= 0 (a release in between reads as 0); -1 when either is missing.
+int64_t VideoMemoryGrowth(const std::optional<VideoMemoryInfo>& before, const std::optional<VideoMemoryInfo>& after);
 
 // One D3D12 device shared by the whole pipeline and (later) the viewport.
 // Stage 0 exposes only what the frame cache and tests need: resource creation and
@@ -41,6 +50,9 @@ public:
     // DXGI user-mode driver version (IDXGIAdapter::CheckInterfaceSupport): product.version.subversion.build
     // packed as a LARGE_INTEGER; 0 when unknown (WARP). NVIDIA: 32.0.15.9186 -> driver 591.86 (NvidiaDriverFromUmd).
     uint64_t UmdDriverVersion() const { return umdVersion_; }
+    // This process's local video memory on the adapter (nr --check: what the NR feature takes); nullopt when the adapter
+    // cannot tell (WARP may not)
+    std::optional<VideoMemoryInfo> LocalVideoMemory() const;
 
     ComPtr<ID3D12Resource> CreateBuffer(uint64_t size, D3D12_HEAP_TYPE heap,
                                         D3D12_RESOURCE_STATES initialState,
@@ -79,6 +91,7 @@ private:
     void PickAdapter(const Options& options, ComPtr<IDXGIFactory6>& factory, ComPtr<IDXGIAdapter1>& adapter);
 
     ComPtr<ID3D12Device> device_;
+    ComPtr<IDXGIAdapter3> adapter3_;  // DXGI 1.4 QueryVideoMemoryInfo; null where unsupported
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<ID3D12CommandAllocator> allocator_;
     ComPtr<ID3D12GraphicsCommandList> list_;
