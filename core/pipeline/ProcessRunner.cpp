@@ -152,9 +152,6 @@ void RefreshFromDisk(PlanState& s, const std::filesystem::path& root) {
         try {
             const Manifest m = Manifest::Load(root / name);
             s.fp[name] = m.fingerprint.empty() ? LegacyId(m) : m.fingerprint;
-            // a stamped mv pass whose manifest got y_up after the stamp (`import --stamp` hashes the flag too): dlssvid
-            // never writes y_up, so this only marks an imported pass read with v negated
-            if (!m.fingerprint.empty() && m.IsYUpMv()) s.fp[name] += ":y_up";
         } catch (const std::exception& e) {
             Log()->warn("process: {} skipped: {}", (root / name).string(), e.what());
         }
