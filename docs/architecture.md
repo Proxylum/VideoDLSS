@@ -435,7 +435,8 @@ INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминир�
   открываются на первом выводимом кадре. CLI перематывает декодер на F−K (`SeekToFrame`), `RunNr` декодирует с текущей
   позиции; покрытие входных пассов проверяется до запуска. Настройки: умолчания схемы < `--params-file`
   (`ReadStageParamsFile`, только ключи схемы) < опции с `CLI::Option::count() > 0`, одна проверка схемой. `--check` создаёт
-  фичу через тот же `NrConfigFromOptions`, что и стадия. `PassComplete` требует `first_frame == 0`.
+  фичу через тот же `NrConfigFromOptions`, что и стадия. `PassComplete` требует `first_frame == 0`; пасс отрезка не входит в
+  состояние плана (`RefreshFromDisk`) и не выбирается `ExistingPass` — ни входом стадий, ни результатом.
 - `NrPatch` / `dlssvid nr-patch`: обёртка внешнего dlssnr-patcher (GPLv2 — не вендорится): python, скрипт
   (`--patcher`, `DLSSNR_PATCHER_ROOT`, `tools/dlssnr-patcher`), CUDA 13.3 (`--cuda-bin`, `CUDA_PATH_V13_3`), SHA-256 входа и
   результата, `bin/nvidia/nvngx_dlssnr.dll` + сайдкар `*.patch.json` (что и чем пропатчено). GUI: кнопка «Пропатчить DLL…».

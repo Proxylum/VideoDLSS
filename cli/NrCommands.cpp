@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
-#include <set>
 #include <sstream>
 #include <vector>
 
@@ -94,14 +93,14 @@ nlohmann::json ResolveNrParams(const NrCommands::NrArgs& a, const CLI::App& cmd)
         std::vector<std::string> dropped;
         params = ReadStageParamsFile("nr", a.paramsFile, &dropped);
         // refused, not skipped: a typo, or an option of the run written into the file, would change nothing and say nothing -
-        // an A/B variant would compare two equal runs
-        static const std::set<std::string> options{"start", "warmup", "frames", "mv_scale", "create_with_mv", "depth_guide", "no_depth_guide", "check",
-                                                    "check_size", "video", "codec", "dll_dir", "params_block"};
+        // an A/B variant would compare two equal runs. An option is recognised by the parser itself (every long option of nr
+        // has its snake spelling), so the message never names an option that does not exist (review of TASK-0047)
         std::vector<std::string> problems;
         for (std::string k : dropped) {
             std::replace(k.begin(), k.end(), '-', '_');
-            problems.push_back(options.count(k) ? "'" + k + "' is an option of dlssvid nr, not a setting: give it on the command line"
-                                                : "'" + k + "' is not an nr setting (stages.nr.params keys)");
+            const bool isOption = !k.empty() && cmd.get_option_no_throw("--" + k) != nullptr;
+            problems.push_back(isOption ? "'" + k + "' is an option of dlssvid nr, not a setting: give it on the command line"
+                                        : "'" + k + "' is not an nr setting (stages.nr.params keys)");
         }
         if (!problems.empty()) Throw("nr: --params-file " + a.paramsFile + ": " + Join(problems));
     }
@@ -110,7 +109,8 @@ nlohmann::json ResolveNrParams(const NrCommands::NrArgs& a, const CLI::App& cmd)
         // each key has an option under its snake spelling (test_cli: every schema key in --help), guides as --no_guides / --guides
         const CLI::Option* opt = cmd.get_option_no_throw(p.key == "guides" ? "--no_guides" : "--" + p.key);
         if (!opt) Throw("nr: internal: the setting '" + p.key + "' has no option");
-        if (opt->count() > 0) params[p.key] = all.at(p.key);
+        // a number as typed (a float member widened 0.3 to 0.30000001192...; the file's 0.3 stays 0.3 - one value in --json)
+        if (opt->count() > 0) params[p.key] = p.type == ParamType::Float ? nlohmann::json(opt->as<double>()) : all.at(p.key);
     }
     // the file's values and the flags by one schema, before anything opens the GPU (a wrong JSON type: a message, not type_error)
     if (const auto problems = ValidateStageParams("nr", params); !problems.empty()) Throw("nr: " + Join(problems));
@@ -146,8 +146,10 @@ NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStage
     r.maxFrames = a.frames >= 0 ? r.warmup + a.frames : -1;
     o.writeFrom = r.first;
     if (!r.Ranged()) return r;
-    if (const int64_t n = decoder.Info().frameCount; n > 0 && r.first >= n)
-        Throw("nr: --start " + std::to_string(r.first) + " is past the end of the clip (" + std::to_string(n) + " frames)");
+    if (a.frames == 0) Throw("nr: --frames 0 with --start " + std::to_string(r.first) + " writes nothing: give N >= 1 or leave --frames out");
+    const int64_t clipFrames = decoder.Info().frameCount;  // 0: unknown (mkv)
+    if (clipFrames > 0 && r.first >= clipFrames)
+        Throw("nr: --start " + std::to_string(r.first) + " is past the end of the clip (" + std::to_string(clipFrames) + " frames)");
     // a range replaces color_nr with a part of the clip: never over the pass of a processed project (it has a fingerprint) -
     // the project would lose it; a range goes under its own -o with --color-dir / --depth-dir / --mv-dir / --masks-dir
     if (const auto out = o.outputDir / "color_nr"; Manifest::Exists(out)) {
@@ -160,7 +162,11 @@ NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStage
             Throw("nr: " + out.string() + " is the pass of a processed project; write the range under another -o (inputs with --color-dir / --depth-dir / " +
                   "--mv-dir / --masks-dir)");
     }
-    const int64_t last = a.frames > 0 ? r.first + a.frames - 1 : -1;
+    // the last frame the run reads: --frames is «at most N», the clip may end first; with the clip's length unknown (mkv) only
+    // the start of a pass is checked - a short colour pass still stops the run at «has no frame N» (review of TASK-0047)
+    int64_t last = a.frames > 0 ? r.first + a.frames - 1 : -1;
+    if (clipFrames > 0) last = last < 0 ? clipFrames - 1 : std::min(last, clipFrames - 1);
+    else last = -1;
     CheckCoverage(o.colorDir, "the colour pass", r.from, last, true);
     if (o.useGuides) {
         CheckCoverage(o.depthDir, "the depth pass", r.from, last, false);
@@ -267,7 +273,7 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
         nlohmann::json j = {{"color_nr", r.outDir.string()},
                             {"backend", r.backend},
                             {"diagnostics", r.diagnostics},
-                            {"params", params},  // the resolved settings: defaults < --params-file < the options given
+                            {"params", EffectiveStageParams("nr", params)},  // the run's settings: defaults < --params-file < the options given
                             {"stats",
                              {{"frames", r.stats.frames},  // through the model, warm-up included
                               {"frames_written", r.stats.written},

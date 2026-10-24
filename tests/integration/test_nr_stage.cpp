@@ -143,6 +143,9 @@ TEST_CASE("NrStage writeFrom: earlier frames build the history and are not outpu
         GpuFrameCache::Slot& slot = pipeline.Cache().Acquire(f.index, f.desc);
         pipeline.ProcessFrame(f);
         CHECK(slot.passes.count("color_nr") == (f.index >= 2 ? 1u : 0u));
+        const auto* s = dynamic_cast<const StubNrBackend*>(raw->Backend(0));
+        REQUIRE(s);
+        CHECK(s->LastReset() == (f.index == 0));  // the model resets on the first warm-up frame only: the written frames keep its history
     }
     pipeline.Finish();
     const NrStage::Stats& st = raw->GetStats();
@@ -161,18 +164,21 @@ TEST_CASE("NrStage writeFrom: earlier frames build the history and are not outpu
     CHECK(rd.Man().frameCount == 3);
     CHECK_FALSE(rd.HasFrame(0));
     CHECK(rd.Man().stageParams["range"] == nlohmann::json{{"first", 2}, {"last", 4}, {"warmup", 2}});
-    CHECK(DecodeAll(dir / "nr.mkv").size() == 3);
+    const auto video = DecodeAll(dir / "nr.mkv");
+    REQUIRE(video.size() == 3);
+    CHECK(video[0].pts == 0);
 
-    // nothing to write: no folder, no empty manifest
+    // nothing to write: no folder, no empty manifest, no video file
     NrStageOptions late = o;
     late.outputDir = dir / "late";
-    late.videoOut.clear();
+    late.videoOut = dir / "late.mkv";
     late.writeFrom = 100;
     VideoDecoder dec2(clip);
     const NrRunResult r = RunNr(dec2, dev, late);
     CHECK(r.stats.frames == 5);
     CHECK(r.stats.written == 0);
     CHECK_FALSE(std::filesystem::exists(dir / "late" / "color_nr"));
+    CHECK_FALSE(std::filesystem::exists(late.videoOut));  // the encoder opens at the first output frame
 }
 
 TEST_CASE("NrStage: color_sr input, guides through the slot, masks, two passes, model resolution and the temporal filter", "[integration][nr]") {

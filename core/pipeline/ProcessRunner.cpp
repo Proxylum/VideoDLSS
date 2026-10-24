@@ -110,9 +110,19 @@ FlowStageOptions FlowOptions(const nlohmann::json& p, const std::filesystem::pat
     return o;
 }
 
+// A pass of the clip starts at frame 0: a part of it (dlssvid nr --start, export --range) is no stage's input and not the
+// result - fg read a color_nr of frames F..L («has no frame 0») and the encode put frame F at t=0 (review of TASK-0047)
+bool PassOfClip(const std::filesystem::path& dir) {
+    try {
+        return Manifest::Load(dir).firstFrame == 0;
+    } catch (const std::exception&) {
+        return true;  // unreadable: the stage that reads it says so, as before
+    }
+}
+
 std::filesystem::path ExistingPass(const std::filesystem::path& root, std::initializer_list<const char*> names) {
     for (const char* n : names)
-        if (std::filesystem::exists(root / n / Manifest::kFileName)) return root / n;
+        if (std::filesystem::exists(root / n / Manifest::kFileName) && PassOfClip(root / n)) return root / n;
     return {};
 }
 
@@ -151,6 +161,10 @@ void RefreshFromDisk(PlanState& s, const std::filesystem::path& root) {
     for (const auto& name : PassesUnderRoot(root)) {
         try {
             const Manifest m = Manifest::Load(root / name);
+            if (m.firstFrame != 0) {  // a part of the clip: no input of the stages below (its own stage still sees it: incomplete)
+                Log()->info("process: {} holds frames {}..{} only, not used as the clip's pass", (root / name).string(), m.firstFrame, m.lastFrame);
+                continue;
+            }
             s.fp[name] = m.fingerprint.empty() ? LegacyId(m) : m.fingerprint;
         } catch (const std::exception& e) {
             Log()->warn("process: {} skipped: {}", (root / name).string(), e.what());
