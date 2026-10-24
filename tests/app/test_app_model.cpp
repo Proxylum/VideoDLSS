@@ -3,21 +3,28 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <QAction>
 #include <QApplication>
+#include <QCheckBox>
+#include <QDoubleSpinBox>
 #include <QElapsedTimer>
 #include <QFormLayout>
 #include <QLabel>
 #include <QComboBox>
 #include <QDir>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSignalSpy>
+#include <QSlider>
 #include <QTest>
+#include <QToolButton>
 #include <QPalette>
 #include <QStyle>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
+#include <type_traits>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -39,6 +46,7 @@
 #include "SourceNames.h"
 #include "PlaybackClock.h"
 #include "ProcessingPanel.h"
+#include "ProjectPanel.h"
 #include "RecentPreviews.h"
 #include "ResultBar.h"
 #include "StageCard.h"
@@ -1141,18 +1149,250 @@ TEST_CASE("StageCard stores a slider value rounded to its step", "[app][card][re
     model.openProject(Q(d / "proj.dlssvid.json"));
     dlssvid::StageCard card(model, "nr");
     card.refresh();
-    auto* slider = card.findChild<QSlider*>();
+    QSlider* slider = nullptr;
+    for (QSlider* s : card.findChildren<QSlider*>())
+        if (s->accessibleName() == QString::fromUtf8("Интенсивность")) slider = s;
     REQUIRE(slider);
-    for (const int ticks : {3, 7, 14}) {
+    REQUIRE(slider->maximum() == 40);  // step 0.05 (TASK-0046)
+    for (const int ticks : {6, 14, 28}) {  // 6 x 0.05 = 0.30000000000000004
         slider->setValue(ticks);
         const dlssvid::StageEntry* e = model.stageEntry("nr");
         REQUIRE(e);
         const double v = e->params["intensity"].get<double>();
-        const double want = ticks / 10.0;  // the nearest double to the decimal the form shows
+        const double want = ticks / 20.0;  // the nearest double to the decimal the form shows
         INFO(ticks << " ticks: " << nlohmann::json(v).dump());
         CHECK(v == want);
         CHECK(nlohmann::json(v).dump().size() <= 3);  // "0.3", "0.7", "1.4"
     }
+}
+
+// TASK-0046: the NR card shows every setting - the basic rows in groups, the rest in «Ещё настройки» (collapsed, saying
+// what it hides), a row that cannot act disabled with a note, reset per row and for the card, changed values in accent.
+TEST_CASE("StageCard NR: groups, the collapsed more block, conditions, reset and changed values", "[app][card][nr]") {
+    App();
+    const auto d = Dir("card_nr");
+    Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+    QSettings().remove("card/nr/more");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    dlssvid::StageCard card(model, "nr");
+    card.refresh();
+    auto labelOf = [&](const char* text) -> QLabel* {
+        for (QLabel* l : card.findChildren<QLabel*>())
+            if (l->text() == QString::fromUtf8(text)) return l;
+        return nullptr;
+    };
+    // groups and rows
+    for (const char* group : {"Модель", "Локальные", "Временная стабильность", "Маска", "Вход", "Разрешение модели"}) {
+        INFO(group);
+        REQUIRE(labelOf(group));
+        CHECK(labelOf(group)->property("role").toString() == "group");
+    }
+    for (const char* row : {"Стиль", "Интенсивность", "Проходы", "Локальный тон", "Локальная структура", "Подавление мерцания", "Автомаска кожи", "Структура кожи"}) {
+        INFO(row);
+        REQUIRE(labelOf(row));
+        CHECK(labelOf(row)->isVisibleTo(&card));
+    }
+    CHECK_FALSE(labelOf("Сила на коже (маски)")->isVisibleTo(&card));  // no face / skin mask among the inputs
+    // «Ещё настройки»: collapsed, opens on a click, says what it hides
+    QToolButton* more = nullptr;
+    for (QToolButton* b : card.findChildren<QToolButton*>())
+        if (b->property("role").toString() == "more") more = b;
+    REQUIRE(more);
+    CHECK_FALSE(labelOf("Экспозиция")->isVisibleTo(&card));
+    model.setStageParam("nr", "exposure", 1.0);
+    card.refresh();
+    CHECK(more->text().contains(QString::fromUtf8("изменено: экспозиция 1 EV")));
+    more->click();
+    CHECK(labelOf("Экспозиция")->isVisibleTo(&card));
+    CHECK(labelOf("Экспозиция")->property("role").toString() == "changed");
+    CHECK_FALSE(labelOf("Предел отношения")->isVisibleTo(&card));  // only at another model scale
+    // skin structure: disabled with a note until the automatic mask is on
+    QLabel* note = labelOf("действует только с автомаской");
+    REQUIRE(note);
+    CHECK(note->isVisibleTo(&card));
+    model.setStageParam("nr", "auto_mask", true);
+    card.refresh();
+    CHECK_FALSE(note->isVisibleTo(&card));
+    // reset of one row: the key leaves the project
+    model.setStageParam("nr", "local_tone", 1.5);
+    card.refresh();
+    CHECK(labelOf("Локальный тон")->property("role").toString() == "changed");
+    QToolButton* reset = nullptr;
+    for (QToolButton* b : card.findChildren<QToolButton*>())
+        if (b->accessibleName() == QString::fromUtf8("Сбросить «Локальный тон»")) reset = b;
+    REQUIRE(reset);
+    CHECK(reset->isVisibleTo(&card));
+    CHECK(reset->focusPolicy() & Qt::TabFocus);
+    reset->click();
+    CHECK_FALSE(model.stageEntry("nr")->params.contains("local_tone"));
+    // the card: the form's keys go, the backend and the engineer keys stay
+    model.setStageParam("nr", "format", "png");
+    model.setStageParam("nr", "intensity", 1.4);
+    card.refresh();
+    QPushButton* resetCard = nullptr;
+    for (QPushButton* b : card.findChildren<QPushButton*>())
+        if (b->text() == QString::fromUtf8("Сбросить")) resetCard = b;
+    REQUIRE(resetCard);
+    resetCard->click();
+    const nlohmann::json after = model.stageEntry("nr")->params;
+    CHECK(after["backend"] == "ngx");
+    CHECK(after["format"] == "png");
+    CHECK_FALSE(after.contains("intensity"));
+    CHECK_FALSE(after.contains("exposure"));
+    CHECK_FALSE(after.contains("auto_mask"));
+    QSettings().remove("card/nr/more");
+}
+
+// TASK-0046, review: a changed value whose row its condition hides is still in the fingerprint - named on «Ещё
+// настройки», dropped by «Сбросить»; the aliases of the JSON (skin-structure, no_guides) are shown and reset as the
+// keys; skin structure «как структура» shows the value it follows; the label's menu resets the row; the controls are
+// named for screen readers.
+TEST_CASE("StageCard NR: hidden changed values, folded aliases, the followed value, the label's menu", "[app][card][nr][regression]") {
+    App();
+    const auto d = Dir("card_nr_review");
+    Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+    QSettings().remove("card/nr/more");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    dlssvid::StageCard card(model, "nr");
+    card.refresh();
+    auto named = [&](auto* type, const char* name) {
+        using T = std::remove_pointer_t<decltype(type)>;
+        for (T* w : card.findChildren<T*>())
+            if (w->accessibleName() == QString::fromUtf8(name)) return w;
+        return static_cast<T*>(nullptr);
+    };
+    auto labelOf = [&](const char* text) -> QLabel* {
+        for (QLabel* l : card.findChildren<QLabel*>())
+            if (l->text() == QString::fromUtf8(text)) return l;
+        return nullptr;
+    };
+    QToolButton* more = nullptr;
+    for (QToolButton* b : card.findChildren<QToolButton*>())
+        if (b->property("role").toString() == "more") more = b;
+    QPushButton* resetCard = nullptr;
+    for (QPushButton* b : card.findChildren<QPushButton*>())
+        if (b->text() == QString::fromUtf8("Сбросить")) resetCard = b;
+    REQUIRE(more);
+    REQUIRE(resetCard);
+    REQUIRE(named(static_cast<QComboBox*>(nullptr), "Стиль"));
+
+    // the threshold changed, then the filter off: the row hides, the value stays in the run
+    model.setStageParams("nr", {{"backend", "ngx"}, {"temporal", 0.3}, {"temporal_threshold", 0.2}});
+    model.setStageParams("nr", {{"backend", "ngx"}, {"temporal_threshold", 0.2}});
+    card.refresh();
+    CHECK(more->text().contains(QString::fromUtf8("не действует: порог подавления мерцания 0.2")));
+    CHECK(resetCard->isVisibleTo(&card));  // before: hidden, the card had no way back
+    resetCard->click();
+    CHECK(model.stageEntry("nr")->params == nlohmann::json{{"backend", "ngx"}});
+
+    // aliases from the engineer JSON
+    model.setStageParams("nr", {{"backend", "ngx"}, {"auto-mask", true}, {"skin-structure", 0.5}, {"no_guides", true}});
+    card.refresh();
+    REQUIRE(named(static_cast<QCheckBox*>(nullptr), "Автомаска кожи"));
+    CHECK(named(static_cast<QCheckBox*>(nullptr), "Автомаска кожи")->isChecked());
+    CHECK_FALSE(named(static_cast<QCheckBox*>(nullptr), "Глубина и векторы")->isChecked());
+    CHECK(labelOf("Автомаска кожи")->property("role").toString() == "changed");
+    REQUIRE(named(static_cast<QCheckBox*>(nullptr), "Структура кожи: отдельно"));
+    CHECK(named(static_cast<QCheckBox*>(nullptr), "Структура кожи: отдельно")->isChecked());
+    CHECK(named(static_cast<QDoubleSpinBox*>(nullptr), "Структура кожи")->value() == Approx(0.5));
+    resetCard->click();
+    CHECK(model.stageEntry("nr")->params == nlohmann::json{{"backend", "ngx"}});  // before: the aliases stayed
+
+    // «как структура»: the disabled number is the local structure it follows, not 0
+    model.setStageParams("nr", {{"backend", "ngx"}, {"auto_mask", true}, {"local_structure", 0.7}});
+    card.refresh();
+    QDoubleSpinBox* skin = named(static_cast<QDoubleSpinBox*>(nullptr), "Структура кожи");
+    REQUIRE(skin);
+    CHECK_FALSE(skin->isEnabled());
+    CHECK(skin->value() == Approx(0.7));
+    named(static_cast<QCheckBox*>(nullptr), "Структура кожи: отдельно")->click();
+    CHECK(model.stageEntry("nr")->params["skin_structure"] == 0.7);  // starts from what it followed
+
+    // exposure keeps the 0.01 EV of the v1 migration
+    model.setStageParam("nr", "exposure", 0.58);
+    card.refresh();
+    CHECK(named(static_cast<QDoubleSpinBox*>(nullptr), "Экспозиция")->value() == Approx(0.58));
+
+    // the label's context menu resets the row
+    model.setStageParam("nr", "local_tone", 1.5);
+    card.refresh();
+    QLabel* tone = labelOf("Локальный тон");
+    REQUIRE(tone);
+    REQUIRE(tone->actions().size() == 1);
+    CHECK(tone->contextMenuPolicy() == Qt::ActionsContextMenu);
+    CHECK(tone->actions()[0]->isEnabled());
+    tone->actions()[0]->trigger();
+    CHECK_FALSE(model.stageEntry("nr")->params.contains("local_tone"));
+    card.refresh();
+    CHECK_FALSE(tone->actions()[0]->isEnabled());
+    QSettings().remove("card/nr/more");
+}
+
+// TASK-0046, review: ↺ of the backend erased the key only - the VDA model stayed under DA3 and the plan failed.
+TEST_CASE("StageCard: the reset of the backend drops the old backend's model, as a switch in the list", "[app][card][regression]") {
+    App();
+    const auto d = Dir("card_backend_reset");
+    Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setStageParams("depth", {{"backend", "vda"}, {"model", "metric-vda-large"}});
+    dlssvid::StageCard card(model, "depth");
+    card.refresh();
+    QToolButton* reset = nullptr;
+    for (QToolButton* b : card.findChildren<QToolButton*>())
+        if (b->accessibleName() == QString::fromUtf8("Сбросить «Метод»")) reset = b;
+    REQUIRE(reset);
+    reset->click();
+    const nlohmann::json p = model.stageEntry("depth")->params;
+    CHECK_FALSE(p.contains("backend"));
+    CHECK_FALSE(p.contains("model"));  // before: metric-vda-large under DA3
+}
+
+// TASK-0046: an experimental style (3..6, not documented by NVIDIA) warns on the card.
+TEST_CASE("Card state: an experimental style warns", "[app][card][nr]") {
+    App();
+    const auto d = Dir("card_experimental");
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    Project p = Project::Create(WriteClip(d / "clip.mkv", spec), d / "passes");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.params["backend"] = "blend";
+    }
+    p.Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    const QString text = QString::fromUtf8("экспериментальный");
+    CHECK_FALSE(model.cardState("nr").warning.contains(text));
+    model.setStageParam("nr", "style", "4");
+    model.refreshPlan();
+    CHECK(model.cardState("nr").warning.contains(text));
+    model.setStageParam("nr", "style", 1);  // natural, as a number
+    model.refreshPlan();
+    CHECK_FALSE(model.cardState("nr").warning.contains(text));
+}
+
+// TASK-0046 (D7): the versions panel named only the intensity, so two NR versions with another style looked the same.
+TEST_CASE("Versions panel names the values other than the default, the basic ones first", "[app][versions][regression]") {
+    const nlohmann::json p = {{"backend", "ngx"},      {"style", "cinematic"},       {"intensity", 1.0}, {"local_tone", 1.5},
+                              {"auto_mask", true},     {"skin_structure", 0.5},      {"preset", 0},      {"temporal_threshold", 0.2},
+                              {"guides", false},       {"format", "png"}};
+    QString tip;
+    const QString s = dlssvid::HumanStageParams("nr", p, &tip);
+    INFO(s.toStdString());
+    CHECK(s.startsWith(QString::fromUtf8("Стиль Кинематографичный (2) · Интенсивность 1 · Локальный тон 1.5")));
+    CHECK(s.indexOf(QString::fromUtf8("Структура кожи")) < s.indexOf(QString::fromUtf8("Пресет модели")));  // basic before «Ещё»
+    CHECK(s.endsWith(QString::fromUtf8("…")));  // nine values, six shown
+    CHECK_FALSE(s.contains(QString::fromUtf8("Формат пасса")));
+    CHECK(tip.contains("style = "));
+    CHECK(tip.contains("format = "));
+    CHECK(dlssvid::HumanStageParams("nr", {{"backend", "ngx"}, {"format", "png"}}).contains(QString::fromUtf8("Формат пасса")));  // engineer keys too
+    CHECK(dlssvid::HumanStageParams("nr", {{"backend", "ngx"}}).isEmpty());
 }
 
 // TASK-0039: the VDA models in the depth card - Small / Base / Large for vda and worker:vda, hidden for DA3; a switch to
@@ -1183,7 +1423,8 @@ TEST_CASE("StageCard lists the VDA models for VDA only and a switch to DA3 drops
     card.refresh();
     CHECK(form->isRowVisible(modelRow));
     CHECK(form->isRowVisible(windowRow));
-    auto* combo = qobject_cast<QComboBox*>(form->itemAt(modelRow, QFormLayout::FieldRole)->widget());
+    // the field of a row is a cell: the control, the note of a disabled row and ↺ (TASK-0046)
+    auto* combo = form->itemAt(modelRow, QFormLayout::FieldRole)->widget()->findChild<QComboBox*>();
     REQUIRE(combo);
     REQUIRE(combo->count() == 3);
     CHECK(combo->itemData(0).toString().isEmpty());
@@ -1519,4 +1760,45 @@ TEST_CASE("AppModel builds the scrubbing proxy in the background and the store t
     off.openProject(Q(d / "proj.dlssvid.json"));
     CHECK_FALSE(off.proxyBuilding());  // turned off in «Вид»
     QSettings().remove("view/autoProxy");
+}
+
+// Screenshots of the NR card for an MR (docs/ux-guidelines.md: «до/после» at 100 % and 150 %). Hidden, run by hand:
+//   set DLSSVID_SHOTS_DIR=<folder> & set QT_SCALE_FACTOR=1.5 & dlssvid_app_tests "[.shots]"
+// The card is laid out off screen (WA_DontShowOnScreen) and grabbed; the desktop is not touched.
+TEST_CASE("StageCard NR screenshots for a merge request", "[.shots]") {
+    App();
+    const QString out = qEnvironmentVariable("DLSSVID_SHOTS_DIR");
+    if (out.isEmpty()) SKIP("DLSSVID_SHOTS_DIR is not set");
+    dlssvid::ApplyTheme(App());
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto d = Dir("card_shots");
+    Project p = Project::Create(WriteClip(d / "clip.mkv", spec), d / "passes");
+    p.Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    const QString scale = QString::number(qEnvironmentVariable("QT_SCALE_FACTOR", "1").toDouble() * 100);
+    auto shot = [&](const char* name, bool more) {
+        QSettings().setValue("card/nr/more", more);
+        dlssvid::StageCard card(model, "nr");
+        card.setAttribute(Qt::WA_DontShowOnScreen);
+        card.setFixedWidth(880);  // the project panel is at least 900 px wide (ProjectPanel), minus its margins
+        card.show();
+        card.refresh();
+        card.adjustSize();
+        QApplication::processEvents();
+        const QString file = out + "/" + name + "_" + scale + ".png";
+        REQUIRE(card.grab().save(file));
+        std::printf("saved %s\n", file.toStdString().c_str());
+    };
+    shot("nr_default", false);
+    model.setStageParam("nr", "intensity", 1.4);
+    model.setStageParam("nr", "local_tone", 1.5);
+    model.setStageParam("nr", "exposure", 1.0);
+    model.refreshPlan();
+    shot("nr_changed", false);
+    shot("nr_more", true);
+    QSettings().remove("card/nr/more");
 }

@@ -426,14 +426,23 @@ menu of previous versions (`<pass>@<id>`, also valid in `render --layers`); pres
 «Исходник ↔ Глубина» live in the «Вид» menu; «Инженерный режим» (`Ctrl+E`) reveals the layer stack and the inspector.
 The project panel (stage 9) shows the source (frame, sound, passes, hash and whether the passes match it), «Что получится»
 (the result's size and rate, the time and disk of what will run, one button «Обработать · N стадий», `Ctrl+Enter`), one
-card per stage with a form built from the stage schema (backend list, scale / multiplier toggles, intensity slider; the
-advanced keys in the JSON editor of the engineer mode) and what the plan does with it («переиспользуется», «пересчёт:
-Интенсивность 1 → 1.4», «будет посчитано», a warning when NR / FG would run without depth and vectors), the encoder
+card per stage with a form built from the stage schema (backend list, scale / multiplier toggles, sliders; the rows in
+groups, the less used ones under a collapsed «Ещё настройки» that names what was changed, ↺ per row and «Сбросить» for
+the card, changed values in accent; the advanced keys in the JSON editor of the engineer mode) and what the plan does
+with it («переиспользуется», «пересчёт: Интенсивность 1 → 1.4», «будет посчитано», a warning when NR / FG would run
+without depth and vectors), the encoder
 card (stored in the project: the codec — H.264 / HEVC / AV1 NVENC, ProRes, FFV1 — the bit depth and chroma, «Авто» = the
 source's within the codec, and the bitrate, «Авто» — chosen from the result's size, rate and codec, see
 `core/io/EncodeDefaults` — or a preset in Mbit/s or a custom value, with the rough file size; the result's extension
 follows the codec: .mp4, .mov for ProRes, .mkv for FFV1) and the pass versions on disk
-(«Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»). The look follows the mockups of `docs/ux-guidelines.md`
+(«Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»; a version names its values other than the default, the basic
+ones first). The NR card shows every DLSS 5 setting (TASK-0046): style (with the numbers of Visual Enhancer's «Style N»
+and the experimental 3..6, which the card warns about), intensity, passes, local tone and structure, the flicker filter,
+the automatic skin mask, the skin structure (enabled with the mask; «отдельно» off = as the local structure) and the
+strength on skin (shown when the plan has face / skin masks), and under «Ещё настройки» the model preset, the flicker
+filter's threshold (with the filter on), the guides, the tonemap / input transfer / exposure in EV and the model
+resolution with the transfer strength and the ratio limit (at a resolution ≠ 1). A changed value whose row its
+condition hides is named on «Ещё настройки» as «не действует». The look follows the mockups of `docs/ux-guidelines.md`
 (`app/Theme`: dark palette, control sizes and paddings, the accent for the one primary action).
 Without a project the window shows the start page (stage 9, laid out as the mockup «1 · Стартовый экран»): drop a video on it,
 «Открыть видео…» / «Открыть проект…», the GPU / driver / DLL readiness card and, on the right, the recent files as cards

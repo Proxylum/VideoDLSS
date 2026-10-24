@@ -1,7 +1,10 @@
 #pragma once
 
+#include <QAction>
 #include <QCheckBox>
+#include <QFormLayout>
 #include <QFrame>
+#include <QToolButton>
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -36,8 +39,28 @@ signals:
     void patchDllRequested();                     // nr: dlssnr-patcher over the user's nvngx_dlssnr.dll
 
 private:
+    // One parameter row of the form (TASK-0046): where it is, its label (accent when changed), the note of a disabled
+    // row and the reset button.
+    struct Row {
+        const ParamSpec* spec = nullptr;
+        QFormLayout* form = nullptr;
+        int index = 0;
+        QLabel* label = nullptr;
+        QWidget* field = nullptr;
+        QLabel* note = nullptr;
+        QToolButton* reset = nullptr;
+        QAction* resetAction = nullptr;  // the same in the context menu of the label
+    };
     QWidget* MakeParamWidget(const ParamSpec& spec);
     void setParam(const std::string& key, const nlohmann::json& value);
+    void resetParam(const std::string& key);  // the row's ↺: the key leaves the project (the schema default runs)
+    void resetCard();                          // «Сбросить»: the backend and the engineer keys stay
+    bool changed(const ParamSpec& spec) const; // the project sets it to something else than the default
+    // The stage's parameters with the aliases folded (skin-structure, no_guides, style 1 -> natural): what the stage runs
+    // with, so the card shows, compares and resets the same values (TASK-0046).
+    nlohmann::json stageParams() const;
+    nlohmann::json valueOf(const ParamSpec& spec) const;   // the project's value, else the default
+    double followedValue(const ParamSpec& spec) const;     // what a special value stands for (skin_structure -1: local_structure)
     std::string currentBackend() const;  // the stage's backend in the project (the schema default when unset)
 
     AppModel& model_;
@@ -58,6 +81,10 @@ private:
     QPushButton* applyJson_;
     QPushButton* run_;
     QPushButton* patch_ = nullptr;
+    QPushButton* resetCard_ = nullptr;
+    QToolButton* moreToggle_ = nullptr;  // «Ещё настройки ▸ · изменено: …»
+    QWidget* more_ = nullptr;
+    std::vector<Row> rows_;
     std::vector<std::function<void()>> pull_;  // per form widget: show the project's value
 };
 

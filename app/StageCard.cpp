@@ -1,5 +1,7 @@
 #include "StageCard.h"
 
+#include <QAbstractButton>
+#include <QAbstractSpinBox>
 #include <QButtonGroup>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -7,12 +9,15 @@
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLineEdit>
+#include <QSettings>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <cmath>
+#include <set>
 
 #include "AppModel.h"
 #include "Theme.h"
@@ -86,29 +91,114 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     grid->addLayout(head, 0, 1, Qt::AlignTop);
 
     form_ = new QWidget(this);
-    auto* form = new QFormLayout(form_);
-    form->setContentsMargins(0, 0, 0, 0);
-    form->setHorizontalSpacing(8);
-    form->setVerticalSpacing(6);
-    form->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    if (schema_)
+    auto* column = new QVBoxLayout(form_);
+    column->setContentsMargins(0, 0, 0, 0);
+    column->setSpacing(4);
+    auto makeForm = [](QWidget* parent) {
+        auto* f = new QFormLayout(parent);
+        f->setContentsMargins(0, 0, 0, 0);
+        f->setHorizontalSpacing(8);
+        f->setVerticalSpacing(6);
+        f->setLabelAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        return f;
+    };
+    auto* basicBox = new QWidget(form_);
+    QFormLayout* basic = makeForm(basicBox);
+    column->addWidget(basicBox);
+    // the rows of the form in their groups; the `more` ones in «Ещё настройки», collapsed (TASK-0046)
+    auto addRows = [this](QFormLayout* f, bool more) {
+        std::string group;
         for (const ParamSpec& spec : schema_->params) {
-            if (spec.advanced) continue;
-            QWidget* w = MakeParamWidget(spec);
-            w->setToolTip(QString::fromStdString(spec.hint.empty() ? spec.key : spec.hint + " (" + spec.key + ")"));
-            form->addRow(QString::fromStdString(spec.label), w);
-            // shown for its backends only (the model of the TensorRT upscaler), or for the backends with a form list
-            // (the VDA models of depth.model, TASK-0039)
-            if (!spec.backends.empty() || !spec.formChoices.empty()) {
-                const int row = form->rowCount() - 1;
-                pull_.push_back([this, spec, form, row] {
-                    const std::string backend = currentBackend();
-                    const bool ofBackend = spec.backends.empty() || std::find(spec.backends.begin(), spec.backends.end(), backend) != spec.backends.end();
-                    const bool hasList = spec.formChoices.empty() || FormChoicesFor(spec, backend) != nullptr;
-                    form->setRowVisible(row, ofBackend && hasList);
-                });
+            if (spec.advanced || spec.more != more) continue;
+            if (!spec.group.empty() && spec.group != group) {
+                group = spec.group;
+                auto* header = new QLabel(QString::fromStdString(group), f->parentWidget());
+                SetRole(header, "group");
+                f->addRow(header);
             }
+            Row row;
+            row.spec = &spec;
+            row.form = f;
+            row.label = new QLabel(QString::fromStdString(spec.label), f->parentWidget());
+            const QString tip = QString::fromStdString(spec.hint.empty() ? spec.key : spec.hint + " (" + spec.key + ")");
+            row.label->setToolTip(tip);
+            // the cell: the control and ↺ on one line, the note of a disabled row under them (inline it squeezed the
+            // control of «Структура кожи» to nothing)
+            auto* cell = new QWidget(f->parentWidget());
+            auto* lines = new QVBoxLayout(cell);
+            lines->setContentsMargins(0, 0, 0, 0);
+            lines->setSpacing(2);
+            auto* h = new QHBoxLayout();
+            h->setSpacing(6);
+            lines->addLayout(h);
+            row.field = MakeParamWidget(spec);
+            row.field->setToolTip(tip);
+            // the label is no buddy of the control inside the cell: name the controls for screen readers
+            const QString name = QString::fromStdString(spec.label);
+            row.field->setAccessibleName(name);
+            for (QWidget* c : row.field->findChildren<QWidget*>()) {
+                if (qobject_cast<QSlider*>(c) || qobject_cast<QAbstractSpinBox*>(c)) c->setAccessibleName(name);
+                else if (auto* b = qobject_cast<QAbstractButton*>(c)) b->setAccessibleName(name + ": " + b->text());
+            }
+            h->addWidget(row.field, 1);
+            row.note = new QLabel(cell);
+            SetRole(row.note, "hint");
+            row.note->setWordWrap(true);
+            row.note->hide();
+            lines->addWidget(row.note);
+            row.reset = new QToolButton(cell);
+            row.reset->setText(QString::fromUtf8("↺"));
+            row.reset->setAutoRaise(true);
+            row.reset->setFocusPolicy(Qt::TabFocus);  // reachable from the keyboard
+            row.reset->setToolTip(tr("Сбросить: %1").arg(QString::fromStdString(ParamValueLabel(spec, spec.def))));
+            row.reset->setAccessibleName(tr("Сбросить «%1»").arg(QString::fromStdString(spec.label)));
+            QSizePolicy keep = row.reset->sizePolicy();  // hidden until the value changes: the row keeps its width
+            keep.setRetainSizeWhenHidden(true);
+            row.reset->setSizePolicy(keep);
+            const std::string key = spec.key;
+            connect(row.reset, &QToolButton::clicked, this, [this, key] { resetParam(key); });
+            h->addWidget(row.reset);
+            row.resetAction = new QAction(row.reset->toolTip(), row.label);
+            connect(row.resetAction, &QAction::triggered, this, [this, key] { resetParam(key); });
+            row.label->addAction(row.resetAction);
+            row.label->setContextMenuPolicy(Qt::ActionsContextMenu);
+            f->addRow(row.label, cell);
+            row.index = f->rowCount() - 1;
+            rows_.push_back(row);
         }
+    };
+    if (schema_) {
+        addRows(basic, false);
+        bool anyMore = false;
+        for (const ParamSpec& spec : schema_->params) anyMore = anyMore || (!spec.advanced && spec.more);
+        if (anyMore) {
+            moreToggle_ = new QToolButton(form_);
+            moreToggle_->setCheckable(true);
+            moreToggle_->setAutoRaise(true);
+            moreToggle_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+            SetRole(moreToggle_, "more");
+            column->addWidget(moreToggle_, 0, Qt::AlignLeft);
+            more_ = new QWidget(form_);
+            addRows(makeForm(more_), true);
+            column->addWidget(more_);
+            // one label column for both forms: the rows of «Ещё настройки» line up with the basic ones
+            int labelWidth = 0;
+            for (const Row& r : rows_) labelWidth = std::max(labelWidth, r.label->sizeHint().width());
+            for (const Row& r : rows_) {
+                r.label->setMinimumWidth(labelWidth);
+                r.label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);  // the widened label keeps the text at the field
+            }
+            const QString settingsKey = QString("card/%1/more").arg(QString::fromStdString(stage));
+            const bool open = QSettings().value(settingsKey, false).toBool();
+            moreToggle_->setChecked(open);
+            more_->setVisible(open);
+            connect(moreToggle_, &QToolButton::toggled, this, [this, settingsKey](bool on) {
+                more_->setVisible(on);
+                QSettings().setValue(settingsKey, on);
+                refresh();  // the summary of the changed values shows on the collapsed toggle only
+            });
+        }
+    }
     grid->addWidget(form_, 0, 2, 2, 1);
 
     auto* side = new QVBoxLayout();
@@ -132,6 +222,11 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     force_ = new QCheckBox(tr("пересчитать"), this);
     force_->setToolTip(tr("Посчитать заново, даже если пасс совпадает по отпечатку"));
     side->addWidget(force_);
+    resetCard_ = new QPushButton(tr("Сбросить"), this);
+    SetRole(resetCard_, "small");
+    resetCard_->setToolTip(tr("Вернуть настройки стадии к умолчаниям (бэкенд и инженерные ключи остаются)"));
+    side->addWidget(resetCard_, 0, Qt::AlignLeft);
+    connect(resetCard_, &QPushButton::clicked, this, [this] { resetCard(); });
     grid->addLayout(side, 0, 3, 2, 1, Qt::AlignTop);
     grid->setColumnStretch(2, 1);
     grid->setColumnMinimumWidth(3, 190);
@@ -198,9 +293,7 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
             if (!updating_ && i >= 0) setParam(spec.key, combo->itemData(i).toString().toStdString());
         });
         pull_.push_back([this, spec, combo] {
-            const StageEntry* e = model_.stageEntry(stage_);
-            const nlohmann::json params = e ? e->params : nlohmann::json::object();
-            const nlohmann::json v = params.contains(spec.key) ? params[spec.key] : spec.def;
+            const nlohmann::json v = valueOf(spec);
             const QString value = QString::fromStdString(v.is_string() ? v.get<std::string>() : v.dump());
             const QSignalBlocker b(combo);
             combo->clear();
@@ -248,9 +341,7 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
             h->addWidget(group_frame);
             h->addStretch(1);
             pull_.push_back([this, spec, buttons] {
-                const StageEntry* e = model_.stageEntry(stage_);
-                const nlohmann::json v = e && e->params.contains(spec.key) ? e->params[spec.key] : spec.def;
-                const int idx = ChoiceIndex(spec, v);
+                const int idx = ChoiceIndex(spec, valueOf(spec));
                 for (size_t i = 0; i < buttons.size(); ++i) {
                     const QSignalBlocker b(buttons[i]);
                     buttons[i]->setChecked(static_cast<int>(i) == idx);
@@ -262,15 +353,22 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
             auto* combo = new QComboBox(form_);
             combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);  // the card, not the longest item, sets the width
             combo->setMinimumContentsLength(10);
-            for (const ParamChoice& c : spec.choices) combo->addItem(QString::fromStdString(c.label), QString::fromStdString(c.value));
+            bool separated = false;
+            for (const ParamChoice& c : spec.choices) {
+                if (c.experimental && !separated) {  // the experimental ones after a separator (nr.style 3..6, TASK-0046)
+                    combo->insertSeparator(combo->count());
+                    separated = true;
+                }
+                combo->addItem(QString::fromStdString(c.label) + (c.experimental ? tr(" (эксп.)") : QString()), QString::fromStdString(c.value));
+                combo->setItemData(combo->count() - 1, QString::fromStdString(c.hint), Qt::ToolTipRole);
+            }
             connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, spec, combo](int i) {
-                if (!updating_ && i >= 0) setParam(spec.key, ChoiceValue(spec, combo->itemData(i).toString().toStdString()));
+                if (!updating_ && i >= 0 && combo->itemData(i).isValid()) setParam(spec.key, ChoiceValue(spec, combo->itemData(i).toString().toStdString()));
             });
             pull_.push_back([this, spec, combo] {
-                const StageEntry* e = model_.stageEntry(stage_);
-                const nlohmann::json v = e && e->params.contains(spec.key) ? e->params[spec.key] : spec.def;
+                const int idx = ChoiceIndex(spec, valueOf(spec));  // folded: nr.style 1 / "1" -> natural
                 const QSignalBlocker b(combo);
-                combo->setCurrentIndex(std::max(0, ChoiceIndex(spec, v)));
+                combo->setCurrentIndex(std::max(0, idx >= 0 ? combo->findData(QString::fromStdString(spec.choices[idx].value)) : 0));
             });
             return combo;
         }
@@ -278,15 +376,43 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
             auto* row = new QWidget(form_);
             auto* h = new QHBoxLayout(row);
             h->setContentsMargins(0, 0, 0, 0);
+            // created before the slider: the Tab order follows the order on screen («отдельно», slider, number)
+            QCheckBox* own = spec.sentinel ? new QCheckBox(tr("отдельно"), row) : nullptr;
             auto* slider = new QSlider(Qt::Horizontal, row);
             slider->setMinimumWidth(80);
             const double step = spec.step > 0 ? spec.step : 0.1;
-            slider->setRange(static_cast<int>(std::lround(spec.min / step)), static_cast<int>(std::lround(spec.max / step)));
+            const double lo = spec.sentinel ? spec.rangeMin : spec.min;  // skin_structure: -1 is the check box, the slider 0..2
+            slider->setRange(static_cast<int>(std::lround(lo / step)), static_cast<int>(std::lround(spec.max / step)));
             auto* spin = new QDoubleSpinBox(row);
-            spin->setRange(spec.min, spec.max);
+            spin->setRange(lo, spec.max);
             spin->setSingleStep(step);
-            const int decimals = step < 0.01 ? 3 : step < 0.1 ? 2 : 1;
+            const int decimals = ParamDecimals(spec);
             spin->setDecimals(decimals);
+            if (!spec.zeroLabel.empty()) spin->setSpecialValueText(QString::fromStdString(spec.zeroLabel));  // «выкл» at the minimum
+            if (!spec.suffix.empty()) spin->setSuffix(QString::fromStdString(spec.suffix));
+            if (spec.sentinel) {
+                // «отдельно» off = the special value (skin structure as the local structure); on = its own strength, starting
+                // from the value it followed
+                own->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);  // the slider gives way, not the word
+                own->setToolTip(tr("Выключено — %1").arg(QString::fromStdString(spec.sentinelLabel)));
+                h->addWidget(own);
+                connect(own, &QCheckBox::toggled, this, [this, spec](bool on) {
+                    if (updating_) return;
+                    if (!on) {
+                        setParam(spec.key, *spec.sentinel);
+                        return;
+                    }
+                    setParam(spec.key, followedValue(spec));
+                });
+                pull_.push_back([this, spec, own, slider, spin] {
+                    const nlohmann::json v = valueOf(spec);
+                    const bool isOwn = !(v.is_number() && v.get<double>() == *spec.sentinel);
+                    const QSignalBlocker b(own);
+                    own->setChecked(isOwn);
+                    slider->setEnabled(isOwn);
+                    spin->setEnabled(isOwn);
+                });
+            }
             h->addWidget(slider, 1);
             h->addWidget(spin);
             connect(slider, &QSlider::valueChanged, this, [this, spec, spin, step, decimals](int v) {
@@ -303,9 +429,11 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
                 setParam(spec.key, spec.type == ParamType::Int ? nlohmann::json(static_cast<int>(std::lround(v))) : nlohmann::json(QuantizeParam(v, decimals)));
             });
             pull_.push_back([this, spec, slider, spin, step] {
-                const StageEntry* e = model_.stageEntry(stage_);
-                const nlohmann::json v = e && e->params.contains(spec.key) && e->params[spec.key].is_number() ? e->params[spec.key] : spec.def;
-                const double d = v.is_number() ? v.get<double>() : 0.0;
+                const nlohmann::json raw = valueOf(spec);
+                const nlohmann::json v = raw.is_number() ? raw : spec.def;
+                double d = v.is_number() ? v.get<double>() : 0.0;
+                // the special value: the check box says it, the disabled slider shows the value followed (not 0)
+                if (spec.sentinel && d == *spec.sentinel) d = followedValue(spec);
                 const QSignalBlocker b1(slider), b2(spin);
                 slider->setValue(static_cast<int>(std::lround(d / step)));
                 spin->setValue(d);
@@ -321,8 +449,8 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
                     if (!updating_) setParam(spec.key, v);
                 });
                 pull_.push_back([this, spec, spin] {
-                    const StageEntry* e = model_.stageEntry(stage_);
-                    const nlohmann::json v = e && e->params.contains(spec.key) && e->params[spec.key].is_number() ? e->params[spec.key] : spec.def;
+                    const nlohmann::json raw = valueOf(spec);
+                    const nlohmann::json v = raw.is_number() ? raw : spec.def;
                     const QSignalBlocker b(spin);
                     spin->setValue(v.is_number() ? static_cast<int>(std::lround(v.get<double>())) : 0);
                 });
@@ -331,13 +459,16 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
             auto* spin = new QDoubleSpinBox(form_);
             spin->setRange(spec.min, spec.max > spec.min ? spec.max : 1e9);
             spin->setSingleStep(spec.step > 0 ? spec.step : 0.1);
-            spin->setDecimals(3);
-            connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this, spec](double v) {
-                if (!updating_) setParam(spec.key, QuantizeParam(v, 3));
+            const int decimals = ParamDecimals(spec);
+            spin->setDecimals(decimals);
+            if (!spec.zeroLabel.empty()) spin->setSpecialValueText(QString::fromStdString(spec.zeroLabel));
+            if (!spec.suffix.empty()) spin->setSuffix(QString::fromStdString(spec.suffix));
+            connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this, spec, decimals](double v) {
+                if (!updating_) setParam(spec.key, QuantizeParam(v, decimals));
             });
             pull_.push_back([this, spec, spin] {
-                const StageEntry* e = model_.stageEntry(stage_);
-                const nlohmann::json v = e && e->params.contains(spec.key) && e->params[spec.key].is_number() ? e->params[spec.key] : spec.def;
+                const nlohmann::json raw = valueOf(spec);
+                const nlohmann::json v = raw.is_number() ? raw : spec.def;
                 const QSignalBlocker b(spin);
                 spin->setValue(v.is_number() ? v.get<double>() : 0.0);
             });
@@ -349,8 +480,7 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
                 if (!updating_) setParam(spec.key, on);
             });
             pull_.push_back([this, spec, check] {
-                const StageEntry* e = model_.stageEntry(stage_);
-                const nlohmann::json v = e && e->params.contains(spec.key) ? e->params[spec.key] : spec.def;
+                const nlohmann::json v = valueOf(spec);  // folded: no_guides true -> guides false
                 const QSignalBlocker b(check);
                 check->setChecked(v.is_boolean() && v.get<bool>());
             });
@@ -363,8 +493,7 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
                 if (!updating_) setParam(spec.key, edit->text().toStdString());
             });
             pull_.push_back([this, spec, edit] {
-                const StageEntry* e = model_.stageEntry(stage_);
-                const nlohmann::json v = e && e->params.contains(spec.key) ? e->params[spec.key] : spec.def;
+                const nlohmann::json v = valueOf(spec);
                 const QSignalBlocker b(edit);
                 edit->setText(v.is_string() ? QString::fromStdString(v.get<std::string>()) : QString::fromStdString(v.dump()));
             });
@@ -373,7 +502,65 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
     }
 }
 
-void StageCard::setParam(const std::string& key, const nlohmann::json& value) { model_.setStageParam(stage_, key, value); }
+nlohmann::json StageCard::stageParams() const {
+    const StageEntry* e = model_.stageEntry(stage_);
+    return e && e->params.is_object() ? NormalizeStageParams(stage_, e->params) : nlohmann::json::object();
+}
+
+nlohmann::json StageCard::valueOf(const ParamSpec& spec) const {
+    const nlohmann::json p = stageParams();
+    return p.contains(spec.key) ? p[spec.key] : spec.def;
+}
+
+double StageCard::followedValue(const ParamSpec& spec) const {
+    const StageEntry* e = model_.stageEntry(stage_);
+    const nlohmann::json eff = EffectiveStageParams(stage_, e ? e->params : nlohmann::json::object());
+    const std::string& seed = spec.sentinelFollows;
+    const double v = !seed.empty() && eff.contains(seed) && eff[seed].is_number() ? eff[seed].get<double>() : std::max(spec.rangeMin, 1.0);
+    return std::clamp(v, spec.rangeMin, spec.max);
+}
+
+void StageCard::setParam(const std::string& key, const nlohmann::json& value) {
+    // an alias of the key (skin-structure, no_guides) would stay beside it and lose to it: the card writes the schema's
+    // spelling only
+    if (const StageEntry* e = model_.stageEntry(stage_); e && e->params.is_object()) {
+        const nlohmann::json folded = NormalizeStageParams(stage_, e->params);
+        if (folded != e->params) model_.setStageParams(stage_, folded);
+    }
+    model_.setStageParam(stage_, key, value);
+}
+
+void StageCard::resetParam(const std::string& key) {
+    nlohmann::json params = stageParams();
+    if (!params.contains(key)) return;
+    // back to the default backend: a model from the old backend's list goes too, as on a switch in the list (VDA Large
+    // under DA3 is an error of the plan)
+    if (key == "backend" && schema_)
+        if (const ParamSpec* b = schema_->Find("backend"); b && b->def.is_string()) params = ParamsForBackendChange(stage_, params, b->def.get<std::string>());
+    params.erase(key);
+    model_.setStageParams(stage_, params);
+}
+
+void StageCard::resetCard() {
+    if (!model_.stageEntry(stage_) || !schema_) return;
+    // the form's keys go; the backend and the keys of the JSON editor (format, ...) stay - setStageParams replaces the
+    // whole object, so they are carried over (TASK-0046). Folded first: an alias of a form key goes with it.
+    nlohmann::json params = nlohmann::json::object();
+    const nlohmann::json current = stageParams();  // named: items() of a temporary dangles in the range-for (C++20)
+    for (const auto& [key, value] : current.items()) {
+        const ParamSpec* spec = schema_->Find(key);
+        if (!spec || spec->advanced || key == "backend") params[key] = value;
+    }
+    model_.setStageParams(stage_, params);
+}
+
+bool StageCard::changed(const ParamSpec& spec) const {
+    const nlohmann::json p = stageParams();
+    if (!p.contains(spec.key)) return false;
+    const nlohmann::json& v = p[spec.key];
+    if (v.is_number() && spec.def.is_number()) return std::fabs(v.get<double>() - spec.def.get<double>()) > 1e-9;
+    return v != spec.def;
+}
 
 void StageCard::refresh() {
     updating_ = true;
@@ -381,6 +568,49 @@ void StageCard::refresh() {
     enabled_->setChecked(e && e->enabled);
     form_->setEnabled(e && e->enabled);
     for (const auto& pull : pull_) pull();
+    // rows: the backend's own, RowState (conditions on the other parameters, the plan's inputs), changed values in accent
+    const nlohmann::json params = e ? e->params : nlohmann::json::object();
+    const nlohmann::json effective = EffectiveStageParams(stage_, params);
+    std::set<std::string> inputs;
+    for (const auto& d : model_.plan().stages)
+        if (d.name == stage_)
+            for (const auto& [pass, fp] : d.inputs) inputs.insert(pass);
+    const std::string backend = currentBackend();
+    const nlohmann::json folded = NormalizeStageParams(stage_, params);
+    QStringList moreChanged, hiddenChanged;
+    bool anyChanged = false;
+    for (const Row& row : rows_) {
+        const ParamSpec& spec = *row.spec;
+        const bool ofBackend = spec.backends.empty() || std::find(spec.backends.begin(), spec.backends.end(), backend) != spec.backends.end();
+        const bool hasList = spec.formChoices.empty() || FormChoicesFor(spec, backend) != nullptr;
+        const ParamRowState st = RowState(spec, effective, inputs);
+        const bool visible = ofBackend && hasList && st.visible;
+        row.form->setRowVisible(row.index, visible);
+        row.field->setEnabled(st.enabled);
+        row.note->setText(QString::fromStdString(st.note));
+        row.note->setVisible(!st.enabled && !st.note.empty());
+        // a value of a row hidden by its condition (the threshold with the filter off) is still in the fingerprint:
+        // the card names it and «Сбросить» drops it; a key of another backend is not (EffectiveStageParams drops it)
+        const bool differs = ofBackend && hasList && changed(spec);
+        const bool isChanged = visible && differs;
+        SetRole(row.label, isChanged ? "changed" : "");
+        row.reset->setVisible(isChanged);
+        row.resetAction->setEnabled(isChanged);
+        anyChanged = anyChanged || differs;
+        const QString item = QString("%1 %2").arg(QString::fromStdString(spec.label).toLower(),
+                                                  QString::fromStdString(ParamValueLabel(spec, folded.contains(spec.key) ? folded[spec.key] : spec.def, backend)));
+        if (differs && !visible) hiddenChanged << item;
+        else if (isChanged && spec.more) moreChanged << item;
+    }
+    auto list = [](const QStringList& l) { return l.size() > 3 ? l.mid(0, 3).join(", ") + ", …" : l.join(", "); };
+    if (moreToggle_) {
+        const bool open = moreToggle_->isChecked();
+        QString text = open ? tr("Ещё настройки ▾") : tr("Ещё настройки ▸");
+        if (!open && !moreChanged.isEmpty()) text += tr(" · изменено: %1").arg(list(moreChanged));  // the collapsed block says what it hides
+        if (!hiddenChanged.isEmpty()) text += tr(" · не действует: %1").arg(list(hiddenChanged));
+        moreToggle_->setText(text);
+    }
+    resetCard_->setVisible(anyChanged);
     const AppModel::StageCardState st = model_.cardState(stage_);
     state_->setText(st.state);
     SetRole(state_, kToneRole[ToneIndex(st.tone)]);

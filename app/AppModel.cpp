@@ -814,6 +814,15 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     if (!st.warning.isEmpty()) warn << st.warning;
     if (!d->error.empty()) warn << QString::fromStdString(d->error);
     for (const auto& w : d->warnings) warn << QString::fromStdString(w);
+    // an experimental value of a list (nr.style 3..6): NVIDIA does not document it, its behaviour is not verified (TASK-0046)
+    if (schema) {
+        const nlohmann::json eff = NormalizeStageParams(stage, d->params);
+        for (const ParamSpec& p : schema->params)
+            for (const ParamChoice& c : p.choices)
+                if (c.experimental && eff.contains(p.key) && eff[p.key].is_string() && eff[p.key].get<std::string>() == c.value)
+                    warn << tr("%1 «%2» — экспериментальный: NVIDIA его не документирует, поведение не проверено")
+                                .arg(QString::fromStdString(p.label), QString::fromStdString(c.label));
+    }
     st.warning = warn.join("\n");
     if (st.runs && !d->info.empty()) st.sub = st.sub.isEmpty() ? QString::fromStdString(d->info) : st.sub + " · " + QString::fromStdString(d->info);
     return st;
