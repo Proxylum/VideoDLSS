@@ -182,6 +182,39 @@ TEST_CASE("dlssvid import --stamp: a mask re-imported with other content recompu
     CHECK(j["stages"][0]["reason"].get<std::string>().find("input") != std::string::npos);
 }
 
+// TASK-0045, review: `import --stamp` saved the manifest as the run saw it (--y-up / --near / --far / --relative are for
+// the run only), hashed the frames but not how they are read (the same files with mv.y_up are other vectors) and, with
+// --to-dlss, stamped the source instead of the converted pass the stages read.
+TEST_CASE("dlssvid import --stamp: the fingerprint alone, how the files are read, the converted pass", "[integration][cli][passes][regression]") {
+    const auto dir = Dir("stamp_layout");
+    auto writePass = [&](PassKind kind, const std::filesystem::path& to) {
+        PassWriter w(to, Manifest::ForPass(kind, 16, 8, FileFormat::Exr));
+        for (int64_t f = 0; f < 2; ++f) w.WriteFrame(f, MakePassImage(kind, 16, 8));
+        w.Finish();
+    };
+    const auto mv = dir / "mv_dlss";
+    writePass(PassKind::MvDlss, mv);
+    const std::string before = Manifest::Load(mv).ToJson().dump();
+    REQUIRE(RunCli({"import", "-i", mv.string(), "--stamp", "--y-up"}).code == 0);
+    Manifest m = Manifest::Load(mv);
+    const std::string stamped = m.fingerprint;
+    CHECK(stamped.rfind("sha256:", 0) == 0);
+    CHECK_FALSE(m.mv.yUp);  // before: --y-up written into manifest.json
+    m.fingerprint.clear();
+    CHECK(m.ToJson().dump() == before);  // the fingerprint is the only change
+    m.mv.yUp = true;  // the same files read y up
+    m.Save(mv);
+    REQUIRE(RunCli({"import", "-i", mv.string(), "--stamp"}).code == 0);
+    CHECK(Manifest::Load(mv).fingerprint != stamped);  // before: the same fingerprint, the stages below reused
+
+    const auto raw = dir / "mv_raw";
+    const auto converted = dir / "converted";
+    writePass(PassKind::MvRaw, raw);
+    REQUIRE(RunCli({"import", "-i", raw.string(), "--to-dlss", converted.string(), "--stamp"}).code == 0);
+    CHECK(Manifest::Load(raw).fingerprint.empty());  // the source is left as it was
+    CHECK(Manifest::Load(converted).fingerprint.rfind("sha256:", 0) == 0);
+}
+
 TEST_CASE("dlssvid process --passthrough and dlssvid bench", "[integration][cli][process]") {
     ClipSpec spec;
     spec.frames = 5;

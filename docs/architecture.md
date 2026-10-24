@@ -285,7 +285,8 @@ AppModel (Qt) ── ViewportWindow / панели ── TaskQueue (dlssvid <st
   задержкой 250 мс после правок) вызывает `PlanProcess` над проектом и раздаёт карточкам состояния
   (`AppModel::cardState`: «переиспользуется · 0 мин · посчитано вчера 14:02», «пересчёт: Интенсивность 1 → 1.4», «пересчёт:
   изменился вход · из-за «Улучшение»», «будет посчитано», «другой исходник», «досчитать…», «выключена»; тег версии vN;
-  предупреждение «без глубины и векторов: качество ниже», когда у NR/FG/апскейла нет guides среди входов), панели
+  предупреждение «без глубины и векторов: качество ниже», когда у NR/FG/апскейла нет guides среди входов, и «глубина и
+  векторы выключены: каждый кадр обрабатывается отдельно» у NR с `guides: false`), панели
   «Что получится» (видео, время «к запуску k из m», совпавшие стадии, диск) и кнопке «Обработать · N стадий»
   (`Ctrl+Enter`, `dlssvid process --project … [--force …]`). Панель версий на диске — `ListPassVersions` с «Сравнить» /
   «Вернуть» / «Удалить» / «Очистить старые». Ошибка валидации показывается в плане вместо падения при запуске.
@@ -553,7 +554,8 @@ PlanProcess / RunProcess ── для каждой включённой ста�
   которую бэкенд загрузит (`NvidiaDllSearchPaths` / `FindNrDll` / `FindDlssgDll`), её sha256 кэшируется по
   (путь, размер, mtime). Таблицы стадий (`StageOutputPasses`, `StageFamilyPasses`, `StageInputCandidates`) повторяют
   `ExistingPass()` раннера: flow читает `depth_raw`, upscale — `depth_dlss`/`mv_dlss`, nr — `color_sr` + guides +
-  `mask_*`, fg — `color_nr`, иначе `color_sr`.
+  `mask_*` (с `guides: false` — без guides), fg — `color_nr`, иначе `color_sr`. `ContentFingerprint` — отпечаток
+  импортированного пасса по содержимому и раскладке (`dlssvid import --stamp`).
 - `core/pipeline/PassVersions`: текущая версия остаётся в `<root>/<pass>/` (ни один читатель не меняется), история —
   `<root>/<pass>.v/<id>/`, id = `created` манифеста (иначе mtime) + 8 символов отпечатка (`legacy` без него,
   `partial` для папки без манифеста). `RetirePassVersion` / `UsePassVersion` (обмен папок, id или уникальный префикс) /

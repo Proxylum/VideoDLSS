@@ -240,7 +240,13 @@ std::string ContentFingerprint(const std::filesystem::path& dir, const Manifest&
         if (std::filesystem::exists(file)) frames.push_back({f, Sha256File(file)});
     }
     if (frames.empty()) Throw("stamp: no frame files in " + dir.string());
-    const std::string canonical = CanonicalJson({{"pass", manifest.pass}, {"frames", frames}});
+    // how the files are read is part of the content: the manifest without its provenance (size, format, channels,
+    // mv.y_up, the depth range...) - the same files read y up are other vectors for the stages below
+    nlohmann::json layout = manifest.ToJson();
+    for (const char* key : {"schema_version", "fps", "frame_count", "frame_range", "file_pattern", "model", "source", "stage_params", "fingerprint",
+                            "inputs", "tool", "params_canonical", "created"})
+        layout.erase(key);
+    const std::string canonical = CanonicalJson({{"pass", manifest.pass}, {"layout", layout}, {"frames", frames}});
     return "sha256:" + Sha256Hex(canonical.data(), canonical.size());
 }
 

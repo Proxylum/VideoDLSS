@@ -426,6 +426,13 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     CHECK(model.cardState("depth").version == "v1");
     CHECK(model.cardState("nr").runs);
     CHECK(model.cardState("nr").warning.isEmpty());  // depth and flow run first: the guides will be there
+    // TASK-0045: with the guides off the card says nr works frame by frame
+    model.setStageParam("nr", "guides", false);
+    model.refreshPlan();
+    CHECK(model.cardState("nr").warning == QString::fromUtf8("глубина и векторы выключены: каждый кадр обрабатывается отдельно"));
+    model.setStageParam("nr", "guides", true);
+    model.refreshPlan();
+    CHECK(model.cardState("nr").warning.isEmpty());
     CHECK(model.sourceHashStatus() == QString::fromUtf8("пассов пока нет"));
     CHECK(!model.plan().sourceHash.empty());
     CHECK(model.project().sourceHash == model.plan().sourceHash);  // cached in the project

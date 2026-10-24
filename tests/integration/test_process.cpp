@@ -261,8 +261,12 @@ TEST_CASE("RunProcess: an nr pass with the guides off is not recomputed when the
     o.codec = "ffv1";
     o.warp = true;
     RunProcess(o);
-    CHECK_FALSE(Manifest::Load(o.passesRoot / "color_nr").inputs.count("depth_dlss"));
-    ApplyParamSpec(o.stages, "depth.z_far=500");  // another depth_dlss
+    const auto inputs = Manifest::Load(o.passesRoot / "color_nr").inputs;
+    CHECK_FALSE(inputs.count("depth_dlss"));
+    CHECK_FALSE(inputs.count("mv_dlss"));
+    // another depth_dlss; upscale off - it reads the depth, a new color_sr would recompute nr through its colour input
+    ApplyParamSpec(o.stages, "depth.z_far=500");
+    for (auto& s : o.stages) s.enabled = s.name == "depth" || s.name == "flow" || s.name == "nr";
     const ProcessResult r = RunProcess(o);
     CHECK(Report(r, "depth").status == "ran");
     CHECK(Report(r, "nr").status == "reused");  // before: input_changed

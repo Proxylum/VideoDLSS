@@ -26,7 +26,8 @@ std::string PassToolVersionFor(const std::string& stage, const nlohmann::json& p
 //   fingerprint = sha256(canonical JSON of {source hash, stage, canonical parameters, input pass fingerprints, tool})
 // so a changed parameter, input, source or tool invalidates the pass and, through the inputs, everything below it.
 
-// Canonical JSON: object keys sorted, integral floats written as integers (2.0 == 2), no whitespace.
+// Canonical JSON: object keys sorted, integral floats written as integers (2.0 == 2), other floats rounded to 9
+// significant digits (3 x 0.1 == 0.3, TASK-0045), no whitespace.
 nlohmann::json CanonicalizeJson(const nlohmann::json& j);
 std::string CanonicalJson(const nlohmann::json& j);
 
@@ -43,7 +44,9 @@ struct ToolInfo {
     static ToolInfo FromJson(const nlohmann::json& j);
     bool operator==(const ToolInfo&) const = default;
 };
-// Resolves the tool identity of a stage from its parameters (backend, model, models_dir, dll_dir) without running it.
+// Resolves the tool identity of a stage from its parameters (backend, model, models_dir) without running it. The NVIDIA
+// DLL is the one the stage loads (DLSSVID_NVIDIA_DLL_DIR, <exe>/nvidia, <exe>): params.dll_dir is read by no stage of
+// process, so it is not hashed (TASK-0045).
 ToolInfo ToolForStage(const std::string& stage, const nlohmann::json& params);
 
 struct PassFingerprint {
@@ -82,8 +85,9 @@ std::string StageForPass(const std::string& pass);
 std::vector<std::vector<std::string>> StageInputCandidates(const std::string& stage, const nlohmann::json& params = nlohmann::json::object());
 
 // The fingerprint of an imported pass from its content (`dlssvid import --stamp`, TASK-0045): "sha256:" of the canonical
-// {"pass", "frames": [sha256 of each frame file]}. A pass without a fingerprint stands for its source and length only, so
-// a mask re-imported with other content and the same frame count reused the NR pass made from the old one.
+// {"pass", "layout": the manifest without its provenance (size, format, channels, mv.y_up, depth range), "frames": [sha256
+// of each frame file]}. A pass without a fingerprint stands for its source and length only, so a mask re-imported with
+// other content and the same frame count reused the NR pass made from the old one.
 std::string ContentFingerprint(const std::filesystem::path& dir, const Manifest& manifest);
 
 // Current UTC time as ISO-8601 ("2026-09-22T14:09:31Z") — the manifest's `created`.

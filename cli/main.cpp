@@ -492,6 +492,14 @@ struct ImportArgs {
 
 int ConvertFolder(const PassReader& in, const std::string& outDir, PassKind toKind, const ImportArgs& a);
 
+// `import --stamp`: the content fingerprint goes into the manifest on disk, nothing else - --y-up / --near / --far /
+// --relative describe this read only, as without --stamp (TASK-0045)
+void StampPass(const std::filesystem::path& dir, Manifest m) {
+    m.fingerprint = ContentFingerprint(dir, m);
+    m.Save(dir);
+    std::printf("fingerprint: %s\n", m.fingerprint.c_str());
+}
+
 int CmdImport(const ImportArgs& a) {
     PassReader r = OpenReader(a.dir, a.pass, a.convention, a.size);
     ApplyYUp(r, a.yUp);  // before PrintManifest / --write-manifest: the flag describes the files
@@ -513,11 +521,9 @@ int CmdImport(const ImportArgs& a) {
         r.Man().Save(r.Dir());
         Log()->info("manifest.json written to {}", r.Dir().string());
     }
-    if (a.stamp) {  // after --write-manifest: a folder without one gets it with the fingerprint
-        r.Man().fingerprint = ContentFingerprint(r.Dir(), r.Man());
-        r.Man().Save(r.Dir());
-        std::printf("fingerprint: %s\n", r.Man().fingerprint.c_str());
-    }
+    // after --write-manifest: a folder without one gets it (as scanned) with the fingerprint; with --to-dlss / --to-raw
+    // the converted pass is stamped, it is what the stages read
+    if (a.stamp && a.toDlss.empty() && a.toRaw.empty()) StampPass(r.Dir(), r.HadManifest() ? Manifest::Load(r.Dir()) : r.Man());
     const auto kind = r.Man().Kind();
     if (!a.toDlss.empty()) {
         if (kind == PassKind::DepthRaw) return ConvertFolder(r, a.toDlss, PassKind::DepthDlss, a);
@@ -624,6 +630,7 @@ int ConvertFolder(const PassReader& in, const std::string& outDir, PassKind toKi
     writer.Finish();
     std::fprintf(stderr, "\n");
     Log()->info("converted {} frames {} -> {} in {}", total, src.pass, out.pass, outDir);
+    if (a.stamp) StampPass(outDir, Manifest::Load(outDir));
     return 0;
 }
 
@@ -711,7 +718,9 @@ int main(int argc, char** argv) {
     imp->add_option("--to-dlss", ia.toDlss, "write depth_dlss / mv_dlss into this folder");
     imp->add_option("--to-raw", ia.toRaw, "write depth_raw / mv_raw into this folder");
     imp->add_flag("--write-manifest", ia.writeManifest, "write manifest.json for a folder that has none");
-    imp->add_flag("--stamp", ia.stamp, "fingerprint the frames' content into the manifest (re-import of a mask with other content recomputes the stages that read it)");
+    imp->add_flag("--stamp", ia.stamp,
+                  "fingerprint the frames' content into the manifest (re-import of a mask with other content recomputes the stages that read it); "
+                  "with --to-dlss / --to-raw the converted pass");
 
     ConvertArgs ca;
     auto* conv = app.add_subcommand("convert", "convert a pass between raw and DLSS conventions");

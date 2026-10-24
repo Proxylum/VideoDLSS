@@ -475,6 +475,55 @@ TEST_CASE("Regression (pass-mv-yup): toggling mv.y_up of a legacy mv_dlss recomp
     CHECK(Decision(PlanProcess(o), "upscale").action == "restore");  // the version made without the flag comes back
 }
 
+// TASK-0045, review: a stamped mv pass (`import --stamp`) carries a fingerprint, the plan took it as is - mv.y_up set
+// in its manifest after the stamp left the stages that read the vectors reused with flipped vectors.
+TEST_CASE("Regression: toggling mv.y_up of a fingerprinted mv_dlss recomputes the stages that read it", "[integration][process][versions][mv][y_up][regression]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("stamped_yup");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o = Options(dir, clip);
+    RunProcess(o);
+    // flow off: its decision would carry the pass's own fingerprint over the one read from disk
+    for (auto& s : o.stages)
+        if (s.name == "flow") s.enabled = false;
+    const auto mvDir = o.passesRoot / "mv_dlss";
+    Manifest m = Manifest::Load(mvDir);
+    const std::string fp = m.fingerprint;
+    REQUIRE(fp.rfind("sha256:", 0) == 0);
+    REQUIRE(PlanProcess(o).runCount == 0);
+    m.mv.yUp = true;
+    m.Save(mvDir);
+    const ProcessPlan plan = PlanProcess(o);
+    CHECK(Decision(plan, "upscale").action == "run");
+    CHECK(Decision(plan, "upscale").kind == "input_changed");
+    CHECK(Decision(plan, "upscale").inputs.at("mv_dlss") == fp + ":y_up");
+    CHECK(Decision(plan, "nr").inputs.at("mv_dlss") == fp + ":y_up");
+    m.mv.yUp = false;
+    m.Save(mvDir);
+    CHECK(PlanProcess(o).runCount == 0);
+}
+
+// TASK-0045: process loads the NVIDIA DLL from DLSSVID_NVIDIA_DLL_DIR / <exe>/nvidia / <exe>, a dll_dir in the stage's
+// parameters is not used - the plan says so instead of keeping quiet.
+TEST_CASE("PlanProcess: dll_dir of an NVIDIA stage is reported as ignored", "[integration][process][versions]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("dll_dir");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o = Options(dir, clip);
+    CHECK(Decision(PlanProcess(o), "nr").warnings.empty());
+    for (auto& s : o.stages)
+        if (s.name == "nr") s.params["dll_dir"] = (dir / "elsewhere").string();
+    const StageDecision d = Decision(PlanProcess(o), "nr");
+    REQUIRE(d.warnings.size() == 1);
+    CHECK_THAT(d.warnings[0], ContainsSubstring("nr.dll_dir is ignored by process"));
+}
+
 // Audit fg-2 (TASK-0038): an fg process that dies while it rewrites color_fg in place (a forced or incomplete pass is not
 // moved to the history first) has already overwritten frames of the signed version - one of them possibly cut short by
 // the crash - so the folder is removed rather than left current (review of TASK-0038, fg-iso-3); the run encodes color_nr.
