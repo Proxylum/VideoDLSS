@@ -3,6 +3,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
 #include <set>
 
@@ -57,6 +59,36 @@ TEST_CASE("Every stage has a schema whose defaults mirror the stages and the pro
     CHECK(FindStageSchema("upscale")->Find("scale")->widget == ParamWidget::Toggle);
     CHECK(FindStageSchema("upscale")->Find("scale")->choices.size() == 3);
     CHECK(FindStageSchema("nr")->guides == std::vector<std::string>{"depth_dlss", "mv_dlss"});
+}
+
+// TASK-0047: a file of one stage's settings (dlssvid nr --params-file) - one object of the schema's keys, aliases normalised;
+// keys the schema does not have are named for the caller to refuse; other files are refused with a message naming them.
+TEST_CASE("ReadStageParamsFile: one object of schema keys, aliases normalised, unknown keys named, other files refused", "[unit][schema][nr]") {
+    const auto dir = std::filesystem::path(DLSSVID_TEST_TMP) / "params_file";
+    std::filesystem::create_directories(dir);
+    auto file = [&](const char* name, const std::string& text) {
+        const auto p = dir / name;
+        std::ofstream(p, std::ios::binary) << text;
+        return p;
+    };
+    std::vector<std::string> dropped;
+    const nlohmann::json j = ReadStageParamsFile("nr", file("ok.json", R"({"local-tone":0.3,"no_guides":true,"style":4,"intensty":1})"), &dropped);
+    CHECK(j == nlohmann::json{{"local_tone", 0.3}, {"guides", false}, {"style", "4"}});
+    CHECK(dropped == std::vector<std::string>{"intensty"});
+    auto throws = [&](const std::filesystem::path& p, const char* says) {
+        INFO(p.string());
+        try {
+            ReadStageParamsFile("nr", p);
+            FAIL("no exception");
+        } catch (const std::exception& e) {
+            CHECK(std::string(e.what()).find(says) != std::string::npos);
+            CHECK(std::string(e.what()).find(p.filename().string()) != std::string::npos);
+        }
+    };
+    throws(file("array.json", "[1]"), "JSON object");
+    throws(file("broken.json", "{\"intensity\": "), "not valid JSON");
+    throws(file("preset.json", R"({"format":"dlssvid-preset","stages":{}})"), "preset");
+    throws(file("big.json", "{\"intensity\": 1, \"pad\": \"" + std::string(1 << 20, 'x') + "\"}"), "1 MiB");
 }
 
 // TASK-0046: the NR card shows every setting (before: the intensity alone, the rest in the engineer JSON) - the basic

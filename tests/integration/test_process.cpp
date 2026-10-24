@@ -165,6 +165,78 @@ TEST_CASE("RunProcess: a PNG16 colour pass from before TASK-0042 is recomputed, 
     CHECK(Report(RunProcess(o), "nr").status == "reused");
 }
 
+// TASK-0047: with the source's frame count unknown (mkv) PassComplete looked at the last frame only, so a color_nr of a part
+// of the clip (dlssvid nr --start, no fingerprint) was adopted as the clip's pass. A pass of the clip starts at frame 0.
+TEST_CASE("RunProcess: a color_nr of a part of the clip (nr --start) is recomputed, not adopted", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("part_of_clip");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    const auto nrDir = o.passesRoot / "color_nr";
+    {  // what a standalone ranged run leaves: frames 2..3, no fingerprint
+        Manifest m = Manifest::Load(nrDir);
+        m.fingerprint.clear();
+        m.tool = nlohmann::json::object();
+        m.firstFrame = 2;
+        m.frameCount = 2;
+        m.stageParams["range"] = {{"first", 2}, {"last", 3}, {"warmup", 0}};
+        for (int64_t i : {0, 1}) std::filesystem::remove(nrDir / m.FrameFileName(i));
+        m.Save(nrDir);
+    }
+    CHECK_FALSE(PassComplete(nrDir, -1, Manifest::Load(nrDir).sourceHash));  // before: true, the last frame was there
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK(Report(r, "nr").reason.find("part of the clip") != std::string::npos);
+    CHECK(Manifest::Load(nrDir).firstFrame == 0);
+    CHECK(Report(r, "fg").status == "reused");  // the pass fg was made from is back, under the same fingerprint
+}
+
+// Review of TASK-0047: the frame-0 rule was in PassComplete only - with nr off in the project, fg took a color_nr of a part of
+// the clip as its colour («has no frame 0») and the encode put frame F at t=0. Such a pass is no input and not the result.
+TEST_CASE("RunProcess: a part of the clip under the passes root is neither fg's input nor the result", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("part_not_input");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    for (auto& s : o.stages)
+        if (s.name == "nr") s.enabled = false;
+    o.codec = "ffv1";
+    o.warp = true;
+    const ProcessResult first = RunProcess(o);
+    {  // what `dlssvid nr --start 2` leaves under the root: frames 2..3
+        const Manifest sr = Manifest::Load(o.passesRoot / "color_sr");
+        PassWriter w(o.passesRoot / "color_nr", Manifest::ForPass(PassKind::ColorNr, sr.width, sr.height, FileFormat::Exr));
+        for (int64_t i : {2, 3}) w.WriteFrame(i, MakePassImage(PassKind::ColorNr, sr.width, sr.height));
+        w.Finish();
+    }
+    ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "fg").status == "reused");  // its colour is color_sr, as before
+    CHECK(r.framesOut == first.framesOut);
+    for (auto& s : o.stages)
+        if (s.name == "fg") s.enabled = false;
+    std::filesystem::remove_all(o.passesRoot / "color_fg");  // a disabled stage's pass would still be the result
+    r = RunProcess(o);
+    CHECK(r.finalPass.filename() == "color_sr");  // the result is not the part of the clip (before: color_nr, 2 frames)
+    CHECK(r.framesOut == 4);
+}
+
 // TASK-0043: the fingerprint hashed the schema's view of the parameters while the stages read the raw ones - an alias ran
 // at its value under a fingerprint saying the default. The parameters are normalised for both now (the handoff of the
 // effective parameters to the stages is covered by the mirror test in test_param_schema: with the defaults in agreement

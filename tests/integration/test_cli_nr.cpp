@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include <catch2/matchers/catch_matchers_floating_point.hpp>
+
 #include "TestClips.h"
 #include "passes/Manifest.h"
 #include "passes/PassSequence.h"
@@ -17,6 +19,7 @@
 
 using namespace dlssvid;
 using namespace dlssvid::test;
+using Catch::Matchers::WithinAbs;
 
 namespace {
 
@@ -205,4 +208,194 @@ print("patched", args.output)
     CHECK(RunCli({"nr-patch", "--input", input.string(), "--patcher", patcher.string(), "--output", (dir / "x.dll").string(), "--arch", "turing"}).code == 1);
     // no patcher: the instruction and exit code 1
     CHECK(RunCli({"nr-patch", "--input", input.string(), "--patcher", (dir / "nope").string()}).code == 1);
+}
+
+// TASK-0047 (spec §2f): --start F --frames N --warmup K - the model sees F-K.. for its history, only F..F+N-1 are written,
+// numbered as the pass folders and the viewport count; the seek lands on the frame the index names.
+TEST_CASE("dlssvid nr --start/--frames/--warmup writes only the requested range", "[integration][cli][nr][preview]") {
+    ClipSpec spec;
+    spec.frames = 64;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("range");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    auto run = [&](const char* name, std::vector<std::string> extra, bool ok = true) {
+        std::vector<std::string> args{"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / name).string(), "--json", (dir / (std::string(name) + ".json")).string()};
+        args.insert(args.end(), extra.begin(), extra.end());
+        const CliResult r = RunCli(args);
+        INFO(name << ": " << r.out);
+        if (ok) REQUIRE(r.code == 0);
+        return r;
+    };
+    auto frame = [&](const char* name, int64_t i) { return PassReader::Open(dir / name / "color_nr").ReadFrame(i).ConvertNormalizedTo(PixelType::F32); };
+
+    run("full", {"--frames", "60"});
+    // 52 - 2 = 50 is more than 48 frames ahead: a real seek, not decoding forward
+    run("part", {"--start", "52", "--frames", "4", "--warmup", "2"});
+    const Manifest part = Manifest::Load(dir / "part" / "color_nr");
+    CHECK(part.firstFrame == 52);
+    CHECK(part.lastFrame == 55);
+    CHECK(part.frameCount == 4);
+    CHECK(part.stageParams["range"] == nlohmann::json{{"first", 52}, {"last", 55}, {"warmup", 2}});
+    int files = 0;
+    for (const auto& e : std::filesystem::directory_iterator(dir / "part" / "color_nr")) files += e.path().filename() != Manifest::kFileName;
+    CHECK(files == 4);
+    for (int64_t i = 52; i <= 55; ++i) CHECK(PassImage::MaxAbsDiff(frame("part", i), frame("full", i)) == 0.0);
+    const nlohmann::json pj = ReadJson(dir / "part.json");
+    CHECK(pj["stats"]["frames"] == 6);
+    CHECK(pj["stats"]["frames_written"] == 4);
+    CHECK(pj["stats"]["warmup_frames"] == 2);
+    CHECK(pj["range"]["first"] == 52);
+
+    // the warm-up builds the temporal filter's history: equal to a run that writes from the warm-up's start
+    const std::vector<std::string> temporal{"--temporal", "0.9", "--temporal-threshold", "1"};
+    auto with = [&](std::vector<std::string> a) {
+        a.insert(a.end(), temporal.begin(), temporal.end());
+        return a;
+    };
+    run("warm", with({"--start", "10", "--frames", "3", "--warmup", "4"}));
+    run("from6", with({"--start", "6", "--frames", "7"}));
+    run("cold", with({"--start", "10", "--frames", "3"}));
+    for (int64_t i = 10; i <= 12; ++i) CHECK(PassImage::MaxAbsDiff(frame("warm", i), frame("from6", i)) == 0.0);
+    CHECK(PassImage::MaxAbsDiff(frame("warm", 10), frame("cold", 10)) > 2e-3);
+    CHECK(PassImage::MaxAbsDiff(frame("cold", 10), frame("full", 10)) == 0.0);  // no warm-up: the history starts at F
+
+    // the warm-up is shortened at the clip's start; past the end is an error
+    run("clamp", {"--start", "1", "--frames", "1", "--warmup", "6"});
+    CHECK(Manifest::Load(dir / "clamp" / "color_nr").firstFrame == 1);
+    CHECK(ReadJson(dir / "clamp.json")["stats"]["warmup_frames"] == 1);
+    const CliResult past = run("past", {"--start", "70"}, false);
+    CHECK(past.code != 0);
+    CHECK(past.out.find("past the end") != std::string::npos);
+
+    // a colour pass over the whole clip and --frames past its end: written to the end, not refused (review of TASK-0047)
+    REQUIRE(RunCli({"export", "-i", clip.string(), "-o", (dir / "color").string()}).code == 0);
+    const CliResult tail = run("tail", {"--color-dir", (dir / "color").string(), "--start", "60", "--frames", "10"});
+    CHECK(Manifest::Load(dir / "tail" / "color_nr").lastFrame == 63);
+    CHECK(tail.out.find("clip ends") != std::string::npos);
+    // a colour pass that starts after F-K: refused before the GPU starts; from F with no warm-up: accepted
+    REQUIRE(RunCli({"export", "-i", clip.string(), "-o", (dir / "color52").string(), "--range", "52-63"}).code == 0);
+    const CliResult cov = run("cov_bad", {"--color-dir", (dir / "color52").string(), "--start", "52", "--frames", "2", "--warmup", "2"}, false);
+    CHECK(cov.code != 0);
+    CHECK(cov.out.find("the colour pass") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(dir / "cov_bad" / "color_nr"));
+    run("cov_ok", {"--color-dir", (dir / "color52").string(), "--start", "52", "--frames", "2"});
+    CHECK(Manifest::Load(dir / "cov_ok" / "color_nr").firstFrame == 52);
+    // --frames 0 with --start writes nothing: said so, not «past the end»; --warmup without --start has nothing to warm
+    const CliResult zero = run("zero", {"--start", "5", "--frames", "0"}, false);
+    CHECK(zero.code != 0);
+    CHECK(zero.out.find("writes nothing") != std::string::npos);
+    run("warm0", {"--warmup", "3", "--frames", "2"});
+    CHECK(ReadJson(dir / "warm0.json")["stats"]["warmup_frames"] == 0);
+    CHECK(ReadJson(dir / "warm0.json")["stats"]["frames_written"] == 2);
+    CHECK_FALSE(Manifest::Load(dir / "warm0" / "color_nr").stageParams.contains("range"));
+
+    // the video of a range has its frames only
+    run("video", {"--start", "52", "--frames", "4", "--warmup", "2", "--video", (dir / "part.mkv").string(), "--codec", "ffv1"});
+    const auto video = DecodeAll(dir / "part.mkv");
+    REQUIRE(video.size() == 4);
+    CHECK(video[0].pts == 0);  // the range's video starts at 0, not 52 frames in
+
+    // never over the pass of a processed project (it has a fingerprint); a whole run there is the user's call, as before
+    Manifest stamped = Manifest::Load(dir / "part" / "color_nr");
+    stamped.fingerprint = "sha256:processed";
+    stamped.Save(dir / "part" / "color_nr");
+    const CliResult guard = run("part", {"--start", "52", "--frames", "4"}, false);
+    CHECK(guard.code != 0);
+    CHECK(guard.out.find("processed project") != std::string::npos);
+    run("part", {"--frames", "1"});
+}
+
+// TASK-0047 (spec §2h): --params-file holds the project's nr keys; the options given on the command line win, even at their
+// default value; the file is validated with the flags by the schema, and a key the schema does not have is refused.
+TEST_CASE("dlssvid nr --params-file; explicit flags override the file", "[integration][cli][nr]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("params_file");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    auto file = [&](const char* name, const std::string& text) {
+        const auto p = dir / name;
+        std::ofstream(p) << text;
+        return p.string();
+    };
+    const std::string tuned =
+        file("tuned.json", R"({"backend":"stub","intensity":0.5,"local-tone":0.3,"temporal":0.4,"model_scale":0.5,"passes":2,"format":"png","no_guides":true,"auto_mask":true})");
+    auto run = [&](const char* name, std::vector<std::string> extra) {
+        std::vector<std::string> args{"nr", "--warp", "-i", clip.string(), "-o", (dir / name).string(), "--frames", "1", "--json", (dir / (std::string(name) + ".json")).string()};
+        args.insert(args.end(), extra.begin(), extra.end());
+        return RunCli(args);
+    };
+
+    {
+        const CliResult r = run("file", {"--params-file", tuned});
+        INFO(r.out);
+        REQUIRE(r.code == 0);
+        const Manifest m = Manifest::Load(dir / "file" / "color_nr");
+        CHECK(m.format == FileFormat::Png);
+        CHECK(m.stageParams["backend"] == "stub");
+        CHECK(m.stageParams["passes"] == 2);
+        CHECK(m.stageParams["model_scale"] == 0.5);
+        CHECK(m.stageParams["guides"] == false);
+        const nlohmann::json p = ReadJson(dir / "file.json")["params"];
+        CHECK(p["intensity"] == 0.5);
+        CHECK(p["local_tone"] == 0.3);
+        CHECK(p["temporal"] == 0.4);
+        CHECK(p["auto_mask"] == true);
+        CHECK(p["style"] == "natural");  // the run's settings: the schema's defaults filled in
+        // what reached the model and the filter, not only the merged object
+        const nlohmann::json b = ReadJson(dir / "file.json")["backend"];
+        CHECK(b["intensity"] == 0.5);
+        CHECK_THAT(b["local_tone"].get<double>(), WithinAbs(0.3, 1e-6));
+        CHECK_THAT(m.stageParams["temporal"].get<double>(), WithinAbs(0.4, 1e-6));
+    }
+    {  // given at their defaults, the options still win: count(), not «differs from the default»
+        const CliResult r = run("flags", {"--params-file", tuned, "--intensity", "1.5", "--temporal", "0", "--model-scale", "1", "--format", "exr", "--guides", "--no-auto-mask"});
+        INFO(r.out);
+        REQUIRE(r.code == 0);
+        const Manifest m = Manifest::Load(dir / "flags" / "color_nr");
+        CHECK(m.format == FileFormat::Exr);
+        CHECK(m.stageParams["model_scale"] == 1.0);
+        CHECK(m.stageParams["guides"] == true);
+        CHECK(m.stageParams["passes"] == 2);  // from the file
+        const nlohmann::json p = ReadJson(dir / "flags.json")["params"];
+        CHECK(p["intensity"] == 1.5);
+        CHECK(p["temporal"] == 0.0);
+        CHECK(p["local_tone"] == 0.3);  // from the file
+        CHECK(p["auto_mask"] == false);  // --no-auto-mask over the file's true
+        const nlohmann::json b = ReadJson(dir / "flags.json")["backend"];
+        CHECK(b["intensity"] == 1.5);
+        CHECK_THAT(b["local_tone"].get<double>(), WithinAbs(0.3, 1e-6));
+        CHECK(m.stageParams["temporal"] == 0.0);
+    }
+    {  // --intensity 0.3 and 0.3 from a file: one value in --json, not 0.30000001192...
+        const CliResult r = run("typed", {"--backend", "stub", "--intensity", "0.3"});
+        INFO(r.out);
+        REQUIRE(r.code == 0);
+        CHECK(ReadJson(dir / "typed.json")["params"]["intensity"] == 0.3);
+    }
+    {  // --check creates the feature with the run's settings, the file's included: without --backend the default ngx fails on WARP
+        const std::string stubOnly = file("check_stub.json", R"({"backend":"stub","local_tone":0.2,"auto_mask":true})");
+        const CliResult r = RunCli({"nr", "--check", "--warp", "--params-file", stubOnly});
+        INFO(r.out);
+        CHECK(r.code == 0);
+        CHECK(r.out.find("status:       ok") != std::string::npos);
+    }
+    auto refused = [&](const std::string& text, std::vector<std::string> extra, const char* says) {
+        std::vector<std::string> args{"--params-file", file("bad.json", text)};
+        args.insert(args.end(), extra.begin(), extra.end());
+        const CliResult r = run("bad", args);
+        INFO(text << ": " << r.out);
+        CHECK(r.code != 0);
+        CHECK(r.out.find(says) != std::string::npos);
+    };
+    refused(R"({"backend":"stub","intensity":5})", {}, "must be");
+    refused(R"({"backend":"stub","intensity":"high"})", {}, "must be a number");
+    refused(R"([1,2])", {}, "JSON object");
+    refused(R"({"backend":"stub"})", {"--intensity", "5"}, "must be");
+    refused(R"({"backend":"stub","intensty":1.2})", {}, "intensty");  // a typo changed nothing and said nothing
+    refused(R"({"backend":"stub","start":3})", {}, "option of dlssvid nr");
+    refused(R"({"backend":"stub","mv_scale":"auto"})", {}, "not an nr setting");  // no such option (yet): not sent to the command line
+    refused(R"({"backend":"stub","preset":9})", {"--check"}, "must be");
 }

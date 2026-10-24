@@ -110,9 +110,19 @@ FlowStageOptions FlowOptions(const nlohmann::json& p, const std::filesystem::pat
     return o;
 }
 
+// A pass of the clip starts at frame 0: a part of it (dlssvid nr --start, export --range) is no stage's input and not the
+// result - fg read a color_nr of frames F..L («has no frame 0») and the encode put frame F at t=0 (review of TASK-0047)
+bool PassOfClip(const std::filesystem::path& dir) {
+    try {
+        return Manifest::Load(dir).firstFrame == 0;
+    } catch (const std::exception&) {
+        return true;  // unreadable: the stage that reads it says so, as before
+    }
+}
+
 std::filesystem::path ExistingPass(const std::filesystem::path& root, std::initializer_list<const char*> names) {
     for (const char* n : names)
-        if (std::filesystem::exists(root / n / Manifest::kFileName)) return root / n;
+        if (std::filesystem::exists(root / n / Manifest::kFileName) && PassOfClip(root / n)) return root / n;
     return {};
 }
 
@@ -151,6 +161,10 @@ void RefreshFromDisk(PlanState& s, const std::filesystem::path& root) {
     for (const auto& name : PassesUnderRoot(root)) {
         try {
             const Manifest m = Manifest::Load(root / name);
+            if (m.firstFrame != 0) {  // a part of the clip: no input of the stages below (its own stage still sees it: incomplete)
+                Log()->info("process: {} holds frames {}..{} only, not used as the clip's pass", (root / name).string(), m.firstFrame, m.lastFrame);
+                continue;
+            }
             s.fp[name] = m.fingerprint.empty() ? LegacyId(m) : m.fingerprint;
         } catch (const std::exception& e) {
             Log()->warn("process: {} skipped: {}", (root / name).string(), e.what());
@@ -290,7 +304,9 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         d.retire = have;
         return true;
     };
-    const std::string incomplete = (have ? std::to_string(m.frameCount) : std::string("0")) + " of " + (d.frames > 0 ? std::to_string(d.frames) : std::string("all")) + " frames";
+    const std::string incomplete =
+        have && m.firstFrame != 0 ? "frames " + std::to_string(m.firstFrame) + ".." + std::to_string(m.lastFrame) + " only, a part of the clip"
+                                  : (have ? std::to_string(m.frameCount) : std::string("0")) + " of " + (d.frames > 0 ? std::to_string(d.frames) : std::string("all")) + " frames";
 
     if (!ctx.skipExisting || ctx.force.count(name)) {
         run("forced", ctx.skipExisting ? "recomputed on request (--force)" : "every stage recomputed (--no-skip-existing)", have && m.fingerprint != fp.value);
@@ -599,6 +615,9 @@ bool PassComplete(const std::filesystem::path& dir, int64_t neededFrames, const 
     try {
         const PassReader r = PassReader::Open(dir);
         const Manifest& m = r.Man();
+        // a pass of the clip starts at frame 0 - a part of it (dlssvid nr --start, export --range) never stands for the clip:
+        // with the source's frame count unknown (mkv) only the last frame was looked at, and frames F..L were adopted (TASK-0047)
+        if (m.firstFrame != 0) return false;
         if (neededFrames > 0) return m.frameCount >= neededFrames && r.HasFrame(m.firstFrame + neededFrames - 1);
         return m.frameCount > 0 && r.HasFrame(m.firstFrame + m.frameCount - 1) && (sourceHash.empty() || m.sourceHash == sourceHash);
     } catch (...) {

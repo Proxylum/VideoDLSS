@@ -1,5 +1,9 @@
 #include "stages/ParamSchema.h"
 
+#include <fstream>
+
+#include "util/Error.h"
+
 #include <algorithm>
 
 #include <cmath>
@@ -412,6 +416,35 @@ nlohmann::json NormalizeStageParams(const std::string& stage, const nlohmann::js
         alias("backbuffer-format", "backbuffer_format");
     }
     return out;
+}
+
+nlohmann::json ReadStageParamsFile(const std::string& stage, const std::filesystem::path& path, std::vector<std::string>* dropped) {
+    const std::string where = path.string() + ": ";
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec) Throw(where + "cannot read the file");
+    if (size > (1u << 20)) Throw(where + "larger than 1 MiB - not a settings file");
+    nlohmann::json j;
+    try {
+        std::ifstream in(path, std::ios::binary);
+        j = nlohmann::json::parse(in);
+    } catch (const std::exception& e) {
+        Throw(where + "not valid JSON (" + e.what() + ")");
+    }
+    if (!j.is_object()) Throw(where + "must be one JSON object of " + stage + " settings, as stages." + stage + ".params of a project");
+    if (j.contains("format") && j["format"] == "dlssvid-preset") Throw(where + "a preset file; presets are not read here yet - give the settings object");
+    j = NormalizeStageParams(stage, j);
+    const StageSchema* schema = FindStageSchema(stage);
+    if (!schema) Throw("unknown stage '" + stage + "'");
+    for (auto it = j.begin(); it != j.end();) {
+        if (schema->Find(it.key())) {
+            ++it;
+            continue;
+        }
+        if (dropped) dropped->push_back(it.key());
+        it = j.erase(it);
+    }
+    return j;
 }
 
 std::vector<std::string> ValidateStageParams(const std::string& stage, const nlohmann::json& rawParams) {

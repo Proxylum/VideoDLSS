@@ -115,6 +115,72 @@ TEST_CASE("NrStage writes color_nr with the stub on WARP, encodes a preview and 
     CHECK(DecodeAll(dir / "nr.mkv").size() == 4);
 }
 
+// TASK-0047: frames before writeFrom go through the model for its history (dlssvid nr --warmup) and are not output - no pass
+// frame, no video frame, no slot; a run of warm-up frames alone leaves no color_nr folder.
+TEST_CASE("NrStage writeFrom: earlier frames build the history and are not output", "[integration][nr][preview]") {
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("write_from");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    D3D12Device dev({true, false});
+    NrStageOptions o;
+    o.backend = "stub";
+    o.outputDir = dir / "passes";
+    o.videoOut = dir / "nr.mkv";
+    o.videoCodec = "ffv1";
+    o.temporal = 0.5f;
+    o.writeFrom = 2;
+    Pipeline pipeline(dev, 4);
+    auto stage = std::make_unique<NrStage>(o);
+    NrStage* raw = stage.get();
+    pipeline.AddStage(std::move(stage));
+    pipeline.Init();
+    VideoDecoder dec(clip);
+    CpuFrame f;
+    while (dec.NextFrame(f)) {
+        GpuFrameCache::Slot& slot = pipeline.Cache().Acquire(f.index, f.desc);
+        pipeline.ProcessFrame(f);
+        CHECK(slot.passes.count("color_nr") == (f.index >= 2 ? 1u : 0u));
+        const auto* s = dynamic_cast<const StubNrBackend*>(raw->Backend(0));
+        REQUIRE(s);
+        CHECK(s->LastReset() == (f.index == 0));  // the model resets on the first warm-up frame only: the written frames keep its history
+    }
+    pipeline.Finish();
+    const NrStage::Stats& st = raw->GetStats();
+    CHECK(st.frames == 5);
+    CHECK(st.warmup == 2);
+    CHECK(st.written == 3);
+    CHECK(st.firstWritten == 2);
+    CHECK(st.lastWritten == 4);
+    const auto* stub = dynamic_cast<const StubNrBackend*>(raw->Backend(0));
+    REQUIRE(stub);
+    CHECK(stub->Calls() == 5);  // the model saw the warm-up frames
+    pipeline.Shutdown();
+    const PassReader rd = PassReader::Open(dir / "passes" / "color_nr");
+    CHECK(rd.Man().firstFrame == 2);
+    CHECK(rd.Man().lastFrame == 4);
+    CHECK(rd.Man().frameCount == 3);
+    CHECK_FALSE(rd.HasFrame(0));
+    CHECK(rd.Man().stageParams["range"] == nlohmann::json{{"first", 2}, {"last", 4}, {"warmup", 2}});
+    const auto video = DecodeAll(dir / "nr.mkv");
+    REQUIRE(video.size() == 3);
+    CHECK(video[0].pts == 0);
+
+    // nothing to write: no folder, no empty manifest, no video file
+    NrStageOptions late = o;
+    late.outputDir = dir / "late";
+    late.videoOut = dir / "late.mkv";
+    late.writeFrom = 100;
+    VideoDecoder dec2(clip);
+    const NrRunResult r = RunNr(dec2, dev, late);
+    CHECK(r.stats.frames == 5);
+    CHECK(r.stats.written == 0);
+    CHECK_FALSE(std::filesystem::exists(dir / "late" / "color_nr"));
+    CHECK_FALSE(std::filesystem::exists(late.videoOut));  // the encoder opens at the first output frame
+}
+
 TEST_CASE("NrStage: color_sr input, guides through the slot, masks, two passes, model resolution and the temporal filter", "[integration][nr]") {
     const uint32_t w = 96, h = 64, gw = 48, gh = 32;
     const int frames = 3;

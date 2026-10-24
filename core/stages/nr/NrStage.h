@@ -61,6 +61,9 @@ struct NrStageOptions {
     Rational fps;
     std::string sourceFile, sourceHash;
     std::function<void(int64_t frame, double ms)> onFrame;
+    // Frames with a lower index go through the model and the temporal filter for their history and are not output - no pass
+    // frame, no video frame, no slot (dlssvid nr --start F --warmup K: decoded from F-K, written from F; spec §2f). 0 = all.
+    int64_t writeFrom = 0;
 };
 
 // The project's stage parameters (schema keys, also the kebab-case aliases a standalone run passes) onto the options;
@@ -69,6 +72,9 @@ void ApplyNrParams(const nlohmann::json& params, NrStageOptions& o);
 // The inverse: the options as schema parameters (the style by its schema name), what NrStage::Init validates against the
 // schema - one check for the standalone `dlssvid nr` and for `process` (TASK-0044: `--intensity 5` reached NGX).
 nlohmann::json NrParamsFromOptions(const NrStageOptions& o);
+// The backend's configuration for the options at the model's size: what NrStage creates its features with and what
+// `dlssvid nr --check` creates one with - the tuning NGX takes at CreateFeature is the same in both (TASK-0047).
+NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t workH);
 
 class NrStage final : public IStage {
 public:
@@ -82,8 +88,10 @@ public:
     void Shutdown() override;
 
     struct Stats {
-        int64_t frames = 0;
+        int64_t frames = 0;   // through the model, warm-up included: what msSum averages over
         double msSum = 0.0;  // GPU submit + wait per frame
+        int64_t warmup = 0;   // of them before NrStageOptions::writeFrom: history only
+        int64_t written = 0, firstWritten = -1, lastWritten = -1;
         double MeanMs() const { return frames ? msSum / static_cast<double>(frames) : 0.0; }
         uint32_t width = 0, height = 0, workWidth = 0, workHeight = 0;
         std::string backend, colorSource;  // colorSource: video | color_sr | slot
@@ -102,6 +110,7 @@ public:
 private:
     void ApplyParams(const nlohmann::json& params);
     void Setup(uint32_t w, uint32_t h);
+    void OpenOutputs();  // the color_nr writer and the --video encoder at the first output frame: warm-up alone leaves nothing
     void LoadMasks(int64_t frame);
     void Disable(const std::string& reason);
 
@@ -120,6 +129,7 @@ private:
     std::map<std::string, PassReader> maskReaders_;
     bool protectFrame_ = false, skinFrame_ = false;
     std::unique_ptr<PassWriter> writer_;
+    std::optional<Manifest> passManifest_;  // color_nr's manifest, built in Setup; the writer opens at the first output frame
     std::unique_ptr<VideoEncoder> encoder_;
     Stats stats_;
     bool initialized_ = false;
@@ -131,6 +141,7 @@ struct NrRunResult {
     nlohmann::json backend;      // INrBackend::Describe of the first pass
     nlohmann::json diagnostics;  // NrDiagnostics (ngx)
 };
+// Decodes from wherever the decoder stands (the CLI seeks for --start) and runs at most maxFrames frames through the stage.
 NrRunResult RunNr(VideoDecoder& decoder, D3D12Device& device, NrStageOptions options, int64_t maxFrames = -1, const std::function<void(int64_t)>& progress = {},
       const nlohmann::json& params = nlohmann::json::object());
 

@@ -100,6 +100,25 @@ nlohmann::json NrParamsFromOptions(const NrStageOptions& o) {
             {"input_transfer", o.tonemap.inputTransfer}};
 }
 
+NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t workH) {
+    NrConfig cfg;
+    cfg.backend = o.backend;
+    cfg.width = workW;
+    cfg.height = workH;
+    cfg.intensity = o.intensity;
+    cfg.style = ParseNrStyle(o.style);
+    cfg.preset = o.preset;
+    cfg.localTone = o.localTone;
+    cfg.localStructure = o.localStructure;
+    cfg.skinStructure = o.skinStructure;
+    cfg.autoMask = o.autoMask;
+    cfg.useGuides = o.useGuides;
+    cfg.dllDir = o.dllDir;
+    cfg.paramsBlock = o.paramsBlock;
+    cfg.requireDriver = o.requireDriver;
+    return cfg;
+}
+
 void NrStage::Init(const StageConfig& config, D3D12Device& device) {
     device_ = &device;
     ApplyParams(config.params);
@@ -162,21 +181,7 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
     stats_.workHeight = workH_;
     stats_.passes = options_.passes;
 
-    NrConfig cfg;
-    cfg.backend = options_.backend;
-    cfg.width = workW_;
-    cfg.height = workH_;
-    cfg.intensity = options_.intensity;
-    cfg.style = ParseNrStyle(options_.style);
-    cfg.preset = options_.preset;
-    cfg.localTone = options_.localTone;
-    cfg.localStructure = options_.localStructure;
-    cfg.skinStructure = options_.skinStructure;
-    cfg.autoMask = options_.autoMask;
-    cfg.useGuides = options_.useGuides;
-    cfg.dllDir = options_.dllDir;
-    cfg.paramsBlock = options_.paramsBlock;
-    cfg.requireDriver = options_.requireDriver;
+    NrConfig cfg = NrConfigFromOptions(options_, workW_, workH_);
 
     std::string backend = options_.backend;
     try {
@@ -236,14 +241,7 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["tonemap"] = {{"curve", options_.tonemap.curve}, {"input_transfer", options_.tonemap.inputTransfer}, {"exposure_ev", options_.tonemap.exposureEv}};
         m.stageParams["guides"] = options_.useGuides;
         m.stageParams["masks"] = stats_.masks;
-        writer_ = std::make_unique<PassWriter>(OutDir(), m);
-    }
-    if (!options_.videoOut.empty()) {
-        VideoEncoder::Options eo;
-        eo.codec = options_.videoCodec;
-        eo.frameRate = options_.fps.num > 0 ? options_.fps : Rational{30, 1};
-        encoder_ = std::make_unique<VideoEncoder>(options_.videoOut, FrameDesc{w, h, PixelFormat::Yuv420p}, eo);
-        encoder_->Open();
+        passManifest_ = std::move(m);  // the writer opens at the first output frame (OpenOutputs)
     }
     Log()->info("nr: {} {}x{}{} — {} pass(es), guides {}, tonemap {}, temporal {}, masks [{}]", backend, w, h,
                 reduced_ ? " (model at " + std::to_string(workW_) + "x" + std::to_string(workH_) + ")" : "", options_.passes, options_.useGuides ? "on" : "off",
@@ -252,6 +250,17 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
                     for (const auto& m : stats_.masks) s += (s.empty() ? "" : ", ") + m;
                     return s;
                 }());
+}
+
+void NrStage::OpenOutputs() {
+    if (passManifest_ && !writer_) writer_ = std::make_unique<PassWriter>(OutDir(), *passManifest_);
+    if (!options_.videoOut.empty() && !encoder_) {
+        VideoEncoder::Options eo;
+        eo.codec = options_.videoCodec;
+        eo.frameRate = options_.fps.num > 0 ? options_.fps : Rational{30, 1};
+        encoder_ = std::make_unique<VideoEncoder>(options_.videoOut, FrameDesc{inW_, inH_, PixelFormat::Yuv420p}, eo);
+        encoder_->Open();
+    }
 }
 
 void NrStage::LoadMasks(int64_t frame) {
@@ -400,6 +409,17 @@ void NrStage::Process(FrameContext& ctx) {
     });
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     hasPrev_ = prev_ != nullptr;
+    ++stats_.frames;
+    stats_.msSum += ms;
+    first_ = false;
+    if (frame.index < options_.writeFrom) {
+        // a warm-up frame (dlssvid nr --warmup): the model's history (Reset was on the first frame) and the filter's prev_ were
+        // built on the GPU above, masks applied too - the history equals a run that writes these frames; nothing is output
+        ++stats_.warmup;
+        if (options_.onFrame) options_.onFrame(frame.index, ms);
+        return;
+    }
+    OpenOutputs();
 
     // ---- readback RGBA16F -> RGB half pass image ----
     size_t pitch = 0;
@@ -419,12 +439,11 @@ void NrStage::Process(FrameContext& ctx) {
         CpuFrame yuv;
         RgbToYuv420p(rgb, options_.color, yuv);
         yuv.index = frame.index;
-        yuv.pts = frame.index;
+        yuv.pts = frame.index - options_.writeFrom;  // the video of a range starts at 0, not after F empty frames
         encoder_->WriteFrame(yuv);
     }
-    ++stats_.frames;
-    stats_.msSum += ms;
-    first_ = false;
+    if (stats_.written++ == 0) stats_.firstWritten = frame.index;
+    stats_.lastWritten = frame.index;
     if (options_.onFrame) options_.onFrame(frame.index, ms);
 }
 
@@ -435,6 +454,9 @@ void NrStage::Finish() {
         m.stageParams["depth_used"] = stats_.depthUsed;
         m.stageParams["mv_used"] = stats_.mvUsed;
         m.stageParams["color_source"] = stats_.colorSource;
+        // a part of the clip (dlssvid nr --start): named for the A/B script and the settings note; process never takes it for
+        // the clip's pass (PassComplete: it does not start at frame 0)
+        if (options_.writeFrom > 0) m.stageParams["range"] = {{"first", stats_.firstWritten}, {"last", stats_.lastWritten}, {"warmup", stats_.warmup}};
         writer_->Finish();
     }
     if (encoder_) encoder_->Close();
@@ -443,6 +465,7 @@ void NrStage::Finish() {
 void NrStage::Shutdown() {
     if (writer_) writer_->Finish();
     writer_.reset();
+    passManifest_.reset();
     if (encoder_) {
         if (encoder_->IsOpen()) encoder_->Close();
         encoder_.reset();
