@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <nlohmann/json.hpp>
+#include <set>
 
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/ProcessRunner.h"
@@ -55,10 +56,70 @@ TEST_CASE("Every stage has a schema whose defaults mirror the stages and the pro
     CHECK(FindStageSchema("nr")->Find("intensity")->label == "Интенсивность");
     CHECK(FindStageSchema("upscale")->Find("scale")->widget == ParamWidget::Toggle);
     CHECK(FindStageSchema("upscale")->Find("scale")->choices.size() == 3);
-    int visible = 0;
-    for (const auto& p : FindStageSchema("nr")->params) visible += p.advanced ? 0 : 1;
-    CHECK(visible == 1);
     CHECK(FindStageSchema("nr")->guides == std::vector<std::string>{"depth_dlss", "mv_dlss"});
+}
+
+// TASK-0046: the NR card shows every setting (before: the intensity alone, the rest in the engineer JSON) - the basic
+// rows in groups, the rest under «Ещё настройки», only the backend and the pass format in the JSON editor.
+TEST_CASE("NR form: groups, levels, conditions of the rows", "[unit][schema][nr][card]") {
+    const StageSchema* nr = FindStageSchema("nr");
+    REQUIRE(nr);
+    std::vector<std::string> basic, more, engineer;
+    for (const auto& p : nr->params) (p.advanced ? engineer : p.more ? more : basic).push_back(p.key);
+    CHECK(basic == std::vector<std::string>{"style", "intensity", "passes", "local_tone", "local_structure", "temporal", "auto_mask", "skin_structure", "skin_blend"});
+    CHECK(more == std::vector<std::string>{"preset", "temporal_threshold", "guides", "tonemap", "input_transfer", "exposure", "model_scale", "transfer", "max_ratio"});
+    CHECK(engineer == std::vector<std::string>{"backend", "format"});
+    for (const auto& p : nr->params) {
+        INFO(p.key);
+        CHECK((p.advanced || !p.group.empty()));  // every form row has a group
+        CHECK(!p.label.empty());
+        CHECK((p.advanced || !p.hint.empty()));   // and says what it does
+    }
+    CHECK(nr->Find("intensity")->step == 0.05);
+    CHECK(nr->Find("style")->choices.back().experimental);
+    CHECK_FALSE(nr->Find("style")->choices.front().experimental);
+
+    const std::set<std::string> none, faceMask{"color_sr", "mask_face"};
+    const nlohmann::json def = EffectiveStageParams("nr", nlohmann::json::object());
+    // skin structure: shown, but disabled without the automatic mask (as in Visual Enhancer)
+    ParamRowState st = RowState(*nr->Find("skin_structure"), def, none);
+    CHECK(st.visible);
+    CHECK_FALSE(st.enabled);
+    CHECK(st.note == "действует только с автомаской");
+    CHECK(RowState(*nr->Find("skin_structure"), EffectiveStageParams("nr", {{"auto_mask", true}}), none).enabled);
+    // the strength on skin masks only when the plan reads a face or skin mask
+    CHECK_FALSE(RowState(*nr->Find("skin_blend"), def, none).visible);
+    CHECK(RowState(*nr->Find("skin_blend"), def, faceMask).visible);
+    // the threshold of the temporal filter only with the filter on; the ratio transfer only at another model scale
+    CHECK_FALSE(RowState(*nr->Find("temporal_threshold"), def, none).visible);
+    CHECK(RowState(*nr->Find("temporal_threshold"), EffectiveStageParams("nr", {{"temporal", 0.3}}), none).visible);
+    CHECK_FALSE(RowState(*nr->Find("transfer"), def, none).visible);
+    CHECK(RowState(*nr->Find("transfer"), EffectiveStageParams("nr", {{"model_scale", 0.5}}), none).visible);
+    CHECK(RowState(*nr->Find("max_ratio"), EffectiveStageParams("nr", {{"model_scale", 2}}), none).visible);
+    CHECK(RowState(*nr->Find("intensity"), def, none).visible);
+}
+
+TEST_CASE("Parameter values: the special value, the zero label, the suffix, the decimals", "[unit][schema][nr][card]") {
+    const StageSchema* nr = FindStageSchema("nr");
+    // skin_structure: -1 (as the local structure) or 0..2 - the half-way -0.5 had no meaning
+    CHECK(ValidateStageParams("nr", {{"skin_structure", -1}}).empty());
+    CHECK(ValidateStageParams("nr", {{"skin_structure", 0.4}}).empty());
+    CHECK(ValidateStageParams("nr", {{"skin_structure", 2}}).empty());
+    CHECK_FALSE(ValidateStageParams("nr", {{"skin_structure", -0.5}}).empty());
+    CHECK_FALSE(ValidateStageParams("nr", {{"skin_structure", 2.5}}).empty());
+    CHECK(ParamValueLabel(*nr->Find("skin_structure"), -1.0) == "как структура");
+    CHECK(ParamValueLabel(*nr->Find("skin_structure"), 0.8) == "0.8");
+    CHECK(ParamValueLabel(*nr->Find("temporal"), 0.0) == "выкл");
+    CHECK(ParamValueLabel(*nr->Find("temporal"), 0.4) == "0.4");
+    CHECK(ParamValueLabel(*nr->Find("exposure"), 1.0) == "1 EV");
+    CHECK(ParamValueLabel(*nr->Find("exposure"), -0.5) == "-0.5 EV");
+    CHECK(ParamValueLabel(*nr->Find("style"), "natural") == "Естественный (1)");
+    CHECK(ParamValueLabel(*nr->Find("passes"), 2) == "2");
+    CHECK(ParamDecimals(*nr->Find("intensity")) == 2);
+    CHECK(ParamDecimals(*nr->Find("exposure")) == 2);  // the v1 migration stores 0.01 EV (1.5 -> 0.58)
+    CHECK(ParamDecimals(*nr->Find("model_scale")) == 2);
+    CHECK(ParamDecimals(*nr->Find("passes")) == 0);
+    CHECK(ParamDecimals(*nr->Find("temporal_threshold")) == 2);
 }
 
 // TASK-0043 (the root of the exposure defect): every nr key at its schema default is the run without the key - the

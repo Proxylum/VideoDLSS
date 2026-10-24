@@ -107,6 +107,31 @@ TEST_CASE("README media: every image the README embeds exists and stays small", 
     }
 }
 
+// ctest selects a test case by its name through the console code page: a name with «», ↺ or Cyrillic matched nothing on
+// Windows and ctest reported the case failed with "No tests ran" (TASK-0046).
+TEST_CASE("Test case names are ASCII", "[hygiene]") {
+    std::vector<std::string> bad;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(kRoot / "tests")) {
+        if (!e.is_regular_file() || e.path().extension() != ".cpp") continue;
+        const std::string text = ReadAll(e.path());
+        const std::string marker = "TEST_CASE(\"";
+        for (size_t at = text.find(marker); at != std::string::npos; at = text.find(marker, at + 1)) {
+            const size_t begin = at + marker.size();
+            size_t end = begin;
+            while (end < text.size() && text[end] != '"') end += text[end] == '\\' ? 2 : 1;
+            const std::string name = text.substr(begin, end - begin);
+            for (const char c : name)
+                if (static_cast<unsigned char>(c) > 127) {
+                    bad.push_back(e.path().filename().string() + ": " + name);
+                    break;
+                }
+        }
+    }
+    INFO("non-ASCII test case names: " << bad.size());
+    for (const auto& b : bad) UNSCOPED_INFO(b);
+    CHECK(bad.empty());
+}
+
 TEST_CASE("Docs carry no developer-machine paths", "[hygiene]") {
     // SDK checkouts and user profiles of the development machine are written with placeholders (<SDK>, %LOCALAPPDATA%).
     const std::regex machine(R"re([A-Za-z]:[\\/](SDK|Users)[\\/][^\s`'")]*)re");

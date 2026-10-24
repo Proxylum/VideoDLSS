@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <map>
 #include <nlohmann/json.hpp>
+#include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -21,6 +23,15 @@ struct ParamChoice {
     std::string value;  // JSON value as text ("dlss", "2", "1.5")
     std::string label;  // human label («DLSS SR»)
     std::string hint;
+    bool experimental = false;  // listed after a separator, marked «(эксп.)»; the card warns when it is chosen (AppModel::cardState)
+};
+
+// A condition on another parameter of the stage (effective value): `key` op `value`. Conditions of a list are ANDed.
+struct ParamCondition {
+    enum class Op : uint8_t { Eq, Ne, Gt };
+    std::string key;
+    Op op = Op::Eq;
+    nlohmann::json value;
 };
 
 struct ParamSpec {
@@ -43,6 +54,28 @@ struct ParamSpec {
     // EffectiveStageParams leaves the key out when absent or equal to the default (depth.window: 0 = the registry's), so
     // a parameter added later leaves the fingerprints of the passes made before it untouched.
     bool omitDefault = false;
+
+    // The form (TASK-0046, docs/ux-guidelines.md): a stage card shows the non-advanced keys in groups; `more` ones sit
+    // in the collapsed «Ещё настройки». Visibility and availability of a row follow the other parameters and the plan's
+    // inputs (RowState); a row that cannot act is shown disabled with a note rather than hidden when the user should
+    // know it exists (skin structure without the automatic mask - as in Visual Enhancer).
+    std::string group;                          // «Модель», «Локальные», «Маска», «Временная стабильность» ...
+    bool more = false;                          // under «Ещё настройки»
+    std::vector<ParamCondition> showIf;         // hidden unless all hold
+    std::vector<ParamCondition> enableIf;       // disabled with `disabledNote` unless all hold
+    std::string disabledNote;
+    std::vector<std::string> needsInputs;       // hidden unless one of these passes is an input of the plan
+    std::vector<std::string> disabledByInputs;  // disabled with `disabledByInputsNote` when one of them is an input
+    std::string disabledByInputsNote;
+    // A number with a special value outside its range (nr.skin_structure: -1 = «as the local structure», else 0..2):
+    // valid is `sentinel` or [rangeMin, max]; the form shows a check box «отдельно» next to the slider.
+    std::optional<double> sentinel;
+    std::string sentinelLabel;
+    std::string sentinelFollows;  // the parameter the special value stands for (skin_structure -1: local_structure)
+    double rangeMin = 0;
+    std::string zeroLabel;  // shown at the minimum instead of the number («выкл»)
+    std::string suffix;     // after the number (« EV»)
+    int decimals = -1;      // digits a value is stored with; -1: from the step
 };
 
 struct StageSchema {
@@ -81,6 +114,16 @@ const std::vector<ParamChoice>* FormChoicesFor(const ParamSpec& spec, const std:
 // backend's form list that the new backend's list does not have is dropped (vda + metric-vda-large -> da3 leaves no VDA
 // model), and so is a value that is not in the new backend's list; "" stays. The backend key itself is not changed.
 nlohmann::json ParamsForBackendChange(const std::string& stage, const nlohmann::json& params, const std::string& newBackend);
+// How the card shows one row for the stage's parameters and the plan's inputs (TASK-0046).
+struct ParamRowState {
+    bool visible = true;
+    bool enabled = true;
+    std::string note;  // why it is disabled
+};
+ParamRowState RowState(const ParamSpec& spec, const nlohmann::json& effectiveParams, const std::set<std::string>& inputs);
+// Digits a value of the parameter is stored and shown with (decimals, else from the step: 0.05 -> 2, 0.1 -> 1).
+int ParamDecimals(const ParamSpec& spec);
+
 // The options of `dlssvid <stage>` for the parameters (the GUI's «Запустить этап»; review of TASK-0038): `--<key> <value>`
 // with the schema key (the commands take the underscore spelling as an alias); a flag only when it differs from its
 // default - `--<key>` when set, `--no-<key>` when a default-on flag is cleared (jitter, guides); empty strings are left

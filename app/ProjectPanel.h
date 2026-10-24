@@ -7,6 +7,7 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QWidget>
+#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,11 @@ namespace dlssvid {
 class AppModel;
 class StageCard;
 class TaskQueue;
+
+// «Стиль Кинематографичный (2) · Интенсивность 1.4 · Локальный тон 1.5 · …»: what sets a pass version apart, in the
+// schema's words (TASK-0046, D7) - the values other than the default, the basic rows first, then «Ещё настройки», then
+// the engineer keys (format); at most six, then «…». `tip` gets every «key = value» of the version.
+QString HumanStageParams(const std::string& stage, const nlohmann::json& params, QString* tip = nullptr);
 
 // Left dock (ТЗ §6; stage 9, MR D — the project screen of the mockups): the source (file, frame, sound, passes,
 // hash), «Что получится» (the result's size and rate, the time and disk of what the plan runs, one button

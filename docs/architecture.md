@@ -274,7 +274,11 @@ AppModel (Qt) ── ViewportWindow / панели ── TaskQueue (dlssvid <st
   `ProcessRunner::Prepare` (CLI `--param nr.intensity=9` → ошибка с текстом), `EffectiveStageParams` подставляет умолчания
   перед отпечатком — явное умолчание и отсутствующий ключ теперь один и тот же прогон (ограничение MR A снято), формы
   карточек строятся из схемы (`app/StageCard`: список бэкендов, переключатель масштаба/множителя/стабилизации, слайдер
-  интенсивности; ключи `advanced` — только в JSON-редакторе инженерного режима). `ProcessOptions::forceStages` /
+  интенсивности; ключи `advanced` — только в JSON-редакторе инженерного режима). С TASK-0046 у `ParamSpec` есть
+  разметка формы: `group` (заголовок группы), `more` (под свёрнутым «Ещё настройки»), `showIf` / `enableIf` (условия на
+  другие параметры), `needsInputs` / `disabledByInputs` (по входам плана), `sentinel` (особое значение вне диапазона:
+  `nr.skin_structure` −1 = «как структура», флажок «отдельно»), `zeroLabel`, `suffix`, `decimals`, а у `ParamChoice` —
+  `experimental`. `RowState` вычисляет видимость и доступность строки; ядро это тестирует без Qt. `ProcessOptions::forceStages` /
   `process --force nr,fg` пересчитывают выбранные стадии на месте (тот же отпечаток — без новой версии);
   `ProcessOptions::sourceHash` принимает готовый хэш — `Project::SourceHash()` кэширует sha256 исходника по размеру и
   mtime файла (`source_hash` в проекте), `process --project` и GUI не хэшируют неизменившийся файл заново. Проект хранит

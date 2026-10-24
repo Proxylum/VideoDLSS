@@ -59,21 +59,6 @@ QLabel* Title(const QString& text, QWidget* parent) {
     return l;
 }
 
-// «Интенсивность 1.4 · Стиль естественный»: the visible parameters of a pass version in the schema's words.
-QString HumanParams(const std::string& stage, const nlohmann::json& params) {
-    QStringList parts;
-    const std::string backend = StageBackend(stage, params);
-    if (const StageSchema* schema = FindStageSchema(stage))
-        for (const auto& spec : schema->params) {
-            if (spec.advanced || !params.is_object() || !params.contains(spec.key)) continue;
-            // the card's rows of this backend only (depth.model is a list for VDA, hidden for DA3)
-            if (!spec.backends.empty() && std::find(spec.backends.begin(), spec.backends.end(), backend) == spec.backends.end()) continue;
-            if (!spec.formChoices.empty() && !FormChoicesFor(spec, backend)) continue;
-            parts << QString("%1 %2").arg(QString::fromStdString(spec.label), QString::fromStdString(ParamValueLabel(spec, params[spec.key], backend)));
-        }
-    return parts.join(" · ");
-}
-
 QString ShortHash(const std::string& hash) {
     const size_t colon = hash.find(':');
     const std::string hex = colon == std::string::npos ? hash : hash.substr(colon + 1);
@@ -82,6 +67,29 @@ QString ShortHash(const std::string& hash) {
 }
 
 }  // namespace
+
+QString HumanStageParams(const std::string& stage, const nlohmann::json& rawParams, QString* tip) {
+    QStringList basic, more, engineer, all;
+    const nlohmann::json params = NormalizeStageParams(stage, rawParams);
+    const std::string backend = StageBackend(stage, params);
+    if (const StageSchema* schema = FindStageSchema(stage); schema && params.is_object())
+        for (const auto& spec : schema->params) {
+            if (!params.contains(spec.key)) continue;
+            // the keys of this backend only (depth.window is VDA's); depth.model counts for every backend, DA3 included
+            if (!spec.backends.empty() && std::find(spec.backends.begin(), spec.backends.end(), backend) == spec.backends.end()) continue;
+            const nlohmann::json& v = params[spec.key];
+            const QString value = QString::fromStdString(ParamValueLabel(spec, v, backend));
+            all << QString("%1 = %2").arg(QString::fromStdString(spec.key), value);
+            const bool isDefault = v.is_number() && spec.def.is_number() ? std::fabs(v.get<double>() - spec.def.get<double>()) < 1e-9 : v == spec.def;
+            const bool always = !spec.advanced && (spec.key == "backend" || spec.key == "scale" || spec.key == "multiplier" || spec.key == "intensity");
+            if (isDefault && !always) continue;
+            (spec.advanced ? engineer : spec.more ? more : basic) << QString("%1 %2").arg(QString::fromStdString(spec.label), value);
+        }
+    QStringList parts = basic + more + engineer;
+    if (parts.size() > 6) parts = parts.mid(0, 6) << QString::fromUtf8("…");
+    if (tip) *tip = all.join("\n");
+    return parts.join(" · ");
+}
 
 ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) : QWidget(parent), model_(model), tasks_(tasks) {
     setMinimumWidth(900);  // the mockup's stage grid (44 + 190 + form + 216 with 14 px gaps) plus the card paddings
@@ -464,8 +472,9 @@ void ProjectPanel::refreshVersions() {
         SetRole(ver, "mono");
         ver->setToolTip(v.current ? tr("текущая версия") : QString::fromStdString(v.id));
         versionsGrid_->addWidget(ver, row, 1);
-        auto* params = Muted(stage.empty() ? QString::fromStdString(v.params.dump()) : HumanParams(stage, v.params), versionsRows_);
-        params->setToolTip(QString::fromStdString(v.params.dump()));
+        QString tip;
+        auto* params = Muted(stage.empty() ? QString::fromStdString(v.params.dump()) : HumanStageParams(stage, v.params, &tip), versionsRows_);
+        params->setToolTip(stage.empty() || tip.isEmpty() ? QString::fromStdString(v.params.dump()) : tip);
         params->setWordWrap(true);
         params->setMinimumWidth(90);
         versionsGrid_->addWidget(params, row, 2);

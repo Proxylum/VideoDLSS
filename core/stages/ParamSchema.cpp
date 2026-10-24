@@ -70,6 +70,40 @@ ParamSpec OmitDefault(ParamSpec s) {
     return s;
 }
 
+// form placement (TASK-0046)
+ParamSpec In(ParamSpec s, const char* group, bool more = false) {
+    s.group = group;
+    s.more = more;
+    return s;
+}
+
+ParamSpec ShowIf(ParamSpec s, const char* key, ParamCondition::Op op, J value) {
+    s.showIf.push_back({key, op, std::move(value)});
+    return s;
+}
+
+ParamSpec EnableIf(ParamSpec s, const char* key, ParamCondition::Op op, J value, const char* note) {
+    s.enableIf.push_back({key, op, std::move(value)});
+    s.disabledNote = note;
+    return s;
+}
+
+ParamSpec NeedsInputs(ParamSpec s, std::vector<std::string> inputs) {
+    s.needsInputs = std::move(inputs);
+    return s;
+}
+
+ParamSpec Display(ParamSpec s, const char* zeroLabel, const char* suffix = "") {
+    s.zeroLabel = zeroLabel;
+    s.suffix = suffix;
+    return s;
+}
+
+ParamSpec Decimals(ParamSpec s, int decimals) {
+    s.decimals = decimals;
+    return s;
+}
+
 // The VDA models of models/registry.json (family vda, metric): "" is the backend's default, metric-vda-small.
 std::vector<ParamChoice> VdaModels() {
     return {{"", "Small — Apache-2.0", "Metric Video Depth Anything Small: 28M параметров, окно 32 кадра; по умолчанию"},
@@ -203,35 +237,90 @@ std::vector<StageSchema> Build() {
         s.title = "Улучшение";
         s.subtitle = "DLSS Neural Rendering";
         s.guides = {"depth_dlss", "mv_dlss"};
+        using Op = ParamCondition::Op;
+        // TASK-0046: every setting of the model and of our processing around it in the card (Output/ref-review; the
+        // reference Visual Enhancer shows eight); the keys are those of before - projects and fingerprints stay
+        ParamSpec style = Enum("style", "Стиль", "natural",
+                               {{"natural", "Естественный (1)", "мягче, ближе к исходным тонам кожи и балансу"},
+                                {"cinematic", "Кинематографичный (2)", "приглушает блеск и цвет"},
+                                {"default", "Стандартный (0)", "сильнее всего добавляет деталь"},
+                                {"3", "Экспериментальный 3", "не документирован NVIDIA", true},
+                                {"4", "Экспериментальный 4", "не документирован NVIDIA", true},
+                                {"5", "Экспериментальный 5", "не документирован NVIDIA", true},
+                                {"6", "Экспериментальный 6", "не документирован NVIDIA", true}},
+                               ParamWidget::Select,
+                               "Профиль обработки модели (DLSSNR.Style). NVIDIA стили не документирует; номер в скобках совпадает со «Style N» в "
+                               "Visual Enhancer. Сравните на превью.");
+        ParamSpec skin = Number("skin_structure", "Структура кожи", ParamType::Float, -1.0, -1.0, 2.0, 0.05, ParamWidget::Slider,
+                                "Своя сила структуры на коже, найденной автомаской. Без флажка «отдельно» — как «Локальная структура».");
+        skin.sentinel = -1.0;
+        skin.sentinelLabel = "как структура";
+        skin.sentinelFollows = "local_structure";
+        skin.rangeMin = 0.0;
         s.params = {
-            Number("intensity", "Интенсивность", ParamType::Float, 1.0, 0.0, 2.0, 0.1, ParamWidget::Slider, "сила модели: 0 — без изменений, 2 — максимум"),
+            In(style, "Модель"),
+            In(Number("intensity", "Интенсивность", ParamType::Float, 1.0, 0.0, 2.0, 0.05, ParamWidget::Slider,
+                      "Сила правки: 0 — почти без изменений, 1 — как обучена модель."),
+               "Модель"),
+            In(Number("passes", "Проходы", ParamType::Int, 1, 1, 2, 1, ParamWidget::Toggle,
+                      "Модель повторно обрабатывает собственный результат: 1 — как обучена, 2 — богаче. Каждый проход заметно увеличивает время.", false,
+                      {{"1", "1", ""}, {"2", "2", ""}}),
+               "Модель"),
+            In(Number("preset", "Пресет модели", ParamType::Int, 3, 0, 3, 1, ParamWidget::Select,
+                      "Подсказка выбора модели (DLSSNR.Hint.Render.Preset). NVIDIA значения не документирует, разница может быть не видна.", false,
+                      {{"0", "0 — выбор модели", ""}, {"1", "1", ""}, {"2", "2", ""}, {"3", "3 — по умолчанию", ""}}),
+               "Модель", true),
+            In(Number("local_tone", "Локальный тон", ParamType::Float, 1.0, 0.0, 2.0, 0.05, ParamWidget::Slider,
+                      "Сила локальной правки света и тона: 0 — без неё, 1 — как обучена, до 2 — сильнее (в Visual Enhancer потолок 1)."),
+               "Локальные"),
+            In(Number("local_structure", "Локальная структура", ParamType::Float, 1.0, 0.0, 2.0, 0.05, ParamWidget::Slider,
+                      "Сила микродеталей и локального контраста: 0 — без них, 1 — как обучена, до 2 — сильнее."),
+               "Локальные"),
+            In(Display(Number("temporal", "Подавление мерцания", ParamType::Float, 0.0, 0.0, 1.0, 0.05, ParamWidget::Slider,
+                              "Смешивает кадр с предыдущим, совмещённым по векторам движения: убирает «дыхание» на статичных планах, на быстром "
+                              "движении возможен шлейф."),
+                       "выкл"),
+               "Временная стабильность"),
+            In(ShowIf(Number("temporal_threshold", "Порог подавления мерцания", ParamType::Float, 0.1, 0.0, 1.0, 0.01, ParamWidget::Spin,
+                             "При какой разнице цвета смешивание с прошлым кадром отменяется: ниже порог — меньше шлейфов, но слабее подавление."),
+                      "temporal", Op::Gt, 0.0),
+               "Временная стабильность", true),
+            In(Flag("guides", "Глубина и векторы", true,
+                    "Подавать модели глубину и векторы движения. Без них каждый кадр обрабатывается отдельно: «дыхания» нет, но на движении "
+                    "ниже согласованность во времени.",
+                    false),
+               "Временная стабильность", true),
+            In(Flag("auto_mask", "Автомаска кожи", false, "Модель сама находит кожу и применяет к ней «Структуру кожи».", false), "Маска"),
+            In(EnableIf(skin, "auto_mask", Op::Eq, true, "действует только с автомаской"), "Маска"),
+            In(NeedsInputs(Number("skin_blend", "Сила на коже (маски)", ParamType::Float, 1.0, 0.0, 1.0, 0.05, ParamWidget::Slider,
+                                  "Доля правки внутри масок лица и кожи (импортированные пассы mask_face / mask_skin): 0 — исходник, 1 — полная правка."),
+                           {"mask_face", "mask_skin"}),
+               "Маска"),
+            In(Enum("tonemap", "Тонмаппинг", "passthrough", {{"passthrough", "без изменений", ""}, {"aces", "ACES", ""}, {"reinhard", "Reinhard", ""}},
+                    ParamWidget::Select, "Кривая перед моделью: модель ждёт SDR sRGB. Для обычного видео — «без изменений»."),
+               "Вход", true),
+            In(Enum("input_transfer", "Входная кривая", "srgb", {{"srgb", "sRGB", ""}, {"linear", "линейная", ""}, {"pq", "PQ", ""}, {"hlg", "HLG", ""}},
+                    ParamWidget::Select, "Как закодирован вход: sRGB — обычное видео; линейная; PQ/HLG — HDR. Результат всегда SDR."),
+               "Вход", true),
+            // two decimals: the v1 migration stores log2 of the old multiplier at 0.01 EV (1.5 -> 0.58)
+            In(Decimals(Display(Number("exposure", "Экспозиция", ParamType::Float, 0.0, -8.0, 8.0, 0.1, ParamWidget::Spin,
+                                       "Сдвиг экспозиции перед тонмаппингом, в ступенях: +1 — вдвое светлее, −1 — вдвое темнее, 0 — без изменений."),
+                                "", " EV"),
+                        2),
+               "Вход", true),
+            In(Number("model_scale", "Разрешение модели", ParamType::Float, 1.0, 0.25, 2.0, 0.25, ParamWidget::Spin,
+                      "Модель работает на уменьшенной (< 1) или увеличенной (> 1, суперсэмплинг) копии кадра, и правка переносится на полный кадр. "
+                      "Меньше 1 — немного быстрее и заметно меняется характер правки; больше 1 — медленнее."),
+               "Разрешение модели", true),
+            In(ShowIf(Number("transfer", "Сила переноса", ParamType::Float, 1.0, 0.0, 1.0, 0.05, ParamWidget::Slider,
+                             "Только при разрешении модели ≠ 1: какая доля правки переносится на полный кадр."),
+                      "model_scale", Op::Ne, 1.0),
+               "Разрешение модели", true),
+            In(ShowIf(Number("max_ratio", "Предел отношения", ParamType::Float, 4.0, 1.0, 16.0, 0.5, ParamWidget::Spin,
+                             "Ограничивает поканальное отношение при переносе, защищает от выбросов в тенях."),
+                      "model_scale", Op::Ne, 1.0),
+               "Разрешение модели", true),
             Enum("backend", "Бэкенд", "ngx", {{"ngx", "DLSS NR (NGX)", "nvngx_dlssnr.dll"}, {"stub", "stub (тест)", ""}}, ParamWidget::Select, "", true),
-            // 0 default, 1 natural, 2 cinematic (DLSSNR.Style); 3..6 are experimental: listed by ComfyUI-DLSS5-NR, not
-            // documented by NVIDIA (TASK-0044; before, the standalone CLI alone took any 0..15)
-            Enum("style", "Стиль", "natural",
-                 {{"natural", "естественный", ""}, {"cinematic", "кинематографичный", ""}, {"default", "по умолчанию", ""},
-                  {"3", "экспериментальный 3", "не документирован NVIDIA"}, {"4", "экспериментальный 4", "не документирован NVIDIA"},
-                  {"5", "экспериментальный 5", "не документирован NVIDIA"}, {"6", "экспериментальный 6", "не документирован NVIDIA"}},
-                 ParamWidget::Select, "", true),
-            Number("preset", "Пресет", ParamType::Int, 3, 0, 3, 1, ParamWidget::Spin, "", true),
-            Number("passes", "Проходов модели", ParamType::Int, 1, 1, 2, 1, ParamWidget::Spin, "", true),
-            Number("model_scale", "Масштаб модели", ParamType::Float, 1.0, 0.25, 2.0, 0.25, ParamWidget::Spin, "", true),
-            Number("transfer", "Перенос отношения", ParamType::Float, 1.0, 0.0, 1.0, 0.1, ParamWidget::Spin, "", true),
-            Number("max_ratio", "Предел отношения", ParamType::Float, 4.0, 1.0, 16.0, 0.5, ParamWidget::Spin, "", true),
-            Number("temporal", "Временной фильтр", ParamType::Float, 0.0, 0.0, 1.0, 0.1, ParamWidget::Slider, "", true),
-            Number("temporal_threshold", "Порог временного фильтра", ParamType::Float, 0.1, 0.0, 1.0, 0.05, ParamWidget::Spin, "", true),
-            Number("skin_blend", "Сила на коже", ParamType::Float, 1.0, 0.0, 1.0, 0.1, ParamWidget::Slider, "", true),
-            Number("local_tone", "Локальный тон", ParamType::Float, 1.0, 0.0, 2.0, 0.1, ParamWidget::Spin, "", true),
-            Number("local_structure", "Локальная структура", ParamType::Float, 1.0, 0.0, 2.0, 0.1, ParamWidget::Spin, "", true),
-            Number("skin_structure", "Структура кожи", ParamType::Float, -1.0, -1.0, 2.0, 0.1, ParamWidget::Spin, "-1 = как модель", true),
-            Flag("auto_mask", "Автомаска", false),
-            Flag("guides", "Guides (глубина и векторы)", true, "без guides — still-режим, качество ниже"),
-            Enum("tonemap", "Тонмаппинг", "passthrough", {{"passthrough", "без изменений", ""}, {"aces", "ACES", ""}, {"reinhard", "Reinhard", ""}},
-                 ParamWidget::Select, "", true),
-            Number("exposure", "Экспозиция", ParamType::Float, 0.0, -8.0, 8.0, 0.1, ParamWidget::Spin,
-                   "в ступенях EV перед тонмаппингом: +1 — вдвое светлее, −1 — вдвое темнее, 0 — без изменений", true),
-            Enum("input_transfer", "Входная кривая", "srgb", {{"srgb", "sRGB", ""}, {"linear", "линейная", ""}, {"pq", "PQ", ""}, {"hlg", "HLG", ""}},
-                 ParamWidget::Select, "", true),
             Enum("format", "Формат пасса", "exr", Formats(true), ParamWidget::Select, "", true),
         };
         out.push_back(std::move(s));
@@ -356,8 +445,13 @@ std::vector<std::string> ValidateStageParams(const std::string& stage, const nlo
                     std::string all;
                     for (const auto& c : spec->choices) all += (all.empty() ? "" : " | ") + c.value;
                     problems.push_back(where + " must be one of " + all + " (got " + Brief(v) + ")");
-                } else if (spec->max > spec->min && (v.get<double>() < spec->min || v.get<double>() > spec->max)) {
-                    problems.push_back(where + " must be within " + J(spec->min).dump() + ".." + J(spec->max).dump() + " (got " + Brief(v) + ")");
+                } else if (spec->sentinel && v.get<double>() == *spec->sentinel) {
+                    // the special value (skin_structure -1 = «as the local structure»)
+                } else if (spec->max > spec->min) {
+                    const double lo = spec->sentinel ? spec->rangeMin : spec->min;
+                    if (v.get<double>() < lo || v.get<double>() > spec->max)
+                        problems.push_back(where + " must be " + (spec->sentinel ? J(*spec->sentinel).dump() + " or " : std::string()) + "within " + J(lo).dump() + ".." +
+                                           J(spec->max).dump() + " (got " + Brief(v) + ")");
                 }
                 break;
             }
@@ -410,10 +504,13 @@ std::string ParamValueLabel(const ParamSpec& spec, const nlohmann::json& value) 
     if (value.is_boolean()) return value.get<bool>() ? "да" : "нет";
     if (value.is_number()) {
         const double d = value.get<double>();
-        if (d == std::floor(d) && std::fabs(d) < 1e9) return std::to_string(static_cast<long long>(d));
+        // the words of the form (TASK-0046): «как структура» for skin_structure -1, «выкл» for temporal 0, « EV»
+        if (spec.sentinel && d == *spec.sentinel && !spec.sentinelLabel.empty()) return spec.sentinelLabel;
+        if (!spec.zeroLabel.empty() && d == spec.min) return spec.zeroLabel;
+        if (d == std::floor(d) && std::fabs(d) < 1e9) return std::to_string(static_cast<long long>(d)) + spec.suffix;
         char buf[32];
         std::snprintf(buf, sizeof buf, "%g", d);
-        return buf;
+        return buf + spec.suffix;
     }
     return value.is_string() ? value.get<std::string>() : value.dump();
 }
@@ -424,6 +521,54 @@ std::string ParamValueLabel(const ParamSpec& spec, const nlohmann::json& value, 
         for (const auto& c : *list)
             if (value.is_string() && value.get<std::string>() == c.value) return c.label;
     return ParamValueLabel(spec, value);
+}
+
+namespace {
+
+bool Holds(const ParamCondition& c, const nlohmann::json& params) {
+    const nlohmann::json v = params.is_object() && params.contains(c.key) ? params[c.key] : nlohmann::json();
+    switch (c.op) {
+        case ParamCondition::Op::Eq:
+            return v.is_number() && c.value.is_number() ? v.get<double>() == c.value.get<double>() : v == c.value;
+        case ParamCondition::Op::Ne:
+            return v.is_number() && c.value.is_number() ? v.get<double>() != c.value.get<double>() : v != c.value;
+        case ParamCondition::Op::Gt:
+            return v.is_number() && c.value.is_number() && v.get<double>() > c.value.get<double>();
+    }
+    return false;
+}
+
+}  // namespace
+
+ParamRowState RowState(const ParamSpec& spec, const nlohmann::json& params, const std::set<std::string>& inputs) {
+    ParamRowState st;
+    for (const auto& c : spec.showIf) st.visible = st.visible && Holds(c, params);
+    if (!spec.needsInputs.empty()) {
+        bool any = false;
+        for (const auto& in : spec.needsInputs) any = any || inputs.count(in) > 0;
+        st.visible = st.visible && any;
+    }
+    for (const auto& in : spec.disabledByInputs)
+        if (inputs.count(in)) {
+            st.enabled = false;
+            st.note = spec.disabledByInputsNote;
+        }
+    if (st.enabled)
+        for (const auto& c : spec.enableIf)
+            if (!Holds(c, params)) {
+                st.enabled = false;
+                st.note = spec.disabledNote;
+            }
+    return st;
+}
+
+int ParamDecimals(const ParamSpec& spec) {
+    if (spec.decimals >= 0) return spec.decimals;
+    if (spec.type == ParamType::Int) return 0;
+    const double step = spec.step > 0 ? spec.step : 0.1;
+    int d = 0;
+    for (double x = step; d < 6 && std::fabs(x - std::round(x)) > 1e-9; x *= 10) ++d;
+    return d;
 }
 
 std::string StageBackend(const std::string& stage, const nlohmann::json& params) {

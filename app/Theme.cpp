@@ -134,6 +134,8 @@ QCheckBox::indicator:disabled { border-color: @border; }
 QSlider::groove:horizontal { height: 4px; background: @border; border-radius: 2px; }
 QSlider::sub-page:horizontal { background: @accent; border-radius: 2px; }
 QSlider::handle:horizontal { width: 14px; height: 14px; margin: -5px 0; border-radius: 7px; background: @text; border: 2px solid @accent; }
+QSlider::sub-page:horizontal:disabled { background: @control; }
+QSlider::handle:horizontal:disabled { background: @disabled; border-color: @control; }
 QProgressBar { background: @border; border: 0; border-radius: 4px; text-align: center; color: @text; font-size: 12px; }
 QProgressBar::chunk { background: @accent; border-radius: 4px; }
 
@@ -153,6 +155,13 @@ QLabel[role="ok"] { color: #5fbf7a; }
 QLabel[role="warn"] { color: #e0a84f; }
 QLabel[role="danger"] { color: #ff7a7a; }
 QLabel[role="accent"] { color: @accent; }
+QLabel[role="group"] { color: @muted; font-size: 11px; font-weight: 600; padding-top: 4px; }
+QLabel[role="changed"] { color: @accent; }
+QToolButton[role="more"] { color: @muted; padding: 2px 0; border: 0; }
+QToolButton[role="more"]:hover { color: @text; }
+QToolButton[role="more"]:checked { background: transparent; }
+QToolButton[role="reset"] { min-width: 24px; padding: 0 4px; border: 0; font-size: 16px; color: @muted; }
+QToolButton[role="reset"]:hover { color: @text; }
 QLabel[role="version"] { font-family: "Consolas", "Cascadia Mono", monospace; font-size: 11px; color: @muted; border: 1px solid @control; border-radius: 4px; padding: 1px 5px; }
 QLabel[role="cell-label"] { padding: 4px 9px; border-radius: 4px; background: @card; font-size: 12px; font-weight: 600; }
 QFrame[role="card"] { background: @card; border: 1px solid @border; border-radius: 6px; }
@@ -317,8 +326,11 @@ QIcon ThemeIcon(Glyph glyph, const QColor& color) {
 }
 
 void SetRole(QWidget* widget, const char* role) {
+    if (widget->property("role").toByteArray() == QByteArray(role)) return;
     widget->setProperty("role", role);
-    if (widget->isVisible()) {  // already polished: apply the new selector
+    // polished once (shown, or laid out while hidden): apply the new selector now - a card refreshed while its dock was
+    // hidden kept the old accent (TASK-0046); a widget not polished yet takes the role on its first polish
+    if (widget->testAttribute(Qt::WA_WState_Polished)) {
         widget->style()->unpolish(widget);
         widget->style()->polish(widget);
     }
