@@ -206,7 +206,12 @@ std::vector<StageSchema> Build() {
         s.params = {
             Number("intensity", "Интенсивность", ParamType::Float, 1.0, 0.0, 2.0, 0.1, ParamWidget::Slider, "сила модели: 0 — без изменений, 2 — максимум"),
             Enum("backend", "Бэкенд", "ngx", {{"ngx", "DLSS NR (NGX)", "nvngx_dlssnr.dll"}, {"stub", "stub (тест)", ""}}, ParamWidget::Select, "", true),
-            Enum("style", "Стиль", "natural", {{"natural", "естественный", ""}, {"cinematic", "кинематографичный", ""}, {"default", "по умолчанию", ""}},
+            // 0 default, 1 natural, 2 cinematic (DLSSNR.Style); 3..6 are experimental: listed by ComfyUI-DLSS5-NR, not
+            // documented by NVIDIA (TASK-0044; before, the standalone CLI alone took any 0..15)
+            Enum("style", "Стиль", "natural",
+                 {{"natural", "естественный", ""}, {"cinematic", "кинематографичный", ""}, {"default", "по умолчанию", ""},
+                  {"3", "экспериментальный 3", "не документирован NVIDIA"}, {"4", "экспериментальный 4", "не документирован NVIDIA"},
+                  {"5", "экспериментальный 5", "не документирован NVIDIA"}, {"6", "экспериментальный 6", "не документирован NVIDIA"}},
                  ParamWidget::Select, "", true),
             Number("preset", "Пресет", ParamType::Int, 3, 0, 3, 1, ParamWidget::Spin, "", true),
             Number("passes", "Проходов модели", ParamType::Int, 1, 1, 2, 1, ParamWidget::Spin, "", true),
@@ -300,6 +305,13 @@ nlohmann::json NormalizeStageParams(const std::string& stage, const nlohmann::js
             std::string kebab = key;
             std::replace(kebab.begin(), kebab.end(), '_', '-');
             alias(kebab.c_str(), key);
+        }
+        // a style given as a number (JSON, --param nr.style=4) or as the index of a named one: the schema's string
+        if (out.contains("style") && out["style"].is_number_integer()) out["style"] = std::to_string(out["style"].get<int64_t>());
+        if (out.contains("style") && out["style"].is_string()) {
+            static const char* named[] = {"default", "natural", "cinematic"};
+            const std::string v = out["style"].get<std::string>();
+            if (v == "0" || v == "1" || v == "2") out["style"] = named[v[0] - '0'];
         }
         for (const char* inverse : {"no_guides", "no-guides"}) {
             if (!out.contains(inverse)) continue;

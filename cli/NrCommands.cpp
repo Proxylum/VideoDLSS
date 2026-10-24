@@ -10,6 +10,7 @@
 #include "passes/Manifest.h"
 #include "stages/nr/INrBackend.h"
 #include "stages/nr/NrPatch.h"
+#include "stages/ParamSchema.h"
 #include "stages/nr/NrStage.h"
 #include "util/Error.h"
 #include "util/Log.h"
@@ -47,6 +48,18 @@ void PrintDiagnostics(const NrDiagnostics& d, const std::string& error) {
 }
 
 int CmdNrCheck(const NrCommands::NrArgs& a) {
+    {  // the values --check hands the backend are checked as a processing run checks them (review of TASK-0044)
+        NrStageOptions o;
+        o.backend = a.backend;
+        o.style = a.style;
+        o.intensity = a.intensity;
+        o.preset = a.preset;
+        if (const auto problems = ValidateStageParams("nr", NrParamsFromOptions(o)); !problems.empty()) {
+            std::string all;
+            for (const auto& p : problems) all += (all.empty() ? "" : "; ") + p;
+            Throw("nr: " + all);
+        }
+    }
     D3D12Device device({a.warp, false});
     std::unique_ptr<INrBackend> backend = CreateNrBackend(a.backend);
     NrConfig cfg;
@@ -121,7 +134,7 @@ int CmdNr(const NrCommands::NrArgs& a) {
     o.dllDir = a.dllDir;
     o.outputDir = a.output;
     const auto fmt = ParseFileFormat(a.format);
-    if (!fmt || (*fmt != FileFormat::Exr && *fmt != FileFormat::Png)) Throw("--format must be exr|png16");
+    if (!fmt) Throw("--format must be exr | png16 | tiff | npz | raw");  // what the schema offers (TASK-0044: exr | png16 only)
     o.format = *fmt;
     o.videoOut = a.video;
     o.videoCodec = a.codec;
@@ -214,7 +227,7 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_flag("--no-auto,--no_auto", na_.noAuto, "do not pick pass folders under --output automatically");
     nr_->add_option("--backend", na_.backend, "ngx (nvngx_dlssnr.dll) | stub (deterministic test edit)")->default_val("ngx");
     nr_->add_option("--intensity", na_.intensity, "DLSSNR.Intensity 0..2")->default_val(1.f);
-    nr_->add_option("--style", na_.style, "natural | cinematic | default | 0..15")->default_val("natural");
+    nr_->add_option("--style", na_.style, "natural | cinematic | default | 3..6 (experimental)")->default_val("natural");
     nr_->add_option("--preset", na_.preset, "DLSSNR.Hint.Render.Preset 0..3")->default_val(3);
     nr_->add_option("--local-tone,--local_tone", na_.localTone, "DLSSNR.LocalToneStrength 0..2")->default_val(1.f);
     nr_->add_option("--local-structure,--local_structure", na_.localStructure, "DLSSNR.LocalStructureStrength 0..2")->default_val(1.f);
@@ -231,7 +244,7 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_option("--tonemap", na_.tonemap, "passthrough | aces | reinhard")->default_val("passthrough");
     nr_->add_option("--input-transfer,--input_transfer", na_.inputTransfer, "srgb | linear | pq | hlg")->default_val("srgb");
     nr_->add_option("--exposure", na_.exposure, "exposure in stops (EV) before the tonemap: +1 doubles linear light, 0 = unchanged")->default_val(0.f);
-    nr_->add_option("--format", na_.format, "exr | png16")->default_val("exr");
+    nr_->add_option("--format", na_.format, "exr | png16 | tiff | npz | raw")->default_val("exr");
     nr_->add_option("--video", na_.video, "also encode the result into this video file (no audio)");
     nr_->add_option("--codec", na_.codec, "encoder for --video: h264_nvenc | hevc_nvenc | av1_nvenc | ffv1")->default_val("h264_nvenc");
     nr_->add_option("--frames", na_.frames, "process at most N frames")->default_val(-1);

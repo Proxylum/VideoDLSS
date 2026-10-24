@@ -64,7 +64,10 @@ TEST_CASE("dlssvid upscale --backend nis writes color_sr and a preview; compare 
     CHECK(Run("upscale --backend dlss --no-fallback --warp --frames 1 -i " + Q(clip) + " -o " + Q(dir / "vsr2")) != 0);
     // errors
     CHECK(Run("upscale --backend nope --warp -i " + Q(clip) + " -o " + Q(dir / "x")) != 0);
-    CHECK(Run("upscale --backend nis --format npz --warp -i " + Q(clip) + " -o " + Q(dir / "x")) != 0);
+    // every format of the schema is a pass format of the stage (TASK-0044: npz was rejected, «Запустить отдельно» failed)
+    CHECK(Run("upscale --backend nis --format bmp --warp -i " + Q(clip) + " -o " + Q(dir / "x")) != 0);
+    REQUIRE(Run("upscale --backend nis --format npz --warp --frames 1 -i " + Q(clip) + " -o " + Q(dir / "npz")) == 0);
+    CHECK(std::filesystem::exists(dir / "npz" / "color_sr" / "manifest.json"));
     CHECK(Run("compare --ref " + Q(clip) + " --test " + Q(out / "color_sr")) != 0);  // sizes differ
 }
 

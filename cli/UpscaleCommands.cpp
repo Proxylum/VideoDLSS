@@ -58,7 +58,7 @@ int CmdUpscale(const UpscaleCommands::UpscaleArgs& a) {
     o.overlap = a.overlap;
     o.outputDir = a.output;
     const auto fmt = ParseFileFormat(a.format);
-    if (!fmt || (*fmt != FileFormat::Exr && *fmt != FileFormat::Png)) Throw("--format must be exr|png16");
+    if (!fmt) Throw("--format must be exr | png16 | tiff | npz | raw");  // what the schema offers (TASK-0044: exr | png16 only)
     o.format = *fmt;
     o.videoOut = a.video;
     o.videoCodec = a.codec;
@@ -200,7 +200,7 @@ void UpscaleCommands::Register(CLI::App& app) {
     upscale_->add_flag("--no-jitter", ua_.noJitter, "dlss: feed frames without the jitter emulation");
     upscale_->add_option("--jitter-sign,--jitter_sign", ua_.jitterSign, "dlss: sign of the reported jitter offset (+1 | -1)")->default_val(1.f);
     upscale_->add_flag("--no-fallback,--no_fallback", ua_.noFallback, "fail instead of falling back to nis when the backend is unavailable");
-    upscale_->add_option("--format", ua_.format, "exr | png16")->default_val("exr");
+    upscale_->add_option("--format", ua_.format, "exr | png16 | tiff | npz | raw")->default_val("exr");
     upscale_->add_option("--video", ua_.video, "also encode the result into this video file (no audio)");
     upscale_->add_option("--codec", ua_.codec, "encoder for --video: h264_nvenc | hevc_nvenc | av1_nvenc | ffv1")->default_val("h264_nvenc");
     upscale_->add_option("--frames", ua_.frames, "process at most N frames")->default_val(-1);

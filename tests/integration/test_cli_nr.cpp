@@ -87,6 +87,48 @@ TEST_CASE("dlssvid nr --backend stub --warp writes color_nr and a JSON summary",
     CHECK(r2.code == 0);
     // missing input
     CHECK(RunCli({"nr", "--backend", "stub", "--warp", "-o", (dir / "passes3").string()}).code != 0);
+
+    // TASK-0044: the standalone run checks every value against the schema (before: `--intensity 5` and `--preset 9` went
+    // to NGX); an experimental style is a valid one
+    for (const std::vector<std::string>& bad : std::vector<std::vector<std::string>>{
+             {"--intensity", "5"}, {"--preset", "9"}, {"--passes", "5"}, {"--exposure", "20"}, {"--style", "7"}, {"--local-tone", "3"}}) {
+        std::vector<std::string> args{"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "bad").string(), "--frames", "1"};
+        args.insert(args.end(), bad.begin(), bad.end());
+        const CliResult b = RunCli(args);
+        INFO(bad[0] << " " << bad[1]);
+        CHECK(b.code != 0);
+        CHECK(b.out.find("must be") != std::string::npos);
+    }
+    CHECK(RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "style4").string(), "--frames", "1", "--style", "4"}).code == 0);
+    // --check too: the values it hands the backend are checked the same way (review of TASK-0044)
+    const CliResult check = RunCli({"nr", "--check", "--backend", "stub", "--warp", "--preset", "9"});
+    CHECK(check.code != 0);
+    CHECK(check.out.find("must be") != std::string::npos);
+}
+
+// TASK-0044: the schema offers tiff, npz and raw for the nr pass and `process` took them, while `dlssvid nr` (the GUI's
+// «Запустить отдельно») refused anything but exr / png16 - and a colour pass in raw could not be written at all.
+TEST_CASE("dlssvid nr writes every pass format the schema offers, with the same colour", "[integration][cli][nr][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 24;
+    spec.height = 16;
+    const auto dir = Dir("formats");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    auto frameIn = [&](const char* format) {
+        const auto out = dir / format;
+        const CliResult r = RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", out.string(), "--frames", "1", "--format", format});
+        INFO(format << ": " << r.out);
+        REQUIRE(r.code == 0);
+        return PassReader::Open(out / "color_nr").ReadFrame(0).ConvertNormalizedTo(PixelType::F32);
+    };
+    const PassImage exr = frameIn("exr");
+    for (const char* format : {"png16", "tiff", "npz", "raw"}) {
+        INFO(format);
+        const PassImage f = frameIn(format);
+        REQUIRE(f.width == exr.width);
+        CHECK(PassImage::MaxAbsDiff(f, exr) <= 1e-3);
+    }
 }
 
 TEST_CASE("dlssvid nr --check reports the diagnostics: stub ok, ngx on WARP fails with the instruction", "[integration][cli][nr]") {

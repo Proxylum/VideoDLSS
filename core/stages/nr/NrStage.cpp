@@ -7,6 +7,7 @@
 #include "gpu/ComputeKernel.h"
 #include "gpu/GpuFrameCache.h"
 #include "pipeline/Pipeline.h"
+#include "stages/ParamSchema.h"
 #include "util/Error.h"
 #include "util/Log.h"
 
@@ -70,15 +71,44 @@ void ApplyNrParams(const nlohmann::json& p, NrStageOptions& o) {
     if (p.contains("guides")) o.useGuides = p["guides"].get<bool>();
 }
 
+nlohmann::json NrParamsFromOptions(const NrStageOptions& o) {
+    std::string style = o.style;
+    try {  // "Natural", "1" -> natural; "4" stays; an unknown value stays for the schema to name it
+        static const char* named[] = {"default", "natural", "cinematic"};
+        const int id = ParseNrStyle(o.style);
+        style = id <= 2 ? named[id] : std::to_string(id);
+    } catch (const std::exception&) {
+    }
+    return {{"backend", o.backend},
+            {"intensity", o.intensity},
+            {"style", style},
+            {"preset", o.preset},
+            {"passes", o.passes},
+            {"model_scale", o.modelScale},
+            {"transfer", o.transfer},
+            {"max_ratio", o.maxRatio},
+            {"temporal", o.temporal},
+            {"temporal_threshold", o.temporalThreshold},
+            {"skin_blend", o.skinBlend},
+            {"local_tone", o.localTone},
+            {"local_structure", o.localStructure},
+            {"skin_structure", o.skinStructure},
+            {"auto_mask", o.autoMask},
+            {"guides", o.useGuides},
+            {"tonemap", o.tonemap.curve},
+            {"exposure", o.tonemap.exposureEv},
+            {"input_transfer", o.tonemap.inputTransfer}};
+}
+
 void NrStage::Init(const StageConfig& config, D3D12Device& device) {
     device_ = &device;
     ApplyParams(config.params);
-    if (options_.passes < 1 || options_.passes > 2) Throw("nr: --passes must be 1 or 2");
-    if (options_.modelScale < 0.25 || options_.modelScale > 2.0) Throw("nr: --model-scale must be within 0.25..2");
-    if (options_.temporal < 0.f || options_.temporal > 1.f) Throw("nr: --temporal must be within 0..1");
-    (void)ParseNrStyle(options_.style);
-    if (!TonemapCurveId(options_.tonemap.curve)) Throw("nr: --tonemap must be passthrough | aces | reinhard");
-    if (!TonemapTransferId(options_.tonemap.inputTransfer)) Throw("nr: --input-transfer must be srgb | linear | pq | hlg");
+    // every value against the schema's range and choices, whether the options came from a project or from the CLI
+    if (const auto problems = ValidateStageParams("nr", NrParamsFromOptions(options_)); !problems.empty()) {
+        std::string all;
+        for (const auto& p : problems) all += (all.empty() ? "" : "; ") + p;
+        Throw("nr: " + all);
+    }
     if (!options_.colorDir.empty()) {
         colorReader_.emplace(PassReader::Open(options_.colorDir));
         if (colorReader_->Man().channels.size() < 3) Throw("nr: --color-dir must be a colour pass (color_sr)");
