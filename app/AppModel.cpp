@@ -805,7 +805,9 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     if (schema && !schema->guides.empty() && (stage == "nr" || stage == "fg" || stage == "upscale")) {
         bool any = false;
         for (const auto& g : schema->guides) any = any || d->inputs.count(g) > 0;
-        if (!any) st.warning = tr("без глубины и векторов: качество ниже");
+        const bool guidesOff = stage == "nr" && d->params.contains("guides") && d->params["guides"].is_boolean() && !d->params["guides"].get<bool>();
+        if (guidesOff) st.warning = tr("глубина и векторы выключены: каждый кадр обрабатывается отдельно");
+        else if (!any) st.warning = tr("без глубины и векторов: качество ниже");
     }
     // the advice of the plan (TASK-0039, depth): licence, VRAM; an error blocks «Обработать»
     QStringList warn;

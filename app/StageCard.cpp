@@ -22,6 +22,13 @@ namespace dlssvid {
 
 namespace {
 
+// A value from a slider or a spin box, rounded to the decimals the control shows: 3 x 0.1 is 0.30000000000000004, which
+// read as another value than the 0.3 typed into the JSON (the plan said «Интенсивность 1.4 → 1.4», TASK-0045)
+double QuantizeParam(double v, int decimals) {
+    const double k = std::pow(10.0, decimals);
+    return std::round(v * k) / k;
+}
+
 nlohmann::json ChoiceValue(const ParamSpec& spec, const std::string& value) {
     if (spec.type == ParamType::Int) return std::stoi(value);
     if (spec.type == ParamType::Float) {
@@ -278,20 +285,22 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
             auto* spin = new QDoubleSpinBox(row);
             spin->setRange(spec.min, spec.max);
             spin->setSingleStep(step);
-            spin->setDecimals(step < 0.01 ? 3 : step < 0.1 ? 2 : 1);
+            const int decimals = step < 0.01 ? 3 : step < 0.1 ? 2 : 1;
+            spin->setDecimals(decimals);
             h->addWidget(slider, 1);
             h->addWidget(spin);
-            connect(slider, &QSlider::valueChanged, this, [this, spec, spin, step](int v) {
+            connect(slider, &QSlider::valueChanged, this, [this, spec, spin, step, decimals](int v) {
                 if (updating_) return;
                 const QSignalBlocker b(spin);
-                spin->setValue(v * step);
-                setParam(spec.key, spec.type == ParamType::Int ? nlohmann::json(static_cast<int>(std::lround(v * step))) : nlohmann::json(v * step));
+                const double value = QuantizeParam(v * step, decimals);
+                spin->setValue(value);
+                setParam(spec.key, spec.type == ParamType::Int ? nlohmann::json(static_cast<int>(std::lround(value))) : nlohmann::json(value));
             });
-            connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this, spec, slider, step](double v) {
+            connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this, spec, slider, step, decimals](double v) {
                 if (updating_) return;
                 const QSignalBlocker b(slider);
                 slider->setValue(static_cast<int>(std::lround(v / step)));
-                setParam(spec.key, spec.type == ParamType::Int ? nlohmann::json(static_cast<int>(std::lround(v))) : nlohmann::json(v));
+                setParam(spec.key, spec.type == ParamType::Int ? nlohmann::json(static_cast<int>(std::lround(v))) : nlohmann::json(QuantizeParam(v, decimals)));
             });
             pull_.push_back([this, spec, slider, spin, step] {
                 const StageEntry* e = model_.stageEntry(stage_);
@@ -324,7 +333,7 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
             spin->setSingleStep(spec.step > 0 ? spec.step : 0.1);
             spin->setDecimals(3);
             connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), this, [this, spec](double v) {
-                if (!updating_) setParam(spec.key, v);
+                if (!updating_) setParam(spec.key, QuantizeParam(v, 3));
             });
             pull_.push_back([this, spec, spin] {
                 const StageEntry* e = model_.stageEntry(stage_);

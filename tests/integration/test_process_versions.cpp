@@ -475,6 +475,24 @@ TEST_CASE("Regression (pass-mv-yup): toggling mv.y_up of a legacy mv_dlss recomp
     CHECK(Decision(PlanProcess(o), "upscale").action == "restore");  // the version made without the flag comes back
 }
 
+// TASK-0045: process loads the NVIDIA DLL from DLSSVID_NVIDIA_DLL_DIR / <exe>/nvidia / <exe>, a dll_dir in the stage's
+// parameters is not used - the plan says so instead of keeping quiet.
+TEST_CASE("PlanProcess: dll_dir of an NVIDIA stage is reported as ignored", "[integration][process][versions]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("dll_dir");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o = Options(dir, clip);
+    CHECK(Decision(PlanProcess(o), "nr").warnings.empty());
+    for (auto& s : o.stages)
+        if (s.name == "nr") s.params["dll_dir"] = (dir / "elsewhere").string();
+    const StageDecision d = Decision(PlanProcess(o), "nr");
+    REQUIRE(d.warnings.size() == 1);
+    CHECK_THAT(d.warnings[0], ContainsSubstring("nr.dll_dir is ignored by process"));
+}
+
 // Audit fg-2 (TASK-0038): an fg process that dies while it rewrites color_fg in place (a forced or incomplete pass is not
 // moved to the history first) has already overwritten frames of the signed version - one of them possibly cut short by
 // the crash - so the folder is removed rather than left current (review of TASK-0038, fg-iso-3); the run encodes color_nr.

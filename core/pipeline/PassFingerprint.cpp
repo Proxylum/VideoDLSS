@@ -4,10 +4,12 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <mutex>
 
 #include "ml/ModelRegistry.h"
+#include "passes/Manifest.h"
 #include "stages/depth/DepthModels.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "stages/flow/TrtFlowEstimator.h"
@@ -65,9 +67,15 @@ nlohmann::json CanonicalizeJson(const nlohmann::json& j) {
             return a;
         }
         case nlohmann::json::value_t::number_float: {
-            const double d = j.get<double>();
-            if (std::isfinite(d) && d == std::floor(d) && std::fabs(d) < 9.0e15) return nlohmann::json(static_cast<int64_t>(d));
-            return j;
+            double d = j.get<double>();
+            if (!std::isfinite(d)) return j;
+            // 9 significant digits: the 0.30000000000000004 of a slider (3 x 0.1) and the 0.3 typed into the JSON are one run
+            // (TASK-0045); a clean value prints back to the same double, so its fingerprint stays
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "%.9g", d);
+            d = std::strtod(buf, nullptr);
+            if (d == std::floor(d) && std::fabs(d) < 9.0e15) return nlohmann::json(static_cast<int64_t>(d));
+            return nlohmann::json(d);
         }
         case nlohmann::json::value_t::number_unsigned: {
             const uint64_t u = j.get<uint64_t>();
@@ -133,7 +141,9 @@ ToolInfo ToolForStage(const std::string& stage, const nlohmann::json& p) {
     const char* def = stage == "depth" ? "da3" : stage == "flow" ? "ofa" : stage == "upscale" ? "dlss" : stage == "nr" ? "ngx" : stage == "fg" ? "dlssg" : "";
     t.backend = Str(p, "backend", def);
     const std::string model = Str(p, "model", "");
-    const std::filesystem::path dllDir = Str(p, "dll_dir", "");
+    // the DLL the stage loads: its default lookup (DLSSVID_NVIDIA_DLL_DIR, <exe>/nvidia, <exe>). params.dll_dir is read by
+    // no stage of `process` - hashing the DLL in it named a DLL other than the one loaded (TASK-0045)
+    const std::filesystem::path dllDir;
     // da3 / vda / worker:vda name their model; plain `worker` (DA3) keeps an empty model as before (its fingerprints stay)
     if (stage == "depth" && (t.backend == "da3" || t.backend == "vda" || t.backend == "worker:vda"))
         t.model = model.empty() ? DefaultDepthModel(DepthFamilyOf(t.backend)) : model;
@@ -211,12 +221,33 @@ std::string StageForPass(const std::string& pass) {
     return {};
 }
 
-std::vector<std::vector<std::string>> StageInputCandidates(const std::string& stage) {
+std::vector<std::vector<std::string>> StageInputCandidates(const std::string& stage, const nlohmann::json& params) {
     if (stage == "flow") return {{"depth_raw"}};
     if (stage == "upscale") return {{"depth_dlss"}, {"mv_dlss"}};
-    if (stage == "nr") return {{"color_sr"}, {"depth_dlss"}, {"mv_dlss"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}};
+    if (stage == "nr") {
+        if (params.is_object() && params.contains("guides") && params["guides"].is_boolean() && !params["guides"].get<bool>())
+            return {{"color_sr"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}};
+        return {{"color_sr"}, {"depth_dlss"}, {"mv_dlss"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}};
+    }
     if (stage == "fg") return {{"color_nr", "color_sr"}, {"depth_dlss"}, {"mv_dlss"}};
     return {};
+}
+
+std::string ContentFingerprint(const std::filesystem::path& dir, const Manifest& manifest) {
+    nlohmann::json frames = nlohmann::json::array();
+    for (int64_t f = manifest.firstFrame; f <= manifest.lastFrame; ++f) {
+        const auto file = dir / manifest.FrameFileName(f);
+        if (std::filesystem::exists(file)) frames.push_back({f, Sha256File(file)});
+    }
+    if (frames.empty()) Throw("stamp: no frame files in " + dir.string());
+    // how the files are read is part of the content: the manifest without its provenance (size, format, channels,
+    // mv.y_up, the depth range...) - the same files read y up are other vectors for the stages below
+    nlohmann::json layout = manifest.ToJson();
+    for (const char* key : {"schema_version", "fps", "frame_count", "frame_range", "file_pattern", "model", "source", "stage_params", "fingerprint",
+                            "inputs", "tool", "params_canonical", "created"})
+        layout.erase(key);
+    const std::string canonical = CanonicalJson({{"pass", manifest.pass}, {"layout", layout}, {"frames", frames}});
+    return "sha256:" + Sha256Hex(canonical.data(), canonical.size());
 }
 
 std::string NowIso8601() { return FormatUtc(std::time(nullptr), "%Y-%m-%dT%H:%M:%SZ"); }
