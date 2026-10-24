@@ -186,10 +186,27 @@ std::string Join(const std::vector<std::string>& v) {
     return s;
 }
 
+// A colour pass written as PNG16 before TASK-0042 - unscaled, so black: in PNG on disk while its tool lacks the "+png.2"
+// revision every PNG colour pass made since carries. Judged by the file, not by the parameters (a standalone
+// `--format png16` pass adopted under exr parameters is PNG all the same), and also when the pass has no fingerprint
+// (adopting it would stamp the black frames with the current revision). Not reused, restored or adopted.
+bool OldPngColourPass(const std::string& stage, const Manifest& m) {
+    if ((stage != "upscale" && stage != "nr" && stage != "fg") || m.format != FileFormat::Png) return false;
+    return m.tool.value("app", std::string()).find("+png.2") == std::string::npos;
+}
+constexpr const char* kOldPng = "PNG16 colour pass written before TASK-0042 (unscaled, black)";
+
 // A complete history version of `pass` with this fingerprint, if any.
-std::optional<PassVersionInfo> RestorableVersion(const RunContext& ctx, const std::string& pass, const std::string& fp, int64_t frames) {
-    for (const auto& v : ListPassVersions(ctx.root, pass))
-        if (!v.current && v.fingerprint == fp && PassComplete(v.dir, frames, ctx.sourceHash)) return v;
+std::optional<PassVersionInfo> RestorableVersion(const RunContext& ctx, const std::string& stage, const std::string& pass, const std::string& fp, int64_t frames) {
+    for (const auto& v : ListPassVersions(ctx.root, pass)) {
+        if (v.current || v.fingerprint != fp || !PassComplete(v.dir, frames, ctx.sourceHash)) continue;
+        try {
+            if (OldPngColourPass(stage, Manifest::Load(v.dir))) continue;
+        } catch (const std::exception&) {
+            continue;
+        }
+        return v;
+    }
     return std::nullopt;
 }
 
@@ -239,7 +256,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         d.retire = retire;
     };
     auto restore = [&]() {
-        const auto v = RestorableVersion(ctx, d.outputs.back(), fp.value, d.frames);
+        const auto v = RestorableVersion(ctx, name, d.outputs.back(), fp.value, d.frames);
         if (!v) return false;
         d.action = "restore";
         d.kind = "restored";
@@ -260,7 +277,9 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         return d;
     }
     if (m.fingerprint == fp.value) {
-        if (complete) {
+        if (OldPngColourPass(name, m)) {
+            run("tool_changed", kOldPng, true);
+        } else if (complete) {
             d.action = "reuse";
             d.kind = "exact";
             d.detail = "fingerprint matches";
@@ -283,6 +302,8 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             // then - adopting it would stamp the old depth with the depth.2 revision
             d.diff["tool"]["app"] = nlohmann::json::array({kPassToolVersion, PassToolVersionFor(name, p)});
             run("tool_changed", "depth made before the temporal alignment of TASK-0038", true);
+        } else if (OldPngColourPass(name, m)) {
+            run("tool_changed", kOldPng, true);
         } else if (!complete) {
             run("incomplete", incomplete, false);
         } else {

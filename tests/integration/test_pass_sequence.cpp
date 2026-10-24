@@ -207,6 +207,24 @@ TEST_CASE("Colour export from a clip round-trips as EXR half and PNG16", "[integ
     CHECK(mr.Get(1, 0, 0) == 128.f);
 }
 
+// Review of TASK-0042: a folder of half EXR mattes (a roto from Nuke) without a manifest got a u8 manifest, and the EXR
+// restore rounded 0.5 to 0 or 1 - an empty mask.
+TEST_CASE("Float EXR masks scanned without a manifest keep their [0,1] values", "[integration][passes][regression]") {
+    const auto dir = Dir("mask_exr_scan");
+    std::filesystem::create_directories(dir);
+    PassImage m;
+    m.Allocate(4, 2, PixelType::F16, {"A"});
+    for (uint32_t x = 0; x < 4; ++x) m.Set(x, 0, 0, 0.25f * static_cast<float>(x + 1));
+    WritePassFile(dir / "matte_000000.exr", m);
+    PassReader::ScanHints hints;
+    hints.kind = PassKind::Mask;
+    const PassReader r = PassReader::OpenWithoutManifest(dir, hints);
+    CHECK(r.Man().pixelType == PixelType::F16);
+    const PassImage back = r.ReadFrame(0);
+    CHECK(back.Get(1, 0, 0) == 0.5f);  // before: 0 or 1
+    CHECK(back.Get(3, 0, 0) == 1.f);
+}
+
 TEST_CASE("Nuke preset writes multi-layer EXR with colour, depth and mv", "[integration][passes][preset]") {
     const uint32_t w = 32, h = 20;
     std::vector<PassImage> color(4);

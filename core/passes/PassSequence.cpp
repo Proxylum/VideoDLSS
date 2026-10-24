@@ -135,6 +135,11 @@ PassReader PassReader::OpenWithoutManifest(const std::filesystem::path& dir, con
                   std::to_string(first.channels.size()) + ": " + frames.begin()->second.string());
         m.pixelType = first.type == PixelType::F16 && spec.type == PixelType::F32 ? PixelType::F16 : m.pixelType;
         if (first.type == PixelType::U8 || first.type == PixelType::U16) m.pixelType = first.type;
+        // float mattes (a half EXR roto from Nuke) mean [0,1] as they are: a u8 manifest made the EXR restore round 0.5
+        // to 0 or 1 (review of TASK-0042)
+        if (!hints.pixelType && NormalizedSamples(hints.kind) && (first.type == PixelType::F16 || first.type == PixelType::F32) &&
+            (spec.type == PixelType::U8 || spec.type == PixelType::U16))
+            m.pixelType = first.type;
     }
     // Sanity: the pattern must reproduce the first file name.
     if (m.FrameFileName(m.firstFrame) != frames.begin()->second.filename().string()) {
