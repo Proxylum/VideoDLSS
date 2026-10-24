@@ -57,9 +57,16 @@ struct StageSchema {
 const std::vector<StageSchema>& StageSchemas();
 const StageSchema* FindStageSchema(const std::string& stage);
 
-// Problems with the parameters (wrong type, out of range, not a choice); unknown keys pass (backends take extra keys).
+// The keys under the schema's spelling: the stages also take kebab-case aliases (nr.local-tone, fg.backbuffer-format)
+// and nr's inverse no_guides / no-guides, which the validation and the defaults did not see - {"model-scale": 0.5} ran
+// at 0.5 under a fingerprint saying 1.0 (TASK-0043). The schema key wins over an alias; the aliases are removed.
+nlohmann::json NormalizeStageParams(const std::string& stage, const nlohmann::json& params);
+// Problems with the parameters (wrong type, out of range, not a choice), after NormalizeStageParams; unknown keys pass
+// (backends take extra keys).
 std::vector<std::string> ValidateStageParams(const std::string& stage, const nlohmann::json& params);
-// The parameters with the schema defaults filled in for absent keys (unknown keys kept): what a run means.
+// The parameters normalised, with the schema defaults filled in for absent keys (unknown keys kept): what a run means.
+// ProcessRunner hands exactly these to the stage and to its fingerprint (TASK-0043: the stages got the raw parameters, so
+// a default that differed between the schema and the stage - nr.exposure - ran differently from what was hashed).
 nlohmann::json EffectiveStageParams(const std::string& stage, const nlohmann::json& params);
 // A parameter's value as its form shows it: the choice label, a number, «да» / «нет».
 std::string ParamValueLabel(const ParamSpec& spec, const nlohmann::json& value);

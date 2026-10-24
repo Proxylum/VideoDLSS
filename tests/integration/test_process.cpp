@@ -10,6 +10,7 @@
 #include "TestClips.h"
 #include "passes/PassSequence.h"
 #include "pipeline/PassFingerprint.h"
+#include "pipeline/PassVersions.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "viewport/Project.h"
@@ -152,12 +153,95 @@ TEST_CASE("RunProcess: a PNG16 colour pass from before TASK-0042 is recomputed, 
         m.Save(nrDir);
     };
     stampOld(true);
+    const size_t versions = ListPassVersions(o.passesRoot, "color_nr").size();
     ProcessResult r = RunProcess(o);
     CHECK(Report(r, "nr").status == "ran");
     CHECK(Report(r, "nr").reason.find("TASK-0042") != std::string::npos);
+    // review of TASK-0043: the recomputed pass keeps its fingerprint, so fg built on the black one would be reused
+    CHECK(Report(r, "fg").status == "ran");
+    CHECK(ListPassVersions(o.passesRoot, "color_nr").size() == versions);  // discarded, not kept to be restored
     stampOld(false);
     CHECK(Report(RunProcess(o), "nr").status == "ran");  // before: adopted as legacy and stamped +png.2 for good
     CHECK(Report(RunProcess(o), "nr").status == "reused");
+}
+
+// TASK-0043: the fingerprint hashed the schema's view of the parameters while the stages read the raw ones - an alias ran
+// at its value under a fingerprint saying the default. The parameters are normalised for both now (the handoff of the
+// effective parameters to the stages is covered by the mirror test in test_param_schema: with the defaults in agreement
+// it cannot be told apart from the outside).
+TEST_CASE("RunProcess: the stage runs with the parameters its fingerprint hashes", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("run_params");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    for (auto& st : o.stages)
+        if (st.name == "nr") st.params["model-scale"] = 0.5;  // the alias the standalone CLI and old projects use
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    const Manifest m = Manifest::Load(o.passesRoot / "color_nr");
+    CHECK(m.paramsCanonical["model_scale"] == 0.5);          // the fingerprint: before, 1.0
+    CHECK(m.stageParams["model_scale"] == 0.5);              // what ran
+    CHECK_FALSE(m.paramsCanonical.contains("model-scale"));
+    CHECK(m.stageParams["tonemap"]["exposure_ev"] == 0.0);  // the schema's default reached the stage
+}
+
+// TASK-0043: nr.exposure was a linear multiplier while the schema said 0 - an explicit 0 gave black frames under the
+// fingerprint of the identity run. In stops 0 is the identity, so such a pass must not be reused, restored or adopted;
+// a pass made with the old default (multiplier 1) stays valid.
+TEST_CASE("RunProcess: an nr pass made with the old linear exposure 0 is recomputed, one made with 1 is reused", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("old_exposure");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    const auto nrDir = o.passesRoot / "color_nr";
+    REQUIRE(Manifest::Load(nrDir).stageParams["tonemap"].contains("exposure_ev"));  // what this build writes
+    auto stampOld = [&](double multiplier, bool keepFingerprint) {
+        Manifest m = Manifest::Load(nrDir);
+        nlohmann::json& t = m.stageParams["tonemap"];
+        t.erase("exposure_ev");
+        t["exposure"] = multiplier;  // what the builds before wrote
+        if (!keepFingerprint) m.fingerprint.clear();  // a standalone `dlssvid nr` pass, adopted as legacy
+        m.Save(nrDir);
+    };
+    stampOld(1.0, true);
+    CHECK(Report(RunProcess(o), "nr").status == "reused");
+    stampOld(0.0, true);
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK_THAT(Report(r, "nr").reason, Catch::Matchers::ContainsSubstring("old linear exposure"));
+    // review: color_nr keeps its fingerprint (exposure 0 = the identity hashes as before), so the color_fg built on the
+    // black pass matched too and stayed - the result black. It reruns now, and a rerun after it reuses again.
+    CHECK(Report(r, "fg").status == "ran");
+    CHECK_THAT(Report(r, "fg").reason, Catch::Matchers::ContainsSubstring("stale"));
+    CHECK(Report(RunProcess(o), "fg").status == "reused");
+    CHECK(Manifest::Load(nrDir).stageParams["tonemap"].contains("exposure_ev"));
+    // the black pass went into the history: it is not restored for the same fingerprint either
+    stampOld(0.0, true);
+    ProcessOptions again = o;
+    again.stages = StubStages(2);
+    ApplyParamSpec(again.stages, "nr.intensity=1.5");
+    RunProcess(again);  // retires the old-exposure pass
+    CHECK(Report(RunProcess(o), "nr").status == "ran");  // back to intensity 1: the retired black version is not restored
+    stampOld(0.0, false);
+    CHECK(Report(RunProcess(o), "nr").status == "ran");  // nor adopted without a fingerprint
 }
 
 TEST_CASE("RunProcess: --frames, passthrough, an unavailable nr stage and a run without colour stages", "[integration][process]") {

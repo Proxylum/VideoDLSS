@@ -39,6 +39,8 @@ float Aces(float x) {
 }
 }  // namespace
 
+float TonemapOptions::ExposureGain() const { return std::exp2(exposureEv); }
+
 std::optional<int> TonemapCurveId(const std::string& s) {
     if (s == "passthrough") return 0;
     if (s == "aces") return 1;
@@ -67,7 +69,7 @@ float TonemapReference(float value, const TonemapOptions& o) {
         case 3: lin = HlgToLinear(std::clamp(value, 0.f, 1.f)); break;
         default: lin = std::max(value, 0.f); break;
     }
-    lin *= o.exposure;
+    lin *= o.ExposureGain();
     float mapped = lin;
     if (*curve == 1) mapped = Aces(lin);
     else if (*curve == 2) mapped = lin / (1.f + lin);
@@ -91,7 +93,7 @@ void Tonemapper::Run(ID3D12GraphicsCommandList* cl, ID3D12Resource* src, ID3D12R
     const auto transfer = TonemapTransferId(o.inputTransfer);
     if (!curve) Throw("tonemap: --tonemap must be passthrough | aces | reinhard (got '" + o.curve + "')");
     if (!transfer) Throw("tonemap: --input-transfer must be srgb | linear | pq | hlg (got '" + o.inputTransfer + "')");
-    Constants c{width, height, static_cast<uint32_t>(*curve), static_cast<uint32_t>(*transfer), o.exposure, {0, 0, 0}};
+    Constants c{width, height, static_cast<uint32_t>(*curve), static_cast<uint32_t>(*transfer), o.ExposureGain(), {0, 0, 0}};
     ComputeKernel::Transition(cl, src, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     ComputeKernel::Transition(cl, dst, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     kernel_->Dispatch(cl, &c, sizeof(c), {src}, {dst}, (width + 7) / 8, (height + 7) / 8);

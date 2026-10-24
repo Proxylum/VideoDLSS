@@ -63,6 +63,10 @@ struct NrStageOptions {
     std::function<void(int64_t frame, double ms)> onFrame;
 };
 
+// The project's stage parameters (schema keys, also the kebab-case aliases a standalone run passes) onto the options;
+// absent keys keep what `o` has. The schema's defaults are these options' defaults (test_param_schema).
+void ApplyNrParams(const nlohmann::json& params, NrStageOptions& o);
+
 class NrStage final : public IStage {
 public:
     explicit NrStage(NrStageOptions options, std::vector<std::unique_ptr<INrBackend>> backends = {});

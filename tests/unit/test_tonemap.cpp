@@ -9,6 +9,7 @@
 
 #include "GpuTextures.h"
 #include "gpu/D3D12Device.h"
+#include "stages/ParamSchema.h"
 #include "stages/tonemap/Tonemapper.h"
 
 using namespace dlssvid;
@@ -40,9 +41,9 @@ TEST_CASE("TonemapReference: known values and identity", "[tonemap][unit]") {
     o.curve = "reinhard";
     CHECK(TonemapReference(1.f, o) == Approx(0.7354f).margin(1e-3));  // 1 / (1 + 1) = 0.5 linear
     o.curve = "passthrough";
-    o.exposure = 2.f;
+    o.exposureEv = 1.f;  // +1 stop doubles linear light: 0.25 -> 0.5
     CHECK(TonemapReference(0.25f, o) == Approx(0.7354f).margin(1e-3));
-    o.exposure = 1.f;
+    o.exposureEv = 0.f;
     o.inputTransfer = "pq";
     CHECK(TonemapReference(0.58f, o) == Approx(1.f).margin(2e-2));  // ~203 nits = reference white -> 1.0
     CHECK(TonemapReference(0.f, o) == Approx(0.f).margin(1e-3));
@@ -56,6 +57,28 @@ TEST_CASE("TonemapReference: known values and identity", "[tonemap][unit]") {
     CHECK(!TonemapCurveId("bogus"));
     CHECK(TonemapCurveId("aces") == 1);
     CHECK(TonemapTransferId("hlg") == 3);
+}
+
+// TASK-0043: the schema said exposure 0.0 in -8..8 while the stage multiplied linear light by it - an explicit 0 (the
+// default the form shows) or a negative value gave black frames. Exposure is in stops now; 0 is the identity.
+TEST_CASE("Exposure is in EV stops: 0 is the identity, +1 doubles linear light, -1 halves", "[tonemap][unit][regression]") {
+    TonemapOptions o;
+    CHECK(o.exposureEv == 0.f);
+    CHECK(o.ExposureGain() == 1.f);
+    CHECK(o.IsIdentity());
+    o.exposureEv = 1.f;
+    CHECK(o.ExposureGain() == 2.f);
+    CHECK_FALSE(o.IsIdentity());
+    o.exposureEv = -1.f;
+    CHECK(o.ExposureGain() == 0.5f);
+    o.inputTransfer = "linear";
+    CHECK(TonemapReference(0.5f, o) == Approx(TonemapReference(0.25f, TonemapOptions{"passthrough", "linear", 0.f})));
+    o.exposureEv = -8.f;  // the bottom of the range: dark, not black
+    CHECK(TonemapReference(1.f, o) > 0.01f);
+    // the schema's default is the stage's default
+    const StageSchema* nr = FindStageSchema("nr");
+    REQUIRE(nr);
+    CHECK(nr->Find("exposure")->def.get<double>() == TonemapOptions{}.exposureEv);
 }
 
 TEST_CASE("Tonemapper: passthrough on sRGB input copies (and clamps) exactly", "[tonemap][unit][gpu]") {
@@ -79,11 +102,11 @@ TEST_CASE("Tonemapper: ACES, Reinhard, exposure and input transfers match the CP
     for (size_t i = 0; i < rgb.size(); ++i) rgb[i] = 4.f * static_cast<float>(i) / static_cast<float>(rgb.size() - 1);  // 0..4 (HDR for linear inputs)
     for (const char* transfer : {"srgb", "linear", "pq", "hlg"}) {
         for (const char* curve : {"passthrough", "aces", "reinhard"}) {
-            for (float exposure : {1.f, 0.5f}) {
+            for (float exposure : {0.f, -1.f}) {  // EV
                 TonemapOptions o;
                 o.curve = curve;
                 o.inputTransfer = transfer;
-                o.exposure = exposure;
+                o.exposureEv = exposure;
                 const std::vector<float> out = RunTonemap(dev, tm, w, h, rgb, o);
                 for (size_t i = 0; i < rgb.size(); ++i) {
                     const float in = HalfToFloat(FloatToHalf(rgb[i]));

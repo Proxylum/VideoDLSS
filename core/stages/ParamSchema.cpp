@@ -151,7 +151,8 @@ std::vector<StageSchema> Build() {
             Number("grid", "Сетка OFA", ParamType::Int, 1, 1, 4, 1, ParamWidget::Spin, "", true),
             Number("dilate", "Дилатация у границ", ParamType::Int, 1, 0, 2, 1, ParamWidget::Spin, "", true),
             Text("target", "Целевое разрешение mv_dlss (WxH)", ""),
-            Enum("hwaccel", "Декод", "cuda", {{"cuda", "CUDA", ""}, {"none", "CPU", ""}}, ParamWidget::Select, "", true),
+            // NVDEC for OFA only: searaft / stub decode on the CPU whatever the key says (TASK-0043: it was hashed as "cuda")
+            OnlyFor(Enum("hwaccel", "Декод", "cuda", {{"cuda", "CUDA", ""}, {"none", "CPU", ""}}, ParamWidget::Select, "", true), {"ofa"}),
             Flag("fp32", "FP32", false),
             Flag("no_dlss", "Только mv_raw", false, "не писать mv_dlss"),
             Enum("format", "Формат пасса", "exr", Formats(false), ParamWidget::Select, "", true),
@@ -222,7 +223,8 @@ std::vector<StageSchema> Build() {
             Flag("guides", "Guides (глубина и векторы)", true, "без guides — still-режим, качество ниже"),
             Enum("tonemap", "Тонмаппинг", "passthrough", {{"passthrough", "без изменений", ""}, {"aces", "ACES", ""}, {"reinhard", "Reinhard", ""}},
                  ParamWidget::Select, "", true),
-            Number("exposure", "Экспозиция", ParamType::Float, 0.0, -8.0, 8.0, 0.1, ParamWidget::Spin, "", true),
+            Number("exposure", "Экспозиция", ParamType::Float, 0.0, -8.0, 8.0, 0.1, ParamWidget::Spin,
+                   "в ступенях EV перед тонмаппингом: +1 — вдвое светлее, −1 — вдвое темнее, 0 — без изменений", true),
             Enum("input_transfer", "Входная кривая", "srgb", {{"srgb", "sRGB", ""}, {"linear", "линейная", ""}, {"pq", "PQ", ""}, {"hlg", "HLG", ""}},
                  ParamWidget::Select, "", true),
             Enum("format", "Формат пасса", "exr", Formats(true), ParamWidget::Select, "", true),
@@ -284,8 +286,36 @@ const StageSchema* FindStageSchema(const std::string& stage) {
     return nullptr;
 }
 
-std::vector<std::string> ValidateStageParams(const std::string& stage, const nlohmann::json& params) {
+nlohmann::json NormalizeStageParams(const std::string& stage, const nlohmann::json& params) {
+    if (!params.is_object()) return params;
+    nlohmann::json out = params;
+    auto alias = [&](const char* from, const char* to) {
+        if (!out.contains(from)) return;
+        if (!out.contains(to)) out[to] = out[from];
+        out.erase(from);
+    };
+    if (stage == "nr") {
+        for (const char* key : {"local_tone", "local_structure", "skin_structure", "auto_mask", "model_scale", "max_ratio", "temporal_threshold", "skin_blend",
+                                "input_transfer"}) {
+            std::string kebab = key;
+            std::replace(kebab.begin(), kebab.end(), '_', '-');
+            alias(kebab.c_str(), key);
+        }
+        for (const char* inverse : {"no_guides", "no-guides"}) {
+            if (!out.contains(inverse)) continue;
+            // a non-boolean stays wrong under `guides` for the validation to say so
+            if (!out.contains("guides")) out["guides"] = out[inverse].is_boolean() ? nlohmann::json(!out[inverse].get<bool>()) : out[inverse];
+            out.erase(inverse);
+        }
+    } else if (stage == "fg") {
+        alias("backbuffer-format", "backbuffer_format");
+    }
+    return out;
+}
+
+std::vector<std::string> ValidateStageParams(const std::string& stage, const nlohmann::json& rawParams) {
     std::vector<std::string> problems;
+    const nlohmann::json params = NormalizeStageParams(stage, rawParams);
     const StageSchema* schema = FindStageSchema(stage);
     if (!schema) {
         problems.push_back("unknown stage '" + stage + "'");
@@ -337,7 +367,7 @@ std::vector<std::string> ValidateStageParams(const std::string& stage, const nlo
 }
 
 nlohmann::json EffectiveStageParams(const std::string& stage, const nlohmann::json& params) {
-    nlohmann::json out = params.is_object() ? params : nlohmann::json::object();
+    nlohmann::json out = params.is_object() ? NormalizeStageParams(stage, params) : nlohmann::json::object();
     if (const StageSchema* schema = FindStageSchema(stage)) {
         std::string backend;
         if (const ParamSpec* b = schema->Find("backend")) {

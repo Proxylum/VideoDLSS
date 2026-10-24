@@ -118,10 +118,13 @@ std::string Sha256FileCached(const std::filesystem::path& path) {
 }
 
 std::string PassToolVersionFor(const std::string& stage, const nlohmann::json& p) {
-    if (stage == "depth" && Str(p, "stabilize", "auto") != "none") return std::string(kPassToolVersion) + "+depth.2";
+    std::string v = kPassToolVersion;
+    if (stage == "depth" && Str(p, "stabilize", "auto") != "none") v += "+depth.2";
+    // nr.exposure is in stops since TASK-0043 (a multiplier before): {"exposure": 1} is another run now
+    if (stage == "nr" && p.is_object() && p.contains("exposure") && p["exposure"].is_number() && p["exposure"].get<double>() != 0.0) v += "+nr.ev";
     // colour passes in PNG16 were written unscaled (black) before TASK-0042: those passes are not reused
-    if ((stage == "upscale" || stage == "nr" || stage == "fg") && Str(p, "format", "exr") == "png") return std::string(kPassToolVersion) + "+png.2";
-    return kPassToolVersion;
+    if ((stage == "upscale" || stage == "nr" || stage == "fg") && Str(p, "format", "exr") == "png") v += "+png.2";
+    return v;
 }
 
 ToolInfo ToolForStage(const std::string& stage, const nlohmann::json& p) {

@@ -1,5 +1,7 @@
 #include "viewport/Project.h"
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
 
 #include "pipeline/PassFingerprint.h"
@@ -23,6 +25,27 @@ std::filesystem::path Abs(const std::string& s, const std::filesystem::path& bas
     const std::filesystem::path p(s);
     return p.is_absolute() || base.empty() ? p : (base / p).lexically_normal();
 }
+
+// schema_version 1 -> 2 (TASK-0043): nr.exposure was a linear multiplier, it is in stops now - x > 0 becomes log2(x)
+// (0 = the identity drops the key), x <= 0 (black frames then) is dropped; nr.skin_structure between -1 and 0 had no
+// meaning (-1 = «as the local structure», 0..2 a strength) and becomes -1.
+void MigrateNrParamsV1(nlohmann::json& params) {
+    if (!params.is_object()) return;
+    if (params.contains("exposure") && params["exposure"].is_number()) {
+        const double x = params["exposure"].get<double>();
+        const double ev = x > 0 ? std::clamp(std::round(std::log2(x) * 100.0) / 100.0, -8.0, 8.0) : 0.0;
+        if (ev == 0.0) params.erase("exposure");
+        else params["exposure"] = ev;
+        Log()->info("project v1: nr.exposure {} (a multiplier) -> {} EV", x, ev);
+    }
+    if (params.contains("skin_structure") && params["skin_structure"].is_number()) {
+        const double v = params["skin_structure"].get<double>();
+        if (v < 0.0 && v != -1.0) {
+            params["skin_structure"] = -1.0;
+            Log()->info("project v1: nr.skin_structure {} -> -1 (as the local structure)", v);
+        }
+    }
+}
 }  // namespace
 
 std::vector<StageEntry> Project::DefaultStages() {
@@ -44,7 +67,7 @@ Project Project::Create(const std::filesystem::path& sourceVideo, const std::fil
 nlohmann::json Project::ToJson(const std::filesystem::path& relativeTo) const {
     nlohmann::json st = nlohmann::json::array();
     for (const auto& s : stages) st.push_back({{"name", s.name}, {"enabled", s.enabled}, {"params", s.params}});
-    return {{"schema_version", 1},
+    return {{"schema_version", kProjectSchemaVersion},
             {"source", Rel(sourceVideo, relativeTo)},
             {"passes", Rel(passesRoot, relativeTo)},
             {"result", Rel(resultVideo, relativeTo)},
@@ -56,7 +79,9 @@ nlohmann::json Project::ToJson(const std::filesystem::path& relativeTo) const {
 }
 
 Project Project::FromJson(const nlohmann::json& j, const std::filesystem::path& relativeTo) {
-    if (j.value("schema_version", 0) != 1) Throw("project: unsupported schema_version");
+    const int version = j.value("schema_version", 0);
+    if (version < 1 || version > kProjectSchemaVersion)
+        Throw("project: unsupported schema_version " + std::to_string(version) + (version > kProjectSchemaVersion ? " (made by a newer dlssvid)" : ""));
     Project p;
     p.sourceVideo = Abs(j.value("source", ""), relativeTo);
     p.passesRoot = Abs(j.value("passes", ""), relativeTo);
@@ -66,6 +91,7 @@ Project Project::FromJson(const nlohmann::json& j, const std::filesystem::path& 
         e.name = s.value("name", "");
         e.enabled = s.value("enabled", true);
         e.params = s.value("params", nlohmann::json::object());
+        if (version < 2 && e.name == "nr") MigrateNrParamsV1(e.params);
         if (!e.name.empty()) p.stages.push_back(e);
     }
     if (p.stages.empty()) p.stages = DefaultStages();

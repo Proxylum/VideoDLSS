@@ -20,6 +20,10 @@ struct StageEntry {
     bool operator==(const StageEntry&) const = default;
 };
 
+// The project file format: 2 since TASK-0043 (nr.exposure in stops; version 1 files are migrated on load, older builds
+// refuse version 2).
+inline constexpr int kProjectSchemaVersion = 2;
+
 // Project file (*.dlssvid.json): source video, passes root, optional result video, stage
 // configs and the viewport state (ТЗ §6: «состояние вьюпорта сохраняется в проект»).
 struct Project {

@@ -56,6 +56,7 @@ void BuildStages(const std::string& projectFile, const std::string& stageList, c
         Project p = Project::Load(projectFile);
         o.stages = StagesFromProject(p);
         o.sourceHash = p.SourceHash();  // the project's cache: no rehash when the file is unchanged
+        if (o.sourceHash.empty()) o.sourceHash = p.sourceHash;  // the file is gone (moved): what the project last saw
         if (projectInput) *projectInput = p.sourceVideo;
         if (projectPasses) *projectPasses = p.passesRoot;
         if (projectResult) *projectResult = p.resultVideo;
@@ -137,6 +138,23 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     for (const auto& name : Split(a.force, ',')) o.forceStages.insert(name);
     o.input = !a.input.empty() ? std::filesystem::path(a.input) : projectInput;
     if (o.input.empty()) Throw("process: -i/--input (or --project with a source video) is required");
+    // --project P -i other.mp4: P's stages and encoder for another video. The hash, passes and result of P belong to P's
+    // video: before, the other file got P's cached hash, so P's passes were reused for it and P's result overwritten
+    // (TASK-0043). Another video is hashed itself and gets its own passes and result unless --passes / -o say otherwise;
+    // P's video moved elsewhere (the same content) stays P's.
+    if (!a.input.empty() && !projectInput.empty()) {
+        std::error_code ec;
+        const bool samePath = std::filesystem::equivalent(o.input, projectInput, ec) && !ec;
+        if (!samePath) {
+            const std::string inputHash = "sha256:" + Sha256FileCached(o.input);
+            if (inputHash != o.sourceHash) {  // also when the project knows no hash of its video: it cannot be told apart
+                Log()->info("process: {} is not the source of the project: its own hash, passes and result", o.input.string());
+                projectPasses.clear();
+                projectResult.clear();
+            }
+            o.sourceHash = inputHash;
+        }
+    }
     o.codec = !a.codecGiven && !projectCodec.empty() ? projectCodec : a.codec;  // the project's encoder unless --codec says otherwise
     o.output = !a.output.empty() ? std::filesystem::path(a.output) : projectResult;
     if (o.output.empty()) o.output = o.input.parent_path() / (o.input.stem().string() + "_result" + ResultExtensionFor(o.codec));

@@ -93,6 +93,56 @@ TEST_CASE("dlssvid process --project runs the saved stages and encodes the resul
     CHECK(RunCli({"process", "-i", clip.string(), "-o", (dir / "bad2.mkv").string(), "--warp", "--param", "nr=1"}).code != 0);
 }
 
+// A project as a preset for another video (TASK-0043, found while studying Visual Enhancer): the other file got the
+// project's cached source hash, so the project's passes were reused for it and its result was written over the project's.
+TEST_CASE("dlssvid process --project with another -i hashes that video and keeps the project's passes and result", "[integration][cli][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("project_other_input");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ClipSpec otherSpec = spec;
+    otherSpec.width = 64;  // other content
+    const auto other = WriteClip(dir / "other" / "other.mkv", otherSpec);
+    Project p = Project::Create(clip, dir / "passes");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.params["backend"] = "blend";
+    }
+    p.resultVideo = dir / "result.mkv";
+    REQUIRE(!p.SourceHash().empty());  // the GUI saves the hash of the video it opened
+    const auto projectFile = dir / "clip.dlssvid.json";
+    p.Save(projectFile);
+    REQUIRE(RunCli({"process", "--project", projectFile.string(), "--warp", "--codec", "ffv1"}).code == 0);
+    const auto resultTime = std::filesystem::last_write_time(dir / "result.mkv");
+    const std::string projectHash = Manifest::Load(dir / "passes" / "color_nr").sourceHash;
+    REQUIRE(!projectHash.empty());
+
+    const auto json = dir / "other.json";
+    const CliResult r = RunCli({"process", "--project", projectFile.string(), "-i", other.string(), "--warp", "--codec", "ffv1", "--json", json.string()});
+    CHECK(r.code == 0);
+    const nlohmann::json j = ReadJson(json);
+    for (const auto& s : j["stages"]) CHECK(s["status"] != "reused");  // before: every stage reused the project's passes
+    // its own result and passes next to it; the project's are untouched
+    const auto otherResult = dir / "other" / "other_result.mkv";
+    REQUIRE(std::filesystem::exists(otherResult));
+    CHECK(DecodeAll(otherResult).size() == 5);
+    const Manifest otherNr = Manifest::Load(dir / "other" / "other_result_passes" / "color_nr");
+    CHECK(otherNr.sourceHash != projectHash);
+    CHECK(otherNr.width == 128);  // 64 x2: the other video's frames
+    CHECK(std::filesystem::last_write_time(dir / "result.mkv") == resultTime);
+    CHECK(Manifest::Load(dir / "passes" / "color_nr").sourceHash == projectHash);
+
+    // the project's own video moved elsewhere (the old path is gone) is still the project's: its passes are reused
+    std::filesystem::rename(clip, dir / "moved.mkv");
+    const CliResult moved = RunCli({"process", "--project", projectFile.string(), "-i", (dir / "moved.mkv").string(), "--warp", "--codec", "ffv1",
+                                    "-o", (dir / "moved_result.mkv").string(), "--json", json.string()});
+    CHECK(moved.code == 0);
+    CHECK(ReadJson(json)["stages"][3]["status"] == "reused");  // nr
+}
+
 TEST_CASE("dlssvid process --passthrough and dlssvid bench", "[integration][cli][process]") {
     ClipSpec spec;
     spec.frames = 5;
