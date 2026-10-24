@@ -1124,6 +1124,30 @@ TEST_CASE("StageCard shows backend-scoped parameters only for their backend", "[
     CHECK(!form->isRowVisible(modelRow));
 }
 
+// TASK-0045: the slider stored v x step - 3 x 0.1 = 0.30000000000000004, 14 x 0.1 = 1.4000000000000001: one visible value
+// from the slider and from the JSON gave two fingerprints, and the plan read «Интенсивность 1.4 → 1.4».
+TEST_CASE("StageCard stores a slider value rounded to its step", "[app][card][regression]") {
+    App();
+    const auto d = Dir("card_quantize");
+    Project::Create(d / "missing.mp4", d / "passes").Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    dlssvid::StageCard card(model, "nr");
+    card.refresh();
+    auto* slider = card.findChild<QSlider*>();
+    REQUIRE(slider);
+    for (const int ticks : {3, 7, 14}) {
+        slider->setValue(ticks);
+        const dlssvid::StageEntry* e = model.stageEntry("nr");
+        REQUIRE(e);
+        const double v = e->params["intensity"].get<double>();
+        const double want = ticks / 10.0;  // the nearest double to the decimal the form shows
+        INFO(ticks << " ticks: " << nlohmann::json(v).dump());
+        CHECK(v == want);
+        CHECK(nlohmann::json(v).dump().size() <= 3);  // "0.3", "0.7", "1.4"
+    }
+}
+
 // TASK-0039: the VDA models in the depth card - Small / Base / Large for vda and worker:vda, hidden for DA3; a switch to
 // DA3 drops the VDA model from the project; an id the list does not name is shown as it is.
 TEST_CASE("StageCard lists the VDA models for VDA only and a switch to DA3 drops the VDA model", "[app][card][models]") {

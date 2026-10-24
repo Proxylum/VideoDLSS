@@ -25,6 +25,30 @@ TEST_CASE("CanonicalJson: key order and number spelling do not matter, types do"
     CHECK(CanonicalJson(nlohmann::json::object()) == "{}");
 }
 
+// TASK-0045: a slider stored 3 x 0.1 = 0.30000000000000004 - one visible value, two fingerprints. Floats are canonical to
+// 9 significant digits; a clean value prints as before, so the fingerprints made with it stay.
+TEST_CASE("CanonicalJson: noisy doubles collapse to the value they show, clean values keep their spelling", "[unit][fingerprint][regression]") {
+    CHECK(CanonicalJson({{"x", 0.1 * 3}}) == CanonicalJson({{"x", 0.3}}));
+    CHECK(CanonicalJson({{"x", 0.1 * 14}}) == CanonicalJson({{"x", 1.4}}));
+    for (const double clean : {0.3, 1.4, 0.25, 0.05, 2.5, -0.75, 0.1, 1000.5, 1e-6})
+        CHECK(CanonicalJson({{"x", clean}}) == nlohmann::json({{"x", clean}}).dump());  // the old canonical text
+    CHECK(CanonicalJson({{"x", 0.1 * 3}}) == R"({"x":0.3})");
+    CHECK(CanonicalJson({{"x", 2.0000000000000004}}) == R"({"x":2})");  // an integer after the rounding
+}
+
+// TASK-0045: the planner ignored params.dll_dir (no stage of process reads it), the fingerprint hashed the DLL in it.
+TEST_CASE("ToolForStage hashes the DLL the stage loads, not one named by params.dll_dir", "[unit][fingerprint][regression]") {
+    const std::filesystem::path dir = std::filesystem::path(DLSSVID_TEST_TMP) / "fingerprint" / "dll_dir";
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "nvngx_dlssnr.dll", std::ios::binary) << "a fake snippet " << dir.string();
+    std::ofstream(dir / "nvngx_dlss.dll", std::ios::binary) << "a fake dlss " << dir.string();
+    std::ofstream(dir / "nvngx_dlssg.dll", std::ios::binary) << "a fake dlssg " << dir.string();
+    for (const char* stage : {"nr", "upscale", "fg"}) {
+        INFO(stage);
+        CHECK(ToolForStage(stage, {{"dll_dir", dir.string()}}).dll == ToolForStage(stage, nlohmann::json::object()).dll);
+    }
+}
+
 TEST_CASE("ComputeFingerprint changes with every component and only with them", "[unit][fingerprint]") {
     ToolInfo tool;
     tool.app = "0.1.0";
@@ -162,6 +186,10 @@ TEST_CASE("Stage pass tables and timestamps", "[unit][fingerprint]") {
     CHECK(StageInputCandidates("flow") == std::vector<std::vector<std::string>>{{"depth_raw"}});
     CHECK(StageInputCandidates("fg").front() == std::vector<std::string>{"color_nr", "color_sr"});
     CHECK(StageInputCandidates("nr").size() == 7);
+    // TASK-0045: nr with the guides off reads no depth / mv - they are no inputs of its fingerprint
+    CHECK(StageInputCandidates("nr", {{"guides", false}}) == std::vector<std::vector<std::string>>{{"color_sr"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}});
+    CHECK(StageInputCandidates("nr", {{"guides", true}}).size() == 7);
+    CHECK(StageInputCandidates("fg", {{"guides", false}}).size() == 3);  // nr's key only
 
     CHECK(CompactTimestamp("2026-09-22T14:09:31Z") == "20260922-140931");
     CHECK(CompactTimestamp("yesterday").empty());

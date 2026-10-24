@@ -244,6 +244,30 @@ TEST_CASE("RunProcess: an nr pass made with the old linear exposure 0 is recompu
     CHECK(Report(RunProcess(o), "nr").status == "ran");  // nor adopted without a fingerprint
 }
 
+// TASK-0045: with the guides off nr reads no depth / mv, yet both were inputs of its fingerprint - a new depth recomputed it.
+TEST_CASE("RunProcess: an nr pass with the guides off is not recomputed when the depth changes", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("guides_off");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    ApplyParamSpec(o.stages, "nr.guides=false");
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    CHECK_FALSE(Manifest::Load(o.passesRoot / "color_nr").inputs.count("depth_dlss"));
+    ApplyParamSpec(o.stages, "depth.z_far=500");  // another depth_dlss
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "depth").status == "ran");
+    CHECK(Report(r, "nr").status == "reused");  // before: input_changed
+}
+
 TEST_CASE("RunProcess: --frames, passthrough, an unavailable nr stage and a run without colour stages", "[integration][process]") {
     ClipSpec spec;
     spec.frames = 6;

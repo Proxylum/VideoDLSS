@@ -21,6 +21,7 @@
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
+#include "pipeline/PassFingerprint.h"
 #include "pipeline/Pipeline.h"
 #include "ml/ModelRegistry.h"
 #include "stages/depth/DepthModels.h"
@@ -486,6 +487,7 @@ struct ImportArgs {
     int dilate = 1;
     bool writeManifest = false;
     bool yUp = false;  // the folder's motion vectors point y up (sets mv.y_up; read with v negated)
+    bool stamp = false;  // fingerprint the content into the manifest (masks: a re-import with other content recomputes NR)
 };
 
 int ConvertFolder(const PassReader& in, const std::string& outDir, PassKind toKind, const ImportArgs& a);
@@ -510,6 +512,11 @@ int CmdImport(const ImportArgs& a) {
     if (a.writeManifest && !r.HadManifest()) {
         r.Man().Save(r.Dir());
         Log()->info("manifest.json written to {}", r.Dir().string());
+    }
+    if (a.stamp) {  // after --write-manifest: a folder without one gets it with the fingerprint
+        r.Man().fingerprint = ContentFingerprint(r.Dir(), r.Man());
+        r.Man().Save(r.Dir());
+        std::printf("fingerprint: %s\n", r.Man().fingerprint.c_str());
     }
     const auto kind = r.Man().Kind();
     if (!a.toDlss.empty()) {
@@ -704,6 +711,7 @@ int main(int argc, char** argv) {
     imp->add_option("--to-dlss", ia.toDlss, "write depth_dlss / mv_dlss into this folder");
     imp->add_option("--to-raw", ia.toRaw, "write depth_raw / mv_raw into this folder");
     imp->add_flag("--write-manifest", ia.writeManifest, "write manifest.json for a folder that has none");
+    imp->add_flag("--stamp", ia.stamp, "fingerprint the frames' content into the manifest (re-import of a mask with other content recomputes the stages that read it)");
 
     ConvertArgs ca;
     auto* conv = app.add_subcommand("convert", "convert a pass between raw and DLSS conventions");

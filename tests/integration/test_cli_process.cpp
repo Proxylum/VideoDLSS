@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -13,6 +14,7 @@
 
 #include "TestClips.h"
 #include "passes/Manifest.h"
+#include "passes/PassSequence.h"
 #include "util/Subprocess.h"
 #include "viewport/Project.h"
 
@@ -141,6 +143,43 @@ TEST_CASE("dlssvid process --project with another -i hashes that video and keeps
                                     "-o", (dir / "moved_result.mkv").string(), "--json", json.string()});
     CHECK(moved.code == 0);
     CHECK(ReadJson(json)["stages"][3]["status"] == "reused");  // nr
+}
+
+// TASK-0045: an imported mask has no fingerprint, it stands for its source and length - a mask re-imported with other
+// content and as many frames reused the NR pass made from the old one. `import --stamp` fingerprints the content.
+TEST_CASE("dlssvid import --stamp: a mask re-imported with other content recomputes NR", "[integration][cli][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("mask_stamp");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const auto passes = dir / "passes";
+    auto writeMask = [&](uint8_t value) {
+        PassWriter w(passes / "mask_skin", Manifest::ForPass(PassKind::Mask, 16, 8, FileFormat::Png));
+        for (int64_t f = 0; f < 2; ++f) {
+            PassImage m = MakePassImage(PassKind::Mask, 16, 8, PixelType::U8);
+            std::fill(m.data.begin(), m.data.end(), value);
+            w.WriteFrame(f, m);
+        }
+        w.Finish();
+    };
+    const std::vector<std::string> process{"process", "-i", clip.string(), "-o", (dir / "result.mkv").string(), "--passes", passes.string(), "--warp", "--codec", "ffv1",
+                                           "--stages", "nr", "--nr-backend", "stub", "--json", (dir / "r.json").string()};
+    writeMask(255);
+    REQUIRE(RunCli({"import", "-i", (passes / "mask_skin").string(), "--stamp"}).code == 0);
+    const std::string stamped = Manifest::Load(passes / "mask_skin").fingerprint;
+    CHECK(stamped.rfind("sha256:", 0) == 0);
+    REQUIRE(RunCli(process).code == 0);
+    REQUIRE(RunCli(process).code == 0);
+    CHECK(ReadJson(dir / "r.json")["stages"][0]["status"] == "reused");
+    writeMask(64);  // other content, the same frames
+    REQUIRE(RunCli({"import", "-i", (passes / "mask_skin").string(), "--stamp"}).code == 0);
+    CHECK(Manifest::Load(passes / "mask_skin").fingerprint != stamped);
+    REQUIRE(RunCli(process).code == 0);
+    const nlohmann::json j = ReadJson(dir / "r.json");
+    CHECK(j["stages"][0]["status"] == "ran");
+    CHECK(j["stages"][0]["reason"].get<std::string>().find("input") != std::string::npos);
 }
 
 TEST_CASE("dlssvid process --passthrough and dlssvid bench", "[integration][cli][process]") {

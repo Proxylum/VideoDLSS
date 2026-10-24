@@ -241,7 +241,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     d.outputs = StageOutputPasses(name, p);
     d.outDir = ctx.root / d.outputs.back();
     std::vector<std::string> inputsRan;
-    for (const auto& group : StageInputCandidates(name))
+    for (const auto& group : StageInputCandidates(name, p))
         for (const auto& cand : group) {
             const auto it = state.fp.find(cand);
             if (it == state.fp.end()) continue;
@@ -489,6 +489,8 @@ Prepared Prepare(const ProcessOptions& options) {
 
 // Licence and VRAM advice of a depth decision (TASK-0039). An error only for a run: a reused or restored pass needs no GPU.
 void AdviseStage(const RunContext& ctx, StageDecision& d) {
+    if ((d.name == "upscale" || d.name == "nr" || d.name == "fg") && d.params.contains("dll_dir"))
+        d.warnings.push_back(d.name + ".dll_dir is ignored by process: the DLL comes from DLSSVID_NVIDIA_DLL_DIR, <exe>/nvidia or <exe>");
     if (d.name != "depth") return;
     const std::string backend = Get<std::string>(d.params, "backend", "da3");
     if (DepthFamilyOf(backend).empty()) return;

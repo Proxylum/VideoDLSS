@@ -8,6 +8,8 @@
 
 namespace dlssvid {
 
+struct Manifest;
+
 // The «app» part of the tool in a pass fingerprint. It is NOT the release version (DLSSVID_VERSION): a release that
 // changes nothing in what a stage writes must not invalidate every pass on disk. Bump it only when a stage's output
 // changes for the same parameters, inputs, model and DLL (a new tonemap, a different NIS, …) in every stage; when one
@@ -74,8 +76,15 @@ const std::vector<std::string>& StageFamilyPasses(const std::string& stage);
 // The stage that writes a pass folder ("" for masks and unknown names).
 std::string StageForPass(const std::string& pass);
 // Pass folders a stage reads when they exist: one group per input, the first existing member of a group is the one
-// used (fg: color_nr, else color_sr) — mirrors ExistingPass() in ProcessRunner.
-std::vector<std::vector<std::string>> StageInputCandidates(const std::string& stage);
+// used (fg: color_nr, else color_sr) — mirrors ExistingPass() in ProcessRunner. With the stage's (effective) parameters:
+// nr with guides off reads no depth_dlss / mv_dlss, so they are no inputs of its fingerprint (TASK-0045: a new depth
+// recomputed an NR pass that never read it).
+std::vector<std::vector<std::string>> StageInputCandidates(const std::string& stage, const nlohmann::json& params = nlohmann::json::object());
+
+// The fingerprint of an imported pass from its content (`dlssvid import --stamp`, TASK-0045): "sha256:" of the canonical
+// {"pass", "frames": [sha256 of each frame file]}. A pass without a fingerprint stands for its source and length only, so
+// a mask re-imported with other content and the same frame count reused the NR pass made from the old one.
+std::string ContentFingerprint(const std::filesystem::path& dir, const Manifest& manifest);
 
 // Current UTC time as ISO-8601 ("2026-09-22T14:09:31Z") — the manifest's `created`.
 std::string NowIso8601();
