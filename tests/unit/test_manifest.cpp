@@ -103,6 +103,13 @@ TEST_CASE("File formats parse and map to extensions", "[passes][manifest]") {
     CHECK(ParseFileFormat("xyz") == std::nullopt);
     CHECK(FormatFromExtension("a/b_000001.EXR") == FileFormat::Exr);
     CHECK(FormatFromExtension("x.rg16f") == FileFormat::Raw);
+    // TASK-0044: every raw name ExtensionFor gives - a colour pass in raw (.rgb16f) could not be written
+    for (PixelType t : {PixelType::U8, PixelType::U16, PixelType::F16, PixelType::F32})
+        for (size_t c = 1; c <= 4; ++c) {
+            INFO(ExtensionFor(FileFormat::Raw, t, c));
+            CHECK(FormatFromExtension("x" + ExtensionFor(FileFormat::Raw, t, c)) == FileFormat::Raw);
+        }
+    CHECK(FormatFromExtension("x.rgbx16f") == std::nullopt);
     CHECK(FormatFromExtension("x.txt") == std::nullopt);
     CHECK(ToString(FileFormat::Png) == "png16");
 }

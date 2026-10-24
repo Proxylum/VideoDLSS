@@ -190,7 +190,7 @@ int CmdFg(const FgCommands::FgArgs& a) {
     o.requireDriver = !a.skipDriverCheck;
     o.outputDir = a.output;
     const auto fmt = ParseFileFormat(a.format);
-    if (!fmt || (*fmt != FileFormat::Exr && *fmt != FileFormat::Png)) Throw("--format must be exr|png16");
+    if (!fmt) Throw("--format must be exr | png16 | tiff | npz | raw");  // what the schema offers (TASK-0044: exr | png16 only)
     o.format = *fmt;
     o.videoOut = a.video;
     o.videoCodec = a.codec;
@@ -241,7 +241,7 @@ void FgCommands::Register(CLI::App& app) {
     fg_->add_flag("--fp32", fa_.fp32, "rife: fp32 engine");
     fg_->add_option("--models-dir,--models_dir", fa_.modelsDir, "folder with registry.json (default: auto)");
     fg_->add_option("--backbuffer-format,--backbuffer_format", fa_.backbufferFormat, "dlssg: rgba16f | rgba8 (rgba8 is tried automatically when rgba16f is refused)")->default_val("rgba16f");
-    fg_->add_option("--format", fa_.format, "exr | png16")->default_val("exr");
+    fg_->add_option("--format", fa_.format, "exr | png16 | tiff | npz | raw")->default_val("exr");
     fg_->add_option("--video", fa_.video, "also encode the result into this video file at fps x multiplier (no audio)");
     fg_->add_option("--codec", fa_.codec, "encoder for --video: h264_nvenc | hevc_nvenc | av1_nvenc | ffv1")->default_val("h264_nvenc");
     fg_->add_option("--frames", fa_.frames, "process at most N input frames")->default_val(-1);

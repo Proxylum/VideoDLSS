@@ -98,10 +98,10 @@ int ParseNrStyle(const std::string& s) {
     try {
         size_t pos = 0;
         const int v = std::stoi(s, &pos);
-        if (pos == s.size() && v >= 0 && v <= 15) return v;
+        if (pos == s.size() && v >= 0 && v <= 6) return v;  // 3..6: experimental (TASK-0044: was 0..15)
     } catch (...) {
     }
-    Throw("nr: --style must be natural | cinematic | default | 0..15 (got '" + s + "')");
+    Throw("nr: --style must be natural | cinematic | default | 3..6 (got '" + s + "')");
 }
 
 NrAvailability NrAvailable(const std::string& backend, const std::filesystem::path& dllDir) {

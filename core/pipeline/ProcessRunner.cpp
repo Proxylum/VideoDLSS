@@ -568,11 +568,18 @@ void ApplyParamSpec(std::vector<ProcessStage>& stages, const std::string& spec) 
     const auto& order = ProcessStageOrder();
     if (std::find(order.begin(), order.end(), stage) == order.end()) Throw("--param: unknown stage '" + stage + "' (depth | flow | upscale | nr | fg)");
     nlohmann::json v;
-    try {
-        v = nlohmann::json::parse(value);
-        if (!(v.is_number() || v.is_boolean())) v = value;
-    } catch (...) {
+    // a key the schema knows as text stays text: --param nr.style=4 is the style "4", not the number 4 (TASK-0044)
+    const StageSchema* schema = FindStageSchema(stage);
+    const ParamSpec* keySpec = schema ? schema->Find(key) : nullptr;
+    if (keySpec && (keySpec->type == ParamType::Enum || keySpec->type == ParamType::String)) {
         v = value;
+    } else {
+        try {
+            v = nlohmann::json::parse(value);
+            if (!(v.is_number() || v.is_boolean())) v = value;
+        } catch (...) {
+            v = value;
+        }
     }
     for (auto& s : stages)
         if (s.name == stage) {

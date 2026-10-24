@@ -128,6 +128,33 @@ TEST_CASE("NormalizeStageParams: aliases take the schema's key; validation and t
           ComputeFingerprint("nr", "sha256:x", EffectiveStageParams("nr", {{"skin_blend", 0.5}}), {}, ToolInfo{}, "").value);
 }
 
+// TASK-0044: the experimental styles 3..6 were reachable from the standalone CLI only - the schema refused them and
+// `--param nr.style=4` became the number 4.
+TEST_CASE("NR styles: the named ones and 3..6; numbers and 0..2 take the schema's string", "[unit][schema][nr][regression]") {
+    for (const char* s : {"natural", "cinematic", "default", "3", "4", "5", "6"}) CHECK(ValidateStageParams("nr", {{"style", s}}).empty());
+    CHECK_FALSE(ValidateStageParams("nr", {{"style", "7"}}).empty());
+    CHECK_FALSE(ValidateStageParams("nr", {{"style", "vivid"}}).empty());
+    CHECK(NormalizeStageParams("nr", {{"style", 4}}) == nlohmann::json{{"style", "4"}});
+    CHECK(NormalizeStageParams("nr", {{"style", "1"}}) == nlohmann::json{{"style", "natural"}});
+    CHECK(NormalizeStageParams("nr", {{"style", 0}}) == nlohmann::json{{"style", "default"}});
+    CHECK(ValidateStageParams("nr", {{"style", 4}}).empty());
+    std::vector<ProcessStage> stages = DefaultProcessStages();
+    ApplyParamSpec(stages, "nr.style=4");
+    ApplyParamSpec(stages, "nr.intensity=1.5");
+    for (const auto& s : stages)
+        if (s.name == "nr") {
+            CHECK(s.params["style"] == "4");        // text: the schema's Enum
+            CHECK(s.params["intensity"] == 1.5);    // a number stays a number
+        }
+    // the options a run validates name the style by its schema value
+    NrStageOptions o;
+    o.style = "Cinematic";
+    CHECK(NrParamsFromOptions(o)["style"] == "cinematic");
+    o.style = "5";
+    CHECK(NrParamsFromOptions(o)["style"] == "5");
+    CHECK(ValidateStageParams("nr", NrParamsFromOptions(NrStageOptions{})).empty());
+}
+
 // TASK-0043: flow.hwaccel was hashed as "cuda" for searaft / stub, which decode on the CPU: it belongs to OFA alone.
 TEST_CASE("flow.hwaccel belongs to the OFA backend", "[unit][schema][regression]") {
     CHECK(EffectiveStageParams("flow", nlohmann::json::object())["hwaccel"] == "cuda");

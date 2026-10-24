@@ -35,7 +35,16 @@ std::optional<FileFormat> FormatFromExtension(const std::filesystem::path& p) {
     if (ext == "png") return FileFormat::Png;
     if (ext == "tif" || ext == "tiff") return FileFormat::Tiff;
     if (ext == "npz" || ext == "npy") return FileFormat::Npz;
-    if (ext == "r32" || ext == "rg16f" || ext == "r16f" || ext == "rg32f" || ext == "r8" || ext == "bin") return FileFormat::Raw;
+    if (ext == "r32" || ext == "bin") return FileFormat::Raw;
+    // every name ExtensionFor gives a raw dump of 1..4 channels: r | rg | rgb | rgba, then 8 | 16 | 16f | 32f (TASK-0044:
+    // a colour pass in raw, .rgb16f, could not be written - the extension was not known)
+    std::string_view rest = ext;
+    if (rest.rfind("rgba", 0) == 0) rest.remove_prefix(4);
+    else if (rest.rfind("rgb", 0) == 0) rest.remove_prefix(3);
+    else if (rest.rfind("rg", 0) == 0) rest.remove_prefix(2);
+    else if (rest.rfind("r", 0) == 0) rest.remove_prefix(1);
+    else return std::nullopt;
+    if (rest == "8" || rest == "16" || rest == "16f" || rest == "32f") return FileFormat::Raw;
     return std::nullopt;
 }
 

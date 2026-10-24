@@ -92,8 +92,11 @@ TEST_CASE("NR styles, backends and availability messages", "[nr][unit]") {
     CHECK(ParseNrStyle("cinematic") == 2);
     CHECK(ParseNrStyle("default") == 0);
     CHECK(ParseNrStyle("4") == 4);
+    CHECK(ParseNrStyle("6") == 6);
+    CHECK(ParseNrStyle("Natural") == 1);
     CHECK_THROWS(ParseNrStyle("vivid"));
     CHECK_THROWS(ParseNrStyle("99"));
+    CHECK_THROWS(ParseNrStyle("7"));  // TASK-0044: 0..6 only (3..6 experimental); 7..15 were taken by the CLI alone
     CHECK(NrBackends() == std::vector<std::string>{"ngx", "stub"});
     CHECK(NrAvailable("stub").available);
     const NrAvailability bogus = NrAvailable("bogus");

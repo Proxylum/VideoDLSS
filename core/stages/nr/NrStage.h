@@ -66,6 +66,9 @@ struct NrStageOptions {
 // The project's stage parameters (schema keys, also the kebab-case aliases a standalone run passes) onto the options;
 // absent keys keep what `o` has. The schema's defaults are these options' defaults (test_param_schema).
 void ApplyNrParams(const nlohmann::json& params, NrStageOptions& o);
+// The inverse: the options as schema parameters (the style by its schema name), what NrStage::Init validates against the
+// schema - one check for the standalone `dlssvid nr` and for `process` (TASK-0044: `--intensity 5` reached NGX).
+nlohmann::json NrParamsFromOptions(const NrStageOptions& o);
 
 class NrStage final : public IStage {
 public:
