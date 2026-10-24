@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
@@ -114,6 +115,14 @@ const std::vector<ParamChoice>* FormChoicesFor(const ParamSpec& spec, const std:
 // backend's form list that the new backend's list does not have is dropped (vda + metric-vda-large -> da3 leaves no VDA
 // model), and so is a value that is not in the new backend's list; "" stays. The backend key itself is not changed.
 nlohmann::json ParamsForBackendChange(const std::string& stage, const nlohmann::json& params, const std::string& newBackend);
+// A file of one stage's settings (dlssvid nr --params-file; process --param-file later, PR-9): one JSON object under the
+// schema's keys, as a project's stages.<stage>.params, aliases normalised (NormalizeStageParams). Keys the schema does not
+// have are removed and named in `dropped` - the caller refuses them: the stages ignore unknown keys, so a typo, or an A/B
+// flag of `dlssvid nr` written into the file, would pass silently (TASK-0047). Values are not validated here: the caller
+// validates what runs, the file merged with the options given. Throws: unreadable or broken JSON, not an object, a preset
+// file (its envelope comes with PR-9), larger than 1 MiB.
+nlohmann::json ReadStageParamsFile(const std::string& stage, const std::filesystem::path& path, std::vector<std::string>* dropped = nullptr);
+
 // How the card shows one row for the stage's parameters and the plan's inputs (TASK-0046).
 struct ParamRowState {
     bool visible = true;

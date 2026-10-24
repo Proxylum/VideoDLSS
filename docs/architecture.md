@@ -430,6 +430,12 @@ INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминир�
   `--model-scale` — модель на уменьшенном/увеличенном прокси, `NrCompose` переносит правку на полный кадр. Недоступный
   бэкенд: CLI — ошибка с инструкцией (код 1); пайплайн (`disableWhenUnavailable`) — стадия отключается с предупреждением,
   кадры идут дальше без `color_nr` (ТЗ §4).
+- Отрезок и настройки отдельного прогона `dlssvid nr` (TASK-0047, спецификация §2f/§2h): `NrStageOptions::writeFrom` —
+  кадры прогрева проходят модель и фильтр мерцания, но ничего не выводят (ни пасса, ни видео, ни слота); writer и encoder
+  открываются на первом выводимом кадре. CLI перематывает декодер на F−K (`SeekToFrame`), `RunNr` декодирует с текущей
+  позиции; покрытие входных пассов проверяется до запуска. Настройки: умолчания схемы < `--params-file`
+  (`ReadStageParamsFile`, только ключи схемы) < опции с `CLI::Option::count() > 0`, одна проверка схемой. `--check` создаёт
+  фичу через тот же `NrConfigFromOptions`, что и стадия. `PassComplete` требует `first_frame == 0`.
 - `NrPatch` / `dlssvid nr-patch`: обёртка внешнего dlssnr-patcher (GPLv2 — не вендорится): python, скрипт
   (`--patcher`, `DLSSNR_PATCHER_ROOT`, `tools/dlssnr-patcher`), CUDA 13.3 (`--cuda-bin`, `CUDA_PATH_V13_3`), SHA-256 входа и
   результата, `bin/nvidia/nvngx_dlssnr.dll` + сайдкар `*.patch.json` (что и чем пропатчено). GUI: кнопка «Пропатчить DLL…».
@@ -608,6 +614,7 @@ PlanProcess / RunProcess ── для каждой включённой ста�
 | `NrCompose` (`--temporal`) | **temporal-фильтр**: смешивание с предыдущим выходом, смещённым по `mv_dlss`, с порогом по разности цвета и весом правки | мерцание пропатченных DLL (ТЗ §4 «известная проблема»); опция, по умолчанию выключена | когда guides уберут мерцание |
 | `StubNrBackend` | детерминированная «правка» (локальный контраст + тон) вместо модели | стадия, resolve, маски, temporal и pass count тестируются на WARP без DLL; в продукте только явно `--backend stub`, без fallback | — (остаётся тестовым бэкендом) |
 | `NrStage::Process` | результат читается на CPU (readback) для записи пасса и заново грузится в слот; guides и маски грузятся с диска каждый кадр | простота; как в `UpscaleStage` | этап 8: слот → слот без CPU |
+| `dlssvid nr --start` | перемотка по pts с частотой потока (`SeekToFrame`) — верно только для постоянной частоты кадров; VFR не распознаётся | превью и A/B на отрезке нужны раньше, чем детекция VFR | строка матрицы `media-vfr` и отказ в превью PR-10 |
 | `INrBackend` (драйвер) | версия драйвера NVIDIA из UMD-версии DXGI (`CheckInterfaceSupport`), а не из NVAPI | NVAPI не подключён; формула `(subversion mod 10)·100 + build/100` проверена на 591.86 | при подключении NVAPI |
 | `DlssgFrameGenerator` (камера) | **синтетические константы камеры** для DLSS-G: перспектива FOV 60°, near 0.1 / far 1000 (`BuildFgCamera`), `clipToPrevClip = prevClipToClip = I`, `cameraMotionIncluded = 1`, `menuDetectionEnabled = 0`, `motionVectorsInvalidValue = FLT_MAX` | у видео нет камеры; всё движение — в `mv_dlss`, как у DLSS5-Feeder для игр без DLSS | если модель заметно выиграет от оценки движения камеры (этап 8: оценка из MV) |
 | `DlssgFrameGenerator` (backbuffer) | цвет подаётся как `R16G16B16A16_FLOAT` с `ColorBuffersHDR = 0`; при `FAIL_UnsupportedFormat` — копия в `R8G8B8A8_UNORM` через `Resampler` | руководство описывает display-ready SDR/HDR10; RGBA16F [0,1] приняты на Ada | — |

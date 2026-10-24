@@ -1,9 +1,12 @@
 #include "NrCommands.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <set>
 #include <sstream>
+#include <vector>
 
 #include "gpu/D3D12Device.h"
 #include "io/VideoDecoder.h"
@@ -47,70 +50,16 @@ void PrintDiagnostics(const NrDiagnostics& d, const std::string& error) {
     else std::printf("status:       FAILED: %s\n", !d.hint.empty() ? d.hint.c_str() : error.c_str());
 }
 
-int CmdNrCheck(const NrCommands::NrArgs& a) {
-    {  // the values --check hands the backend are checked as a processing run checks them (review of TASK-0044)
-        NrStageOptions o;
-        o.backend = a.backend;
-        o.style = a.style;
-        o.intensity = a.intensity;
-        o.preset = a.preset;
-        if (const auto problems = ValidateStageParams("nr", NrParamsFromOptions(o)); !problems.empty()) {
-            std::string all;
-            for (const auto& p : problems) all += (all.empty() ? "" : "; ") + p;
-            Throw("nr: " + all);
-        }
-    }
-    D3D12Device device({a.warp, false});
-    std::unique_ptr<INrBackend> backend = CreateNrBackend(a.backend);
-    NrConfig cfg;
-    cfg.backend = a.backend;
-    ParseSize(a.checkSize, cfg.width, cfg.height);
-    cfg.dllDir = a.dllDir;
-    cfg.paramsBlock = a.paramsBlock;
-    cfg.requireDriver = !a.skipDriverCheck;
-    cfg.style = ParseNrStyle(a.style);
-    cfg.intensity = a.intensity;
-    cfg.preset = a.preset;
-    std::string error;
-    try {
-        backend->Init(device, cfg);
-    } catch (const std::exception& e) {
-        error = e.what();
-    }
-    const NrDiagnostics d = backend->Diagnostics();
-    backend->Shutdown();
-    PrintDiagnostics(d, error);
-    if (!a.json.empty()) {
-        nlohmann::json j = d.ToJson();
-        j["error"] = error;
-        std::ofstream(a.json) << j.dump(2) << "\n";
-    }
-    return d.ok ? 0 : 1;
+std::string Join(const std::vector<std::string>& items, const char* sep = "; ") {
+    std::string all;
+    for (const auto& s : items) all += (all.empty() ? "" : sep) + s;
+    return all;
 }
 
-int CmdNr(const NrCommands::NrArgs& a) {
-    if (a.check) return CmdNrCheck(a);
-    if (a.input.empty()) Throw("nr: -i/--input is required (or --check)");
-    if (a.output.empty()) Throw("nr: -o/--output is required");
-    VideoDecoder decoder(a.input);
-    const auto& info = decoder.Info();
+// Every option of an nr setting as the schema spells it, defaults included; ResolveNrParams keeps the given ones.
+nlohmann::json ArgsAsParams(const NrCommands::NrArgs& a) {
     NrStageOptions o;
     o.backend = a.backend;
-    // pass folders produced by the earlier stages live under the same root: pick them up unless told otherwise
-    auto autoDir = [&](const std::string& given, const char* name) -> std::filesystem::path {
-        if (!given.empty()) return given;
-        if (a.noAuto) return {};
-        const auto d = std::filesystem::path(a.output) / name;
-        if (std::filesystem::exists(d / Manifest::kFileName)) {
-            Log()->info("nr: using {}", d.string());
-            return d;
-        }
-        return {};
-    };
-    o.colorDir = autoDir(a.colorDir, "color_sr");
-    o.depthDir = autoDir(a.depthDir, "depth_dlss");
-    o.mvDir = autoDir(a.mvDir, "mv_dlss");
-    o.masksDir = !a.masksDir.empty() ? std::filesystem::path(a.masksDir) : a.noAuto ? std::filesystem::path() : std::filesystem::path(a.output);
     o.intensity = a.intensity;
     o.style = a.style;
     o.preset = a.preset;
@@ -129,30 +78,175 @@ int CmdNr(const NrCommands::NrArgs& a) {
     o.tonemap.curve = a.tonemap;
     o.tonemap.inputTransfer = a.inputTransfer;
     o.tonemap.exposureEv = a.exposure;
+    nlohmann::json p = NrParamsFromOptions(o);  // the style by its schema name, guides from --no-guides
+    const auto fmt = ParseFileFormat(a.format);
+    if (!fmt) Throw("--format must be exr | png16 | tiff | npz | raw");  // what the schema offers (TASK-0044: exr | png16 only)
+    p["format"] = *fmt == FileFormat::Png ? std::string("png") : std::string(ToString(*fmt));  // the schema's choice: ToString says png16
+    return p;
+}
+
+// The run's nr settings (spec §2h): the schema's defaults < --params-file < the options given on the command line. «Given» is
+// CLI::Option::count() > 0, not «differs from the default»: `--temporal 0` over a file with 0.4 turns the filter off. The keys
+// come from the schema, so a new key cannot be forgotten here (TASK-0047).
+nlohmann::json ResolveNrParams(const NrCommands::NrArgs& a, const CLI::App& cmd) {
+    nlohmann::json params = nlohmann::json::object();
+    if (!a.paramsFile.empty()) {
+        std::vector<std::string> dropped;
+        params = ReadStageParamsFile("nr", a.paramsFile, &dropped);
+        // refused, not skipped: a typo, or an option of the run written into the file, would change nothing and say nothing -
+        // an A/B variant would compare two equal runs
+        static const std::set<std::string> options{"start", "warmup", "frames", "mv_scale", "create_with_mv", "depth_guide", "no_depth_guide", "check",
+                                                    "check_size", "video", "codec", "dll_dir", "params_block"};
+        std::vector<std::string> problems;
+        for (std::string k : dropped) {
+            std::replace(k.begin(), k.end(), '-', '_');
+            problems.push_back(options.count(k) ? "'" + k + "' is an option of dlssvid nr, not a setting: give it on the command line"
+                                                : "'" + k + "' is not an nr setting (stages.nr.params keys)");
+        }
+        if (!problems.empty()) Throw("nr: --params-file " + a.paramsFile + ": " + Join(problems));
+    }
+    const nlohmann::json all = ArgsAsParams(a);
+    for (const ParamSpec& p : FindStageSchema("nr")->params) {
+        // each key has an option under its snake spelling (test_cli: every schema key in --help), guides as --no_guides / --guides
+        const CLI::Option* opt = cmd.get_option_no_throw(p.key == "guides" ? "--no_guides" : "--" + p.key);
+        if (!opt) Throw("nr: internal: the setting '" + p.key + "' has no option");
+        if (opt->count() > 0) params[p.key] = all.at(p.key);
+    }
+    // the file's values and the flags by one schema, before anything opens the GPU (a wrong JSON type: a message, not type_error)
+    if (const auto problems = ValidateStageParams("nr", params); !problems.empty()) Throw("nr: " + Join(problems));
+    return params;
+}
+
+// --start F --frames N --warmup K (spec §2f): decode from F-K so the model (Reset there) and the temporal filter build their
+// history, write F..F+N-1. Indices are those of the pass folders and the viewport. SeekToFrame maps them to pts at the
+// stream's rate, i.e. assumes a constant frame rate: VFR is not detected yet (matrix media-vfr; PR-10 refuses it).
+struct NrRange {
+    int64_t first = 0, warmup = 0, from = 0, maxFrames = -1;  // maxFrames: frames to decode, -1 to the end
+    bool Ranged() const { return first > 0; }
+};
+
+// The frames a pass folder has against the frames the run reads: a missing colour frame stops the run after the model's
+// start-up, a missing guide frame silently drops that guide - an A/B would compare different inputs.
+void CheckCoverage(const std::filesystem::path& dir, const char* what, int64_t from, int64_t last, bool required) {
+    if (dir.empty() || !Manifest::Exists(dir)) return;
+    const Manifest m = Manifest::Load(dir);
+    if (m.firstFrame <= from && (last < 0 || m.lastFrame >= last)) return;
+    const std::string text = std::string(what) + " " + dir.string() + " has frames " + std::to_string(m.firstFrame) + ".." + std::to_string(m.lastFrame) +
+                             ", the run reads " + std::to_string(from) + ".." + (last < 0 ? std::string("the end") : std::to_string(last));
+    if (required) Throw("nr: " + text);
+    Log()->warn("nr: {}; frames outside go without it", text);
+}
+
+NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStageOptions& o) {
+    NrRange r;
+    r.first = a.start;
+    r.warmup = std::min(a.warmup, a.start);  // nothing before the clip's first frame
+    if (r.warmup < a.warmup) Log()->info("nr: --warmup {} shortened to {}: the clip starts at frame 0", a.warmup, r.warmup);
+    r.from = r.first - r.warmup;
+    r.maxFrames = a.frames >= 0 ? r.warmup + a.frames : -1;
+    o.writeFrom = r.first;
+    if (!r.Ranged()) return r;
+    if (const int64_t n = decoder.Info().frameCount; n > 0 && r.first >= n)
+        Throw("nr: --start " + std::to_string(r.first) + " is past the end of the clip (" + std::to_string(n) + " frames)");
+    // a range replaces color_nr with a part of the clip: never over the pass of a processed project (it has a fingerprint) -
+    // the project would lose it; a range goes under its own -o with --color-dir / --depth-dir / --mv-dir / --masks-dir
+    if (const auto out = o.outputDir / "color_nr"; Manifest::Exists(out)) {
+        std::string fp;
+        try {
+            fp = Manifest::Load(out).fingerprint;
+        } catch (const std::exception&) {
+        }
+        if (!fp.empty())
+            Throw("nr: " + out.string() + " is the pass of a processed project; write the range under another -o (inputs with --color-dir / --depth-dir / " +
+                  "--mv-dir / --masks-dir)");
+    }
+    const int64_t last = a.frames > 0 ? r.first + a.frames - 1 : -1;
+    CheckCoverage(o.colorDir, "the colour pass", r.from, last, true);
+    if (o.useGuides) {
+        CheckCoverage(o.depthDir, "the depth pass", r.from, last, false);
+        CheckCoverage(o.mvDir, "the motion-vector pass", r.from, last, false);
+    }
+    if (r.from > 0) {
+        Log()->info("nr: frames from {} through the model (warm-up {}), written from {}; the seek assumes a constant frame rate", r.from, r.warmup, r.first);
+        if (!decoder.SeekToFrame(r.from)) Throw("nr: --start " + std::to_string(r.first) + " is past the end of " + a.input);
+    }
+    return r;
+}
+
+int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
+    // the values were checked with the run's (ResolveNrParams); the feature is created with the run's tuning at --check-size
+    D3D12Device device({a.warp, false});
+    std::unique_ptr<INrBackend> backend = CreateNrBackend(o.backend);
+    uint32_t w = 0, h = 0;
+    ParseSize(a.checkSize, w, h);
+    const NrConfig cfg = NrConfigFromOptions(o, w, h);
+    std::string error;
+    try {
+        backend->Init(device, cfg);
+    } catch (const std::exception& e) {
+        error = e.what();
+    }
+    const NrDiagnostics d = backend->Diagnostics();
+    backend->Shutdown();
+    PrintDiagnostics(d, error);
+    if (!a.json.empty()) {
+        nlohmann::json j = d.ToJson();
+        j["error"] = error;
+        std::ofstream(a.json) << j.dump(2) << "\n";
+    }
+    return d.ok ? 0 : 1;
+}
+
+int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
+    const nlohmann::json params = ResolveNrParams(a, cmd);
+    NrStageOptions o;
+    ApplyNrParams(params, o);  // keys not given keep the options' defaults - the schema's (test_param_schema)
     o.paramsBlock = a.paramsBlock;
     o.requireDriver = !a.skipDriverCheck;
     o.dllDir = a.dllDir;
+    if (a.check) return CmdNrCheck(a, o);
+    if (a.input.empty()) Throw("nr: -i/--input is required (or --check)");
+    if (a.output.empty()) Throw("nr: -o/--output is required");
+    VideoDecoder decoder(a.input);
+    const auto& info = decoder.Info();
+    // pass folders produced by the earlier stages live under the same root: pick them up unless told otherwise
+    auto autoDir = [&](const std::string& given, const char* name) -> std::filesystem::path {
+        if (!given.empty()) return given;
+        if (a.noAuto) return {};
+        const auto d = std::filesystem::path(a.output) / name;
+        if (std::filesystem::exists(d / Manifest::kFileName)) {
+            Log()->info("nr: using {}", d.string());
+            return d;
+        }
+        return {};
+    };
+    o.colorDir = autoDir(a.colorDir, "color_sr");
+    o.depthDir = autoDir(a.depthDir, "depth_dlss");
+    o.mvDir = autoDir(a.mvDir, "mv_dlss");
+    o.masksDir = !a.masksDir.empty() ? std::filesystem::path(a.masksDir) : a.noAuto ? std::filesystem::path() : std::filesystem::path(a.output);
     o.outputDir = a.output;
-    const auto fmt = ParseFileFormat(a.format);
-    if (!fmt) Throw("--format must be exr | png16 | tiff | npz | raw");  // what the schema offers (TASK-0044: exr | png16 only)
-    o.format = *fmt;
+    o.format = *ParseFileFormat(params.value("format", std::string("exr")));  // validated by the schema
     o.videoOut = a.video;
     o.videoCodec = a.codec;
     o.sourceFile = std::filesystem::path(a.input).filename().string();
     o.sourceHash = "sha256:" + Sha256File(a.input);
-    const int64_t total = a.frames > 0 ? a.frames : info.frameCount;
+    const NrRange range = PrepareRange(a, decoder, o);
+    const int64_t total = range.maxFrames >= 0 ? range.maxFrames : info.frameCount > 0 ? info.frameCount - range.from : 0;
     o.onFrame = [](int64_t frame, double ms) {
         if (frame % 10 == 0) std::fprintf(stderr, "  frame %lld %.1f ms\n", static_cast<long long>(frame), ms);
     };
     D3D12Device device({a.warp, false});
     const auto t0 = std::chrono::steady_clock::now();
-    const NrRunResult r = RunNr(decoder, device, o, a.frames, [total](int64_t n) { Progress(n, total); });
+    const NrRunResult r = RunNr(decoder, device, o, range.maxFrames, [total](int64_t n) { Progress(n, total); });
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::fprintf(stderr, "\n");
     if (r.stats.disabled) {
         std::printf("nr:          disabled — %s\n", r.stats.disabledReason.c_str());
         return 1;
     }
+    if (range.Ranged() && r.stats.written == 0) Throw("nr: nothing written - --start " + std::to_string(range.first) + " is past the end of " + a.input);
+    if (a.frames > 0 && r.stats.written < a.frames)
+        Log()->warn("nr: the clip ends at frame {}: {} of {} frames written", r.stats.lastWritten, r.stats.written, a.frames);
     Log()->info("nr done: {} frames in {:.1f} s ({:.1f} ms/frame wall, {:.1f} ms/frame GPU), backend {}", r.stats.frames, sec,
                 r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0, r.stats.MeanMs(), r.backend.dump());
     std::printf("color_nr:    %s\n", r.outDir.string().c_str());
@@ -165,13 +259,19 @@ int CmdNr(const NrCommands::NrArgs& a) {
     std::printf("masks:       %s\n", masks.empty() ? "none" : masks.c_str());
     std::printf("frames:      %lld\nms/frame:    %.1f (GPU %.1f)\n", static_cast<long long>(r.stats.frames), r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0,
                 r.stats.MeanMs());
+    if (range.Ranged())
+        std::printf("range:       %lld..%lld (warm-up %lld)\n", static_cast<long long>(r.stats.firstWritten), static_cast<long long>(r.stats.lastWritten),
+                    static_cast<long long>(r.stats.warmup));
     if (!a.video.empty()) std::printf("video:       %s\n", a.video.c_str());
     if (!a.json.empty()) {
         nlohmann::json j = {{"color_nr", r.outDir.string()},
                             {"backend", r.backend},
                             {"diagnostics", r.diagnostics},
+                            {"params", params},  // the resolved settings: defaults < --params-file < the options given
                             {"stats",
-                             {{"frames", r.stats.frames},
+                             {{"frames", r.stats.frames},  // through the model, warm-up included
+                              {"frames_written", r.stats.written},
+                              {"warmup_frames", r.stats.warmup},
                               {"ms_per_frame_gpu", r.stats.MeanMs()},
                               {"ms_per_frame_wall", r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0},
                               {"size", {r.stats.width, r.stats.height}},
@@ -181,6 +281,7 @@ int CmdNr(const NrCommands::NrArgs& a) {
                               {"mv_used", r.stats.mvUsed},
                               {"masks", r.stats.masks},
                               {"color_source", r.stats.colorSource}}}};
+        if (range.Ranged()) j["range"] = {{"first", r.stats.firstWritten}, {"last", r.stats.lastWritten}, {"warmup", r.stats.warmup}};
         std::ofstream(a.json) << j.dump(2) << "\n";
     }
     return 0;
@@ -232,12 +333,13 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_option("--local-tone,--local_tone", na_.localTone, "DLSSNR.LocalToneStrength 0..2")->default_val(1.f);
     nr_->add_option("--local-structure,--local_structure", na_.localStructure, "DLSSNR.LocalStructureStrength 0..2")->default_val(1.f);
     nr_->add_option("--skin-structure,--skin_structure", na_.skinStructure, "DLSSNR.SkinStructureStrength (-1 = model default)")->default_val(-1.f);
-    nr_->add_flag("--auto-mask,--auto_mask", na_.autoMask, "DLSSNR.UseAutoMask (the model's automatic skin mask)");
+    nr_->add_flag("--auto-mask,--auto_mask,!--no-auto-mask,!--no_auto_mask", na_.autoMask,
+                  "DLSSNR.UseAutoMask (the model's automatic skin mask); --no-auto-mask overrides --params-file");
     nr_->add_option("--passes", na_.passes, "model passes 1 | 2")->default_val(1);
     nr_->add_option("--model-scale,--model_scale", na_.modelScale, "model resolution relative to the colour (0.25..2); != 1 uses the ratio transfer resolve")->default_val(1.0);
     nr_->add_option("--transfer", na_.transfer, "ratio transfer strength 0..1 (model-scale != 1)")->default_val(1.f);
     nr_->add_option("--max-ratio,--max_ratio", na_.maxRatio, "ratio transfer guard")->default_val(4.f);
-    nr_->add_flag("--no-guides,--no_guides", na_.noGuides, "A/B: no depth / motion vectors to the model (still-image mode)");
+    nr_->add_flag("--no-guides,--no_guides,!--guides", na_.noGuides, "A/B: no depth / motion vectors to the model (still-image mode); --guides overrides --params-file");
     nr_->add_option("--temporal", na_.temporal, "temporal filter weight 0..1 (0 = off): blend with the previous frame warped by mv_dlss")->default_val(0.f);
     nr_->add_option("--temporal-threshold,--temporal_threshold", na_.temporalThreshold, "colour difference that rejects the temporal blend")->default_val(0.1f);
     nr_->add_option("--skin-blend,--skin_blend", na_.skinBlend, "edit strength inside mask_face / mask_skin (0 = keep the input)")->default_val(1.f);
@@ -247,7 +349,16 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_option("--format", na_.format, "exr | png16 | tiff | npz | raw")->default_val("exr");
     nr_->add_option("--video", na_.video, "also encode the result into this video file (no audio)");
     nr_->add_option("--codec", na_.codec, "encoder for --video: h264_nvenc | hevc_nvenc | av1_nvenc | ffv1")->default_val("h264_nvenc");
-    nr_->add_option("--frames", na_.frames, "process at most N frames")->default_val(-1);
+    nr_->add_option("--frames", na_.frames, "write at most N frames (from --start; warm-up frames not counted)")->default_val(-1);
+    nr_->add_option("--start", na_.start, "first frame to write, as the pass folders and the viewport count (from 0); the seek assumes a constant frame rate")
+        ->default_val(0)
+        ->check(CLI::NonNegativeNumber);
+    nr_->add_option("--warmup", na_.warmup, "frames before --start that go through the model for its history and are not written (fewer at the clip's start)")
+        ->default_val(0)
+        ->check(CLI::NonNegativeNumber);
+    nr_->add_option("--params-file,--params_file", na_.paramsFile,
+                    "JSON object of nr settings under the project's keys (stages.nr.params); options given on the command line win")
+        ->check(CLI::ExistingFile);
     nr_->add_flag("--warp", na_.warp, "use the WARP software adapter (stub)");
     nr_->add_option("--dll-dir,--dll_dir", na_.dllDir, "folder with nvngx_dlssnr.dll (default: bin/nvidia next to the executable)");
     nr_->add_option("--params-block,--params_block", na_.paramsBlock, "NGX parameter block: capability | alloc")->default_val("capability");
@@ -267,7 +378,7 @@ void NrCommands::Register(CLI::App& app) {
 }
 
 int NrCommands::Dispatch() {
-    if (nr_ && nr_->parsed()) return CmdNr(na_);
+    if (nr_ && nr_->parsed()) return CmdNr(na_, *nr_);
     if (patch_ && patch_->parsed()) return CmdPatch(pa_);
     return -1;
 }

@@ -348,7 +348,14 @@ dlssvid nr -i input.mp4 -o passes                                               
 dlssvid nr -i input.mp4 -o passes --intensity 1.2 --style cinematic --passes 2 --model-scale 0.75 --temporal 0.4
 dlssvid nr -i input.mp4 -o passes --no-guides --video nr.mp4                          :: A/B without depth / MV, plus a preview video
 dlssvid nr -i input.mp4 -o passes --backend stub --warp                               :: deterministic stand-in (tests, any GPU)
+dlssvid nr -i input.mp4 -o ab\a --no-auto --color-dir passes\color_sr --depth-dir passes\depth_dlss --mv-dir passes\mv_dlss --masks-dir passes --start 240 --frames 12 --warmup 6   :: frames 240..251 only; 234..239 build the model's history
+dlssvid nr -i input.mp4 -o ab\b ... --params-file tuned.json --intensity 1.4             :: the project's nr keys from a file; options on the command line win, even at their default
 ```
+
+`--start` counts frames as the pass folders and the viewport do, from 0; the seek assumes a constant frame rate (VFR is
+not detected yet). A part of the clip carries `stage_params.range`, `process` never takes it for the clip's pass, and a
+range is not written over a `color_nr` that `process` made. `--params-file` takes one JSON object of the project's keys
+(`stages.nr.params`); a key the schema does not have is refused, so a typo cannot pass unnoticed.
 
 Frame Generation (stage 7): `color_fg` with `multiplier` x frames (real frame i at index i * multiplier), fps x multiplier;
 colour from `color_nr` / `color_sr` / the video, guides from `depth_dlss` / `mv_dlss` under the pass root.
