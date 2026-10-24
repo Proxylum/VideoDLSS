@@ -10,6 +10,7 @@
 #include "passes/Manifest.h"
 #include "stages/nr/INrBackend.h"
 #include "stages/nr/NrPatch.h"
+#include "stages/ParamSchema.h"
 #include "stages/nr/NrStage.h"
 #include "util/Error.h"
 #include "util/Log.h"
@@ -47,6 +48,18 @@ void PrintDiagnostics(const NrDiagnostics& d, const std::string& error) {
 }
 
 int CmdNrCheck(const NrCommands::NrArgs& a) {
+    {  // the values --check hands the backend are checked as a processing run checks them (review of TASK-0044)
+        NrStageOptions o;
+        o.backend = a.backend;
+        o.style = a.style;
+        o.intensity = a.intensity;
+        o.preset = a.preset;
+        if (const auto problems = ValidateStageParams("nr", NrParamsFromOptions(o)); !problems.empty()) {
+            std::string all;
+            for (const auto& p : problems) all += (all.empty() ? "" : "; ") + p;
+            Throw("nr: " + all);
+        }
+    }
     D3D12Device device({a.warp, false});
     std::unique_ptr<INrBackend> backend = CreateNrBackend(a.backend);
     NrConfig cfg;

@@ -144,7 +144,8 @@ ProcessResult RunProcess(const ProcessOptions& options);
 const std::vector<std::string>& ProcessStageOrder();
 std::vector<ProcessStage> DefaultProcessStages();
 std::vector<ProcessStage> StagesFromProject(const Project& project);
-// "stage.key=value" -> params (value parsed as JSON when possible, else a string); throws on a bad spec.
+// "stage.key=value" -> params: a key the schema types as Enum / String stays text ("nr.style=4" is the style "4"), other
+// values are parsed as JSON when possible, else kept as a string; throws on a bad spec.
 void ApplyParamSpec(std::vector<ProcessStage>& stages, const std::string& spec);
 
 // A pass folder is complete when its manifest lists at least `neededFrames` frames and the last one exists. With an

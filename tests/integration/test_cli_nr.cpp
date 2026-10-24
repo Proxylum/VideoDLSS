@@ -100,6 +100,10 @@ TEST_CASE("dlssvid nr --backend stub --warp writes color_nr and a JSON summary",
         CHECK(b.out.find("must be") != std::string::npos);
     }
     CHECK(RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "style4").string(), "--frames", "1", "--style", "4"}).code == 0);
+    // --check too: the values it hands the backend are checked the same way (review of TASK-0044)
+    const CliResult check = RunCli({"nr", "--check", "--backend", "stub", "--warp", "--preset", "9"});
+    CHECK(check.code != 0);
+    CHECK(check.out.find("must be") != std::string::npos);
 }
 
 // TASK-0044: the schema offers tiff, npz and raw for the nr pass and `process` took them, while `dlssvid nr` (the GUI's
