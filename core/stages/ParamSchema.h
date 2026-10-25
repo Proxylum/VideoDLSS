@@ -24,7 +24,6 @@ struct ParamChoice {
     std::string value;  // JSON value as text ("dlss", "2", "1.5")
     std::string label;  // human label («DLSS SR»)
     std::string hint;
-    bool experimental = false;  // listed after a separator, marked «(эксп.)»; the card warns when it is chosen (AppModel::cardState)
 };
 
 // A condition on another parameter of the stage (effective value): `key` op `value`. Conditions of a list are ANDed.

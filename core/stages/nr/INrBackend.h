@@ -37,8 +37,8 @@ struct NrConfig {
     std::string backend = "ngx";             // ngx | stub
     uint32_t width = 0, height = 0;          // colour = output size (the model's working resolution)
     float intensity = 1.f;                   // DLSSNR.Intensity 0..2
-    int style = 1;                           // DLSSNR.Style: 0 default, 1 natural, 2 cinematic, 3..6
-    int preset = 3;                          // DLSSNR.Hint.Render.Preset 0..3
+    int style = 1;                           // DLSSNR.Style: 0 default, 1 natural, 2 cinematic (3..6 gave cinematic, PR-2 E7 - refused)
+    int preset = 3;                          // DLSSNR.Hint.Render.Preset: always 3 - 0..2 gave the same picture (PR-2 E7), no setting
     float localTone = 1.f;                   // DLSSNR.LocalToneStrength 0..2
     float localStructure = 1.f;              // DLSSNR.LocalStructureStrength 0..2
     float skinStructure = -1.f;              // DLSSNR.SkinStructureStrength (-1 = model default)

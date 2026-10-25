@@ -34,13 +34,15 @@ double Baseline(const std::string& stage, const std::string& backend, const std:
     return 0.0;
 }
 
-// docs/benchmarks.md, NR at 2560x1440 on Ada (RTX 4070 Ti SUPER): `--passes 2` 33.5 ms GPU against 15.9 for one pass
-constexpr double kNrModelMsPerPass = 17.6;
+// PR-2 E6 (docs/benchmarks.md «Результаты A/B на NGX», Ada RTX 4070 Ti SUPER): the GPU step of `passes 2` over `passes 1`,
+// per 2560x1440 of work pixels - 5.7 ms at 2560x1440, 16.7 at 3840x2160 (7.4), 10.3 at 3840x1600 on 120 frames (6.2); the
+// September 17.6 ms was one 12-frame run
+constexpr double kNrModelMsPerPass = 6.4;
 constexpr double kNrModelPixels = 2560.0 * 1440.0;
-// One more NR feature in a run: the snippet's Init_Ext, CreateFeature (nr --check: ~0.2 s on the same GPU, TASK-0048), its output
-// texture, the first Evaluate. The 12-frame `--passes 2` run of docs/benchmarks.md was ~65 ms/frame slower than its GPU step
-// explains next to comparable 12-frame runs (464 against ~381 ms), ~0.8 s in all. E8 (PR-2) replaces it with a measurement.
-constexpr double kNrFeatureCreateMs = 800.0;
+// One more NR feature in a run (PR-2 E6f / E8): with NGX already up its Init is ~1 ms and CreateFeature 110-120 ms at 4K
+// (the first feature of a process: init ~1.4 s, create 0.2-0.3 s - every run pays that once); plus its output texture and the
+// first Evaluate: ~0.2 s
+constexpr double kNrFeatureCreateMs = 200.0;
 
 bool HasNumber(const nlohmann::json& j, const char* key) { return j.is_object() && j.contains(key) && j[key].is_number(); }
 

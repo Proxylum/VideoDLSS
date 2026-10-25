@@ -111,10 +111,10 @@ int ParseNrStyle(const std::string& s) {
     try {
         size_t pos = 0;
         const int v = std::stoi(s, &pos);
-        if (pos == s.size() && v >= 0 && v <= 6) return v;  // 3..6: experimental (TASK-0044: was 0..15)
+        if (pos == s.size() && v >= 0 && v <= 2) return v;  // PR-2 E7: 3..6 gave the cinematic picture (TASK-0044: was 0..15)
     } catch (...) {
     }
-    Throw("nr: --style must be natural | cinematic | default | 3..6 (got '" + s + "')");
+    Throw("nr: --style must be natural | cinematic | default (got '" + s + "')");
 }
 
 nlohmann::json NrRecreation::ToJson() const {

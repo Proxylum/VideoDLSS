@@ -243,15 +243,12 @@ std::vector<StageSchema> Build() {
         s.guides = {"depth_dlss", "mv_dlss"};
         using Op = ParamCondition::Op;
         // TASK-0046: every setting of the model and of our processing around it in the card (Output/ref-review; the
-        // reference Visual Enhancer shows eight); the keys are those of before - projects and fingerprints stay
+        // reference Visual Enhancer shows eight). PR-2 (E7, TASK-0052): styles 3..6 gave the cinematic picture bit for bit and the
+        // render preset 0..3 changed nothing on DLL 310.8.0.0 - both left the schema (the user's decision, no compatibility kept)
         ParamSpec style = Enum("style", "Стиль", "natural",
                                {{"natural", "Естественный (1)", "мягче, ближе к исходным тонам кожи и балансу"},
                                 {"cinematic", "Кинематографичный (2)", "приглушает блеск и цвет"},
-                                {"default", "Стандартный (0)", "сильнее всего добавляет деталь"},
-                                {"3", "Экспериментальный 3", "не документирован NVIDIA", true},
-                                {"4", "Экспериментальный 4", "не документирован NVIDIA", true},
-                                {"5", "Экспериментальный 5", "не документирован NVIDIA", true},
-                                {"6", "Экспериментальный 6", "не документирован NVIDIA", true}},
+                                {"default", "Стандартный (0)", "сильнее всего добавляет деталь"}},
                                ParamWidget::Select,
                                "Профиль обработки модели (DLSSNR.Style). NVIDIA стили не документирует; номер в скобках совпадает со «Style N» в "
                                "Visual Enhancer. Сравните на превью.");
@@ -270,10 +267,6 @@ std::vector<StageSchema> Build() {
                       "Модель повторно обрабатывает собственный результат: 1 — как обучена, 2 — богаче. Каждый проход заметно увеличивает время.", false,
                       {{"1", "1", ""}, {"2", "2", ""}}),
                "Модель"),
-            In(Number("preset", "Пресет модели", ParamType::Int, 3, 0, 3, 1, ParamWidget::Select,
-                      "Подсказка выбора модели (DLSSNR.Hint.Render.Preset). NVIDIA значения не документирует, разница может быть не видна.", false,
-                      {{"0", "0 — выбор модели", ""}, {"1", "1", ""}, {"2", "2", ""}, {"3", "3 — по умолчанию", ""}}),
-               "Модель", true),
             In(Number("local_tone", "Локальный тон", ParamType::Float, 1.0, 0.0, 2.0, 0.05, ParamWidget::Slider,
                       "Сила локальной правки света и тона: 0 — без неё, 1 — как обучена, до 2 — сильнее (в Visual Enhancer потолок 1)."),
                "Локальные"),

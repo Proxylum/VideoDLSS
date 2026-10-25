@@ -139,24 +139,24 @@ TEST_CASE("NR estimate follows passes and model scale; a GPU-only ms/frame is no
     CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 1.0), 300) == Approx(410.0));
     CHECK(*RecordedMsPerFrame(root, "nr", ngx) == Approx(410.0));
 
-    CHECK(NrModelMsPerPass("ngx", 2560.0 * 1440) == Approx(17.6));
-    CHECK(NrModelMsPerPass("ngx", 3840.0 * 2160) == Approx(17.6 * 2.25));
+    CHECK(NrModelMsPerPass("ngx", 2560.0 * 1440) == Approx(6.4));
+    CHECK(NrModelMsPerPass("ngx", 3840.0 * 2160) == Approx(6.4 * 2.25));
     CHECK(NrModelMsPerPass("stub", 2560.0 * 1440) == 0.0);
 
     // two passes: the model's step plus the second feature created once, spread over the frames
     const auto two = RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 300);
     REQUIRE(two);
-    CHECK(*two > 410.0 + 17.6);
-    CHECK(*two < 410.0 + 17.6 + 10.0);
+    CHECK(*two > 410.0 + 6.4);
+    CHECK(*two < 410.0 + 6.4 + 10.0);
     CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 30) > *two);  // a short run carries more of the creation
-    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 1000000) == Approx(410.0 + 17.6).margin(0.01));
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 1000000) == Approx(410.0 + 6.4).margin(0.01));
     // the model's resolution
-    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 0.5), 300) == Approx(410.0 - 17.6 + 17.6 / 4));
-    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 2.0), 300) == Approx(410.0 - 17.6 + 17.6 * 4));
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 0.5), 300) == Approx(410.0 - 6.4 + 6.4 / 4));
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 2.0), 300) == Approx(410.0 - 6.4 + 6.4 * 4));
     CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(2, 0.5), 300) < *two);
     // a two-pass record moved to one pass: the creation is not taken back
     save(2, {{"ms_per_frame", 464.0}, {"ms_per_frame_gpu", 33.5}});
-    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 1.0), 300) == Approx(464.0 - 17.6));
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 1.0), 300) == Approx(464.0 - 6.4));
     CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 300) == Approx(464.0));
 
     // EstimateRun: NR works on the upscaled frame (1280x720 x2 = 2560x1440)
@@ -187,8 +187,8 @@ TEST_CASE("NR estimate follows passes and model scale; a GPU-only ms/frame is no
     const double base = BaselineMsPerFrame("nr", "ngx", 1280.0 * 720 / 1e6);
     o = EstimateRun(plan, stages, src);
     CHECK_FALSE(o.stages[0].recorded);
-    CHECK(o.stages[0].msPerFrame > base + 17.6);
-    CHECK(o.stages[0].msPerFrame < base + 17.6 + 10.0);
+    CHECK(o.stages[0].msPerFrame > base + 6.4);
+    CHECK(o.stages[0].msPerFrame < base + 6.4 + 10.0);
     plan.stages[0].params = EffectiveStageParams("nr", nlohmann::json::object());
     o = EstimateRun(plan, stages, src);
     CHECK(o.stages[0].msPerFrame == Approx(base));

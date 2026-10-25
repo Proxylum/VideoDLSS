@@ -114,7 +114,7 @@ TEST_CASE("NR form: groups, levels, conditions of the rows", "[unit][schema][nr]
     std::vector<std::string> basic, more, engineer;
     for (const auto& p : nr->params) (p.advanced ? engineer : p.more ? more : basic).push_back(p.key);
     CHECK(basic == std::vector<std::string>{"style", "intensity", "passes", "local_tone", "local_structure", "temporal", "auto_mask", "skin_structure", "skin_blend"});
-    CHECK(more == std::vector<std::string>{"preset", "temporal_threshold", "guides", "tonemap", "input_transfer", "exposure", "model_scale", "transfer", "max_ratio"});
+    CHECK(more == std::vector<std::string>{"temporal_threshold", "guides", "tonemap", "input_transfer", "exposure", "model_scale", "transfer", "max_ratio"});
     CHECK(engineer == std::vector<std::string>{"backend", "format"});
     for (const auto& p : nr->params) {
         INFO(p.key);
@@ -123,8 +123,8 @@ TEST_CASE("NR form: groups, levels, conditions of the rows", "[unit][schema][nr]
         CHECK((p.advanced || !p.hint.empty()));   // and says what it does
     }
     CHECK(nr->Find("intensity")->step == 0.05);
-    CHECK(nr->Find("style")->choices.back().experimental);
-    CHECK_FALSE(nr->Find("style")->choices.front().experimental);
+    CHECK(nr->Find("style")->choices.size() == 3);  // PR-2 E7: 3..6 = cinematic, the preset changed nothing (TASK-0052)
+    CHECK(nr->Find("preset") == nullptr);
 
     const std::set<std::string> none, faceMask{"color_sr", "mask_face"};
     const nlohmann::json def = EffectiveStageParams("nr", nlohmann::json::object());
@@ -178,7 +178,6 @@ TEST_CASE("NR: the options from the schema's defaults are the stage's defaults, 
     CHECK(o.backend == def.backend);
     CHECK(o.intensity == def.intensity);
     CHECK(o.style == def.style);
-    CHECK(o.preset == def.preset);
     CHECK(o.localTone == def.localTone);
     CHECK(o.localStructure == def.localStructure);
     CHECK(o.skinStructure == def.skinStructure);
@@ -208,7 +207,7 @@ TEST_CASE("NR: the options from the schema's defaults are the stage's defaults, 
         ApplyNrParams(EffectiveStageParams("nr", nlohmann::json::object()), a);
         ApplyNrParams(one, b);
         const auto key = [](const NrStageOptions& x) {
-            return nlohmann::json{x.backend, x.intensity, x.style, x.preset, x.localTone, x.localStructure, x.skinStructure, x.autoMask, x.passes, x.modelScale,
+            return nlohmann::json{x.backend, x.intensity, x.style, x.localTone, x.localStructure, x.skinStructure, x.autoMask, x.passes, x.modelScale,
                                   x.transfer, x.maxRatio, x.useGuides, x.temporal, x.temporalThreshold, x.skinBlend, x.tonemap.curve, x.tonemap.inputTransfer,
                                   x.tonemap.exposureEv};
         };
@@ -236,30 +235,32 @@ TEST_CASE("NormalizeStageParams: aliases take the schema's key; validation and t
           ComputeFingerprint("nr", "sha256:x", EffectiveStageParams("nr", {{"skin_blend", 0.5}}), {}, ToolInfo{}, "").value);
 }
 
-// TASK-0044: the experimental styles 3..6 were reachable from the standalone CLI only - the schema refused them and
-// `--param nr.style=4` became the number 4.
-TEST_CASE("NR styles: the named ones and 3..6; numbers and 0..2 take the schema's string", "[unit][schema][nr][regression]") {
-    for (const char* s : {"natural", "cinematic", "default", "3", "4", "5", "6"}) CHECK(ValidateStageParams("nr", {{"style", s}}).empty());
-    CHECK_FALSE(ValidateStageParams("nr", {{"style", "7"}}).empty());
-    CHECK_FALSE(ValidateStageParams("nr", {{"style", "vivid"}}).empty());
-    CHECK(NormalizeStageParams("nr", {{"style", 4}}) == nlohmann::json{{"style", "4"}});
+// PR-2 E7 (TASK-0052): styles 3..6 gave the cinematic picture bit for bit and the render preset changed nothing - the schema
+// keeps the three named styles and no preset; a number 0..2 takes the schema's string (TASK-0044), 3..6 are refused now.
+TEST_CASE("NR styles: the three named ones; numbers 0..2 take the schema's string; 3..6 and the preset are gone", "[unit][schema][nr][regression]") {
+    for (const char* s : {"natural", "cinematic", "default"}) CHECK(ValidateStageParams("nr", {{"style", s}}).empty());
+    for (const char* s : {"3", "4", "6", "7", "vivid"}) CHECK_FALSE(ValidateStageParams("nr", {{"style", s}}).empty());
     CHECK(NormalizeStageParams("nr", {{"style", "1"}}) == nlohmann::json{{"style", "natural"}});
     CHECK(NormalizeStageParams("nr", {{"style", 0}}) == nlohmann::json{{"style", "default"}});
-    CHECK(ValidateStageParams("nr", {{"style", 4}}).empty());
+    CHECK_FALSE(ValidateStageParams("nr", {{"style", 4}}).empty());
+    CHECK(ValidateStageParams("nr", {{"preset", 3}}).empty());  // an unknown key now: validation skips it, --params-file and the CLI refuse it
     std::vector<ProcessStage> stages = DefaultProcessStages();
-    ApplyParamSpec(stages, "nr.style=4");
+    ApplyParamSpec(stages, "nr.style=2");
     ApplyParamSpec(stages, "nr.intensity=1.5");
     for (const auto& s : stages)
         if (s.name == "nr") {
-            CHECK(s.params["style"] == "4");        // text: the schema's Enum
-            CHECK(s.params["intensity"] == 1.5);    // a number stays a number
+            CHECK(s.params["style"] == "2");                                      // text, as typed: the schema's Enum
+            CHECK(NormalizeStageParams("nr", s.params)["style"] == "cinematic");  // the schema names it
+            CHECK(s.params["intensity"] == 1.5);      // a number stays a number
         }
     // the options a run validates name the style by its schema value
     NrStageOptions o;
     o.style = "Cinematic";
     CHECK(NrParamsFromOptions(o)["style"] == "cinematic");
+    CHECK_FALSE(NrParamsFromOptions(o).contains("preset"));
     o.style = "5";
-    CHECK(NrParamsFromOptions(o)["style"] == "5");
+    CHECK(NrParamsFromOptions(o)["style"] == "5");  // left for the schema to refuse
+    CHECK_FALSE(ValidateStageParams("nr", NrParamsFromOptions(o)).empty());
     CHECK(ValidateStageParams("nr", NrParamsFromOptions(NrStageOptions{})).empty());
 }
 

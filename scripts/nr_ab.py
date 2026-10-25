@@ -113,14 +113,10 @@ EXPERIMENTS = [
                ("base", "temporal", "time"), needs=("depth", "mv")),
     Experiment("E6", "Проходы: время и видеопамять (§2c)",
                [_v(f"p{p}", params={"passes": p}, optional=p > 2) for p in (1, 2, 3, 4)], "p1", MODEL, ("time", "base")),
-    # both axes in every variant: a base --params / --project-params with a style or a preset must not leak into either group (§2i: presets
-    # 0..3 at one style, styles at preset 3 - the schema's default)
-    Experiment("E7", "Стили и пресеты (§2i)",
-               [_v(n, params={"style": s, "preset": 3}) for n, s in (("default", "default"), ("natural", "natural"), ("cinematic", "cinematic"),
-                                                                     ("style3", "3"), ("style4", "4"), ("style5", "5"), ("style6", "6"))]
-               + [_v(f"preset{p}", params={"style": "natural", "preset": p}) for p in (0, 1, 2)],
-               "natural", STILL, ("pairs", "edit", "time"),
-               groups=[["default", "natural", "cinematic", "style3", "style4", "style5", "style6"], ["preset0", "preset1", "preset2", "natural"]]),
+    # the schema's three styles (PR-2: 3..6 gave cinematic bit for bit, the preset changed nothing - both left the schema, TASK-0052);
+    # a new DLL is re-checked here for these three; 3..6 or a preset again need a code change (ParseNrStyle, a preset flag)
+    Experiment("E7", "Стили (§2i)", [_v(n, params={"style": n}) for n in ("default", "natural", "cinematic")],
+               "natural", STILL, ("pairs", "edit", "time"), groups=[["default", "natural", "cinematic"]]),
     Experiment("E6f", "Несколько фич одновременно: VRAM на фичу (§2c)", [], kind="check", check="features", metrics=("time",),
                requires=("--check-features",)),
     Experiment("E8", "Цена создания фичи (§2f)", [], kind="check", check="runs", metrics=("time",)),
@@ -642,7 +638,7 @@ def verdict_e5(res):
 def verdict_e6(res):
     p1, p2 = _get(res, "p1", "nr", "ms_per_frame_gpu"), _get(res, "p2", "nr", "ms_per_frame_gpu")
     step = None if None in (p1, p2) else p2 - p1
-    return {"ms_per_pass": step, "text": [] if step is None else [f"GPU на добавленный проход: {step:.1f} мс/кадр (константа оценок — 17.6 мс на 1440p)"]}
+    return {"ms_per_pass": step, "text": [] if step is None else [f"GPU на добавленный проход: {step:.1f} мс/кадр (константа оценок — 6.4 мс на 1440p)"]}
 
 
 def verdict_e7(res):
