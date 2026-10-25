@@ -27,8 +27,10 @@ public:
     const NrDiagnostics& Diagnostics() const override { return diag_; }
     nlohmann::json Describe() const override;
     void Shutdown() override;
+    NrRecreation RecreateFeature() override;
 
 private:
+    int CreateFeatureCall();  // CreateFeature(18) on the current block with the scratch textures and the zero guides of Init
     struct Impl;
     std::unique_ptr<Impl> impl_;
     NrConfig config_;

@@ -91,6 +91,18 @@ struct NrDiagnostics {
     nlohmann::json ToJson() const;
 };
 
+// One re-creation of the feature inside the same Init (`dlssvid nr --check --check-repeat`, spec E8: N re-creations in one process -
+// the preview's phase 2 condition): released and created again with the same parameters and block, never the other block.
+struct NrRecreation {
+    std::string result;             // CreateFeature(18) result, or "release: <result>" when the release failed (nothing created then)
+    std::string releaseResult;      // ReleaseFeature result
+    bool ok = false;
+    double releaseMs = -1.0, createMs = -1.0;
+    int64_t vramAfterRelease = -1;  // this process's local video memory (DXGI CurrentUsage), raw bytes: a drift shows either way
+    int64_t vramAfterCreate = -1;
+    nlohmann::json ToJson() const;
+};
+
 class INrBackend {
 public:
     virtual ~INrBackend() = default;
@@ -103,6 +115,8 @@ public:
     virtual const NrDiagnostics& Diagnostics() const = 0;
     virtual nlohmann::json Describe() const = 0;
     virtual void Shutdown() {}
+    // Releases the feature and creates it again (E8); after a failed creation the backend has no feature. Throws before Init.
+    virtual NrRecreation RecreateFeature() = 0;
 };
 
 struct NrAvailability {

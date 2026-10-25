@@ -117,6 +117,17 @@ int ParseNrStyle(const std::string& s) {
     Throw("nr: --style must be natural | cinematic | default | 3..6 (got '" + s + "')");
 }
 
+nlohmann::json NrRecreation::ToJson() const {
+    auto orNull = [](auto v) { return v < 0 ? nlohmann::json(nullptr) : nlohmann::json(v); };
+    return {{"ok", ok},
+            {"result", result},
+            {"release_result", releaseResult},
+            {"release_ms", orNull(releaseMs)},
+            {"create_ms", orNull(createMs)},
+            {"vram_after_release_bytes", orNull(vramAfterRelease)},
+            {"vram_after_create_bytes", orNull(vramAfterCreate)}};
+}
+
 NrAvailability NrAvailable(const std::string& backend, const std::filesystem::path& dllDir) {
     if (backend == "stub") return {true, {}};
     if (backend == "ngx") return NgxNrBackend::Available(dllDir);

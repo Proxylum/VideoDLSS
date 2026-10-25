@@ -146,6 +146,7 @@ struct NgxNrBackend::Impl {
     ComPtr<ID3D12Resource> scratchColor, scratchOutput;  // bound at CreateFeature
     // zero guides bound at CreateFeature (--create-with-mv), kept to Shutdown: whether the feature holds what it was created with is unknown
     ComPtr<ID3D12Resource> createMv, createDepth;
+    uint32_t createMvW = 0, createMvH = 0, createDepthW = 0, createDepthH = 0;
     bool warnedDepth = false, warnedMv = false;
     int64_t frames = 0;
 };
@@ -303,34 +304,19 @@ void NgxNrBackend::Init(D3D12Device& device, const NrConfig& config) {
     im.scratchOutput = device.CreateTexture2D(config.width, config.height, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     // A/B E4 (--create-with-mv): ComfyUI binds a zero MVec at creation and re-creates the feature when the motion contract changes
     // (dlss5nr_bridge.cpp EnsureFeature); whether NGX fixes the contract at creation is what the A/B measures
-    uint32_t cmw = 0, cmh = 0, cdw = 0, cdh = 0;
     if (config.createWithMv && config.useGuides) {
-        cmw = config.createMvWidth ? config.createMvWidth : config.width;
-        cmh = config.createMvHeight ? config.createMvHeight : config.height;
-        im.createMv = ZeroTexture(device, cmw, cmh, DXGI_FORMAT_R32G32_FLOAT, 8);
+        im.createMvW = config.createMvWidth ? config.createMvWidth : config.width;
+        im.createMvH = config.createMvHeight ? config.createMvHeight : config.height;
+        im.createMv = ZeroTexture(device, im.createMvW, im.createMvH, DXGI_FORMAT_R32G32_FLOAT, 8);
         if (config.depthGuide && config.createDepthWidth && config.createDepthHeight) {
-            cdw = config.createDepthWidth;
-            cdh = config.createDepthHeight;
-            im.createDepth = ZeroTexture(device, cdw, cdh, DXGI_FORMAT_R32_FLOAT, 4);  // reverse-Z 0 = the far plane
+            im.createDepthW = config.createDepthWidth;
+            im.createDepthH = config.createDepthHeight;
+            im.createDepth = ZeroTexture(device, im.createDepthW, im.createDepthH, DXGI_FORMAT_R32_FLOAT, 4);  // reverse-Z 0 = the far plane
         }
     }
     const auto memBeforeCreate = device.LocalVideoMemory();  // after our scratch and zero guides: they are not the feature's
     const auto createStart = std::chrono::steady_clock::now();
-    auto create = [&]() {
-        SetAllParams(im.params, config_, im.scratchColor.Get(), im.scratchOutput.Get(), im.createDepth.Get(), cdw, cdh, im.createMv.Get(), cmw, cmh, true);
-        int r = 0;
-        device.ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) {
-            for (ID3D12Resource* res : {im.scratchColor.Get(), im.createDepth.Get(), im.createMv.Get()})
-                if (res) ComputeKernel::Transition(cl, res, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            ComputeKernel::Transition(cl, im.scratchOutput.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            r = im.fwdCreate(im.snipCreate, cl, kFeatureId, im.params, reinterpret_cast<void**>(&im.feature));
-            for (ID3D12Resource* res : {im.scratchColor.Get(), im.createDepth.Get(), im.createMv.Get()})
-                if (res) ComputeKernel::Transition(cl, res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
-            ComputeKernel::Transition(cl, im.scratchOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-        });
-        return r;
-    };
-    int created = create();
+    int created = CreateFeatureCall();
     diag_.createResult = ngx::ResultString(created);
     Log()->info("nr: CreateFeature(18) [{} block] -> {}", diag_.paramsBlock, diag_.createResult);
     if (created != static_cast<int>(NVSDK_NGX_Result_Success) &&
@@ -340,7 +326,7 @@ void NgxNrBackend::Init(D3D12Device& device, const NrConfig& config) {
         Log()->warn("nr: retrying CreateFeature(18) with the {} parameter block", other);
         im.feature = nullptr;
         acquireParams(other);
-        const int again = create();
+        const int again = CreateFeatureCall();
         diag_.createResult += "; " + other + " block -> " + ngx::ResultString(again);
         Log()->info("nr: CreateFeature(18) [{} block] -> {}", other, ngx::ResultString(again));
         created = again;
@@ -368,6 +354,48 @@ void NgxNrBackend::Init(D3D12Device& device, const NrConfig& config) {
                 MiB(diag_.vramFeatureBytes), im.createMv ? " with zero guides (--create-with-mv)" : "");
     Log()->info("nr: {}x{} ready (intensity {}, style {}, preset {}, guides {}, {} block)", config.width, config.height, config.intensity, config.style, config.preset,
                 config.useGuides ? "on" : "off (still mode)", diag_.paramsBlock);
+}
+
+int NgxNrBackend::CreateFeatureCall() {
+    Impl& im = *impl_;
+    SetAllParams(im.params, config_, im.scratchColor.Get(), im.scratchOutput.Get(), im.createDepth.Get(), im.createDepthW, im.createDepthH, im.createMv.Get(),
+                 im.createMvW, im.createMvH, true);
+    int r = 0;
+    im.device->ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) {
+        for (ID3D12Resource* res : {im.scratchColor.Get(), im.createDepth.Get(), im.createMv.Get()})
+            if (res) ComputeKernel::Transition(cl, res, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        ComputeKernel::Transition(cl, im.scratchOutput.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        r = im.fwdCreate(im.snipCreate, cl, kFeatureId, im.params, reinterpret_cast<void**>(&im.feature));
+        for (ID3D12Resource* res : {im.scratchColor.Get(), im.createDepth.Get(), im.createMv.Get()})
+            if (res) ComputeKernel::Transition(cl, res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+        ComputeKernel::Transition(cl, im.scratchOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+    });
+    return r;
+}
+
+NrRecreation NgxNrBackend::RecreateFeature() {
+    if (!impl_ || !impl_->feature) Throw("nr: not initialised");
+    Impl& im = *impl_;
+    NrRecreation rec;
+    im.device->WaitIdle();
+    const auto releaseStart = std::chrono::steady_clock::now();
+    const int released = im.fwdRelease(im.snipRelease, im.feature);
+    im.feature = nullptr;
+    rec.releaseMs = MsSince(releaseStart);
+    rec.releaseResult = ngx::ResultString(released);
+    if (const auto m = im.device->LocalVideoMemory()) rec.vramAfterRelease = static_cast<int64_t>(m->currentUsage);
+    if (released != static_cast<int>(NVSDK_NGX_Result_Success)) {  // the feature may still be alive: never stack another one on it
+        rec.result = "release: " + rec.releaseResult;
+        return rec;
+    }
+    const auto createStart = std::chrono::steady_clock::now();
+    const int r = CreateFeatureCall();
+    rec.createMs = MsSince(createStart);
+    rec.result = ngx::ResultString(r);
+    rec.ok = r == static_cast<int>(NVSDK_NGX_Result_Success) && im.feature;
+    if (!rec.ok) im.feature = nullptr;
+    if (const auto m = im.device->LocalVideoMemory()) rec.vramAfterCreate = static_cast<int64_t>(m->currentUsage);
+    return rec;
 }
 
 void NgxNrBackend::Evaluate(ID3D12GraphicsCommandList* cl, const NrInputs& in, ID3D12Resource* output) {
@@ -425,7 +453,13 @@ nlohmann::json NgxNrBackend::Describe() const {
 void NgxNrBackend::Shutdown() {
     if (!impl_) return;
     Impl& im = *impl_;
-    if (im.device) im.device->WaitIdle();
+    if (im.device) {
+        try {
+            im.device->WaitIdle();
+        } catch (...) {
+            // a removed device (TDR): release what we hold anyway; the destructor calls this and must not throw
+        }
+    }
     if (im.feature && im.fwdRelease) im.fwdRelease(im.snipRelease, im.feature);
     im.feature = nullptr;
     if (im.params && im.paramsAllocated) NVSDK_NGX_D3D12_DestroyParameters(im.params);
@@ -463,6 +497,7 @@ void NgxNrBackend::Init(D3D12Device& device, const NrConfig& config) {
 void NgxNrBackend::Evaluate(ID3D12GraphicsCommandList*, const NrInputs&, ID3D12Resource*) { Throw("nr: ngx backend not available"); }
 nlohmann::json NgxNrBackend::Describe() const { return {{"backend", "ngx"}, {"available", false}}; }
 void NgxNrBackend::Shutdown() {}
+NrRecreation NgxNrBackend::RecreateFeature() { Throw("nr: ngx backend not available"); }
 
 #endif
 

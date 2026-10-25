@@ -65,7 +65,7 @@ class Helpers(unittest.TestCase):
     @staticmethod
     def args(**kw) -> argparse.Namespace:
         a = argparse.Namespace(start=6, frames=0, warmup=6, only=[], backend="stub", format="exr", warp=True, nr_arg=[], keep=False, check_runs=3,
-                               check_size="1280x720", force=False, prepare_backends="stub,stub,bicubic")
+                               check_size="1280x720", check_repeat=0, check_features=4, force=False, prepare_backends="stub,stub,bicubic")
         vars(a).update(kw)
         return a
 
@@ -121,10 +121,11 @@ class Helpers(unittest.TestCase):
         self.assertEqual(nr_ab.expected_ab(["--mv-scale=unit", "--no-depth-guide"]), {"depth_guide": False})
         self.assertEqual(nr_ab.expected_ab([]), {})
         help_text = ("--local-tone,--local_tone FLOAT\n--no-guides,--no_guides,!--guides\n--mv-scale,--mv_scale TEXT\n--start INT\n--no-auto\n"
-                     "--dll-dir TEXT\n--auto-mask,--auto_mask,!--no-auto-mask,!--no_auto_mask")
+                     "--dll-dir TEXT\n--auto-mask,--auto_mask,!--no-auto-mask,!--no_auto_mask\n--check-repeat,--check_repeat INT\n"
+                     "--check-features,--check_features INT")
         keys = nr_ab.setting_keys(help_text)  # a run option in a params.json fails the run after the variants before it ran
         self.assertTrue({"local_tone", "guides", "auto_mask"} <= keys)
-        self.assertFalse({"mv_scale", "start", "auto", "no_auto", "dll_dir", "no_auto_mask", "no_guides"} & keys)
+        self.assertFalse({"mv_scale", "start", "auto", "no_auto", "dll_dir", "no_auto_mask", "no_guides", "check_repeat", "check_features"} & keys)
         self.assertEqual(nr_ab.names_only(r"missing pass frame 12: D:\clips\mv_dlss\000012.exr"), "missing pass frame 12: 000012.exr")
         self.assertEqual(nr_ab.names_only("pass folder not found: /tmp/x/color_sr (no manifest)"), "pass folder not found: color_sr (no manifest)")
         self.assertEqual(nr_ab.names_only(r"missing pass frame 12: D:\My Clips\face\mv_dlss\000012.exr"), "missing pass frame 12: 000012.exr")
@@ -243,7 +244,8 @@ class Helpers(unittest.TestCase):
             edir.mkdir()
             (edir / "check_0.json").write_text(json.dumps({"ok": True, "init_ms": 1.0, "gpu": "G"}), encoding="utf-8")
             res = nr_ab.run_check(self.args(check_runs=1), "dlssvid", nr_ab.Inputs(Path("clip.mp4")), self.cat["E8"], edir, False)
-            self.assertEqual(res["checks"], [{"ok": False, "init_ms": None, "create_ms": None, "device_ms": None, "vram_mib": None, "run_s": None}])
+            self.assertEqual(res["checks"], [{"ok": False, "json": False, "init_ms": None, "create_ms": None, "device_ms": None, "vram_mib": None, "run_s": None}])
+            self.assertIs(res["measured"], False)  # no JSON: not an answer - reusable() measures it again
         finally:
             nr_ab.run = run
         if os.name == "nt":  # an open file cannot be deleted on Windows: the frames left behind stop the run
@@ -253,6 +255,87 @@ class Helpers(unittest.TestCase):
                     nr_ab.clear(folder)
         nr_ab.clear(self.root / "color_nr")
         self.assertFalse((self.root / "color_nr").exists())
+
+    def test_a_hung_call_is_killed(self):
+        old, nr_ab.TIMEOUT = nr_ab.TIMEOUT, 1.0
+        try:
+            log = self.root / "hung.log"
+            t0 = __import__("time").perf_counter()
+            with self.assertRaises(RuntimeError) as e:
+                nr_ab.run([sys.executable, "-c", "import time; time.sleep(30)", "x"], log, False)
+            self.assertIn("timed out", str(e.exception))
+            self.assertLess(__import__("time").perf_counter() - t0, 15)  # killed, not waited for
+            self.assertIn("killed after", log.read_text(encoding="utf-8"))
+        finally:
+            nr_ab.TIMEOUT = old
+
+    def test_check_runs_record_recreations_and_features(self):
+        def fake(cmd, log, dry):  # what `nr --check` writes: the JSON beside the command
+            out = Path(cmd[cmd.index("--json") + 1])
+            if "--check-repeat" in cmd:
+                n = int(cmd[cmd.index("--check-repeat") + 1])
+                recs = [{"index": i, "ok": True, "result": "Success", "create_ms": 200.0 + i, "vram_after_release_bytes": 2 << 30,
+                         "vram_after_create_bytes": (2 << 30) + (504 << 20)} for i in range(1, n + 1)]
+                out.write_text(json.dumps({"ok": True, "gpu": "G", "vram_usage_after_init_bytes": (2 << 30) + (504 << 20), "recreations": recs}), encoding="utf-8")
+            elif "--check-features" in cmd:
+                feats = [{"index": i, "ok": i < 3, "create_ms": 210.0, "vram_feature_bytes": 940 << 20, "vram_usage_bytes": (2 << 30) + i * (940 << 20)}
+                         for i in (1, 2, 3)]
+                out.write_text(json.dumps({"ok": True, "gpu": "G", "vram_budget_bytes": 14 << 30, "features": feats, "features_alive": 2, "features_stop": "failure"}),
+                               encoding="utf-8")
+            else:
+                out.write_text(json.dumps({"ok": True, "gpu": "G", "init_ms": 1400.0, "create_ms": 240.0, "vram_feature_bytes": 504 << 20}), encoding="utf-8")
+            return 2.5
+
+        run, nr_ab.run = nr_ab.run, fake
+        try:
+            inp = nr_ab.Inputs(Path("clip.mp4"))
+            e8 = nr_ab.run_check(self.args(check_runs=1, check_repeat=12, check_size="2560x1440"), "dlssvid", inp, self.cat["E8"], self.root / "E8", False)
+            self.assertEqual(e8["size"], "2560x1440")
+            self.assertEqual((e8["repeat"]["requested"], e8["repeat"]["ok"]), (12, 12))
+            self.assertIs(e8["verdict"]["phase2"], True)  # all ok, no slowdown, no drift
+            self.assertIn("условие фазы 2 превью выполнено", e8["verdict"]["text"])
+            md = nr_ab.render_experiment("E8", e8)
+            self.assertIn("`--check-repeat 12`: 12 пересозданий ok", md)
+            f = nr_ab.run_check(self.args(check_features=3, check_size="3840x2160"), "dlssvid", inp, self.cat["E6f"], self.root / "E6f", False)
+            self.assertEqual((f["alive"], f["stop"]), (2, "failure"))
+            self.assertEqual(f["verdict"]["mib_per_feature"], 940.0)
+            self.assertIn("наблюдаемый предел", f["verdict"]["text"][0])
+            self.assertIn("| 3 | нет |", nr_ab.render_experiment("E6f", f))
+        finally:
+            nr_ab.run = run
+        def silent(cmd, log, dry):  # a timeout kill or a crash: no JSON at all
+            raise RuntimeError("timed out")
+
+        def first_fails(cmd, log, dry):
+            Path(cmd[cmd.index("--json") + 1]).write_text(json.dumps({"ok": False, "features": [], "features_alive": 0, "features_stop": ""}), encoding="utf-8")
+            raise RuntimeError("failed (1)")
+
+        for k, (fake_run, word) in enumerate(((silent, "не измерено"), (first_fails, "не создалась"))):
+            nr_ab.run = fake_run
+            try:
+                f = nr_ab.run_check(self.args(check_features=4), "dlssvid", inp, self.cat["E6f"], self.root / f"E6f_{k}", False)
+                e8 = nr_ab.run_check(self.args(check_runs=1, check_repeat=5), "dlssvid", inp, self.cat["E8"], self.root / f"E8_{k}", False)
+            finally:
+                nr_ab.run = run
+            self.assertIn(word, f["verdict"]["text"][0])
+            self.assertNotIn("все запрошенные созданы", f["verdict"]["text"][0])
+            self.assertIs(f["measured"], False)
+            self.assertFalse(nr_ab.reusable({**f, "sig": {"common": {}, "variants": {}}}, {"common": {}, "variants": {}}, [], False))
+            self.assertIsNone(e8["verdict"]["phase2"])  # the re-creations were not measured: neither met nor failed
+            self.assertIn("не измерено", nr_ab.render_experiment("E8", e8))
+        sr = nr_ab.Inputs(Path("clip.mp4"), color=manifest(self.root / "color_sr", 0, 0))  # manifest() writes 8x8
+        self.assertEqual(nr_ab.check_size(self.args(check_size="2560x1440"), sr), "2560x1440")  # an explicit --check-size beats color_sr
+        self.assertEqual(nr_ab.check_size(self.args(check_size=None), sr), "8x8")
+        self.assertEqual(nr_ab.check_size(self.args(check_size=None), nr_ab.Inputs(Path("clip.mp4"))), "1280x720")
+        stopped = {"requested": 100, "ok": 17, "stop": "growth", "create_ms": [100.0] * 17, "vram_after_release_mib": [2048.0] * 17,
+                   "vram_after_create_mib": [2552.0] * 17, "usage_after_init_mib": 2552.0}
+        self.assertIs(nr_ab.phase2(stopped)[0], False)  # a release that frees nothing
+        rep = {"requested": 20, "ok": 20, "usage_after_init_mib": 2552.0, "create_ms": [200.0] * 10 + [400.0] * 10,
+               "vram_after_release_mib": [2048.0] * 20, "vram_after_create_mib": [2552.0] * 20}
+        self.assertIs(nr_ab.phase2(rep)[0], False)  # twice slower at the end
+        self.assertIs(nr_ab.phase2({**rep, "create_ms": [200.0] * 20, "vram_after_release_mib": [2048.0] * 19 + [2200.0]})[0], False)  # memory not freed
+        self.assertIs(nr_ab.phase2({**rep, "create_ms": [200.0] * 20, "ok": 19})[0], False)
+        self.assertEqual(nr_ab.phase2(None), (None, []))
 
     def test_variants_file_validation(self):
         ok = self.load({"id": "s", "still": True, "metrics": ["base", "time", "pairs"], "variants": [{"name": "a"}, {"name": "b", "params": {"local-tone": 0}}],
@@ -299,6 +382,9 @@ class Helpers(unittest.TestCase):
         self.assertEqual(nr_ab.run_expect(cat["E1"], cat["E1"].variants[0]), {})
         self.assertEqual([v.optional for v in cat["E6"].variants], [False, False, True, True])
         self.assertTrue(cat["E8b"].unsupported)
+        self.assertEqual((cat["E8"].check, cat["E6f"].check, cat["E6f"].kind), ("runs", "features", "check"))
+        self.assertEqual([v.name for v in cat["E11"].variants][-3:], ["am_follow", "am_s0", "am_s2"])
+        self.assertTrue(all(v.params["auto_mask"] for v in cat["E11"].variants[-3:]))  # the control overrides the fixed auto_mask false
         self.assertEqual(cat["E9"].requires, ("--scene-cut",))
         self.assertEqual((cat["E3"].frames, cat["E4"].frames), (30, 30))
 
@@ -330,7 +416,12 @@ class Helpers(unittest.TestCase):
         self.assertEqual(sub["missing_pairs"], 2)
         full = nr_ab.verdict_e7({"groups": [["a", "b"]], "pairs": [{"a": "a", "b": "b", "psnr_y": 30}]})
         self.assertEqual(full["text"], ["все пары различаются"])
-        self.assertTrue(nr_ab.verdict_e11(v(**{n: {"vs_base": {"psnr_y": 46.5}} for n in ("s0", "s1", "s2")}))["no_effect"])
+        flat = v(**{n: {"vs_base": {"psnr_y": 46.5}} for n in ("s0", "s1", "s2")})
+        self.assertTrue(nr_ab.verdict_e11({**flat, "pairs": [{"a": "am_follow", "b": "am_s0", "psnr_y": 38.0}]})["no_effect"])  # acts with the mask
+        blind = nr_ab.verdict_e11({**flat, "pairs": [{"a": "am_follow", "b": "am_s0", "psnr_y": 60.0}, {"a": "am_follow", "b": "am_s2", "psnr_y": 58.0}]})
+        self.assertIsNone(blind["no_effect"])  # no effect with the mask either: the clip proves nothing
+        self.assertIs(nr_ab.verdict_e11({**v(s0={"vs_base": {"psnr_y": 30}}, s1={"vs_base": {"psnr_y": 50}}, s2={"vs_base": {"psnr_y": 50}})})["no_effect"], False)
+        self.assertTrue(nr_ab.names_only("[14:46:39.828] [error] nr: nr.passes must be one of 1 | 2 (got 3)").startswith("nr: nr.passes"))
         e3 = nr_ab.verdict_e3(v(unit={"temporal": {"psnr_y": 40}, "nr": {"mv_scale": [1, 1]}}, auto={"temporal": {"psnr_y": 41}, "nr": {"mv_scale": [1, 1]}}))
         self.assertTrue(any("ничего не меряет" in t for t in e3["text"]))
         e3 = v(unit={"temporal": {"psnr_y": 44.0}}, auto={"temporal": {"psnr_y": 46.0}}, target={"temporal": {"psnr_y": 46.5}})
@@ -508,8 +599,8 @@ class StubRun(unittest.TestCase):
                                                       {"name": "nodepth", "flags": ["--no-depth-guide"], "expect": {"depth_used": False, "mv_used": True}},
                                                       {"name": "mv", "flags": ["--mv-scale", "auto", "--create-with-mv"]}]}), encoding="utf-8")
         cls.out = cls.work / "out"
-        cls.result = cls.run_ab(["--variants", str(cls.smoke), "--experiment", "E2,E8", "--check-runs", "1", "--start", "4", "--frames", "3", "--warmup", "2",
-                                 "--out", str(cls.out)])
+        cls.result = cls.run_ab(["--variants", str(cls.smoke), "--experiment", "E2,E8,E6f", "--check-runs", "1", "--check-repeat", "5", "--check-features", "3",
+                                 "--start", "4", "--frames", "3", "--warmup", "2", "--out", str(cls.out)])
 
     @classmethod
     def run_ab(cls, args: list) -> subprocess.CompletedProcess:
@@ -541,6 +632,9 @@ class StubRun(unittest.TestCase):
         self.assertEqual([c["ok"] for c in e8["checks"]], [True])
         self.assertEqual(e8["size"], "192x128")  # the feature at the size NR runs at: color_sr's
         self.assertTrue(e8["meta"]["gpu"])  # the build line keeps the check's GPU (nothing else ran in E8)
+        self.assertEqual((e8["repeat"]["requested"], e8["repeat"]["ok"]), (5, 5))  # nr --check --check-repeat on the stub
+        self.assertEqual((res["E6f"]["alive"], res["E6f"]["stop"]), (3, ""))
+        self.assertEqual(res["E6f"]["size"], "192x128")
         self.assertTrue(res["smoke"]["meta"]["exe_sha256"])
         md = (self.out / "nr_ab.md").read_text(encoding="utf-8")
         for s in ("### smoke", "| i05 |", "∞", "E2", "### E8", e8["meta"]["gpu"], "Вход NR: color_sr, depth_dlss, mv_dlss; маски: выкл."):
@@ -646,6 +740,10 @@ class StubRun(unittest.TestCase):
         switch.write_text(json.dumps({"id": "switch", "variants": [{"name": "a"}, {"name": "b", "params": {"mv_scale": "auto"}}]}), encoding="utf-8")
         taken = self.work / "E7.json"  # its id is the file name: results.json, folder and verdict of the catalogue's E7
         taken.write_text(json.dumps({"variants": [{"name": "a"}]}), encoding="utf-8")
+        many = self.run_ab(["--experiment", "E6f", "--check-features", "18", "--out", str(self.work / "many")])  # INCIDENT 2026-10-25: hung the machine
+        self.assertNotEqual(many.returncode, 0)
+        self.assertIn("--check-features", many.stderr)
+        self.assertFalse((self.work / "many").exists())
         for args, word in ((["--variants", str(bad)], "no_such_key"), (["--experiment", "E2", "--nr-arg=--intensity=1"], "--intensity=1"),
                            (["--variants", str(switch)], "mv_scale"), (["--variants", str(taken)], "taken"),
                            (["--experiment", "E2", "--passes", str(self.work)], "--prepare makes")):

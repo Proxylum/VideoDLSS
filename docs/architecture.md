@@ -420,7 +420,10 @@ INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминир�
      DXGI (`32.0.15.9186` → 591.86; порог **616.56**, `--skip-driver-check`), путь + размер + **SHA-256** `nvngx_dlssnr.dll`,
      путь форвардера — всё в лог и в `NrDiagnostics` (`dlssvid nr --check`, `--json`); время инициализации NGX и `CreateFeature`
      и видеопамять фичи — рост `CurrentUsage` процесса по DXGI `QueryVideoMemoryInfo` (локальный сегмент) до и после
-     (`init_ms`, `create_ms`, `vram_*_bytes`; TASK-0048);
+     (`init_ms`, `create_ms`, `vram_*_bytes`; TASK-0048). `nr --check --check-repeat N` — `INrBackend::RecreateFeature`:
+     `ReleaseFeature` + `CreateFeature(18)` на том же блоке параметров внутри одной инициализации (E8, условие фазы 2 превью);
+     `--check-features N` (1…4) — N бэкендов живы одновременно, каждый со своей инициализацией, как проходы прогона (E6;
+     больше 4 подвешивало машину — INCIDENT 2026-10-25) (TASK-0053);
   2. ядро NGX через общий `gpu/Ngx` (`Init_with_ProjectID`, рефкаунт на процесс; тот же, что у DLSS SR);
   3. `LoadLibraryEx(nvngx_dlssnr.dll)` + форвардер `nvngx.dll_dlssvid.dll` (см. хаки): `Init_Ext` сниппета с перебором ABI
      (`info, version` ComfyUI → `version, info` публичный → `version, params` OptiScaler), блок параметров `capability`

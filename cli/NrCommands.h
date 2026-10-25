@@ -42,6 +42,8 @@ public:
         bool skipDriverCheck = false;
         bool check = false;
         std::string checkSize = "1280x720";
+        int checkRepeat = 0;    // --check: release + CreateFeature this many times inside one Init (spec E8)
+        int checkFeatures = 0;  // --check: features alive at once, 1..4 (spec E6: VRAM per feature; more hung the machine); 0 not asked
         std::string json;
     };
     struct PatchArgs {
