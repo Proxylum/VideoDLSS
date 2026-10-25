@@ -14,8 +14,9 @@ adds variants to it, --force redoes.
     python scripts/nr_ab.py --clip clip.mp4 --prepare --experiment E7 --dry-run          # the commands only
     python scripts/nr_ab.py --clip clip.mp4 --passes <passes> --variants my_ab.json      # own variants
 
-NGX runs use the GPU the CI runner shares: run them only while CI is idle. `--backend stub --warp` runs anywhere (ctest
-scripts.nr_ab_stub). Standard library only."""
+NGX runs use the GPU the CI runner shares: run them only while CI is idle. `--backend stub --warp` runs anywhere on given passes, or with
+`--prepare --prepare-backends stub,stub,bicubic` (ctest scripts.nr_ab_stub); the default --prepare backends (da3,ofa,dlss) need the NVIDIA
+GPU. Standard library only."""
 from __future__ import annotations
 
 import argparse
@@ -53,7 +54,9 @@ NOT_SETTINGS = {"input", "output", "color_dir", "depth_dir", "mv_dir", "masks_di
 INPUT_KEYS = ("color", "depth", "mv")  # a variant's own folders: what nr_command passes as --color-dir / --depth-dir / --mv-dir
 EXPECT_KEYS = ("depth_used", "mv_used", "work_size", "passes", "mv_scale", "frames_written", "warmup_frames", "masks")  # stats read_nr keeps
 NR_DLLS = ("nvngx_dlssnr.dll", "nvngx.dll_dlssvid.dll")  # kNrDllName, kNrForwarderName (core/stages/nr/INrBackend.h)
-ABS_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\|/)[^\s'\"()]+")  # a path in a dlssvid message: the report keeps its last part ([hygiene])
+# a path in a dlssvid message (printed unquoted): the report keeps its last part ([hygiene]). A drive or UNC path may have spaces in its
+# folders (each ends with a separator); only the last part stops at a space, a POSIX path at the first one (prose like «unit / auto» stays)
+ABS_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|\\\\)(?:[^\\/\r\n'\"()]*[\\/])*[^\s'\"()]+|/[^\s'\"()]+")
 
 
 @dataclass
@@ -178,8 +181,9 @@ def known_keys(help_text: str) -> set:
 
 
 def setting_keys(help_text: str) -> set:
-    """The nr settings `dlssvid nr --help` lists: every option but the run's own (NOT_SETTINGS) - those in a params.json fail the run."""
-    return known_keys(help_text) - NOT_SETTINGS
+    """The nr settings `dlssvid nr --help` lists: every option but the run's own (NOT_SETTINGS) - those in a params.json fail the run - and
+    the negated spellings of a flag (no_auto_mask): no nr key starts with no_, normalize_params folds no_guides into guides first."""
+    return {k for k in known_keys(help_text) - NOT_SETTINGS if not k.startswith("no_")}
 
 
 def check_options(tokens: list, allowed: dict, what: str) -> list:
@@ -331,15 +335,14 @@ class Inputs:
     masks: Optional[Path] = None        # a passes root with mask_* passes (--masks)
     mv_target: Optional[Path] = None
 
-    def reference(self) -> Path:        # what NR read: the edit is measured against it
-        return self.color or self.clip
-
-    def index(self, frame: int) -> int:  # compare reads a pass from its first frame, a video from 0
-        r = pass_range(self.color) if self.color else None
-        return frame - (r[0] if r else 0)
-
     def describe(self) -> str:
         return ", ".join(n for n, d in (("color_sr", self.color), ("depth_dlss", self.depth), ("mv_dlss", self.mv)) if d) or "видео"
+
+
+def frame_index(color: Optional[Path], frame: int) -> int:
+    """Index of `frame` for `dlssvid compare` in what NR read: a pass is read from its first frame, the video (no color_sr) from 0."""
+    r = pass_range(color) if color else None
+    return frame - (r[0] if r else 0)
 
 
 def own_inputs(inp: Inputs, v: Variant) -> dict:
@@ -448,13 +451,14 @@ def load_variants(path: Path) -> Experiment:
             raise RuntimeError(f"{path}: {where} sets {', '.join(bad)} - give it to nr_ab as --backend / --format")
         return p
 
-    vs, names = [], set()
+    vs, names, folders = [], set(), {}
     for x in j.get("variants", []):
         name = x.get("name", "")
-        if not NAME.match(name):
-            raise RuntimeError(f"{path}: variant name '{name}' must match {NAME.pattern}")
-        if name in names:
-            raise RuntimeError(f"{path}: variant '{name}' twice")
+        if not NAME.match(name) or name.endswith("."):  # Win32 drops a trailing dot: "x." is the folder "x"
+            raise RuntimeError(f"{path}: variant name '{name}' must match {NAME.pattern} and not end with '.'")
+        if name.casefold() in folders:  # every variant runs in <out>/<run>/<id>/<name>: case-blind on Windows, like the experiment ids
+            raise RuntimeError(f"{path}: variant '{name}' and '{folders[name.casefold()]}' are one folder on Windows")
+        folders[name.casefold()] = name
         names.add(name)
         flags = check_options(x.get("flags", []), AB_FLAGS, f"{path}: variant '{name}' flags")
         if expected_ab(flags).get("mv_scale") not in (None, "auto"):
@@ -710,7 +714,8 @@ def prepare_root(out: Path, a, clip: Path) -> Path:
     """One folder per clip and backends: other --prepare-backends make other passes, never over the stored experiments' inputs; two clips of
     one name (another folder) get their own by a hash of the full path."""
     tag = hashlib.sha256(str(Path(clip).resolve()).lower().encode("utf-8")).hexdigest()[:8]
-    return out / "prepare" / f"{Path(clip).stem}-{tag}-{'-'.join(x for x in a.prepare_backends.split(',') if x)}"
+    backends = "-".join(re.sub(r"[^A-Za-z0-9._-]", "_", x) for x in a.prepare_backends.split(",") if x)  # worker:vda -> worker_vda (no ':' on Windows)
+    return out / "prepare" / f"{Path(clip).stem}-{tag}-{backends}"
 
 
 def resolve_inputs(a, out: Path, cli: Path, dry: bool) -> Inputs:
@@ -837,13 +842,13 @@ def run_experiment(a, cli: Path, inp: Inputs, exp: Experiment, base_params: dict
         if "base" in exp.metrics and v.name != exp.baseline:
             entry["vs_base"] = measure(cli, base, vdir / "color_nr", vdir / "cmp_base.json", frames, dry)
         if "edit" in exp.metrics:  # against what this variant read: its own color_sr, the run's, else the video
-            r0 = pass_range(own) if own else None
-            entry["edit"] = measure(cli, vdir / "color_nr", own or inp.clip, vdir / "cmp_input.json", frames, dry, offset=start - (r0[0] if r0 else 0))
+            entry["edit"] = measure(cli, vdir / "color_nr", own or inp.clip, vdir / "cmp_input.json", frames, dry, offset=frame_index(own, start))
         if "temporal" in exp.metrics and frames > 1:
             entry["temporal"] = measure(cli, vdir / "color_nr", vdir / "color_nr", vdir / "cmp_next.json", frames - 1, dry, offset=1)
-    if "temporal" in exp.metrics and frames > 1:
-        ref = inp.reference()
-        res["input_temporal"] = measure(cli, ref, ref, edir / "cmp_input_next.json", frames - 1, dry, start=inp.index(start), offset=1)
+    if "temporal" in exp.metrics and frames > 1:  # the «вход» row: what the baseline read (a variants file may give it its own color_sr)
+        own = variant_dirs(inp, next(v for v in exp.variants if v.name == exp.baseline))["color"]
+        res["input_temporal"] = measure(cli, own or inp.clip, own or inp.clip, edir / "cmp_input_next.json", frames - 1, dry,
+                                        start=frame_index(own, start), offset=1)
     valid = valid_stored(prev, sig, exp.baseline) if prev and sig else set()
     if valid:  # --only over a stored result: the variants not run now stay while true under this run's signature and of the same build
         now = _ident((prev if dry else res)["variants"].get(exp.baseline))  # a dry run has no new baseline: it shows what the real one keeps
@@ -914,13 +919,17 @@ def run_check(a, cli: Path, inp: Inputs, exp: Experiment, edir: Path, dry: bool)
     return res
 
 
-def experiment_meta(res: dict, version: str, build: dict, inp: Inputs) -> dict:
-    """The build and the inputs an experiment was measured with - stored with it: an experiment reused from results.json keeps its own."""
+def experiment_meta(res: dict, version: str, build: dict, inp: Inputs, exp: Experiment) -> dict:
+    """The build and the inputs an experiment was measured with - stored with it: an experiment reused from results.json keeps its own. The
+    inputs are the baseline's, and the variants with folders of their own are named."""
     first = next((x["nr"] for x in res.get("variants", {}).values() if x.get("nr")), None) or res.get("diag") or {}
     meta = {"version": version, "exe_sha256": build.get("dlssvid"), "gpu": first.get("gpu"), "driver": first.get("driver"), "dll_sha256": first.get("dll_sha256")}
     if "checks" not in res:  # E8 reads no passes
         used = sorted({m for x in res.get("variants", {}).values() for m in ((x.get("nr") or {}).get("masks") or [])})
-        meta.update({"inputs": inp.describe(), "masks": ", ".join(used)})
+        d = variant_dirs(inp, next(v for v in exp.variants if v.name == exp.baseline))
+        own = [v.name for v in exp.variants if v.inputs and v.name in res.get("variants", {})]
+        inputs = Inputs(inp.clip, d["color"], d["depth"], d["mv"]).describe() + (f"; свои входы у {', '.join(own)}" if own else "")
+        meta.update({"inputs": inputs, "masks": ", ".join(used)})
     return meta
 
 
@@ -948,7 +957,10 @@ def render_experiment(exp_id: str, res: dict, own: tuple = ()) -> str:
         for i, c in enumerate(res["checks"]):
             lines.append(f"| {i + 1} | {'да' if c['ok'] else 'нет'} | {fmt_num(c['init_ms'], 0)} | {fmt_num(c['create_ms'], 0)} | {fmt_num(c['vram_mib'])} | {fmt_num(c['run_s'], 2)} |")
     else:
-        mode = "still (guides выкл, temporal 0)" if res.get("still") else ", ".join(f"{k} {v}" for k, v in res.get("fixed", {}).items()) or "параметры по умолчанию"
+        fixed = res.get("fixed", {})  # every fixed value is in the heading: still mode names its own two, the others follow
+        extra = ", ".join(f"{k} {v}" for k, v in fixed.items() if k not in STILL or STILL[k] != v)
+        mode = ("still (guides выкл, temporal 0)" + (f", {extra}" if extra else "")) if res.get("still") else \
+            ", ".join(f"{k} {v}" for k, v in fixed.items()) or "параметры по умолчанию"
         lines += [f"Кадры {res['start']}…{res['start'] + res['frames'] - 1} ({res['frames']}), разогрев {res['warmup']}, {mode}; база — {res['baseline']}.", ""]
         metrics, variants = res.get("metrics", []), res.get("variants", {})
         timed = any((e.get("nr") or {}).get("init_ms") is not None for e in variants.values())
@@ -1124,8 +1136,9 @@ def main(argv=None) -> int:
     for e in exps:
         sig = run_signature(a, inp, e, base_params, build)  # after prepare: the identities of the passes the variants read
         prev = stored.get(e.id)
-        if a.dry_run and repass and e.kind == "run":  # the real run rewrites the passes first: no stored experiment keeps its signature
-            print(f"# {e.id}: --prepare перепишет пассы — будет переснят")
+        if a.dry_run and repass and (e.kind == "run" or inp.color):  # the real run rewrites the passes first: no stored experiment on them keeps
+            # its signature; E8 creates the feature at color_sr's size, known only after them - its --check-size below is provisional
+            print(f"# {e.id}: --prepare перепишет пассы — будет переснят" + (" (размер фичи — по новому color_sr)" if e.kind == "check" else ""))
             prev = None
         if reusable(prev, sig, [v.name for v in selected(e, a.only)], a.force, e.baseline):
             prev["title"] = e.title
@@ -1134,7 +1147,7 @@ def main(argv=None) -> int:
         res = run_experiment(a, cli, inp, e, base_params, out, a.dry_run, prev, sig)
         if a.dry_run:
             continue
-        res["sig"], res["meta"] = sig, experiment_meta(res, version, build, inp)
+        res["sig"], res["meta"] = sig, experiment_meta(res, version, build, inp, e)
         stored[e.id] = res
         out_root.mkdir(parents=True, exist_ok=True)
         results_path.write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")  # after each experiment: resumable

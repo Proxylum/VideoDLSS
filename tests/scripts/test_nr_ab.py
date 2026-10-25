@@ -120,12 +120,17 @@ class Helpers(unittest.TestCase):
         self.assertEqual(nr_ab.expected_ab(["--mv-scale", "auto", "--create-with-mv"]), {"mv_scale": "auto", "create_with_mv": True})  # NrAbJson
         self.assertEqual(nr_ab.expected_ab(["--mv-scale=unit", "--no-depth-guide"]), {"depth_guide": False})
         self.assertEqual(nr_ab.expected_ab([]), {})
-        help_text = "--local-tone,--local_tone FLOAT\n--no-guides,--no_guides,!--guides\n--mv-scale,--mv_scale TEXT\n--start INT\n--no-auto\n--dll-dir TEXT"
+        help_text = ("--local-tone,--local_tone FLOAT\n--no-guides,--no_guides,!--guides\n--mv-scale,--mv_scale TEXT\n--start INT\n--no-auto\n"
+                     "--dll-dir TEXT\n--auto-mask,--auto_mask,!--no-auto-mask,!--no_auto_mask")
         keys = nr_ab.setting_keys(help_text)  # a run option in a params.json fails the run after the variants before it ran
-        self.assertTrue({"local_tone", "guides"} <= keys)
-        self.assertFalse({"mv_scale", "start", "auto", "no_auto", "dll_dir"} & keys)
+        self.assertTrue({"local_tone", "guides", "auto_mask"} <= keys)
+        self.assertFalse({"mv_scale", "start", "auto", "no_auto", "dll_dir", "no_auto_mask", "no_guides"} & keys)
         self.assertEqual(nr_ab.names_only(r"missing pass frame 12: D:\clips\mv_dlss\000012.exr"), "missing pass frame 12: 000012.exr")
         self.assertEqual(nr_ab.names_only("pass folder not found: /tmp/x/color_sr (no manifest)"), "pass folder not found: color_sr (no manifest)")
+        self.assertEqual(nr_ab.names_only(r"missing pass frame 12: D:\My Clips\face\mv_dlss\000012.exr"), "missing pass frame 12: 000012.exr")
+        self.assertEqual(nr_ab.names_only(r"nr: color D:\John Doe\clips\color_sr has frames 0..9, the run reads 4..12"),
+                         "nr: color color_sr has frames 0..9, the run reads 4..12")  # spaces in the folders, unquoted
+        self.assertEqual(nr_ab.names_only("unit / auto"), "unit / auto")
         for e in nr_ab.EXPERIMENTS:  # the catalogue keeps the same rules as a variants file
             for v in e.variants:
                 nr_ab.check_options(v.flags, nr_ab.AB_FLAGS, f"{e.id}/{v.name}")
@@ -162,12 +167,11 @@ class Helpers(unittest.TestCase):
 
     def test_compare_commands_index_the_input_from_the_output(self):
         sr = manifest(self.root / "color_sr", 0, 9)
-        inp = nr_ab.Inputs(Path("clip.mp4"), color=sr)
-        self.assertEqual(inp.index(4), 4)
+        self.assertEqual(nr_ab.frame_index(sr, 4), 4)
         manifest(sr, 2, 9)
-        self.assertEqual(inp.index(4), 2)  # compare reads a pass from its first frame
-        self.assertEqual(nr_ab.Inputs(Path("clip.mp4")).index(4), 4)  # a video from frame 0
-        edit = nr_ab.compare_command("dlssvid", "out/color_nr", sr, "e.json", offset=inp.index(4))
+        self.assertEqual(nr_ab.frame_index(sr, 4), 2)  # compare reads a pass from its first frame
+        self.assertEqual(nr_ab.frame_index(None, 4), 4)  # a video from frame 0
+        edit = nr_ab.compare_command("dlssvid", "out/color_nr", sr, "e.json", offset=nr_ab.frame_index(sr, 4))
         self.assertIn("--offset 2", " ".join(edit))
         nxt = nr_ab.compare_command("dlssvid", "a", "a", "n.json", start=4, offset=1, frames=2)
         self.assertIn("--start 4 --offset 1 --frames 2", " ".join(nxt))
@@ -185,6 +189,19 @@ class Helpers(unittest.TestCase):
         self.assertIn(str(bic), edits[1])  # b: its own color_sr, indexed from its first frame
         self.assertIn("--offset 4", edits[1])
         self.assertIn("--frames 12", edits[1])  # every compare bounded to the frames written
+
+    def test_the_input_row_is_what_the_baseline_read(self):
+        bic = manifest(self.root / "bic" / "color_sr", 2, 40)
+        exp = nr_ab.Experiment("x", "x", [nr_ab.Variant("a", inputs={"color": str(bic)}), nr_ab.Variant("b")], "a", metrics=("temporal",))
+        inp = nr_ab.Inputs(Path("clip.mp4"))
+        _res, lines = self.dry(exp, inp)
+        row = [x for x in lines if "cmp_input_next" in x]
+        self.assertEqual(len(row), 1)
+        self.assertIn(str(bic), row[0])
+        self.assertIn("--start 4 --offset 1 --frames 11", row[0])
+        res = {"variants": {"a": {"nr": {}}, "b": {"nr": {}}}}
+        meta = nr_ab.experiment_meta(res, "1.0", {"dlssvid": "e"}, inp, exp)
+        self.assertEqual(meta["inputs"], "color_sr; свои входы у a")
 
     def test_pass_range_and_covers(self):
         d = manifest(self.root / "p", 2, 9)
@@ -255,6 +272,7 @@ class Helpers(unittest.TestCase):
                     {"variants": [{"name": "a"}, {"name": "b", "flags": ["--intensity", "2"]}]},  # a setting as a flag
                     {"variants": [{"name": "a"}, {"name": "b", "flags": ["--mv-scale", "half"]}]},
                     {"variants": [{"name": "a"}, {"name": "b", "inputs": {"colour": "x"}}]},  # would run on the run's colour under another name
+                    {"variants": [{"name": "A"}, {"name": "a"}]}, {"variants": [{"name": "a"}, {"name": "b."}]},  # one folder on Windows
                     {"variants": [{"name": "a", "expect": {"color_source": "color_sr"}}]}):  # a stat nr_ab does not read: never met
             with self.subTest(bad=bad):
                 with self.assertRaises(RuntimeError):
@@ -350,6 +368,8 @@ class Helpers(unittest.TestCase):
         res["variants"]["x"]["params"] = {"intensity": 0.5, "temporal": 0.4}  # an override of a fixed key: the heading says 0, the row 0.4
         res["pairs_missing"] = [["base", "x"]]
         md = nr_ab.render_experiment("smoke", res)
+        still = nr_ab.render_experiment("s", {**res, "still": True, "fixed": {**nr_ab.STILL, "auto_mask": False}})  # E11: every fixed value shown
+        self.assertIn("still (guides выкл, temporal 0), auto_mask False", still)
         self.assertIn("mv: mv_dlss", md)
         self.assertIn("temporal=0.4", md)
         self.assertIn("Пары без замера", md)
@@ -443,6 +463,8 @@ class Helpers(unittest.TestCase):
         self.assertEqual(inp.color, nr_ab.prepare_root(self.root, a, Path("clip.mp4")) / "passes" / "color_sr")
         self.assertTrue(nr_ab.prepare_root(self.root, a, Path("clip.mp4")).name.startswith("clip-"))
         self.assertTrue(nr_ab.prepare_root(self.root, a, Path("clip.mp4")).name.endswith("-stub-stub-bicubic"))
+        name = nr_ab.prepare_root(self.root, self.args(prepare_backends="worker:vda,ofa,dlss"), Path("clip.mp4")).name
+        self.assertTrue(name.endswith("-worker_vda-ofa-dlss"))  # ':' is not a Windows file name character
 
     def test_prepared_passes_belong_to_the_clip(self):
         a = self.args()
