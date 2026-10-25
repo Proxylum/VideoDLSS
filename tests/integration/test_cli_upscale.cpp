@@ -50,6 +50,7 @@ TEST_CASE("dlssvid upscale --backend nis writes color_sr and a preview; compare 
     in >> j;
     CHECK(j["summary"]["frames"] == 3);
     CHECK(j["summary"]["ssim_y_mean"].get<double>() > 0.9999);
+    CHECK(j["summary"]["mae_rgb_mean"].get<double>() == 0.0);  // TASK-0050: the size of an edit, 0 for the same frames
     CHECK(j["frames"].size() == 3);
     // pass folder vs the preview video at the same size
     REQUIRE(Run("compare --ref " + Q(out / "color_sr") + " --test " + Q(dir / "sr.mkv") + " -q --json " + Q(dir / "sr.json")) == 0);
@@ -58,6 +59,9 @@ TEST_CASE("dlssvid upscale --backend nis writes color_sr and a preview; compare 
     in2 >> j2;
     CHECK(j2["summary"]["psnr_rgb_mean"].get<double>() > 38.0);
     CHECK(j2["summary"]["size"][0] == 80);
+    CHECK(j2["summary"]["mae_rgb_mean"].get<double>() > 0.0);
+    CHECK(j2["summary"]["mae_y_mean"].get<double>() > 0.0);
+    CHECK(j2["frames"][0].contains("mae_rgb"));
 
     // dlss on WARP (no NVIDIA adapter): the fallback to nis works, --no-fallback fails with the reason
     REQUIRE(Run("upscale --backend dlss --warp --frames 1 -i " + Q(clip) + " -o " + Q(dir / "vsr")) == 0);

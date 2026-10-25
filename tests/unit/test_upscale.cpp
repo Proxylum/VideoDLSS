@@ -184,6 +184,28 @@ TEST_CASE("PSNR / SSIM metrics", "[upscale][metrics]") {
     CHECK_THROWS(CompareImages(a, other));
 }
 
+// TASK-0050: the size of an edit for the NR A/B (spec E1: mean |out - in|) - not a quality score, so a separate number
+TEST_CASE("Mean absolute difference is the size of the edit: 0 for identical images, the offset of a constant shift", "[upscale][metrics]") {
+    const PassImage a = MakeRgb(32, 16, [](uint32_t x, uint32_t y) { return std::array<float, 3>{x / 31.f, y / 15.f, 0.5f}; });
+    CHECK(CompareImages(a, a).maeRgb == 0.0);
+    CHECK(CompareImages(a, a).maeY == 0.0);
+    const PassImage c4 = MakeRgb(16, 16, [](uint32_t, uint32_t) { return std::array<float, 3>{0.4f, 0.4f, 0.4f}; });
+    const PassImage c5 = MakeRgb(16, 16, [](uint32_t, uint32_t) { return std::array<float, 3>{0.5f, 0.5f, 0.5f}; });
+    const ImageMetrics shift = CompareImages(c4, c5);
+    CHECK(std::fabs(shift.maeRgb - 0.1) < 1e-6);
+    CHECK(std::fabs(shift.maeY - 0.1) < 1e-6);
+    // uniform noise of amplitude 0.05: E|d| = 0.025
+    std::mt19937 rng(2);
+    std::uniform_real_distribution<float> dist(-0.05f, 0.05f);
+    PassImage b = c5;
+    for (uint32_t y = 0; y < b.height; ++y)
+        for (uint32_t x = 0; x < b.width; ++x)
+            for (size_t c = 0; c < 3; ++c) b.Set(x, y, c, c5.Get(x, y, c) + dist(rng));
+    const double noisy = CompareImages(c5, b).maeRgb;
+    CHECK(noisy > 0.02);
+    CHECK(noisy < 0.03);
+}
+
 TEST_CASE("Resampler: integer shifts and identity are exact, upscale of a constant is constant", "[upscale][gpu]") {
     D3D12Device dev({true, false});
     Resampler rs(dev);

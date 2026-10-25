@@ -181,4 +181,12 @@ if(Python3_Interpreter_FOUND)
   # the benchmark script's guards against stale passes (review of TASK-0038); standard library only
   add_test(NAME scripts.bench_clips COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tests/data/test_bench_clips.py)
   set_tests_properties(scripts.bench_clips PROPERTIES LABELS "scripts" TIMEOUT 60)
+  # scripts/nr_ab.py (TASK-0050): its helpers without dlssvid, then a whole A/B on the stub backend and WARP over a generated Y4M clip - the
+  # measurements of PR-2 run the same code on NGX. No NGX and no GPU, so it is safe while CI shares the GPU with development.
+  add_test(NAME scripts.nr_ab COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tests/scripts/test_nr_ab.py -k Helpers)
+  set_tests_properties(scripts.nr_ab PROPERTIES LABELS "scripts" TIMEOUT 60)
+  add_test(NAME scripts.nr_ab_stub
+           COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_SOURCE_DIR}/tests/scripts/test_nr_ab.py -k StubRun --cli $<TARGET_FILE:dlssvid> --work ${CMAKE_BINARY_DIR}/test-tmp/nr_ab
+           WORKING_DIRECTORY "${DLSSVID_TEST_CWD}")
+  set_tests_properties(scripts.nr_ab_stub PROPERTIES LABELS "scripts" TIMEOUT 180)
 endif()
