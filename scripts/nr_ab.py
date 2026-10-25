@@ -39,8 +39,12 @@ SAME_DB = 45.0        # spec §2b / §2i: two outputs above it are one picture (
 LINEAR_TOL = 0.05     # PR-7, E1: the edit at strength x <= 1 is x times the edit at 1 (our lerp, no clipping inside [input, model])
 GAIN_DB = 1.0         # spec §2e: an inter-frame PSNR gain this large makes an MV variant the default (E4)
 IDENTICAL_DB = 100.0  # `dlssvid compare` counts an identical frame as 100 dB in its means and writes null for an infinite minimum
-STILL = {"guides": False, "temporal": 0.0}  # the model alone: Reset on every frame (still mode), no history of our filter either
-MODEL = {"temporal": 0.0}                   # model history on, our flicker filter off: the breathing measured is the model's
+# intensity 1: since PR-7 the strength is our blend after the model - a base intensity of --params / --project-params would scale every
+# difference between variants (0: every variant one bypass run); E1 / E2 set it in their variants
+STILL = {"guides": False, "temporal": 0.0, "intensity": 1.0}  # the model alone: Reset on every frame (still mode), no history of our filter either
+MODEL = {"temporal": 0.0, "intensity": 1.0}                   # model history on, our flicker filter off: the breathing measured is the model's
+# E1 / E2 measure the edit against the input, the blend starts from the tone-mapped frame: an identity tone stage
+TONE = {"tonemap": "passthrough", "input_transfer": "srgb", "exposure": 0.0}
 METRICS = ("base", "edit", "temporal", "time", "pairs")
 NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 RUN_KEYS = ("backend", "format")  # nr schema keys nr_ab passes as options (--backend / --format): a base file's would be overridden anyway
@@ -102,8 +106,8 @@ EXPERIMENTS = [
     # PR-7: nr.intensity is our blend after the model (the model always gets DLSSNR.Intensity 1) - E1 and E2 check the blend, not NGX;
     # NGX's own reading of DLSSNR.Intensity (it saturated at 1, 0 was black: PR-2) needs a hidden A/B flag for a new DLL, not added yet
     Experiment("E1", "Сила правки: линейность смешивания (PR-7, §2b)",
-               [_v(f"i{x:g}", params={"intensity": x}) for x in (0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2)], "i1", STILL, ("base", "edit", "time")),
-    Experiment("E2", "Сила 0: обход модели (PR-7, §2b)", [_v("i0", params={"intensity": 0}), _v("i1", params={"intensity": 1})], "i1", STILL,
+               [_v(f"i{x:g}", params={"intensity": x}) for x in (0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2)], "i1", {**STILL, **TONE}, ("base", "edit", "time")),
+    Experiment("E2", "Сила 0: обход модели (PR-7, §2b)", [_v("i0", params={"intensity": 0}), _v("i1", params={"intensity": 1})], "i1", {**STILL, **TONE},
                ("edit", "base", "time")),
     Experiment("E3", "Единицы векторов движения (§2e)",
                [_v("unit", flags=["--mv-scale", "unit"]), _v("auto", flags=["--mv-scale", "auto"]),
@@ -127,7 +131,7 @@ EXPERIMENTS = [
                unsupported="нужен режим смены tone/structure посреди прогона без пересоздания фичи — не входит в PR-1d"),
     Experiment("E9", "Сброс на склейках (§2d)",
                [_v("cut0", params={"scene_cut": 0}), _v("cut024", params={"scene_cut": 0.24}), _v("cut024_t04", params={"scene_cut": 0.24, "temporal": 0.4})],
-               "cut0", {}, ("temporal", "base", "time"), needs=("mv",), requires=("--scene-cut",)),
+               "cut0", {"intensity": 1.0}, ("temporal", "base", "time"), needs=("mv",), requires=("--scene-cut",)),
     Experiment("E10", "Локальный тон и структура (§2a)",
                [_v("base"), _v("tone0", params={"local_tone": 0}), _v("structure0", params={"local_structure": 0})], "base", STILL, ("base", "edit", "time")),
     # the control with the auto mask (am_*): «no effect without it» means something only if the key acts with it on this clip
@@ -583,7 +587,8 @@ def _not_static(t) -> str:
 def verdict_e1(res):
     """PR-7: out = in + x * (model - in), the model run at 1. Up to 1 the edit (MAE to the input) is x times the edit at 1 - the lerp stays
     inside [input, model], nothing clips; above 1 saturate clips the extrapolation, and the ratio's shortfall from x is the clipped share.
-    The time does not depend on x > 0: the model runs the same, the strength is one lerp in NrCompose."""
+    The GPU time at x > 0 is listed, not judged: every run does the same model work plus one lerp, and one run's mean over a few frames
+    spreads by x1.4-x4.8 between identical runs (PR-2 E1 / E7) - no threshold separates a lerp from that noise."""
     e1 = _get(res, "i1", "edit", "mae_rgb")
     low = {x: _get(res, f"i{x:g}", "edit", "mae_rgb") for x in (0.25, 0.5, 0.75)}
     worst = None if not e1 or None in low.values() else max(abs(m - x * e1) / e1 for x, m in low.items())
@@ -594,7 +599,6 @@ def verdict_e1(res):
     known = [m for m in edits if m is not None]
     monotone = None if len(known) < 2 else all(b > a for a, b in zip(known, known[1:]))
     ms = [t for t in (_get(res, f"i{x:g}", "nr", "ms_per_frame_gpu") for x in (0.25, 0.5, 0.75, 1, 1.25, 1.5, 2)) if isinstance(t, (int, float)) and t > 0]
-    spread = max(ms) / min(ms) if len(ms) >= 2 else None
     text = []
     if linear is not None:
         text.append(f"смешивание линейно на [0, 1]: худшее отклонение правки от x·правка(1) — {worst * 100:.1f}% (допуск {LINEAR_TOL * 100:g}%)" if linear
@@ -605,9 +609,9 @@ def verdict_e1(res):
                                                          for x, r in over))
     if monotone is False:
         text.append("правка растёт с силой не монотонно — регрессия NrCompose (PR-7)")
-    if spread is not None and spread > 1.2:
-        text.append(f"время GPU зависит от силы (разброс ×{spread:.2f}): сила — один lerp после модели, так быть не должно")
-    return {"linear": linear, "worst": worst, "ratios": ratios, "monotone": monotone, "time_spread": spread, "text": text}
+    if len(ms) >= 2:
+        text.append(f"время GPU при x > 0: {fmt_num(min(ms))}–{fmt_num(max(ms))} мс/кадр — одна и та же работа модели, разброс — шум прогонов")
+    return {"linear": linear, "worst": worst, "ratios": ratios, "monotone": monotone, "text": text}
 
 
 def verdict_e2(res):
@@ -890,6 +894,13 @@ def _ident(entry) -> tuple:
     return tuple(((entry or {}).get("nr") or {}).get(k) for k in ("gpu", "driver", "dll_sha256"))
 
 
+def _same_build(entry, now: tuple, baseline) -> bool:
+    """A stored variant kept by an --only merge ran on the baseline's GPU / driver / DLL. A bypass run (intensity 0, PR-7) calls no model
+    and reports none of them - nothing to compare, for it or against a bypass baseline; the build itself is in the signature."""
+    bypass = lambda e: ((e or {}).get("nr") or {}).get("bypass") is True
+    return bypass(entry) or bypass(baseline) or _ident(entry) == now
+
+
 def run_experiment(a, cli: Path, inp: Inputs, exp: Experiment, base_params: dict, out: Path, dry: bool, prev: Optional[dict] = None,
                    sig: Optional[dict] = None) -> dict:
     """`prev` / `sig`: the stored result and this run's signature - the stored variants still true under it (valid_stored) and not run now stay
@@ -968,8 +979,9 @@ def run_experiment(a, cli: Path, inp: Inputs, exp: Experiment, base_params: dict
                                         start=frame_index(own, start), offset=1)
     valid = valid_stored(prev, sig, exp.baseline) if prev and sig else set()
     if valid:  # --only over a stored result: the variants not run now stay while true under this run's signature and of the same build
-        now = _ident((prev if dry else res)["variants"].get(exp.baseline))  # a dry run has no new baseline: it shows what the real one keeps
-        merged = {**{n: e for n, e in prev.get("variants", {}).items() if n in valid and n not in ran and _ident(e) == now}, **res["variants"]}
+        base = (prev if dry else res)["variants"].get(exp.baseline)  # a dry run has no new baseline: it shows what the real one keeps
+        now = _ident(base)
+        merged = {**{n: e for n, e in prev.get("variants", {}).items() if n in valid and n not in ran and _same_build(e, now, base)}, **res["variants"]}
         res["variants"] = {v.name: merged[v.name] for v in exp.variants if v.name in merged}
         res["failed"] = {**{n: w for n, w in prev.get("failed", {}).items() if n in valid and n not in ran}, **res["failed"]}
     if "pairs" in exp.metrics:
@@ -1138,7 +1150,7 @@ def render_experiment(exp_id: str, res: dict, own: tuple = ()) -> str:
     else:
         fixed = res.get("fixed", {})  # every fixed value is in the heading: still mode names its own two, the others follow
         extra = ", ".join(f"{k} {v}" for k, v in fixed.items() if k not in STILL or STILL[k] != v)
-        mode = ("still (guides выкл, temporal 0)" + (f", {extra}" if extra else "")) if res.get("still") else \
+        mode = ("still (guides выкл, temporal 0, сила 1)" + (f", {extra}" if extra else "")) if res.get("still") else \
             ", ".join(f"{k} {v}" for k, v in fixed.items()) or "параметры по умолчанию"
         lines += [f"Кадры {res['start']}…{res['start'] + res['frames'] - 1} ({res['frames']}), разогрев {res['warmup']}, {mode}; база — {res['baseline']}.", ""]
         metrics, variants = res.get("metrics", []), res.get("variants", {})

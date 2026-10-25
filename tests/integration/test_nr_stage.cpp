@@ -405,7 +405,16 @@ TEST_CASE("NrStage applies the edit strength once, after the last model pass", "
     spec.height = h;
     const auto dir = Dir("strength");
     const auto clip = WriteClip(dir / "clip.mkv", spec);
-    WritePass(dir / "src" / "color_sr", PassKind::ColorSr, w, h, frames, FileFormat::Exr, [&](int64_t i, PassImage& img) { img = ColorFrame(i, w, h); });
+    // a soft checker: twice the stub's two-pass edit stays inside [0, 1], so saturate clips (almost) nothing
+    auto soft = [&](int64_t i) {
+        PassImage img = MakePassImage(PassKind::ColorSr, w, h, PixelType::F16);
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+                for (size_t c = 0; c < 3; ++c)
+                    img.Set(x, y, c, (((x / 4 + y / 4) % 2) ? 0.55f : 0.45f) + 0.05f * static_cast<float>(c) * x / w - 0.01f * static_cast<float>(i));
+        return img;
+    };
+    WritePass(dir / "src" / "color_sr", PassKind::ColorSr, w, h, frames, FileFormat::Exr, [&](int64_t i, PassImage& img) { img = soft(i); });
     D3D12Device dev({true, false});
     auto run = [&](float s) {
         NrStageOptions o;
@@ -419,7 +428,8 @@ TEST_CASE("NrStage applies the edit strength once, after the last model pass", "
         CHECK(r.stats.frames == frames);
         return PassReader::Open(r.outDir).ReadFrame(1);
     };
-    const PassImage in = ColorFrame(1, w, h), one = run(1.f), two = run(2.f);
+    const PassImage in = soft(1), one = run(1.f), two = run(2.f);
+    double edit = 0.0;  // the stub edits: else e2 = 2 e1 = 0 would pass for any strength
     int64_t checked = 0;
     for (uint32_t y = 0; y < h; ++y)
         for (uint32_t x = 0; x < w; ++x)
@@ -428,10 +438,12 @@ TEST_CASE("NrStage applies the edit strength once, after the last model pass", "
                 if (i0 + 2.0 * e1 < 0.005 || i0 + 2.0 * e1 > 0.995) continue;  // saturate clips the extrapolation there
                 INFO(x << "," << y << " c" << c);
                 CHECK(std::fabs(e2 - 2.0 * e1) < 2e-3);
+                edit = std::max(edit, std::fabs(e1));
                 ++checked;
             }
     INFO("checked " << checked);
-    REQUIRE(checked > static_cast<int64_t>(w) * h * 3 / 2);  // half the values or more: the checker's edges clip at 2
+    REQUIRE(checked > static_cast<int64_t>(w) * h * 3 * 9 / 10);
+    CHECK(edit > 0.02);
     const PassReader rd = PassReader::Open(dir / "s20" / "color_nr");
     CHECK(rd.Man().stageParams["intensity"] == 2.0);
     CHECK(rd.Man().stageParams["model_intensity"] == 1.0);  // what the model got, also the mark of a PR-7 pass

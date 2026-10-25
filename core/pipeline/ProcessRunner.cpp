@@ -232,8 +232,8 @@ bool OldExposurePass(const std::string& stage, const Manifest& m) {
 constexpr const char* kOldExposure = "made with the old linear exposure (TASK-0043: exposure is in stops now)";
 
 // An nr pass made before PR-7, when nr.intensity went to NGX as DLSSNR.Intensity: any value but 1 is another picture now (0 was a
-// black frame, PR-2 E2). A pass of PR-7 carries model_intensity or bypass. Discarded like the old exposure: not reused, restored or
-// adopted (a pass without a fingerprint would otherwise be taken as it is).
+// black frame, PR-2 E2). A pass of PR-7 carries model_intensity or bypass. Discarded like the old exposure: not reused, restored,
+// adopted or kept as a version (its fingerprint differs - +nr.gain / +nr.i0 - and DecideStage discards it in that branch too).
 bool OldIntensityPass(const std::string& stage, const Manifest& m) {
     if (stage != "nr" || !m.stageParams.is_object()) return false;
     const nlohmann::json& sp = m.stageParams;
@@ -401,7 +401,17 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         }
         return d;
     }
-    // another fingerprinted version is current: restore a matching one, else say what changed
+    // another fingerprinted version is current. A broken one is discarded, not kept as a version: a revision that fixes it changes the
+    // fingerprint (+png.2, +nr.gain / +nr.i0), so it lands here, and «Вернуть» in the versions panel would bring the black frames back
+    // (review of PR-7). The card names the added revision.
+    if (const char* broken = BrokenPassReason(name, m)) {
+        const std::string oldApp = ToolInfo::FromJson(m.tool).app;
+        if (oldApp != fp.tool.app) d.diff["tool"]["app"] = nlohmann::json::array({oldApp, fp.tool.app});
+        run("tool_changed", broken, false);
+        d.stale = true;
+        return d;
+    }
+    // restore a matching one, else say what changed
     if (restore()) return d;
     if (m.sourceHash != ctx.sourceHash) {
         run("source_changed", "the pass was made from another source", true);

@@ -566,6 +566,10 @@ TEST_CASE("dlssvid nr --intensity 0 does not call the model; the A/B switches of
     const CliResult ab = RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "ab").string(), "--intensity", "0", "--mv-scale", "auto"});
     CHECK(ab.code != 0);
     CHECK(ab.out.find("at --intensity 0") != std::string::npos);
+    // --check creates the feature whatever the strength: a project's settings at 0 do not refuse its A/B switches there
+    const CliResult check = RunCli({"nr", "--check", "--backend", "stub", "--warp", "--intensity", "0", "--create-with-mv", "--check-size", "64x32"});
+    INFO(check.out);
+    CHECK(check.code == 0);
 }
 
 TEST_CASE("dlssvid nr --check prints the device, init and create times and the feature VRAM", "[integration][cli][nr]") {

@@ -341,7 +341,7 @@ class Helpers(unittest.TestCase):
         ok = self.load({"id": "s", "still": True, "metrics": ["base", "time", "pairs"], "variants": [{"name": "a"}, {"name": "b", "params": {"local-tone": 0}}],
                         "groups": [["a", "b"]]})
         self.assertEqual(ok.baseline, "a")
-        self.assertEqual(ok.fixed, {"guides": False, "temporal": 0.0})
+        self.assertEqual(ok.fixed, {"guides": False, "temporal": 0.0, "intensity": 1.0})  # PR-7: the strength pinned, like the catalogue's
         self.assertEqual(ok.variants[1].params, {"local_tone": 0})
         for bad in ({"variants": [{"name": "a"}, {"name": "a"}]}, {"variants": [{"name": "a/b"}]}, {"baseline": "z", "variants": [{"name": "a"}]},
                     {"metrics": ["speed"], "variants": [{"name": "a"}]}, {"metrics": ["pairs"], "groups": [["a", "q"]], "variants": [{"name": "a"}]},
@@ -368,7 +368,7 @@ class Helpers(unittest.TestCase):
         for i in ("E1", "E2", "E7", "E10", "E11"):
             self.assertEqual({k: cat[i].fixed[k] for k in ("guides", "temporal")}, {"guides": False, "temporal": 0.0}, i)
         for i in ("E3", "E4", "E5", "E6"):
-            self.assertEqual(cat[i].fixed, {"temporal": 0.0}, i)
+            self.assertEqual(cat[i].fixed, {"temporal": 0.0, "intensity": 1.0}, i)
         self.assertEqual(cat["E7"].groups, [["default", "natural", "cinematic"]])  # PR-2: 3..6 = cinematic, no preset (TASK-0052)
         self.assertEqual({v.params["style"] for v in cat["E7"].variants}, {"default", "natural", "cinematic"})
         self.assertFalse(any("preset" in v.params for e in nr_ab.EXPERIMENTS for v in e.variants))
@@ -405,8 +405,9 @@ class Helpers(unittest.TestCase):
         self.assertIn("регрессия", " ".join(bad["text"]))
         self.assertIsNone(nr_ab.verdict_e1(v(**{"i1.5": {"edit": {"mae_rgb": 0.05}}}))["linear"])
         slow = edits((0, .01, .02, .03, .04, .05, .06, .08))
-        slow["variants"]["i2"]["nr"]["ms_per_frame_gpu"] = 30.0
-        self.assertIn("время GPU зависит от силы", " ".join(nr_ab.verdict_e1(slow)["text"]))
+        slow["variants"]["i2"]["nr"]["ms_per_frame_gpu"] = 30.0  # one run's noise (PR-2 E1: x1.6..x4.8 between the same work): listed, not judged
+        self.assertIn("16.0–30.0 мс/кадр", " ".join(nr_ab.verdict_e1(slow)["text"]))
+        self.assertNotIn("регрессия", " ".join(nr_ab.verdict_e1(slow)["text"]))
         # E2: at 0 the model is not called - identity, the bypass reported, the GPU time beside 1
         e2 = nr_ab.verdict_e2(v(i0={"edit": {"psnr_y": 100.0}, "nr": {"bypass": True, "ms_per_frame_gpu": 0.4}}, i1={"nr": {"ms_per_frame_gpu": 16.0}}))
         self.assertEqual((e2["identity"], e2["bypass"]), (True, True))
@@ -478,7 +479,7 @@ class Helpers(unittest.TestCase):
         res["pairs_missing"] = [["base", "x"]]
         md = nr_ab.render_experiment("smoke", res)
         still = nr_ab.render_experiment("s", {**res, "still": True, "fixed": {**nr_ab.STILL, "auto_mask": False}})  # E11: every fixed value shown
-        self.assertIn("still (guides выкл, temporal 0), auto_mask False", still)
+        self.assertIn("still (guides выкл, temporal 0, сила 1), auto_mask False", still)
         self.assertIn("mv: mv_dlss", md)
         self.assertIn("temporal=0.4", md)
         self.assertIn("Пары без замера", md)
@@ -540,6 +541,30 @@ class Helpers(unittest.TestCase):
         self.assertEqual(nr_ab.valid_stored(prev, nr_ab.run_signature(self.args(), inp, e1, {}, {"dlssvid": "y"}), "i1"), set())
         check = nr_ab.run_signature(self.args(), inp, self.cat["E8"], {}, {"dlssvid": "x"})
         self.assertTrue(nr_ab.reusable({"sig": check, "checks": []}, check, [], False))
+
+    def test_an_only_merge_keeps_a_bypass_run(self):
+        # PR-7 (review): i0 calls no model and reports no GPU / driver / DLL - the merge compared them with the baseline's and dropped it
+        e2 = self.cat["E2"]
+        inp = nr_ab.Inputs(Path("clip.mp4"), color=manifest(self.root / "color_sr", 0, 40))
+        sig = nr_ab.run_signature(self.args(), inp, e2, {}, {"dlssvid": "x"})
+        gpu = {"gpu": "G", "driver": "D", "dll_sha256": "S"}
+        prev = {"sig": sig, "variants": {"i0": {"nr": {"bypass": True, "passes": 0}}, "i1": {"nr": gpu}}, "failed": {}}
+        with contextlib.redirect_stdout(io.StringIO()):
+            res = nr_ab.run_experiment(self.args(only=["i1"]), "dlssvid", inp, e2, {}, self.root / "out", True, prev, sig)
+        self.assertEqual(set(res["variants"]), {"i0", "i1"})
+        other = {**prev, "variants": {**prev["variants"], "i0": {"nr": {"gpu": "H", "driver": "D", "dll_sha256": "S"}}}}
+        with contextlib.redirect_stdout(io.StringIO()):
+            res = nr_ab.run_experiment(self.args(only=["i1"]), "dlssvid", inp, e2, {}, self.root / "out", True, other, sig)
+        self.assertEqual(set(res["variants"]), {"i1"})  # a model run on another GPU still goes
+
+    def test_the_model_experiments_pin_the_strength(self):
+        # PR-7 (review): a base intensity is our blend after the model - it would scale every difference between variants
+        for e in nr_ab.EXPERIMENTS:
+            if e.kind == "run":
+                for v in e.variants:
+                    self.assertEqual(nr_ab.run_params({"intensity": 0.0}, e.fixed, v.params).get("intensity"), v.params.get("intensity", 1.0), (e.id, v.name))
+        for i in ("E1", "E2"):
+            self.assertEqual({k: self.cat[i].fixed[k] for k in nr_ab.TONE}, nr_ab.TONE)  # the edit is measured against the input
 
     def test_e3_c_without_its_vectors_is_not_run(self):
         inp = nr_ab.Inputs(Path("clip.mp4"), mv=Path("m"))
@@ -650,6 +675,9 @@ class StubRun(unittest.TestCase):
         self.assertIs(res["E2"]["verdict"]["bypass"], True)
         self.assertEqual(res["E2"]["variants"]["i0"]["nr"]["passes"], 0)
         self.assertTrue(res["E2"]["meta"]["exe_sha256"])
+        # i0 calls no model and has no diagnostics: the build line takes the baseline's GPU (review of PR-7)
+        self.assertTrue(res["E2"]["meta"]["gpu"])
+        self.assertEqual(res["E2"]["meta"]["gpu"], res["E2"]["variants"]["i1"]["nr"]["gpu"])
         e8 = res["E8"]
         self.assertEqual([c["ok"] for c in e8["checks"]], [True])
         self.assertEqual(e8["size"], "192x128")  # the feature at the size NR runs at: color_sr's

@@ -358,7 +358,9 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     o.mvScale = a.mvScale;  // the A/B switches: options of the run, never settings (spec §2e)
     o.createWithMv = a.createWithMv;
     o.depthGuide = !a.noDepthGuide;
-    if (const auto problems = NrAbProblems(o); !problems.empty()) Throw("nr: " + Join(problems));
+    NrStageOptions ab = o;
+    if (a.check) ab.intensity = 1.f;  // --check always creates the feature: the refusal at --intensity 0 is the run's (review of PR-7)
+    if (const auto problems = NrAbProblems(ab); !problems.empty()) Throw("nr: " + Join(problems));
     if (a.checkRepeat > 0 && a.checkFeatures > 0)
         Throw("nr: --check-repeat and --check-features measure one thing each - give one of them per run");
     if ((a.checkRepeat > 0 || a.checkFeatures > 0) && !a.check) Throw("nr: --check-repeat and --check-features belong to --check");
