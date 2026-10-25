@@ -1,6 +1,7 @@
 // Stage parameter schema (stage 9, MR D): every stage described, defaults mirror the stages, validation catches wrong
 // types / ranges / choices, effective parameters make an explicit default and an absent key the same run.
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
@@ -287,6 +288,12 @@ TEST_CASE("ValidateStageParams catches types, ranges and choices; unknown keys p
     CHECK(ValidateStageParams("nr", {{"passes", 1.5}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"passes", 2}}).empty());
     CHECK(ValidateStageParams("nr", {{"passes", 4}}).empty());  // PR-5: 1..4
+    CHECK(ValidateStageParams("nr", {{"scene_cut", 0.0}}).empty());  // PR-6: 0 = off .. 1
+    CHECK(ValidateStageParams("nr", {{"scene_cut", 1.5}}).size() == 1);
+    CHECK(FindStageSchema("nr")->Find("scene_cut")->def == 0.24);
+    CHECK(FindStageSchema("nr")->Find("scene_cut")->more);
+    CHECK(ParamValueLabel(*FindStageSchema("nr")->Find("scene_cut"), 0.0) == "выкл");
+    CHECK(static_cast<double>(NrStageOptions{}.sceneCut) == Catch::Approx(0.24));
     CHECK(ValidateStageParams("nr", {{"passes", 5}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"passes", 0}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"guides", "yes"}}).size() == 1);

@@ -417,6 +417,19 @@ class Helpers(unittest.TestCase):
         self.assertIs(old["identity"], False)
         self.assertIn("регрессия", " ".join(old["text"]))
         self.assertIn("до PR-7", " ".join(old["text"]))
+        # PR-6: E9 names the cuts and what the reset changed; no cut on the range or no detector says so
+        e9 = nr_ab.verdict_e9(v(cut0={"nr": {"scene_cuts": [], "scene_cut_count": 0}},
+                                cut024={"nr": {"scene_cuts": [40, 97], "scene_cut_count": 2}, "vs_base": {"psnr_y_min": 31.5}},
+                                cut024_t04={"nr": {"scene_cuts": [40, 97], "scene_cut_count": 2}}))
+        self.assertEqual((e9["count"], e9["cuts"]), (2, [40, 97]))
+        self.assertIn("кадры 40, 97", e9["text"][0])
+        self.assertIn("31.5", e9["text"][0])
+        self.assertEqual(len(e9["text"]), 1)
+        self.assertIn("склеек на отрезке нет", nr_ab.verdict_e9(v(cut024={"nr": {"scene_cuts": [], "scene_cut_count": 0}}))["text"][0])
+        self.assertIn("детектор не работал", nr_ab.verdict_e9(v(cut024={"nr": {"scene_cuts": None, "scene_cut_count": 0}}))["text"][0])
+        drift = nr_ab.verdict_e9(v(cut024={"nr": {"scene_cuts": [40], "scene_cut_count": 1}}, cut024_t04={"nr": {"scene_cuts": [], "scene_cut_count": 0}}))
+        self.assertIn("регрессия", drift["text"][1])
+        self.assertEqual(nr_ab.verdict_e9(v())["text"], [])
         # PR-5: E6 over p1..p4 - the slope to the most passes measured, the VRAM of each pass's feature
         e6 = nr_ab.verdict_e6(v(p1={"nr": {"ms_per_frame_gpu": 14.0}}, p2={"nr": {"ms_per_frame_gpu": 20.0}}, p3={"nr": {"ms_per_frame_gpu": 26.5}},
                                 p4={"nr": {"ms_per_frame_gpu": 32.0, "vram_mib_per_pass": [503.9, 503.9, 503.9, 504.0]}}))

@@ -29,6 +29,7 @@ public:
         std::string mvScale = "unit";                     // A/B (spec §2e): not a setting, never in a project
         bool createWithMv = false, noDepthGuide = false;  // A/B
         float temporal = 0.f, temporalThreshold = 0.1f, skinBlend = 1.f;
+        float sceneCut = 0.24f;  // PR-6: the history reset at a scene cut (0 = off)
         std::string tonemap = "passthrough", inputTransfer = "srgb";
         float exposure = 0.f;  // EV
         std::string format = "exr", video, codec = "h264_nvenc";

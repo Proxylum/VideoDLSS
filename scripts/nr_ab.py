@@ -131,7 +131,7 @@ EXPERIMENTS = [
                unsupported="нужен режим смены tone/structure посреди прогона без пересоздания фичи — не входит в PR-1d"),
     Experiment("E9", "Сброс на склейках (§2d)",
                [_v("cut0", params={"scene_cut": 0}), _v("cut024", params={"scene_cut": 0.24}), _v("cut024_t04", params={"scene_cut": 0.24, "temporal": 0.4})],
-               "cut0", {"intensity": 1.0}, ("temporal", "base", "time"), needs=("mv",), requires=("--scene-cut",)),
+               "cut0", MODEL, ("temporal", "base", "time"), needs=("mv",), requires=("--scene-cut",)),
     Experiment("E10", "Локальный тон и структура (§2a)",
                [_v("base"), _v("tone0", params={"local_tone": 0}), _v("structure0", params={"local_structure": 0})], "base", STILL, ("base", "edit", "time")),
     # the control with the auto mask (am_*): «no effect without it» means something only if the key acts with it on this clip
@@ -416,7 +416,7 @@ def read_nr(path: Path) -> dict:
     j = json.loads(Path(path).read_text(encoding="utf-8"))
     st, dg = j.get("stats", {}), j.get("diagnostics", {}) or {}
     out = {k: st.get(k) for k in ("ms_per_frame_gpu", "ms_per_frame_wall", "depth_used", "mv_used", "work_size", "passes", "mv_scale",
-                                  "frames_written", "warmup_frames", "masks", "bypass", "vram_mib_per_pass")}
+                                  "frames_written", "warmup_frames", "masks", "bypass", "vram_mib_per_pass", "scene_cuts", "scene_cut_count")}
     out.update({k: dg.get(k) for k in ("init_ms", "create_ms", "gpu", "driver", "dll_sha256")})
     vram = dg.get("vram_feature_bytes")
     out["vram_mib"] = round(vram / 1048576.0, 1) if isinstance(vram, (int, float)) else None
@@ -760,6 +760,25 @@ def verdict_e6f(res):
                      f"из {fmt_num(res.get('budget_mib'))} МиБ бюджета; {stop}"]}
 
 
+def verdict_e9(res):
+    """PR-6 (spec §2d): the cuts the detector found at 0.24 and what the reset changed - cut024 against cut0 (no reset) differs only
+    after a cut: the model's history; cut024_t04 adds the flicker filter's. No cut on the range: E9 measures nothing there."""
+    cuts, n = _get(res, "cut024", "nr", "scene_cuts"), _get(res, "cut024", "nr", "scene_cut_count")
+    db = _get(res, "cut024", "vs_base", "psnr_y_min")
+    text = []
+    if cuts is None and _get(res, "cut024", "nr") is not None:
+        text.append("детектор не работал: нет истории (guides выкл и temporal 0) или сборка до PR-6")
+    elif n == 0:
+        text.append("склеек на отрезке нет (порог 0.24) — E9 на этом входе ничего не меряет")
+    elif cuts:
+        text.append(f"склейки при 0.24: {n} (кадры {', '.join(str(c) for c in cuts[:20])}{'…' if len(cuts) > 20 else ''}); "
+                    f"кадры после них против прогона без сброса — PSNR Y min {fmt_db(db)} дБ")
+        t04 = _get(res, "cut024_t04", "nr", "scene_cut_count")
+        if t04 is not None and t04 != n:
+            text.append(f"с фильтром мерцания найдено {t04} склеек, без него {n}: детектор не должен зависеть от temporal — регрессия")
+    return {"cuts": cuts, "count": n, "psnr_y_min": db, "text": text}
+
+
 def verdict_e11(res):
     """Without the auto mask s0 / s1 / s2 against follow; the control with the mask (am_s0, am_s2 against am_follow) says whether the key acts
     on this clip at all - without an effect there «no effect without the mask» proves nothing."""
@@ -779,7 +798,7 @@ def verdict_e11(res):
 
 
 VERDICTS = {"E1": verdict_e1, "E2": verdict_e2, "E3": verdict_e3, "E4": verdict_e4, "E5": verdict_e5, "E6": verdict_e6, "E6f": verdict_e6f, "E7": verdict_e7,
-            "E8": verdict_e8, "E11": verdict_e11}
+            "E8": verdict_e8, "E9": verdict_e9, "E11": verdict_e11}
 
 
 # ---- running ----------------------------------------------------------------------------------------------------------------

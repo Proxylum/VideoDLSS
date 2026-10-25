@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "convert/ColorConvert.h"
+#include "convert/SceneCut.h"
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
@@ -47,6 +48,9 @@ struct NrStageOptions {
     bool depthGuide = true;             // false: mv_dlss to the model, depth_dlss not
     float temporal = 0.f;               // temporal filter weight (0 = off)
     float temporalThreshold = 0.1f;
+    // scene-cut threshold (PR-6, spec §2d; 0 = off): mean |ΔY| of the source's luma above it is a cut - the model's history (Reset of
+    // every pass) and the flicker filter's start again. Acts when there is a history: guides on (the model's with mv) or temporal > 0
+    float sceneCut = 0.24f;
     float skinBlend = 1.f;              // edit strength inside face / skin masks
     TonemapOptions tonemap;
     std::string paramsBlock = "capability";
@@ -112,6 +116,9 @@ public:
         std::string backend, colorSource;  // colorSource: video | color_sr | slot
         int passes = 0;      // model passes: 0 in the bypass
         std::vector<double> vramMibPerPass;  // each pass's feature: DXGI growth over its CreateFeature (PR-5; the stub: 0); empty: not measured
+        bool sceneCutActive = false;          // the detector ran (scene_cut > 0 and a history to reset, PR-6)
+        std::vector<int64_t> sceneCuts;       // frames where it reset the history (the first kMaxSceneCuts)
+        int64_t sceneCutCount = 0;            // all of them
         bool bypass = false;  // intensity 0: the model was not called (PR-7)
         bool depthUsed = false, mvUsed = false;
         std::vector<std::string> masks;
@@ -153,7 +160,10 @@ private:
     Stats stats_;
     bool initialized_ = false;
     bool bypass_ = false;
+    std::optional<SceneCutDetector> sceneCuts_;  // PR-6: only when it can act (NrStage::Init)
 };
+
+inline constexpr size_t kMaxSceneCuts = 1000;  // a manifest names at most this many cut frames (stage_params.scene_cuts)
 
 struct NrRunResult {
     NrStage::Stats stats;
