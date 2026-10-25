@@ -115,7 +115,8 @@ TEST_CASE("NR form: groups, levels, conditions of the rows", "[unit][schema][nr]
     std::vector<std::string> basic, more, engineer;
     for (const auto& p : nr->params) (p.advanced ? engineer : p.more ? more : basic).push_back(p.key);
     CHECK(basic == std::vector<std::string>{"style", "intensity", "passes", "local_tone", "local_structure", "temporal", "auto_mask", "skin_structure", "skin_blend"});
-    CHECK(more == std::vector<std::string>{"temporal_threshold", "guides", "tonemap", "input_transfer", "exposure", "model_scale", "transfer", "max_ratio"});
+    CHECK(more == std::vector<std::string>{"temporal_threshold", "scene_cut", "guides", "tonemap", "input_transfer", "exposure", "model_scale", "transfer",
+                                           "max_ratio"});
     CHECK(engineer == std::vector<std::string>{"backend", "format"});
     for (const auto& p : nr->params) {
         INFO(p.key);
@@ -194,6 +195,7 @@ TEST_CASE("NR: the options from the schema's defaults are the stage's defaults, 
     CHECK(o.useGuides == def.useGuides);
     CHECK(o.temporal == def.temporal);
     CHECK(o.temporalThreshold == def.temporalThreshold);
+    CHECK(o.sceneCut == def.sceneCut);
     CHECK(o.skinBlend == def.skinBlend);
     CHECK(o.tonemap.curve == def.tonemap.curve);
     CHECK(o.tonemap.inputTransfer == def.tonemap.inputTransfer);
@@ -213,8 +215,8 @@ TEST_CASE("NR: the options from the schema's defaults are the stage's defaults, 
         ApplyNrParams(one, b);
         const auto key = [](const NrStageOptions& x) {
             return nlohmann::json{x.backend, x.intensity, x.style, x.localTone, x.localStructure, x.skinStructure, x.autoMask, x.passes, x.modelScale,
-                                  x.transfer, x.maxRatio, x.useGuides, x.temporal, x.temporalThreshold, x.skinBlend, x.tonemap.curve, x.tonemap.inputTransfer,
-                                  x.tonemap.exposureEv};
+                                  x.transfer, x.maxRatio, x.useGuides, x.temporal, x.temporalThreshold, x.sceneCut, x.skinBlend, x.tonemap.curve,
+                                  x.tonemap.inputTransfer, x.tonemap.exposureEv};
         };
         INFO("nr." << spec.key);
         CHECK(key(a) != key(b));
