@@ -334,7 +334,7 @@ dlssvid upscale -i input.mp4 -o passes --backend dlss --scale 2 --depth-dir pass
 dlssvid upscale -i input.mp4 -o passes --scale 2                                       :: DLSS SR (default); --backend trt [--model realesrgan-x2plus | realesr-general-x4v3 | realesrgan-x4plus] | worker [--window 15 --overlap 3] | nis | bicubic
 dlssvid upscale -i input.mp4 -o passes --backend nis --no-scaling                      :: x1: NVSharpen (dlss: DLAA); not a compression-artifact filter
 dlssvid upscale -i input.mp4 -o passes --backend dlss --video sr.mp4 --codec hevc_nvenc  :: plus a preview video (no audio)
-dlssvid compare --ref reference.mp4 --test passes\color_sr --json ab.json              :: PSNR Y/RGB + SSIM per frame
+dlssvid compare --ref reference.mp4 --test passes\color_sr --json ab.json              :: PSNR Y/RGB, SSIM, MAE (mean |difference|) per frame
 ```
 
 Neural Rendering (stage 6): `color_nr` from `color_sr` (or the video) with `depth_dlss` / `mv_dlss` guides and
@@ -351,6 +351,7 @@ dlssvid nr -i input.mp4 -o passes --backend stub --warp                         
 dlssvid nr -i input.mp4 -o ab\a --no-auto --color-dir passes\color_sr --depth-dir passes\depth_dlss --mv-dir passes\mv_dlss --masks-dir passes --start 240 --frames 12 --warmup 6   :: frames 240..251 only; 234..239 build the model's history
 dlssvid nr -i input.mp4 -o ab\b ... --params-file tuned.json --intensity 1.4             :: the project's nr keys from a file; options on the command line win, even at their default
 dlssvid nr -i input.mp4 -o ab\c ... --mv-scale auto --create-with-mv --no-depth-guide   :: A/B switches (not project settings): MV units, zero MVs at CreateFeature, no depth
+python scripts\nr_ab.py --clip input.mp4 --passes passes --experiment E1 --start 48       :: NR A/B (docs/benchmarks.md): one range per variant + compare -> markdown tables; --list, --dry-run
 ```
 
 `--start` counts frames as the pass folders and the viewport do, from 0; the seek assumes a constant frame rate (VFR is
@@ -494,11 +495,12 @@ cli/        dlssvid (+ ViewportCommands: project, render; UpscaleCommands: upsca
 app/        dlssvid-gui — Qt 6.8 Widgets shell (AppModel, ViewportWindow, panels, TaskQueue)
 tests/      unit/ (Catch2, WARP-capable) · integration/ (synthetic clips, CLI as a process) · app/ (Qt offscreen) · golden/ (the pipeline vs stored references, also for an installed copy) · check_ninja_deps.cmake (build hygiene)
 docs/       architecture.md · conventions.md · dll-setup.md · benchmarks.md · release.md · ci.md · plans/
-scripts/    ci-build.cmd (configure, build, tests), package.cmd (CPack ZIP / NSIS; `package.cmd full` bundles the TensorRT runtime, cudart and the ONNX models)
+scripts/    nr_ab.py (A/B of the NR settings, experiments E1-E11 -> markdown tables), ci-build.cmd (configure, build, tests), package.cmd (CPack ZIP / NSIS; `package.cmd full` bundles the TensorRT runtime, cudart and the ONNX models)
 third_party/nis/  NVIDIA Image Scaling 1.0.3 (MIT, vendored headers)
 models/     registry.json (models, URLs, hashes, licences) · export/ (ONNX export scripts)
 depth_worker/ worker.py — PyTorch reference backends (da3, vda), icdepth placeholder, stub for tests
 models/     registry.json · export/ (fetch.py, export_da3.py, export_vda.py, loaders) · cache/ (weights, ONNX, engines; git-ignored)
+tests/scripts/ test_nr_ab.py (nr_ab.py helpers and an A/B on the stub backend and WARP; `ctest -L scripts`)
 tests/data/ fetch.py (the 5 acceptance clips from open sources, sha256-checked; cache/ and clips/ are git-ignored) · bench_clips.py (measurements on them) · README.md (licences)
 fg_worker/  README only: why there is no worker executable (DLSS-G runs through NGX inside `dlssvid fg`)
 bin/nvidia/ user-supplied NVIDIA DLLs (git-ignored)

@@ -13,6 +13,8 @@ struct ImageMetrics {
     double psnrRgb = 0.0;  // dB over all colour samples
     double ssimY = 0.0;    // SSIM on luma, 11x11 Gaussian window (sigma 1.5), K1 = 0.01, K2 = 0.03
     double mseY = 0.0;
+    double maeRgb = 0.0;  // mean |reference - test| over the colour samples: the size of an edit (NR A/B, spec E1), not a quality score
+    double maeY = 0.0;    // the same on luma
 };
 
 ImageMetrics CompareImages(const PassImage& reference, const PassImage& test);

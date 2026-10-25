@@ -141,7 +141,7 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
         Log()->warn("compare: the videos decode with different colour matrices/ranges ({} {} vs {} {}) — tag both with the same colorspace, otherwise PSNR measures the mismatch",
                     ToString(ref.Color().matrix), ToString(ref.Color().range), ToString(test.Color().matrix), ToString(test.Color().range));
     nlohmann::json frames = nlohmann::json::array();
-    double psnrY = 0, psnrRgb = 0, ssim = 0, minPsnr = std::numeric_limits<double>::infinity(), minSsim = 1.0;
+    double psnrY = 0, psnrRgb = 0, ssim = 0, mae = 0, maeY = 0, minPsnr = std::numeric_limits<double>::infinity(), minSsim = 1.0;
     int64_t n = 0;
     if (a.step < 1) Throw("compare: --step must be >= 1");
     for (int64_t i = 0; a.frames < 0 || i < a.frames; ++i) {
@@ -151,7 +151,9 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
         if (!test.Next(ri + a.offset, t)) break;
         const ImageMetrics m = CompareImages(r, t);
         if (!a.quiet) std::printf("frame %6lld  PSNR Y %7.3f dB  PSNR RGB %7.3f dB  SSIM %.4f\n", static_cast<long long>(ri), m.psnrY, m.psnrRgb, m.ssimY);
-        frames.push_back({{"frame", ri}, {"psnr_y", m.psnrY}, {"psnr_rgb", m.psnrRgb}, {"ssim_y", m.ssimY}});
+        frames.push_back({{"frame", ri}, {"psnr_y", m.psnrY}, {"psnr_rgb", m.psnrRgb}, {"ssim_y", m.ssimY}, {"mae_rgb", m.maeRgb}});
+        mae += m.maeRgb;
+        maeY += m.maeY;
         psnrY += std::isfinite(m.psnrY) ? m.psnrY : 100.0;
         psnrRgb += std::isfinite(m.psnrRgb) ? m.psnrRgb : 100.0;
         ssim += m.ssimY;
@@ -166,9 +168,11 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
                               {"ssim_y_mean", ssim / n},
                               {"psnr_y_min", minPsnr},
                               {"ssim_y_min", minSsim},
+                              {"mae_rgb_mean", mae / n},  // mean |reference - test|: the size of an edit (NR A/B), not a quality score
+                              {"mae_y_mean", maeY / n},
                               {"size", {ref.Width(), ref.Height()}}};
-    std::printf("frames:      %lld\nPSNR Y:      %.3f dB (min %.3f)\nPSNR RGB:    %.3f dB\nSSIM Y:      %.4f (min %.4f)\n", static_cast<long long>(n), psnrY / n, minPsnr,
-                psnrRgb / n, ssim / n, minSsim);
+    std::printf("frames:      %lld\nPSNR Y:      %.3f dB (min %.3f)\nPSNR RGB:    %.3f dB\nSSIM Y:      %.4f (min %.4f)\nMAE RGB:     %.5f (Y %.5f)\n",
+                static_cast<long long>(n), psnrY / n, minPsnr, psnrRgb / n, ssim / n, minSsim, mae / n, maeY / n);
     if (!a.json.empty()) {
         std::ofstream out(a.json);
         out << nlohmann::json{{"reference", a.ref}, {"test", a.test}, {"summary", summary}, {"frames", frames}}.dump(2) << "\n";
@@ -207,7 +211,7 @@ void UpscaleCommands::Register(CLI::App& app) {
     upscale_->add_flag("--warp", ua_.warp, "use the WARP software adapter (nis / bicubic)");
     upscale_->add_option("--dll-dir", ua_.dllDir, "folder with nvngx_dlss.dll (default: bin/nvidia next to the executable)");
 
-    compare_ = app.add_subcommand("compare", "PSNR / SSIM between two videos or pass folders of the same size");
+    compare_ = app.add_subcommand("compare", "PSNR / SSIM / MAE between two videos or pass folders of the same size");
     compare_->add_option("--ref", ca_.ref, "reference video or pass folder")->required();
     compare_->add_option("--test", ca_.test, "video or pass folder under test")->required();
     compare_->add_option("--frames", ca_.frames, "compare at most N frames")->default_val(-1);

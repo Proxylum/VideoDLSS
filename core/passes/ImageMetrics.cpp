@@ -76,26 +76,30 @@ ImageMetrics CompareImages(const PassImage& reference, const PassImage& test) {
     // RGB PSNR over min(channels, 3) colour samples
     const size_t nc = std::min<size_t>(3, std::min(reference.channels.size(), test.channels.size()));
     const float sr = Scale(reference.type), st = Scale(test.type);
-    double mseRgb = 0.0;
+    double mseRgb = 0.0, maeRgb = 0.0;
     for (uint32_t y = 0; y < h; ++y)
         for (uint32_t x = 0; x < w; ++x)
             for (size_t c = 0; c < nc; ++c) {
                 const double d = static_cast<double>(reference.Get(x, y, c)) * sr - static_cast<double>(test.Get(x, y, c)) * st;
                 mseRgb += d * d;
+                maeRgb += std::abs(d);
             }
     mseRgb /= static_cast<double>(n * nc);
+    m.maeRgb = maeRgb / static_cast<double>(n * nc);
     m.psnrRgb = mseRgb > 0.0 ? 10.0 * std::log10(1.0 / mseRgb) : std::numeric_limits<double>::infinity();
 
     // luma
     const PassImage ya = LumaOf(reference), yb = LumaOf(test);
     const float* a = ya.As<float>();
     const float* b = yb.As<float>();
-    double mseY = 0.0;
+    double mseY = 0.0, maeY = 0.0;
     for (size_t i = 0; i < n; ++i) {
         const double d = static_cast<double>(a[i]) - b[i];
         mseY += d * d;
+        maeY += std::abs(d);
     }
     mseY /= static_cast<double>(n);
+    m.maeY = maeY / static_cast<double>(n);
     m.mseY = mseY;
     m.psnrY = mseY > 0.0 ? 10.0 * std::log10(1.0 / mseY) : std::numeric_limits<double>::infinity();
 
