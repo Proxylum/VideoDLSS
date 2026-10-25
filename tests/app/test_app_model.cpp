@@ -486,6 +486,11 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
         stampOld(0.5);
         CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: сила правки теперь после модели"));
         CHECK_FALSE(model.cardState("nr").sub.contains(QString::fromUtf8("останется")));
+        model.setForce("nr", true);  // forced: discarded all the same, no version promised
+        model.refreshPlan();
+        CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт (принудительно)"));
+        CHECK_FALSE(model.cardState("nr").sub.contains(QString::fromUtf8("останется")));
+        model.clearForce();
         stampOld(0.0);
         CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: при силе 0 модель не вызывается"));
         CHECK(model.cardState("nr").warning.isEmpty());  // no guides read at 0: no «без глубины и векторов»

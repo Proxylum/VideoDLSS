@@ -1148,9 +1148,10 @@ def render_experiment(exp_id: str, res: dict, own: tuple = ()) -> str:
             lines += ["", f"`--check-repeat {rep['requested']}`: {rep['ok']} пересозданий ok" + (f", сбой: {rep['failed']}" if rep.get("failed") else "") +
                       (f"; create min / медиана / max {fmt_num(cs[0], 0)} / {fmt_num(cs[len(cs) // 2], 0)} / {fmt_num(cs[-1], 0)} мс" if cs else "")]
     else:
-        fixed = res.get("fixed", {})  # every fixed value is in the heading: still mode names its own two, the others follow
-        extra = ", ".join(f"{k} {v}" for k, v in fixed.items() if k not in STILL or STILL[k] != v)
-        mode = ("still (guides выкл, temporal 0, сила 1)" + (f", {extra}" if extra else "")) if res.get("still") else \
+        fixed = res.get("fixed", {})  # every fixed value is in the heading: still mode names its own, as the run used them
+        own = ["guides выкл" if fixed.get("guides", False) is False else "guides вкл"] +             [f"{word} {fixed[k]:g}" for k, word in (("temporal", "temporal"), ("intensity", "сила")) if isinstance(fixed.get(k), (int, float))]
+        extra = ", ".join(f"{k} {v}" for k, v in fixed.items() if k not in STILL)
+        mode = (f"still ({', '.join(own)})" + (f", {extra}" if extra else "")) if res.get("still") else \
             ", ".join(f"{k} {v}" for k, v in fixed.items()) or "параметры по умолчанию"
         lines += [f"Кадры {res['start']}…{res['start'] + res['frames'] - 1} ({res['frames']}), разогрев {res['warmup']}, {mode}; база — {res['baseline']}.", ""]
         metrics, variants = res.get("metrics", []), res.get("variants", {})

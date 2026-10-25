@@ -208,6 +208,21 @@ TEST_CASE("RunProcess: an nr pass from before PR-7 with intensity != 1 is discar
     CHECK(Report(RunProcess(o), "nr").status == "reused");
     stampOld(false);
     CHECK(Report(RunProcess(o), "nr").status == "ran");  // nor adopted without a fingerprint
+    // the stage disabled after the discard (no DLL - the GUI runs --disable-unavailable): fg reads color_sr then, and the color_fg
+    // made from the discarded pass went to the history; discarded too now
+    stampOld(true);
+    const size_t fgBefore = ListPassVersions(o.passesRoot, "color_fg").size();
+    ProcessOptions ngx = o;
+    ngx.stages = StubStages(2);
+    ApplyParamSpec(ngx.stages, "nr.intensity=0.5");
+    ApplyParamSpec(ngx.stages, "nr.backend=ngx");
+    ngx.disableUnavailable = true;
+    const ProcessResult off = RunProcess(ngx);
+    CHECK(Report(off, "nr").status == "disabled");
+    CHECK_FALSE(Manifest::Exists(nrDir));
+    CHECK(Report(off, "fg").status == "ran");
+    CHECK_THAT(Report(off, "fg").reason, Catch::Matchers::ContainsSubstring("discarded"));
+    CHECK(ListPassVersions(o.passesRoot, "color_fg").size() == fgBefore);
     // a pass of before PR-7 at intensity 1 is the same picture: kept
     ProcessOptions one = o;
     one.stages = StubStages(2);
@@ -440,13 +455,19 @@ TEST_CASE("RunProcess: an nr pass made with the old linear exposure 0 is recompu
     CHECK_THAT(Report(r, "fg").reason, Catch::Matchers::ContainsSubstring("stale"));
     CHECK(Report(RunProcess(o), "fg").status == "reused");
     CHECK(Manifest::Load(nrDir).stageParams["tonemap"].contains("exposure_ev"));
-    // the black pass went into the history: it is not restored for the same fingerprint either
+    // a black pass the builds before PR-7 put into the history (under another fingerprint): not restored for its own either
     stampOld(0.0, true);
+    REQUIRE(RetirePassVersion(o.passesRoot, "color_nr"));
+    CHECK(Report(RunProcess(o), "nr").status == "ran");  // no current pass: restore() would bring the black version back, «reused»
+    // under another fingerprint the black pass is discarded now, not kept as a version (review of PR-7)
+    stampOld(0.0, true);
+    const size_t versions = ListPassVersions(o.passesRoot, "color_nr").size();
     ProcessOptions again = o;
     again.stages = StubStages(2);
     ApplyParamSpec(again.stages, "nr.intensity=1.5");
-    RunProcess(again);  // another fingerprint: the old-exposure pass is discarded all the same (review of PR-7), not kept as a version
-    CHECK(Report(RunProcess(o), "nr").status == "ran");  // back to intensity 1: no black version to restore
+    CHECK(Report(RunProcess(again), "nr").status == "ran");
+    CHECK(ListPassVersions(o.passesRoot, "color_nr").size() == versions);
+    CHECK(Report(RunProcess(o), "nr").status == "ran");  // back to intensity 1: the black version in the history is skipped
     stampOld(0.0, false);
     CHECK(Report(RunProcess(o), "nr").status == "ran");  // nor adopted without a fingerprint
 }

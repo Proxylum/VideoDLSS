@@ -480,6 +480,9 @@ class Helpers(unittest.TestCase):
         md = nr_ab.render_experiment("smoke", res)
         still = nr_ab.render_experiment("s", {**res, "still": True, "fixed": {**nr_ab.STILL, "auto_mask": False}})  # E11: every fixed value shown
         self.assertIn("still (guides выкл, temporal 0, сила 1), auto_mask False", still)
+        half = nr_ab.render_experiment("s", {**res, "still": True, "fixed": {**nr_ab.STILL, "intensity": 0.5}})  # a still file's own strength
+        self.assertIn("still (guides выкл, temporal 0, сила 0.5)", half)
+        self.assertNotIn("сила 1", half)
         self.assertIn("mv: mv_dlss", md)
         self.assertIn("temporal=0.4", md)
         self.assertIn("Пары без замера", md)

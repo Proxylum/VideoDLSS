@@ -151,6 +151,8 @@ struct PlanState {
     std::set<std::string> ran;
     std::set<std::string> staleRan;  // passes rerun because they were stale (StageDecision::stale): a later stage built on
                                      // them is stale too although every fingerprint matches
+    std::set<std::string> discarded;  // stale passes removed (StageDecision::stale): a pass made from one is discarded too, whether
+                                      // its stage ran again or was disabled after the removal (review of PR-7)
 };
 
 // A pass without a fingerprint stands for its source and length; a y-up motion-vector pass also for its orientation:
@@ -186,7 +188,10 @@ void Advance(PlanState& s, const StageDecision& d) {
                 if (s.fp.count(out)) s.fp[out] = d.fingerprint;  // adopted: stamped with this fingerprint
         return;
     }
-    for (const auto& fam : StageFamilyPasses(d.name)) s.fp.erase(fam);  // retired or rewritten
+    for (const auto& fam : StageFamilyPasses(d.name)) {
+        s.fp.erase(fam);  // retired or rewritten
+        if (d.stale && d.current) s.discarded.insert(fam);
+    }
     for (const auto& out : d.outputs) {
         s.fp[out] = d.fingerprint;
         s.ran.insert(out);
@@ -318,6 +323,12 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     }
     d.current = have;
     if (have) d.currentFingerprint = m.fingerprint;
+    // the current pass was made from a broken pass this run removed (PlanState::discarded): it is broken too, even when that stage
+    // was disabled since and no longer feeds this one (no nr DLL: fg reads color_sr - the color_fg of the black nr went to the history)
+    std::vector<std::string> inputsDiscarded;
+    if (have)
+        for (const auto& [input, inputFp] : m.inputs)
+            if (state.discarded.count(input)) inputsDiscarded.push_back(input);
     const bool complete = have && PassComplete(d.outDir, d.frames, ctx.sourceHash);
     auto run = [&](const char* kind, std::string detail, bool retire) {
         d.action = "run";
@@ -340,8 +351,10 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
                                   : (have ? std::to_string(m.frameCount) : std::string("0")) + " of " + (d.frames > 0 ? std::to_string(d.frames) : std::string("all")) + " frames";
 
     if (!ctx.skipExisting || ctx.force.count(name)) {
-        run("forced", ctx.skipExisting ? "recomputed on request (--force)" : "every stage recomputed (--no-skip-existing)", have && m.fingerprint != fp.value);
-        d.stale = !inputsStale.empty() || (have && BrokenPassReason(name, m));
+        // a stale pass is discarded, never kept as a version: the card would promise «vN останется на диске» (review of PR-7)
+        const bool stale = !inputsStale.empty() || !inputsDiscarded.empty() || (have && BrokenPassReason(name, m));
+        run("forced", ctx.skipExisting ? "recomputed on request (--force)" : "every stage recomputed (--no-skip-existing)", have && m.fingerprint != fp.value && !stale);
+        d.stale = stale;
         return d;
     }
     // Every fingerprint may match, yet an input was stale when this pass (or a history version under the same fingerprint)
@@ -349,6 +362,12 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     if (!inputsStale.empty()) {
         d.diff["inputs"] = inputsStale;
         run("input_changed", "built on a stale pass that is recomputed: " + Join(inputsStale), false);
+        d.stale = true;
+        return d;
+    }
+    if (!inputsDiscarded.empty()) {
+        d.diff["inputs"] = inputsDiscarded;
+        run("input_changed", "built on a discarded pass: " + Join(inputsDiscarded), false);
         d.stale = true;
         return d;
     }
@@ -903,6 +922,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         }
         if (d.stale) {  // wrong under its own fingerprint: discarded, not kept as a version a later run would restore
             for (const auto& pass : StageFamilyPasses(name)) {
+                if (Manifest::Exists(root / pass)) state.discarded.insert(pass);  // what was made from it goes too, however this stage ends
                 std::error_code ec;
                 std::filesystem::remove_all(root / pass, ec);
                 if (ec) Throw("process: cannot remove the stale pass " + (root / pass).string() + ": " + ec.message());
