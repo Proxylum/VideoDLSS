@@ -7,6 +7,7 @@
 #include "pipeline/PassFingerprint.h"
 #include "stages/ParamSchema.h"
 #include "stages/fg/IFrameGenerator.h"
+#include "stages/nr/NrStage.h"
 
 namespace dlssvid {
 
@@ -33,6 +34,43 @@ double Baseline(const std::string& stage, const std::string& backend, const std:
     return 0.0;
 }
 
+// docs/benchmarks.md, NR at 2560x1440 on Ada (RTX 4070 Ti SUPER): `--passes 2` 33.5 ms GPU against 15.9 for one pass
+constexpr double kNrModelMsPerPass = 17.6;
+constexpr double kNrModelPixels = 2560.0 * 1440.0;
+// One more NR feature in a run: the snippet's Init_Ext, CreateFeature (nr --check: ~0.2 s on the same GPU, TASK-0048), its output
+// texture, the first Evaluate. The 12-frame `--passes 2` run of docs/benchmarks.md was ~65 ms/frame slower than its GPU step
+// explains next to comparable 12-frame runs (464 against ~381 ms), ~0.8 s in all. E8 (PR-2) replaces it with a measurement.
+constexpr double kNrFeatureCreateMs = 800.0;
+
+bool HasNumber(const nlohmann::json& j, const char* key) { return j.is_object() && j.contains(key) && j[key].is_number(); }
+
+// The wall time a `process` run recorded (StampPass), never a stage's own timer (D8, see RecordedMsPerFrame)
+std::optional<double> WallMsPerFrame(const Manifest& m, const std::string& stage) {
+    const nlohmann::json& sp = m.stageParams;
+    if (!HasNumber(sp, "ms_per_frame")) return std::nullopt;
+    const double ms = sp["ms_per_frame"].get<double>();
+    const bool gpu = HasNumber(sp, "ms_per_frame_gpu");
+    if (ms <= 0 || (stage == "nr" && !gpu) || (gpu && ms < sp["ms_per_frame_gpu"].get<double>())) return std::nullopt;
+    return ms;
+}
+
+// nr: the record moved to the run's passes and model_scale. The run's model resolution is the recorded frame at its
+// model_scale, as NrStage::Setup computes it. A changed frame (another upscale) is not compared, as for every stage.
+double NrMovedRecord(const Manifest& m, double wall, const nlohmann::json& params, int64_t frames) {
+    const nlohmann::json& sp = m.stageParams;
+    const int passes0 = HasNumber(sp, "passes") ? sp["passes"].get<int>() : 1;
+    auto [w0, h0] = NrWorkSize(m.width, m.height, HasNumber(sp, "model_scale") ? sp["model_scale"].get<double>() : 1.0);
+    if (sp.contains("work_size") && sp["work_size"].is_array() && sp["work_size"].size() == 2) {
+        w0 = sp["work_size"][0].get<uint32_t>();
+        h0 = sp["work_size"][1].get<uint32_t>();
+    }
+    const int passes1 = HasNumber(params, "passes") ? params["passes"].get<int>() : passes0;
+    const auto [w1, h1] = HasNumber(params, "model_scale") ? NrWorkSize(m.width, m.height, params["model_scale"].get<double>()) : std::pair{w0, h0};
+    if (passes1 == passes0 && w1 == w0 && h1 == h0) return wall;  // the same run: the record as it is
+    return NrMovedMsPerFrame(wall, passes0, static_cast<double>(w0) * h0, passes1, static_cast<double>(w1) * h1, frames > 0 ? frames : m.frameCount,
+                             sp.value("backend", std::string("ngx")));
+}
+
 double Scale(const nlohmann::json& p) {
     const double s = p.value("scale", 2.0);
     return s > 0 ? s : 1.0;
@@ -46,7 +84,20 @@ double BaselineMsPerFrame(const std::string& stage, const std::string& backend, 
     return Baseline(stage, backend, model) * factor;
 }
 
-std::optional<double> RecordedMsPerFrame(const std::filesystem::path& passesRoot, const std::string& stage, const nlohmann::json& tool) {
+double NrModelMsPerPass(const std::string& backend, double workPixels) {
+    return backend == "stub" || workPixels <= 0 ? 0.0 : kNrModelMsPerPass * workPixels / kNrModelPixels;  // the stub edit: ~0.1 ms
+}
+
+double NrMovedMsPerFrame(double recordedMs, int recordedPasses, double recordedWorkPixels, int passes, double workPixels, int64_t frames, const std::string& backend) {
+    const double perPass = NrModelMsPerPass(backend, workPixels);
+    double ms = recordedMs - recordedPasses * NrModelMsPerPass(backend, recordedWorkPixels) + passes * perPass;
+    // each added pass creates its feature once; a removed one is not taken back: the record spread it over its own frames
+    if (passes > recordedPasses && frames > 0 && backend != "stub") ms += (passes - recordedPasses) * kNrFeatureCreateMs / static_cast<double>(frames);
+    return std::max(ms, passes * perPass);  // a wall time is never below the GPU time of its passes
+}
+
+std::optional<double> RecordedMsPerFrame(const std::filesystem::path& passesRoot, const std::string& stage, const nlohmann::json& tool, const nlohmann::json& params,
+                                         int64_t frames) {
     const auto& family = StageFamilyPasses(stage);
     for (auto it = family.rbegin(); it != family.rend(); ++it) {
         const auto dir = passesRoot / *it;
@@ -60,10 +111,7 @@ std::optional<double> RecordedMsPerFrame(const std::filesystem::path& passesRoot
                 other = other || (!want.empty() && !made.empty() && want != made);
             }
             if (other) continue;  // another backend / model: its time says nothing about this one
-            if (m.stageParams.contains("ms_per_frame") && m.stageParams["ms_per_frame"].is_number()) {
-                const double ms = m.stageParams["ms_per_frame"].get<double>();
-                if (ms > 0) return ms;
-            }
+            if (const auto wall = WallMsPerFrame(m, stage)) return stage == "nr" ? NrMovedRecord(m, *wall, params, frames) : *wall;
         } catch (...) {
         }
     }
@@ -111,11 +159,18 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
         e.action = d.action;
         const nlohmann::json p = EffectiveStageParams(d.name, d.params);
         const std::string backend = p.value("backend", std::string());
-        if (const auto recorded = RecordedMsPerFrame(plan.passesRoot, d.name, d.tool)) {
+        if (const auto recorded = RecordedMsPerFrame(plan.passesRoot, d.name, d.tool, p, frames)) {
             e.msPerFrame = *recorded;
             e.recorded = true;
         } else {
             e.msPerFrame = BaselineMsPerFrame(d.name, backend, megapixels, d.tool.is_object() ? d.tool.value("model", std::string()) : std::string());
+            if (d.name == "nr" && o.width && o.height) {
+                // the baseline is one model pass at the colour's resolution (docs/benchmarks.md): the run's passes and model_scale
+                // move it (D8)
+                const auto [ww, wh] = NrWorkSize(o.width, o.height, p.value("model_scale", 1.0));
+                e.msPerFrame = NrMovedMsPerFrame(e.msPerFrame, 1, static_cast<double>(o.width) * o.height, p.value("passes", 1), static_cast<double>(ww) * wh, frames,
+                                                 backend);
+            }
         }
         e.frames = d.name == "fg" ? FgFrameCount(frames, multiplier) : frames;
         const double seconds = e.msPerFrame * static_cast<double>(frames) / 1000.0;  // the baselines are per source frame

@@ -95,7 +95,8 @@ TEST_CASE("NrStage writes color_nr with the stub on WARP, encodes a preview and 
     CHECK(rd.Man().stageParams["backend"] == "stub");
     CHECK(rd.Man().stageParams["passes"] == 1);
     CHECK(rd.Man().stageParams["color_source"] == "video");
-    CHECK(rd.Man().stageParams.contains("ms_per_frame"));
+    CHECK(rd.Man().stageParams["ms_per_frame_gpu"].is_number());
+    CHECK_FALSE(rd.Man().stageParams.contains("ms_per_frame"));  // the wall time is process's to write (D8)
     CHECK(rd.Man().stageParams["tonemap"]["curve"] == "passthrough");
 
     // the edit is visible but sane

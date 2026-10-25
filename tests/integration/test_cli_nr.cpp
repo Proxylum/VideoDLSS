@@ -85,6 +85,11 @@ TEST_CASE("dlssvid nr --backend stub --warp writes color_nr and a JSON summary",
     CHECK(j["stats"]["work_size"] == nlohmann::json::array({24, 16}));
     CHECK(j["backend"]["backend"] == "stub");
     CHECK(j["diagnostics"]["ok"] == true);
+    // D8: the standalone run's manifest keeps the stage's GPU time only; the JSON summary has both times for nr_ab.py
+    const Manifest nm = Manifest::Load(passes / "color_nr");
+    CHECK(nm.stageParams["ms_per_frame_gpu"].is_number());
+    CHECK_FALSE(nm.stageParams.contains("ms_per_frame"));
+    CHECK(j["stats"]["ms_per_frame_wall"].get<double>() >= j["stats"]["ms_per_frame_gpu"].get<double>());
     // underscore spellings (the GUI passes project JSON keys as options) are accepted too
     const CliResult r2 = RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "passes2").string(), "--frames", "1", "--model_scale", "1", "--no_guides"});
     CHECK(r2.code == 0);

@@ -455,7 +455,9 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
 
 void StampPass(const std::filesystem::path& dir, const StageDecision& d, const std::string& created, double msPerFrame = 0.0) {
     Manifest m = Manifest::Load(dir);
-    if (msPerFrame > 0) m.stageParams["ms_per_frame"] = msPerFrame;  // the last run on this machine: the estimates use it
+    // the wall time of this run (decode, pass I/O, init and the stage) on this machine: the only time the estimates use; a stage's
+    // own timer is ms_per_frame_gpu (nr, D8)
+    if (msPerFrame > 0) m.stageParams["ms_per_frame"] = msPerFrame;
     m.fingerprint = d.fingerprint;
     m.inputs = d.inputs;
     m.tool = d.tool;
