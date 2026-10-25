@@ -390,12 +390,32 @@ class Helpers(unittest.TestCase):
         def v(**variants):
             return {"variants": variants}
 
-        e1 = nr_ab.verdict_e1(v(**{"i1.5": {"vs_base": {"psnr_y": 50}}, "i2": {"vs_base": {"psnr_y": 47}},
-                                   **{f"i{x}": {"edit": {"mae_rgb": m}} for x, m in zip(("0", "0.25", "0.5", "0.75", "1"), (0, .01, .02, .015, .03))}}))
-        self.assertTrue(e1["saturated"])
-        self.assertFalse(e1["monotone"])
-        self.assertIsNone(nr_ab.verdict_e1(v(**{"i1.5": {"vs_base": {"psnr_y": 50}}}))["saturated"])
-        self.assertFalse(nr_ab.verdict_e2(v(i0={"edit": {"psnr_y": 40}}))["identity"])
+        # PR-7: E1 checks our blend - up to 1 the edit is x times the edit at 1, above 1 the clipped share is shown
+        edits = lambda ms: v(**{f"i{x}": {"edit": {"mae_rgb": m}, "nr": {"ms_per_frame_gpu": 16.0}}
+                                for x, m in zip(("0", "0.25", "0.5", "0.75", "1", "1.25", "1.5", "2"), ms)})
+        e1 = nr_ab.verdict_e1(edits((0, .0101, .0199, .0302, .04, .049, .057, .07)))
+        self.assertIs(e1["linear"], True)
+        self.assertLess(e1["worst"], 0.01)
+        self.assertAlmostEqual(e1["ratios"]["2"], 1.75)
+        self.assertIs(e1["monotone"], True)
+        self.assertIn("обрезано 12%", " ".join(e1["text"]))  # 1 - 1.75 / 2
+        bad = nr_ab.verdict_e1(edits((0, .01, .02, .015, .04, .05, .06, .08)))  # NGX's reading of the strength would give this
+        self.assertIs(bad["linear"], False)
+        self.assertIs(bad["monotone"], False)
+        self.assertIn("регрессия", " ".join(bad["text"]))
+        self.assertIsNone(nr_ab.verdict_e1(v(**{"i1.5": {"edit": {"mae_rgb": 0.05}}}))["linear"])
+        slow = edits((0, .01, .02, .03, .04, .05, .06, .08))
+        slow["variants"]["i2"]["nr"]["ms_per_frame_gpu"] = 30.0
+        self.assertIn("время GPU зависит от силы", " ".join(nr_ab.verdict_e1(slow)["text"]))
+        # E2: at 0 the model is not called - identity, the bypass reported, the GPU time beside 1
+        e2 = nr_ab.verdict_e2(v(i0={"edit": {"psnr_y": 100.0}, "nr": {"bypass": True, "ms_per_frame_gpu": 0.4}}, i1={"nr": {"ms_per_frame_gpu": 16.0}}))
+        self.assertEqual((e2["identity"], e2["bypass"]), (True, True))
+        self.assertEqual(e2["ms_gpu"], [0.4, 16.0])
+        self.assertNotIn("до PR-7", " ".join(e2["text"]))
+        old = nr_ab.verdict_e2(v(i0={"edit": {"psnr_y": 7.6}, "nr": {}}))  # PR-2's black frame: the build before PR-7
+        self.assertIs(old["identity"], False)
+        self.assertIn("регрессия", " ".join(old["text"]))
+        self.assertIn("до PR-7", " ".join(old["text"]))
         static = {"input_temporal": {"psnr_y": 100.0, "psnr_y_min": 100.0}}
         e4 = v(null={"temporal": {"psnr_y": 46.4}}, create_mv={"temporal": {"psnr_y": 47.6}})
         self.assertTrue(nr_ab.verdict_e4({**e4, **static})["create_better"])
@@ -614,7 +634,8 @@ class StubRun(unittest.TestCase):
         for name, e in smoke.items():
             self.assertEqual(e["range"], [4, 6, 3], name)  # checked against the manifest by nr_ab
         self.assertLess(smoke["i05"]["vs_base"]["psnr_y"], 100.0)
-        self.assertLess(smoke["i05"]["edit"]["mae_rgb"], smoke["base"]["edit"]["mae_rgb"])  # the stub's edit grows with intensity
+        # PR-7: the strength is NrCompose's lerp after the model - half the edit at 0.5 (the flicker filter fades with it, the clip moves)
+        self.assertAlmostEqual(smoke["i05"]["edit"]["mae_rgb"] / smoke["base"]["edit"]["mae_rgb"], 0.5, delta=0.1)
         self.assertEqual(smoke["nodepth"]["vs_base"]["psnr_y"], 100.0)  # the stub ignores the guides
         self.assertEqual(smoke["mv"]["vs_base"]["psnr_y"], 100.0)
         self.assertIs(smoke["nodepth"]["nr"]["depth_used"], False)
@@ -625,7 +646,10 @@ class StubRun(unittest.TestCase):
         self.assertIsInstance(smoke["base"]["nr"]["ms_per_frame_gpu"], (int, float))
         self.assertEqual(smoke["i05"]["nr"]["params"]["intensity"], 0.5)  # what the run reported it ran with
         self.assertEqual(res["E2"]["warmup"], 0)  # still mode: no warm-up
-        self.assertIs(res["E2"]["verdict"]["identity"], True)  # the stub at intensity 0 returns its input
+        self.assertIs(res["E2"]["verdict"]["identity"], True)  # intensity 0: the model is not called, the output is the input (PR-7)
+        self.assertIs(res["E2"]["verdict"]["bypass"], True)
+        self.assertEqual(res["E2"]["variants"]["i0"]["nr"]["passes"], 0)
+        self.assertTrue(res["E2"]["meta"]["exe_sha256"])
         e8 = res["E8"]
         self.assertEqual([c["ok"] for c in e8["checks"]], [True])
         self.assertEqual(e8["size"], "192x128")  # the feature at the size NR runs at: color_sr's

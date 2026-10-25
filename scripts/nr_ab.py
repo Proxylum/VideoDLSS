@@ -35,7 +35,8 @@ from pathlib import Path, PureWindowsPath
 from typing import Optional
 
 ROOT = Path(__file__).resolve().parents[1]
-SAME_DB = 45.0        # spec §2b / §2i: two outputs above it are one picture (E1 saturation, E2 identity, E5 / E7 / E11 «no effect»)
+SAME_DB = 45.0        # spec §2b / §2i: two outputs above it are one picture (E2 identity, E5 / E7 / E11 «no effect»)
+LINEAR_TOL = 0.05     # PR-7, E1: the edit at strength x <= 1 is x times the edit at 1 (our lerp, no clipping inside [input, model])
 GAIN_DB = 1.0         # spec §2e: an inter-frame PSNR gain this large makes an MV variant the default (E4)
 IDENTICAL_DB = 100.0  # `dlssvid compare` counts an identical frame as 100 dB in its means and writes null for an infinite minimum
 STILL = {"guides": False, "temporal": 0.0}  # the model alone: Reset on every frame (still mode), no history of our filter either
@@ -98,9 +99,11 @@ def _v(name, **kw) -> Variant:
 
 
 EXPERIMENTS = [
-    Experiment("E1", "Интенсивность: насыщение и монотонность правки (§2b)",
+    # PR-7: nr.intensity is our blend after the model (the model always gets DLSSNR.Intensity 1) - E1 and E2 check the blend, not NGX;
+    # NGX's own reading of DLSSNR.Intensity (it saturated at 1, 0 was black: PR-2) needs a hidden A/B flag for a new DLL, not added yet
+    Experiment("E1", "Сила правки: линейность смешивания (PR-7, §2b)",
                [_v(f"i{x:g}", params={"intensity": x}) for x in (0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2)], "i1", STILL, ("base", "edit", "time")),
-    Experiment("E2", "Интенсивность 0 — тождество? (§2b)", [_v("i0", params={"intensity": 0}), _v("i1", params={"intensity": 1})], "i1", STILL,
+    Experiment("E2", "Сила 0: обход модели (PR-7, §2b)", [_v("i0", params={"intensity": 0}), _v("i1", params={"intensity": 1})], "i1", STILL,
                ("edit", "base", "time")),
     Experiment("E3", "Единицы векторов движения (§2e)",
                [_v("unit", flags=["--mv-scale", "unit"]), _v("auto", flags=["--mv-scale", "auto"]),
@@ -121,7 +124,7 @@ EXPERIMENTS = [
                requires=("--check-features",)),
     Experiment("E8", "Цена создания фичи (§2f)", [], kind="check", check="runs", metrics=("time",)),
     Experiment("E8b", "Смена настроек без пересоздания фичи (§2f)", [],
-               unsupported="нужен режим смены intensity/tone посреди прогона без пересоздания фичи — не входит в PR-1d"),
+               unsupported="нужен режим смены tone/structure посреди прогона без пересоздания фичи — не входит в PR-1d"),
     Experiment("E9", "Сброс на склейках (§2d)",
                [_v("cut0", params={"scene_cut": 0}), _v("cut024", params={"scene_cut": 0.24}), _v("cut024_t04", params={"scene_cut": 0.24, "temporal": 0.4})],
                "cut0", {}, ("temporal", "base", "time"), needs=("mv",), requires=("--scene-cut",)),
@@ -409,7 +412,7 @@ def read_nr(path: Path) -> dict:
     j = json.loads(Path(path).read_text(encoding="utf-8"))
     st, dg = j.get("stats", {}), j.get("diagnostics", {}) or {}
     out = {k: st.get(k) for k in ("ms_per_frame_gpu", "ms_per_frame_wall", "depth_used", "mv_used", "work_size", "passes", "mv_scale",
-                                  "frames_written", "warmup_frames", "masks")}
+                                  "frames_written", "warmup_frames", "masks", "bypass")}
     out.update({k: dg.get(k) for k in ("init_ms", "create_ms", "gpu", "driver", "dll_sha256")})
     vram = dg.get("vram_feature_bytes")
     out["vram_mib"] = round(vram / 1048576.0, 1) if isinstance(vram, (int, float)) else None
@@ -578,26 +581,50 @@ def _not_static(t) -> str:
 
 
 def verdict_e1(res):
-    hi = [_get(res, "i1.5", "vs_base", "psnr_y"), _get(res, "i2", "vs_base", "psnr_y")]
-    saturated = None if None in hi else all(x > SAME_DB for x in hi)
-    edits = [_get(res, f"i{x}", "edit", "mae_rgb") for x in ("0", "0.25", "0.5", "0.75", "1")]
-    monotone = None if None in edits else all(b > a for a, b in zip(edits, edits[1:]))
+    """PR-7: out = in + x * (model - in), the model run at 1. Up to 1 the edit (MAE to the input) is x times the edit at 1 - the lerp stays
+    inside [input, model], nothing clips; above 1 saturate clips the extrapolation, and the ratio's shortfall from x is the clipped share.
+    The time does not depend on x > 0: the model runs the same, the strength is one lerp in NrCompose."""
+    e1 = _get(res, "i1", "edit", "mae_rgb")
+    low = {x: _get(res, f"i{x:g}", "edit", "mae_rgb") for x in (0.25, 0.5, 0.75)}
+    worst = None if not e1 or None in low.values() else max(abs(m - x * e1) / e1 for x, m in low.items())
+    linear = None if worst is None else worst <= LINEAR_TOL
+    ratios = {f"{x:g}": (None if not e1 or _get(res, f"i{x:g}", "edit", "mae_rgb") is None else _get(res, f"i{x:g}", "edit", "mae_rgb") / e1)
+              for x in (1.25, 1.5, 2)}
+    edits = [_get(res, f"i{x:g}", "edit", "mae_rgb") for x in (0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2)]
+    known = [m for m in edits if m is not None]
+    monotone = None if len(known) < 2 else all(b > a for a, b in zip(known, known[1:]))
+    ms = [t for t in (_get(res, f"i{x:g}", "nr", "ms_per_frame_gpu") for x in (0.25, 0.5, 0.75, 1, 1.25, 1.5, 2)) if isinstance(t, (int, float)) and t > 0]
+    spread = max(ms) / min(ms) if len(ms) >= 2 else None
     text = []
-    if saturated is not None:
-        text.append(f"NGX насыщается на 1: PSNR(1.5, 1) {fmt_db(hi[0])}, PSNR(2, 1) {fmt_db(hi[1])} дБ > {SAME_DB:g} — по решению пользователя "
-                    "(2026-10-24) вариант Б: отдельный ползунок edit_gain в PR-7, смысл intensity не меняется"
-                    if saturated else f"насыщения нет (PSNR(1.5, 1) {fmt_db(hi[0])}, PSNR(2, 1) {fmt_db(hi[1])} дБ) — intensity идёт в NGX как есть")
+    if linear is not None:
+        text.append(f"смешивание линейно на [0, 1]: худшее отклонение правки от x·правка(1) — {worst * 100:.1f}% (допуск {LINEAR_TOL * 100:g}%)" if linear
+                    else f"правка на [0, 1] не пропорциональна силе: отклонение {worst * 100:.1f}% > {LINEAR_TOL * 100:g}% — регрессия NrCompose (PR-7)")
+    over = [(x, r) for x, r in ratios.items() if r is not None]
+    if over:
+        text.append("выше 1 (экстраполяция): " + ", ".join(f"правка({x})/правка(1) = {r:.2f} при {x}, обрезано {max(0.0, 1 - r / float(x)) * 100:.0f}%"
+                                                         for x, r in over))
     if monotone is False:
-        text.append("правка на [0, 1] растёт не монотонно — семантику не меняем, сначала разбираемся, как читается параметр (E8b)")
-    return {"saturated": saturated, "monotone": monotone, "text": text}
+        text.append("правка растёт с силой не монотонно — регрессия NrCompose (PR-7)")
+    if spread is not None and spread > 1.2:
+        text.append(f"время GPU зависит от силы (разброс ×{spread:.2f}): сила — один lerp после модели, так быть не должно")
+    return {"linear": linear, "worst": worst, "ratios": ratios, "monotone": monotone, "time_spread": spread, "text": text}
 
 
 def verdict_e2(res):
+    """PR-7: at 0 the model is not called (no feature, no DLL, no guides) and the output is the input: identity, bypass and the GPU time saved."""
     db = _get(res, "i0", "edit", "psnr_y")
     identity = None if db is None else db >= SAME_DB
-    text = [] if identity is None else [f"тождество (PSNR ко входу {fmt_db(db)} дБ): обход модели не нужен" if identity
-                                        else f"не тождество (PSNR ко входу {fmt_db(db)} дБ) — обход при 0 (+nr.i0, PR-7)"]
-    return {"identity": identity, "text": text}
+    bypass = _get(res, "i0", "nr", "bypass")
+    t0, t1 = _get(res, "i0", "nr", "ms_per_frame_gpu"), _get(res, "i1", "nr", "ms_per_frame_gpu")
+    text = []
+    if identity is not None:
+        text.append(f"тождество: PSNR ко входу {fmt_db(db)} дБ" if identity
+                    else f"не тождество (PSNR ко входу {fmt_db(db)} дБ) — регрессия обхода модели при 0 (PR-7)")
+    if bypass is not True and identity is not None:
+        text.append("прогон при 0 не сообщил обход модели (stats.bypass) — сборка до PR-7?")
+    if isinstance(t0, (int, float)) and isinstance(t1, (int, float)):
+        text.append(f"GPU {fmt_num(t0)} мс/кадр при 0 против {fmt_num(t1)} при 1")
+    return {"identity": identity, "bypass": bypass, "ms_gpu": [t0, t1], "text": text}
 
 
 def verdict_e3(res):
@@ -1058,7 +1085,10 @@ def run_check(a, cli: Path, inp: Inputs, exp: Experiment, edir: Path, dry: bool)
 def experiment_meta(res: dict, version: str, build: dict, inp: Inputs, exp: Experiment) -> dict:
     """The build and the inputs an experiment was measured with - stored with it: an experiment reused from results.json keeps its own. The
     inputs are the baseline's, and the variants with folders of their own are named."""
-    first = next((x["nr"] for x in res.get("variants", {}).values() if x.get("nr")), None) or res.get("diag") or {}
+    # the baseline's run first, then the first that reported its GPU: i0 calls no model and has no diagnostics (PR-7)
+    variants = res.get("variants", {})
+    runs = [x["nr"] for x in ([variants[exp.baseline]] if exp.baseline in variants else []) + list(variants.values()) if x.get("nr")]
+    first = next((n for n in runs if n.get("gpu")), runs[0] if runs else None) or res.get("diag") or {}
     meta = {"version": version, "exe_sha256": build.get("dlssvid"), "gpu": first.get("gpu"), "driver": first.get("driver"), "dll_sha256": first.get("dll_sha256")}
     if exp.kind != "check":  # E8 and E6f read no passes
         used = sorted({m for x in res.get("variants", {}).values() for m in ((x.get("nr") or {}).get("masks") or [])})

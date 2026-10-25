@@ -103,7 +103,6 @@ NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t w
     cfg.backend = o.backend;
     cfg.width = workW;
     cfg.height = workH;
-    cfg.intensity = o.intensity;
     cfg.style = ParseNrStyle(o.style);  // the render preset stays NrConfig's 3: 0..2 changed nothing (PR-2 E7)
     cfg.localTone = o.localTone;
     cfg.localStructure = o.localStructure;
@@ -137,6 +136,8 @@ std::vector<std::string> NrAbProblems(const NrStageOptions& o) {
     if (o.mvScale != "unit" && o.mvScale != "auto") p.push_back("--mv-scale must be unit | auto (got '" + o.mvScale + "')");
     if (!o.useGuides && (o.mvScale != "unit" || o.createWithMv || !o.depthGuide))
         p.push_back("--mv-scale auto, --create-with-mv and --no-depth-guide change how the guides reach the model: drop --no-guides (or guides: false in --params-file)");
+    if (o.intensity == 0.f && (o.mvScale != "unit" || o.createWithMv || !o.depthGuide))
+        p.push_back("--mv-scale auto, --create-with-mv and --no-depth-guide change how the guides reach the model: at --intensity 0 the model is not called");
     return p;
 }
 
@@ -151,20 +152,22 @@ void NrStage::Init(const StageConfig& config, D3D12Device& device) {
         for (const auto& p : problems) all += (all.empty() ? "" : "; ") + p;
         Throw("nr: " + all);
     }
+    bypass_ = options_.intensity == 0.f;  // PR-7: the edit strength 0 is the frame itself - the model, its guides and masks are not needed
+    stats_.bypass = bypass_;
     if (!options_.colorDir.empty()) {
         colorReader_.emplace(PassReader::Open(options_.colorDir));
         if (colorReader_->Man().channels.size() < 3) Throw("nr: --color-dir must be a colour pass (color_sr)");
     }
-    if (!options_.depthDir.empty()) {
+    if (!options_.depthDir.empty() && !bypass_) {
         depthReader_.emplace(PassReader::Open(options_.depthDir));
         depthReader_->Validate({0, 0, -1, PassKind::DepthDlss});
     }
-    if (!options_.mvDir.empty()) {
+    if (!options_.mvDir.empty() && !bypass_) {
         mvReader_.emplace(PassReader::Open(options_.mvDir));
         mvReader_->Validate({0, 0, -1, PassKind::MvDlss});
     }
     maskReaders_.clear();
-    if (!options_.masksDir.empty()) {
+    if (!options_.masksDir.empty() && !bypass_) {
         for (const auto& name : MaskNames()) {
             const auto dir = options_.masksDir / ("mask_" + name);
             if (!std::filesystem::exists(dir / Manifest::kFileName)) continue;
@@ -191,18 +194,7 @@ void NrStage::Disable(const std::string& reason) {
     Log()->warn("nr: stage disabled — {}. The pipeline continues without color_nr.", reason);
 }
 
-void NrStage::Setup(uint32_t w, uint32_t h) {
-    setup_ = true;
-    inW_ = w;
-    inH_ = h;
-    std::tie(workW_, workH_) = NrWorkSize(w, h, options_.modelScale);
-    reduced_ = workW_ != w || workH_ != h;
-    stats_.width = w;
-    stats_.height = h;
-    stats_.workWidth = workW_;
-    stats_.workHeight = workH_;
-    stats_.passes = options_.passes;
-
+bool NrStage::CreateBackends(std::string& backend) {
     NrConfig cfg = NrConfigFromOptions(options_, workW_, workH_);
     if (options_.createWithMv) {
         // Setup runs before the first frame's guides are bound (Process): the zero guides take the sizes of the pass folders, the
@@ -216,7 +208,6 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         if (!mvReader_) Log()->warn("nr: --create-with-mv without an mv_dlss pass folder: zero vectors at CreateFeature, the frames run without vectors");
     }
 
-    std::string backend = options_.backend;
     try {
         if (!injected_.empty()) {
             backends_ = std::move(injected_);
@@ -241,22 +232,41 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
     } catch (const std::exception& e) {
         if (!options_.disableWhenUnavailable) throw;
         Disable(e.what());
-        return;
+        return false;
     }
-    stats_.backend = backend;
     while (backends_.size() > static_cast<size_t>(options_.passes)) backends_.pop_back();
+    return true;
+}
+
+void NrStage::Setup(uint32_t w, uint32_t h) {
+    setup_ = true;
+    inW_ = w;
+    inH_ = h;
+    std::tie(workW_, workH_) = NrWorkSize(w, h, options_.modelScale);
+    reduced_ = workW_ != w || workH_ != h;
+    stats_.width = w;
+    stats_.height = h;
+    stats_.workWidth = workW_;
+    stats_.workHeight = workH_;
+    stats_.passes = bypass_ ? 0 : options_.passes;
+
+    std::string backend = options_.backend;
+    if (!bypass_ && !CreateBackends(backend)) return;  // PR-7: at intensity 0 no backend, no DLL; false: disabled (logged)
+    stats_.backend = backend;
 
     tonemapper_ = std::make_unique<Tonemapper>(*device_);
-    compose_ = std::make_unique<NrCompose>(*device_);
-    if (reduced_) resampler_ = std::make_unique<Resampler>(*device_);
     input_ = device_->CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
     proxy_ = device_->CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    output_ = device_->CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    if (reduced_) work_ = device_->CreateTexture2D(workW_, workH_, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
     modelOut_.clear();
-    for (size_t p = 0; p < backends_.size(); ++p)
-        modelOut_.push_back(device_->CreateTexture2D(workW_, workH_, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
-    if (options_.temporal > 0.f) prev_ = device_->CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    if (!bypass_) {
+        compose_ = std::make_unique<NrCompose>(*device_);
+        if (reduced_) resampler_ = std::make_unique<Resampler>(*device_);
+        output_ = device_->CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        if (reduced_) work_ = device_->CreateTexture2D(workW_, workH_, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        for (size_t p = 0; p < backends_.size(); ++p)
+            modelOut_.push_back(device_->CreateTexture2D(workW_, workH_, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
+        if (options_.temporal > 0.f) prev_ = device_->CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    }
 
     if (!options_.outputDir.empty()) {
         Manifest m = Manifest::ForPass(PassKind::ColorNr, w, h, options_.format);
@@ -264,8 +274,10 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         m.colorspace = "srgb";
         m.sourceFile = options_.sourceFile;
         m.sourceHash = options_.sourceHash;
-        m.stageParams = backends_[0]->Describe();
-        m.stageParams["passes"] = options_.passes;
+        m.stageParams = bypass_ ? nlohmann::json{{"backend", options_.backend}, {"bypass", true}} : backends_[0]->Describe();
+        m.stageParams["passes"] = stats_.passes;          // model passes: 0 in the bypass (the estimates read it)
+        m.stageParams["intensity"] = options_.intensity;  // our edit strength after the model, not the model's (PR-7)
+        if (!bypass_) m.stageParams["model_intensity"] = kNrModelIntensity;  // what the model got: also the mark of a PR-7 pass
         m.stageParams["model_scale"] = options_.modelScale;
         m.stageParams["work_size"] = {workW_, workH_};
         m.stageParams["transfer"] = options_.transfer;
@@ -276,6 +288,10 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["masks"] = stats_.masks;
         if (nlohmann::json ab = NrAbJson(options_); !ab.empty()) m.stageParams["ab"] = std::move(ab);  // process never adopts it
         passManifest_ = std::move(m);  // the writer opens at the first output frame (OpenOutputs)
+    }
+    if (bypass_) {
+        Log()->info("nr: {} {}x{} — intensity 0: the model is not called (tonemap {} only)", backend, w, h, options_.tonemap.curve);
+        return;
     }
     Log()->info("nr: {} {}x{}{} — {} pass(es), guides {}, tonemap {}, temporal {}, masks [{}]", backend, w, h,
                 reduced_ ? " (model at " + std::to_string(workW_) + "x" + std::to_string(workH_) + ")" : "", options_.passes, options_.useGuides ? "on" : "off",
@@ -412,11 +428,13 @@ void NrStage::Process(FrameContext& ctx) {
     rp.temporal = options_.temporal;
     rp.temporalThreshold = options_.temporalThreshold;
     rp.skinBlend = options_.skinBlend;
+    rp.gain = options_.intensity;  // PR-7: the edit strength, once after the last pass (NrCompose)
     rp.mvWidth = in.mvWidth;
     rp.mvHeight = in.mvHeight;
     const auto t0 = std::chrono::steady_clock::now();
     device_->ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) {
         tonemapper_->Run(cl, colorTex, proxy_.Get(), w, h, options_.tonemap);
+        if (bypass_) return;  // intensity 0: the tone-mapped frame is the output
         ID3D12Resource* modelIn = proxy_.Get();
         if (reduced_) {
             resampler_->Run(cl, proxy_.Get(), w, h, work_.Get(), workW_, workH_, 0.f, 0.f,
@@ -462,7 +480,7 @@ void NrStage::Process(FrameContext& ctx) {
 
     // ---- readback RGBA16F -> RGB half pass image ----
     size_t pitch = 0;
-    const std::vector<uint8_t> bytes = device_->ReadbackTexture2D(output_.Get(), pitch);
+    const std::vector<uint8_t> bytes = device_->ReadbackTexture2D((bypass_ ? proxy_ : output_).Get(), pitch);
     PassImage rgb = MakePassImage(PassKind::ColorNr, w, h, PixelType::F16);
     const uint16_t* src = reinterpret_cast<const uint16_t*>(bytes.data());
     uint16_t* dst = rgb.As<uint16_t>();
@@ -555,7 +573,9 @@ NrRunResult RunNr(VideoDecoder& decoder, D3D12Device& device, NrStageOptions opt
     NrRunResult r;
     r.stats = raw->GetStats();
     r.outDir = raw->OutDir();
-    r.backend = raw->Backend() ? raw->Backend()->Describe() : nlohmann::json::object();
+    r.backend = raw->Backend()  ? raw->Backend()->Describe()
+                : raw->Bypass() ? nlohmann::json{{"backend", r.stats.backend}, {"bypass", true}}
+                                : nlohmann::json::object();
     r.diagnostics = raw->Diagnostics() ? raw->Diagnostics()->ToJson() : nlohmann::json::object();
     pipeline.Shutdown();
     return r;

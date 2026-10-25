@@ -412,7 +412,9 @@ TEST_CASE("dlssvid nr --params-file; explicit flags override the file", "[integr
         CHECK(p["style"] == "natural");  // the run's settings: the schema's defaults filled in
         // what reached the model and the filter, not only the merged object
         const nlohmann::json b = ReadJson(dir / "file.json")["backend"];
-        CHECK(b["intensity"] == 0.5);
+        CHECK_FALSE(b.contains("intensity"));  // PR-7: the strength is NrCompose's, the model is not given it
+        CHECK_THAT(m.stageParams["intensity"].get<double>(), WithinAbs(0.5, 1e-6));
+        CHECK(m.stageParams["model_intensity"] == 1.0);
         CHECK_THAT(b["local_tone"].get<double>(), WithinAbs(0.3, 1e-6));
         CHECK_THAT(m.stageParams["temporal"].get<double>(), WithinAbs(0.4, 1e-6));
     }
@@ -431,7 +433,8 @@ TEST_CASE("dlssvid nr --params-file; explicit flags override the file", "[integr
         CHECK(p["local_tone"] == 0.3);  // from the file
         CHECK(p["auto_mask"] == false);  // --no-auto-mask over the file's true
         const nlohmann::json b = ReadJson(dir / "flags.json")["backend"];
-        CHECK(b["intensity"] == 1.5);
+        CHECK_FALSE(b.contains("intensity"));
+        CHECK_THAT(m.stageParams["intensity"].get<double>(), WithinAbs(1.5, 1e-6));
         CHECK_THAT(b["local_tone"].get<double>(), WithinAbs(0.3, 1e-6));
         CHECK(m.stageParams["temporal"] == 0.0);
     }
@@ -542,6 +545,29 @@ TEST_CASE("dlssvid nr A/B switches on the stub: --mv-scale, --create-with-mv, --
 
 // TASK-0048 (spec E6, E8): `nr --check` prints what creating the feature costs - the device, NGX init and CreateFeature times
 // and the feature's video memory (DXGI, this process); the same lines for the stub on WARP.
+// PR-7 (E2): --intensity 0 is the upscaled frame - the model is not called, so ngx runs on WARP without an NVIDIA GPU or the DLL
+TEST_CASE("dlssvid nr --intensity 0 does not call the model; the A/B switches of its guides are refused there", "[integration][cli][nr][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("bypass");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const auto json = dir / "nr.json";
+    const CliResult r = RunCli({"nr", "--backend", "ngx", "--warp", "-i", clip.string(), "-o", (dir / "passes").string(), "--intensity", "0", "--json", json.string()});
+    INFO(r.out);
+    REQUIRE(r.code == 0);
+    CHECK(r.out.find("the model is not called") != std::string::npos);
+    const nlohmann::json j = ReadJson(json);
+    CHECK(j["backend"]["bypass"] == true);
+    CHECK(j["stats"]["passes"] == 0);
+    CHECK(j["stats"]["bypass"] == true);
+    CHECK(j["diagnostics"].empty());
+    const CliResult ab = RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "ab").string(), "--intensity", "0", "--mv-scale", "auto"});
+    CHECK(ab.code != 0);
+    CHECK(ab.out.find("at --intensity 0") != std::string::npos);
+}
+
 TEST_CASE("dlssvid nr --check prints the device, init and create times and the feature VRAM", "[integration][cli][nr]") {
     const auto dir = Dir("check_times");
     const auto json = dir / "c.json";

@@ -338,7 +338,141 @@ TEST_CASE("NrCompose resolve on WARP: direct mode, masks, ratio transfer and the
     }
 }
 
-TEST_CASE("StubNrBackend edits deterministically and scales with intensity", "[nr][unit][gpu]") {
+// PR-7: NrCompose applies the edit strength after the model; the model (and the stub) edit at their own strength (NrResolveParams::gain).
+TEST_CASE("NrCompose edit strength: 1 is the resolve before PR-7, 2 doubles the edit, 0 is the original, masks scale it", "[nr][unit][gpu]") {
+    D3D12Device dev({true, false});
+    NrCompose compose(dev);
+    const uint32_t w = 8, h = 4;
+    auto original = UploadRgba16fConst(dev, w, h, 0.25f, 0.5f, 0.75f);
+    auto model = UploadRgba16fConst(dev, w, h, 0.5f, 0.25f, 0.5f);  // the edit: (+0.25, -0.25, -0.25)
+    auto out = dev.CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    NrResolveParams p;
+    p.width = w;
+    p.height = h;
+    p.workWidth = w;
+    p.workHeight = h;
+    NrResolveInputs in;
+    in.original = original.Get();
+    in.model = model.Get();
+    auto resolve = [&](float gain) {
+        p.gain = gain;
+        dev.ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) { compose.Resolve(cl, in, out.Get(), p); });
+        return ReadbackRgb(dev, out.Get(), w, h);
+    };
+    auto expect = [&](const std::vector<float>& rgb, float r, float g, float b) {
+        CHECK(rgb[0] == Approx(r).margin(2e-3));
+        CHECK(rgb[1] == Approx(g).margin(2e-3));
+        CHECK(rgb[2] == Approx(b).margin(2e-3));
+    };
+    expect(resolve(1.f), 0.5f, 0.25f, 0.5f);      // the model's picture
+    expect(resolve(2.f), 0.75f, 0.f, 0.25f);      // twice the edit
+    expect(resolve(0.5f), 0.375f, 0.375f, 0.625f);
+    expect(resolve(2.5f), 0.875f, 0.f, 0.125f);   // saturate last: green -0.125 clamps to 0
+    CHECK_THROWS(resolve(-0.5f));
+    p.gain = 1.f;
+
+    // 0 is the original exactly, the flicker filter and the masks included (the filter fades with the edit below 1)
+    auto prev = UploadRgba16fConst(dev, w, h, 0.3f, 0.45f, 0.7f);
+    std::vector<float> half(static_cast<size_t>(w) * h, 0.f);
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = w / 2; x < w; ++x) half[y * w + x] = 1.f;
+    auto skinTex = UploadR32f(dev, w, h, half);
+    in.prev = prev.Get();
+    in.skin = skinTex.Get();
+    p.temporal = 1.f;
+    p.temporalThreshold = 1.f;
+    p.skinBlend = 0.5f;
+    const std::vector<float> zero = resolve(0.f);
+    for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i) {
+        CHECK(zero[i * 3] == 0.25f);
+        CHECK(zero[i * 3 + 1] == 0.5f);
+        CHECK(zero[i * 3 + 2] == 0.75f);
+    }
+    in.prev = nullptr;
+    p.temporal = 0.f;
+
+    // the skin mask scales the edit, the strength scales it again: skinBlend 0.5 x gain 2 = the model's picture on skin
+    const std::vector<float> skin = resolve(2.f);
+    expect(skin, 0.75f, 0.f, 0.25f);                                   // left: no skin, twice the edit
+    const size_t right = (w - 1) * 3;
+    CHECK(skin[right] == Approx(0.5f).margin(2e-3));                   // right: w 0.5 x 2 = 1
+    CHECK(skin[right + 1] == Approx(0.25f).margin(2e-3));
+    in.skin = nullptr;
+    auto protectTex = UploadR32f(dev, w, h, half);
+    in.protect = protectTex.Get();
+    const std::vector<float> prot = resolve(2.f);
+    CHECK(prot[right] == Approx(0.25f).margin(2e-3));                  // protected: the original whatever the strength
+    expect(prot, 0.75f, 0.f, 0.25f);
+}
+
+// spec §2b (PR-7): the strength is applied once - after the ratio transfer and its clamp, with the masks, before the flicker filter
+// and saturate. Each case below gives another number when the gain sits elsewhere.
+TEST_CASE("NrCompose order of the strength controls: after the ratio transfer, before the flicker filter", "[nr][unit][gpu][regression]") {
+    D3D12Device dev({true, false});
+    NrCompose compose(dev);
+    const uint32_t w = 8, h = 4;
+    auto original = UploadRgba16fConst(dev, w, h, 0.25f, 0.5f, 0.75f);
+    auto out = dev.CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    NrResolveParams p;
+    p.width = w;
+    p.height = h;
+    auto run = [&](const NrResolveInputs& in) {
+        dev.ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) { compose.Resolve(cl, in, out.Get(), p); });
+        return ReadbackRgb(dev, out.Get(), w, h);
+    };
+    {  // the ratio transfer: the clamp of the ratio first, the strength on the edit it gives (before the clamp: 0.375 red)
+        auto proxy = UploadRgba16fConst(dev, w / 2, h / 2, 0.25f, 0.5f, 0.75f);
+        auto smallModel = UploadRgba16fConst(dev, w / 2, h / 2, 0.5f, 0.5f, 0.25f);  // ratio (2, 1, 1/3)
+        NrResolveInputs in;
+        in.original = original.Get();
+        in.model = smallModel.Get();
+        in.proxy = proxy.Get();
+        p.workWidth = w / 2;
+        p.workHeight = h / 2;
+        p.maxRatio = 1.5f;  // clamped to (1.5, 1, 2/3): edited (0.375, 0.5, 0.5)
+        p.gain = 2.f;
+        std::vector<float> rgb = run(in);
+        CHECK(rgb[0] == Approx(0.5f).margin(2e-3));
+        CHECK(rgb[1] == Approx(0.5f).margin(2e-3));
+        CHECK(rgb[2] == Approx(0.25f).margin(2e-3));
+        p.maxRatio = 4.f;
+        p.transfer = 0.5f;  // half the transferred edit, twice the strength: the same picture
+        rgb = run(in);
+        CHECK(rgb[0] == Approx(0.5f).margin(2e-3));
+        CHECK(rgb[2] == Approx(0.25f).margin(2e-3));
+        p.transfer = 1.f;
+    }
+    p.workWidth = w;
+    p.workHeight = h;
+    auto model = UploadRgba16fConst(dev, w, h, 0.5f, 0.25f, 0.5f);
+    {  // the flicker filter after the strength: gain 2 gives 0.75 red, the previous frame 0.77 is within the threshold
+        auto prev = UploadRgba16fConst(dev, w, h, 0.77f, 0.f, 0.25f);
+        NrResolveInputs in;
+        in.original = original.Get();
+        in.model = model.Get();
+        in.prev = prev.Get();
+        p.gain = 2.f;
+        p.temporal = 0.5f;
+        p.temporalThreshold = 0.1f;
+        const std::vector<float> rgb = run(in);
+        // gate = 1 - 0.02 / 0.1 = 0.8, k = 0.5 x 0.8 = 0.4: 0.75 + 0.4 x 0.02; the strength after the filter would give 0.75
+        CHECK(rgb[0] == Approx(0.758f).margin(2e-3));
+    }
+    {  // below 1 the filter fades with the edit: k = 1 x 0.9 x 0.5 (without the fade 0.42)
+        auto prev = UploadRgba16fConst(dev, w, h, 0.425f, 0.375f, 0.625f);
+        NrResolveInputs in;
+        in.original = original.Get();
+        in.model = model.Get();
+        in.prev = prev.Get();
+        p.gain = 0.5f;
+        p.temporal = 1.f;
+        p.temporalThreshold = 0.5f;
+        const std::vector<float> rgb = run(in);
+        CHECK(rgb[0] == Approx(0.3975f).margin(2e-3));
+    }
+}
+
+TEST_CASE("StubNrBackend edits deterministically at its own strength; local_structure scales the detail", "[nr][unit][gpu]") {
     D3D12Device dev({true, false});
     const uint32_t w = 16, h = 8;
     std::vector<float> rgb(static_cast<size_t>(w) * h * 3);
@@ -347,13 +481,15 @@ TEST_CASE("StubNrBackend edits deterministically and scales with intensity", "[n
             for (int c = 0; c < 3; ++c) rgb[(static_cast<size_t>(y) * w + x) * 3 + c] = ((x / 2 + y) % 2) ? 0.7f : 0.3f;  // checker: local contrast to enhance
     auto src = UploadRgba16f(dev, w, h, rgb);
     auto out = dev.CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
-    auto run = [&](float intensity) {
+    auto run = [&](float structure) {
         StubNrBackend stub;
         NrConfig cfg;
         cfg.width = w;
         cfg.height = h;
-        cfg.intensity = intensity;
+        cfg.localStructure = structure;
+        cfg.localTone = 0.f;
         stub.Init(dev, cfg);
+        CHECK_FALSE(stub.Describe().contains("intensity"));  // PR-7: the strength is NrCompose's, not the model's
         NrInputs in;
         in.color = src.Get();
         dev.ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) { stub.Evaluate(cl, in, out.Get()); });
@@ -371,7 +507,20 @@ TEST_CASE("StubNrBackend edits deterministically and scales with intensity", "[n
         CHECK(a[i] <= 1.f);
     }
     CHECK(diffA > 0.0);
-    CHECK(diffC > diffA);  // more intensity, more edit
+    CHECK(diffC > diffA);  // more structure, more edit
+}
+
+TEST_CASE("NrBypassParams and the A/B switches at intensity 0", "[nr][unit]") {
+    CHECK(NrBypassParams({{"intensity", 0}}));
+    CHECK(NrBypassParams({{"intensity", 0.0}}));
+    CHECK_FALSE(NrBypassParams({{"intensity", 0.05}}));
+    CHECK_FALSE(NrBypassParams(nlohmann::json::object()));  // absent = 1
+    CHECK_FALSE(NrBypassParams({{"intensity", "0"}}));
+    NrStageOptions o;
+    o.intensity = 0.f;
+    CHECK(NrAbProblems(o).empty());
+    o.createWithMv = true;  // switches of the model's guides: the model is not called at 0
+    CHECK_FALSE(NrAbProblems(o).empty());
 }
 
 // TASK-0048 (spec §2e, E3): DLSSNR.MVecScale - "unit" passes mv_dlss pixels of its own resolution as they are (the sub-rect

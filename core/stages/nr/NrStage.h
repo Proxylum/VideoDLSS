@@ -28,6 +28,8 @@ namespace dlssvid {
 struct NrStageOptions {
     std::string backend = "ngx";        // ngx | stub
     // model (docs/plans/06-nr.md)
+    // edit strength after the model (PR-7): out = in + s * (model - in) in NrCompose; 0 = the tone-mapped frame without the model (no
+    // backend, DLL, guides or masks), > 1 extrapolates; the model itself always gets kNrModelIntensity
     float intensity = 1.f;
     std::string style = "natural";      // natural | cinematic | default (PR-2 E7: 3..6 = cinematic)
     float localTone = 1.f, localStructure = 1.f, skinStructure = -1.f;
@@ -108,7 +110,8 @@ public:
         double MeanMs() const { return frames ? msSum / static_cast<double>(frames) : 0.0; }
         uint32_t width = 0, height = 0, workWidth = 0, workHeight = 0;
         std::string backend, colorSource;  // colorSource: video | color_sr | slot
-        int passes = 0;
+        int passes = 0;      // model passes: 0 in the bypass
+        bool bypass = false;  // intensity 0: the model was not called (PR-7)
         bool depthUsed = false, mvUsed = false;
         std::vector<std::string> masks;
         bool disabled = false;
@@ -116,6 +119,7 @@ public:
     };
     const Stats& GetStats() const { return stats_; }
     const INrBackend* Backend(size_t pass = 0) const { return pass < backends_.size() ? backends_[pass].get() : nullptr; }
+    bool Bypass() const { return bypass_; }  // intensity 0 (PR-7): no backend, the output is the tone-mapped frame
     const NrDiagnostics* Diagnostics() const { return diag_ ? &*diag_ : nullptr; }
     std::filesystem::path OutDir() const { return options_.outputDir / "color_nr"; }
     static const std::vector<std::string>& MaskNames();  // ui, ignore, face, skin
@@ -123,6 +127,7 @@ public:
 private:
     void ApplyParams(const nlohmann::json& params);
     void Setup(uint32_t w, uint32_t h);
+    bool CreateBackends(std::string& backend);  // the model's passes; false: unavailable and disabled (disableWhenUnavailable)
     void OpenOutputs();  // the color_nr writer and the --video encoder at the first output frame: warm-up alone leaves nothing
     void LoadMasks(int64_t frame);
     void Disable(const std::string& reason);
@@ -146,6 +151,7 @@ private:
     std::unique_ptr<VideoEncoder> encoder_;
     Stats stats_;
     bool initialized_ = false;
+    bool bypass_ = false;
 };
 
 struct NrRunResult {

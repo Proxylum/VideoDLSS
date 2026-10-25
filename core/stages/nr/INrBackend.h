@@ -29,6 +29,14 @@ std::string GpuArchitectureFromName(std::string_view adapterName);
 // From a CUDA compute capability (7.5 Turing, 8.x Ampere / 8.9 Ada, >= 10 Blackwell), "" when unknown.
 std::string GpuArchitectureFromComputeCapability(int major, int minor);
 
+// HACK (PR-7, PR-2 E1/E2): DLSSNR.Intensity is not an edit strength on DLL 310.8 - above 1 it is 1 bit for bit, below 1 the frame
+// darkens and drifts over the next frames even in still mode, 0 is a black frame. The model always gets this value; nr.intensity is
+// NrCompose's blend after the model (the user's decision 2026-10-25).
+inline constexpr float kNrModelIntensity = 1.f;
+// nr.intensity 0 in a stage's parameters: NrStage writes the tone-mapped frame and never creates or calls the model (PR-7) - one rule
+// for the stage, the fingerprint (inputs, DLL), the estimates and the card.
+bool NrBypassParams(const nlohmann::json& params);
+
 inline constexpr const char* kNrDllName = "nvngx_dlssnr.dll";           // NGX Feature 18 snippet (user supplied)
 inline constexpr const char* kNrForwarderName = "nvngx.dll_dlssvid.dll";  // our caller module (core/stages/nr/forwarder)
 
@@ -36,7 +44,6 @@ inline constexpr const char* kNrForwarderName = "nvngx.dll_dlssvid.dll";  // our
 struct NrConfig {
     std::string backend = "ngx";             // ngx | stub
     uint32_t width = 0, height = 0;          // colour = output size (the model's working resolution)
-    float intensity = 1.f;                   // DLSSNR.Intensity 0..2
     int style = 1;                           // DLSSNR.Style: 0 default, 1 natural, 2 cinematic (3..6 gave cinematic, PR-2 E7 - refused)
     int preset = 3;                          // DLSSNR.Hint.Render.Preset: always 3 - 0..2 gave the same picture (PR-2 E7), no setting
     float localTone = 1.f;                   // DLSSNR.LocalToneStrength 0..2

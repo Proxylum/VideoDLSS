@@ -17,9 +17,15 @@ struct Manifest;
 constexpr const char* kPassToolVersion = "0.1.0";
 
 // The «app» of one stage's passes: kPassToolVersion plus "+<stage>.<revision>" for a stage whose own algorithm changed
-// for the same parameters. depth.2 (TASK-0038, audit depth-7): temporal alignment over a centred window of ±N frames,
-// auto = scale for metric models - only when stabilize != none (without alignment the depth is what it was).
+// for the same parameters:
+// - depth.2 (TASK-0038, audit depth-7): temporal alignment over a centred window of ±N frames, auto = scale for metric models -
+//   only when stabilize != none (without alignment the depth is what it was);
+// - nr.ev (TASK-0043): exposure in stops; png.2 (TASK-0042): PNG16 colour passes scaled;
+// - nr.gain / nr.i0 (PR-7): nr.intensity is the edit strength after the model (it went to NGX before) - any value but 1 is
+//   another picture; 0 does not call the model at all.
 std::string PassToolVersionFor(const std::string& stage, const nlohmann::json& params);
+// The revisions `newApp` has and `oldApp` lacks ("0.1.0", "0.1.0+nr.gain" -> {"nr.gain"}): what the card names on tool_changed.
+std::vector<std::string> AddedToolRevisions(const std::string& oldApp, const std::string& newApp);
 
 // Pass fingerprints (stage 9, MR A — docs/architecture.md «Отпечатки и версии пассов»). A pass is reused only when the
 // fingerprint of the run that would produce it equals the one stored in its manifest:

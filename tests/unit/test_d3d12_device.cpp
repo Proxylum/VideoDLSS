@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <numeric>
+#include <stdexcept>
 #include <vector>
 
 #include "gpu/D3D12Device.h"
@@ -31,6 +32,19 @@ TEST_CASE("D3D12Device creates on hardware or WARP", "[gpu]") {
 TEST_CASE("D3D12Device WARP adapter is always available", "[gpu]") {
     D3D12Device dev({true, false});
     CHECK(dev.IsWarp());
+}
+
+// PR-7: a record that threw (NrCompose::Resolve on a bad gain) left the command list open - every later ExecuteAndWait failed
+// with "CommandAllocator::Reset failed".
+TEST_CASE("D3D12Device stays usable after a record that throws", "[gpu][regression]") {
+    D3D12Device dev({true, false});
+    CHECK_THROWS(dev.ExecuteAndWait([](ID3D12GraphicsCommandList*) { throw std::runtime_error("record failed"); }));
+    const size_t size = 4096;
+    auto buf = dev.CreateBuffer(size, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON);
+    const auto in = Pattern(size, 5);
+    dev.UploadBuffer(buf.Get(), in.data(), size);
+    CHECK(dev.ReadbackBuffer(buf.Get(), size) == in);
+    CHECK_NOTHROW(dev.ExecuteAndWait([](ID3D12GraphicsCommandList*) {}));
 }
 
 TEST_CASE("D3D12Device buffer upload/readback is bit-exact", "[gpu]") {

@@ -136,7 +136,12 @@ ComPtr<ID3D12Resource> D3D12Device::CreateTexture2D(uint32_t width, uint32_t hei
 void D3D12Device::ExecuteAndWait(const std::function<void(ID3D12GraphicsCommandList*)>& record) {
     CheckHr(allocator_->Reset(), "CommandAllocator::Reset");
     CheckHr(list_->Reset(allocator_.Get(), nullptr), "CommandList::Reset");
-    record(list_.Get());
+    try {
+        record(list_.Get());
+    } catch (...) {
+        list_->Close();  // a list left open fails the next Reset: one throwing record would break every later command on this device
+        throw;
+    }
     CheckHr(list_->Close(), "CommandList::Close");
     ID3D12CommandList* lists[] = {list_.Get()};
     queue_->ExecuteCommandLists(1, lists);

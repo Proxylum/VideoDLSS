@@ -66,7 +66,7 @@ double NrMovedRecord(const Manifest& m, double wall, const nlohmann::json& param
         w0 = sp["work_size"][0].get<uint32_t>();
         h0 = sp["work_size"][1].get<uint32_t>();
     }
-    const int passes1 = HasNumber(params, "passes") ? params["passes"].get<int>() : passes0;
+    const int passes1 = NrBypassParams(params) ? 0 : HasNumber(params, "passes") ? params["passes"].get<int>() : passes0;  // PR-7: 0 at intensity 0
     const auto [w1, h1] = HasNumber(params, "model_scale") ? NrWorkSize(m.width, m.height, params["model_scale"].get<double>()) : std::pair{w0, h0};
     if (passes1 == passes0 && w1 == w0 && h1 == h0) return wall;  // the same run: the record as it is
     return NrMovedMsPerFrame(wall, passes0, static_cast<double>(w0) * h0, passes1, static_cast<double>(w1) * h1, frames > 0 ? frames : m.frameCount,
@@ -170,8 +170,8 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
                 // the baseline is one model pass at the colour's resolution (docs/benchmarks.md): the run's passes and model_scale
                 // move it (D8)
                 const auto [ww, wh] = NrWorkSize(o.width, o.height, p.value("model_scale", 1.0));
-                e.msPerFrame = NrMovedMsPerFrame(e.msPerFrame, 1, static_cast<double>(o.width) * o.height, p.value("passes", 1), static_cast<double>(ww) * wh, frames,
-                                                 backend);
+                e.msPerFrame = NrMovedMsPerFrame(e.msPerFrame, 1, static_cast<double>(o.width) * o.height, NrBypassParams(p) ? 0 : p.value("passes", 1),
+                                                 static_cast<double>(ww) * wh, frames, backend);
             }
         }
         e.frames = d.name == "fg" ? FgFrameCount(frames, multiplier) : frames;

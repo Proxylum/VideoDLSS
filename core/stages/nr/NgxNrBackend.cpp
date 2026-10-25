@@ -83,7 +83,7 @@ void SetAllParams(NVSDK_NGX_Parameter* p, const NrConfig& c, ID3D12Resource* col
     NVSDK_NGX_Parameter_SetUI(p, NVSDK_NGX_Parameter_CreationNodeMask, 1);
     NVSDK_NGX_Parameter_SetUI(p, NVSDK_NGX_Parameter_VisibilityNodeMask, 1);
     NVSDK_NGX_Parameter_SetUI(p, "DLSSNR.Hint.Render.Preset", static_cast<unsigned>(c.preset));
-    NVSDK_NGX_Parameter_SetF(p, "DLSSNR.Intensity", c.intensity);
+    NVSDK_NGX_Parameter_SetF(p, "DLSSNR.Intensity", kNrModelIntensity);  // HACK (PR-7): the strength is NrCompose's, see kNrModelIntensity
     NVSDK_NGX_Parameter_SetUI(p, "DLSSNR.Style", static_cast<unsigned>(c.style));
     NVSDK_NGX_Parameter_SetF(p, "DLSSNR.LocalStructureStrength", c.localStructure);
     NVSDK_NGX_Parameter_SetF(p, "DLSSNR.LocalToneStrength", c.localTone);
@@ -352,7 +352,7 @@ void NgxNrBackend::Init(D3D12Device& device, const NrConfig& config) {
     diag_.ok = true;
     Log()->info("nr: NGX init {:.0f} ms (+{}), CreateFeature(18) {:.0f} ms (+{}){}", diag_.initMs, MiB(diag_.vramInitBytes), diag_.createMs,
                 MiB(diag_.vramFeatureBytes), im.createMv ? " with zero guides (--create-with-mv)" : "");
-    Log()->info("nr: {}x{} ready (intensity {}, style {}, preset {}, guides {}, {} block)", config.width, config.height, config.intensity, config.style, config.preset,
+    Log()->info("nr: {}x{} ready (model intensity {}, style {}, preset {}, guides {}, {} block)", config.width, config.height, kNrModelIntensity, config.style, config.preset,
                 config.useGuides ? "on" : "off (still mode)", diag_.paramsBlock);
 }
 
@@ -437,7 +437,7 @@ void NgxNrBackend::Evaluate(ID3D12GraphicsCommandList* cl, const NrInputs& in, I
 nlohmann::json NgxNrBackend::Describe() const {
     nlohmann::json j = {{"backend", "ngx"},
                         {"feature", kFeatureId},
-                        {"intensity", config_.intensity},
+                        {"model_intensity", kNrModelIntensity},
                         {"style", config_.style},
                         {"preset", config_.preset},
                         {"local_tone", config_.localTone},

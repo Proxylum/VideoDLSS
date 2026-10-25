@@ -144,7 +144,7 @@ BT.709: Kr = 0.2126, Kb = 0.0722;  BT.601: Kr = 0.299, Kb = 0.114;  Kg = 1 − K
   "mv": {"direction": "forward", "y_up": false, "ref_width": 0, "ref_height": 0},
   "fingerprint": "sha256:…",
   "inputs": {"color_sr": "sha256:…", "depth_dlss": "sha256:…", "mv_dlss": "sha256:…"},
-  "tool": {"app": "0.1.0", "backend": "ngx", "model": "", "model_hash": "", "dll_file": "nvngx_dlssnr.dll", "dll": "sha256:…"},
+  "tool": {"app": "0.1.0+nr.gain", "backend": "ngx", "model": "", "model_hash": "", "dll_file": "nvngx_dlssnr.dll", "dll": "sha256:…"},
   "params_canonical": {"backend": "ngx", "intensity": 1.4},
   "created": "2026-09-22T14:09:31Z"
 }
@@ -164,6 +164,10 @@ BT.709: Kr = 0.2126, Kb = 0.0722;  BT.601: Kr = 0.299, Kb = 0.114;  Kg = 1 − K
 кадр, кадры прогрева включены); его пишет и отдельный `dlssvid nr` (TASK-0049). Апскейл и FG пока пишут под `ms_per_frame`
 собственный таймер стадии: `process` перезаписывает его wall-временем, но в отдельном или усыновлённом пассе он остаётся
 (TASK-0051).
+
+`color_nr` пишет силу правки: `stage_params.intensity` — наша сила после модели, `model_intensity` — что получила модель
+(всегда 1; поле — признак пасса PR-7: пасс NR без него с `intensity ≠ 1` снят до PR-7 и отбрасывается). При `intensity 0`
+модель не вызывается: `bypass: true`, `passes: 0`, `model_intensity` нет.
 
 У импортированного пасса (маски `mask_*`, внешняя глубина) отпечатка нет. Для стадий, которые его читают, он
 означает только «источник и число кадров», поэтому замена содержимого с тем же числом кадров не пересчитывает их.

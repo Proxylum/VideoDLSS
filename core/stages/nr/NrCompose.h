@@ -16,6 +16,7 @@ struct NrResolveParams {
     float temporal = 0.f;                    // 0 = off, else blend weight with the previous frame
     float temporalThreshold = 0.1f;          // colour difference at which the temporal blend is fully rejected
     float skinBlend = 1.f;                   // edit strength inside the face / skin masks
+    float gain = 1.f;                        // nr.intensity: the edit strength after the model (PR-7), >= 0; > 1 extrapolates
     uint32_t mvWidth = 0, mvHeight = 0;      // guide size of `mv` (for the px scale)
 };
 

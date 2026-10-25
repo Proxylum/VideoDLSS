@@ -231,6 +231,17 @@ bool OldExposurePass(const std::string& stage, const Manifest& m) {
 }
 constexpr const char* kOldExposure = "made with the old linear exposure (TASK-0043: exposure is in stops now)";
 
+// An nr pass made before PR-7, when nr.intensity went to NGX as DLSSNR.Intensity: any value but 1 is another picture now (0 was a
+// black frame, PR-2 E2). A pass of PR-7 carries model_intensity or bypass. Discarded like the old exposure: not reused, restored or
+// adopted (a pass without a fingerprint would otherwise be taken as it is).
+bool OldIntensityPass(const std::string& stage, const Manifest& m) {
+    if (stage != "nr" || !m.stageParams.is_object()) return false;
+    const nlohmann::json& sp = m.stageParams;
+    if (sp.contains("model_intensity") || sp.contains("bypass") || !sp.contains("intensity") || !sp["intensity"].is_number()) return false;
+    return sp["intensity"].get<double>() != 1.0;
+}
+constexpr const char* kOldIntensity = "made before PR-7, when nr.intensity went to the model (it is the edit strength after the model now)";
+
 // An nr pass a standalone `dlssvid nr` made with its A/B switches (spec §2e: --mv-scale auto, --create-with-mv, --no-depth-guide):
 // the switches are not parameters, so adopting it - it has no fingerprint - would claim the default run (TASK-0048). It is a
 // real result of an experiment, not a broken pass: it goes to the history (kind ab_pass), the stages below are not stale.
@@ -241,6 +252,7 @@ constexpr const char* kAbPass = "made with the A/B switches of a standalone dlss
 const char* BrokenPassReason(const std::string& stage, const Manifest& m) {
     if (OldPngColourPass(stage, m)) return kOldPng;
     if (OldExposurePass(stage, m)) return kOldExposure;
+    if (OldIntensityPass(stage, m)) return kOldIntensity;
     return nullptr;
 }
 

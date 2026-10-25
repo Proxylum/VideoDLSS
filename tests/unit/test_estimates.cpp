@@ -158,6 +158,13 @@ TEST_CASE("NR estimate follows passes and model scale; a GPU-only ms/frame is no
     save(2, {{"ms_per_frame", 464.0}, {"ms_per_frame_gpu", 33.5}});
     CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 1.0), 300) == Approx(464.0 - 6.4));
     CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 300) == Approx(464.0));
+    // PR-7: intensity 0 does not call the model - a record moved there loses its passes; a bypass record (0 passes) moved to one gains it
+    const nlohmann::json i0 = EffectiveStageParams("nr", {{"passes", 2}, {"intensity", 0.0}});
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, i0, 300) == Approx(464.0 - 2 * 6.4));
+    save(0, {{"ms_per_frame", 20.0}, {"ms_per_frame_gpu", 2.0}});
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, i0, 300) == Approx(20.0));
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 1.0), 300) > 20.0 + 6.4);
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 1.0), 300) < 20.0 + 6.4 + 10.0);
 
     // EstimateRun: NR works on the upscaled frame (1280x720 x2 = 2560x1440)
     ProcessPlan plan;
@@ -192,6 +199,9 @@ TEST_CASE("NR estimate follows passes and model scale; a GPU-only ms/frame is no
     plan.stages[0].params = EffectiveStageParams("nr", nlohmann::json::object());
     o = EstimateRun(plan, stages, src);
     CHECK(o.stages[0].msPerFrame == Approx(base));
+    plan.stages[0].params = EffectiveStageParams("nr", {{"passes", 2}, {"intensity", 0.0}});  // PR-7: the baseline less its model pass
+    o = EstimateRun(plan, stages, src);
+    CHECK(o.stages[0].msPerFrame == Approx(base - 6.4));
 
     CHECK(NrWorkSize(2560, 1440, 0.5) == std::pair<uint32_t, uint32_t>{1280, 720});
     CHECK(NrWorkSize(1281, 721, 1.0) == std::pair<uint32_t, uint32_t>{1280, 720});
