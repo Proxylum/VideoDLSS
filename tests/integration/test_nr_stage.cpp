@@ -396,6 +396,70 @@ TEST_CASE("NrStage: color_sr input, guides through the slot, masks, two passes, 
 
 // PR-7 (spec §2b): the edit strength is NrCompose's, once after the last model pass - two stub passes are not linear, so a gain inside
 // the backend or per pass would not give twice the edit of one at s = 2.
+// PR-5 (spec §2c): passes 1..4 - one backend (one feature, one history) each, in a chain: the next reads the last one's output. The
+// VRAM of each pass's feature goes to the stats and the manifest: the stub has no feature, 0 each (none when DXGI reports no memory).
+TEST_CASE("NrStage runs four passes, one backend each", "[integration][nr]") {
+    const uint32_t w = 64, h = 32;
+    const int frames = 3;
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("four_passes");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    WritePass(dir / "src" / "color_sr", PassKind::ColorSr, w, h, frames, FileFormat::Exr, [&](int64_t i, PassImage& img) { img = ColorFrame(i, w, h); });
+    D3D12Device dev({true, false});
+    NrStageOptions o;
+    o.backend = "stub";
+    o.colorDir = dir / "src" / "color_sr";
+    o.outputDir = dir / "p4";
+    o.passes = 4;
+    Pipeline pipeline(dev, 4);
+    auto stage = std::make_unique<NrStage>(o);
+    NrStage* raw = stage.get();
+    pipeline.AddStage(std::move(stage));
+    pipeline.Init();
+    VideoDecoder dec(clip);
+    CpuFrame f;
+    while (dec.NextFrame(f)) {
+        pipeline.Cache().Acquire(f.index, f.desc);
+        pipeline.ProcessFrame(f);
+    }
+    pipeline.Finish();
+    CHECK(raw->GetStats().passes == 4);
+    const std::vector<double> vram = raw->GetStats().vramMibPerPass;
+    CHECK((vram.empty() || vram == std::vector<double>(4, 0.0)));
+    for (size_t p = 0; p < 4; ++p) {
+        const auto* stub = dynamic_cast<const StubNrBackend*>(raw->Backend(p));
+        REQUIRE(stub);
+        CHECK(stub->Calls() == frames);
+        CHECK(!stub->LastReset());  // its own history after the first frame
+    }
+    CHECK(raw->Backend(4) == nullptr);
+    pipeline.Shutdown();
+    const PassReader rd = PassReader::Open(dir / "p4" / "color_nr");
+    CHECK(rd.Man().stageParams["passes"] == 4);
+    if (vram.empty()) CHECK_FALSE(rd.Man().stageParams.contains("vram_mib_per_pass"));
+    else CHECK(rd.Man().stageParams["vram_mib_per_pass"] == nlohmann::json(vram));
+    // each pass edits the last one's output: the edit grows with the passes
+    auto edit = [&](int passes) {
+        NrStageOptions q = o;
+        q.outputDir = dir / ("e" + std::to_string(passes));
+        q.passes = passes;
+        VideoDecoder d2(clip);
+        const NrRunResult r = RunNr(d2, dev, q);
+        const PassImage in = ColorFrame(1, w, h), out = PassReader::Open(r.outDir).ReadFrame(1);
+        double sum = 0.0;
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+                for (size_t c = 0; c < 3; ++c) sum += std::fabs(static_cast<double>(out.Get(x, y, c)) - in.Get(x, y, c));
+        return sum / (static_cast<double>(w) * h * 3);
+    };
+    const double e1 = edit(1), e2 = edit(2), e4 = edit(4);
+    CHECK(e2 > e1);
+    CHECK(e4 > e2);
+}
+
 TEST_CASE("NrStage applies the edit strength once, after the last model pass", "[integration][nr][regression]") {
     const uint32_t w = 64, h = 32;
     const int frames = 2;
@@ -577,6 +641,58 @@ TEST_CASE("Neural Rendering (NGX Feature 18) produces color_nr on an NVIDIA GPU 
             CHECK(out0.Get(x, y, 1) >= 0.f);
             CHECK(out0.Get(x, y, 1) <= 1.f);
         }
+}
+
+// PR-5 (spec §2c): four passes on the real model - four features in one process (E6f: 933 MiB each at 4K, safe), each its VRAM in
+// the stats and the manifest.
+TEST_CASE("Neural Rendering runs four passes on NGX: four features, the VRAM of each", "[integration][nr][gpu][ngx]") {
+    D3D12Device dev({false, false});
+    if (!dev.IsNvidia()) SKIP("Neural Rendering needs an NVIDIA GPU");
+    const NrAvailability avail = NrAvailable("ngx");
+    if (!avail.available) SKIP(avail.reason);
+    const NvidiaDriverVersion drv = NvidiaDriverFromUmd(dev.UmdDriverVersion());
+    if (drv.valid && !drv.AtLeast(kNrMinDriverMajor, kNrMinDriverMinor)) SKIP("driver " + drv.ToString() + " is older than 616.56 (TASK-0011)");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 256;
+    spec.height = 144;
+    const auto dir = Dir("ngx_four");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    NrStageOptions o;
+    o.backend = "ngx";
+    o.outputDir = dir / "passes";
+    o.passes = 4;
+    VideoDecoder dec(clip);
+    NrRunResult r;
+    try {
+        r = RunNr(dec, dev, o);
+    } catch (const std::exception& e) {
+        const std::string what = e.what();
+        if (what.find("FAIL_FeatureNotSupported") != std::string::npos) SKIP("the DLL refuses this GPU — patch it with `dlssvid nr-patch` (" + what + ")");
+        throw;
+    }
+    CHECK(r.stats.frames == 3);
+    CHECK(r.stats.passes == 4);
+    REQUIRE(r.stats.vramMibPerPass.size() == 4);
+    // a real feature holds memory (E6: 504 MiB at 1440p, 933 at 4K): 0 would mean the window missed its CreateFeature; the passes
+    // are the same feature, so about the same size
+    const double first = r.stats.vramMibPerPass[0];
+    CHECK(first > 0.0);
+    for (const double v : r.stats.vramMibPerPass) {
+        CHECK(v > 0.5 * first);
+        CHECK(v < 2.0 * first);
+    }
+    const PassReader rd = PassReader::Open(r.outDir);
+    CHECK(rd.Man().stageParams["passes"] == 4);
+    CHECK(rd.Man().stageParams["vram_mib_per_pass"] == nlohmann::json(r.stats.vramMibPerPass));
+    const PassImage out = rd.ReadFrame(2);
+    for (uint32_t y = 0; y < out.height; y += 9)
+        for (uint32_t x = 0; x < out.width; x += 7)
+            for (size_t c = 0; c < 3; ++c) {
+                CHECK(std::isfinite(out.Get(x, y, c)));
+                CHECK(out.Get(x, y, c) >= 0.f);
+                CHECK(out.Get(x, y, c) <= 1.f);
+            }
 }
 
 // Audit pass-mv-yup (TASK-0038): an mv_dlss pass stored with y up reaches the cache slot - and so the NR, upscale and FG

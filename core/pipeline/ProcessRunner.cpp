@@ -574,6 +574,14 @@ Prepared Prepare(const ProcessOptions& options) {
 void AdviseStage(const RunContext& ctx, StageDecision& d) {
     if ((d.name == "upscale" || d.name == "nr" || d.name == "fg") && d.params.contains("dll_dir"))
         d.warnings.push_back(d.name + ".dll_dir is ignored by process: the DLL comes from DLSSVID_NVIDIA_DLL_DIR, <exe>/nvidia or <exe>");
+    if (d.name == "nr") {
+        // PR-5 (spec §2c): above 2 the model reworks its own output again - the picture turns synthetic; each pass is a feature of its own
+        const int passes = Get<int>(d.params, "passes", 1);
+        if (passes >= 3 && !NrBypassParams(d.params))
+            d.info = std::to_string(passes) + " прохода: модель повторно обрабатывает свой результат — картинка заметно синтетичнее; каждый проход — "
+                     "своя копия модели (≈ 0.5 ГБ видеопамяти на 1440p, 0.9 ГБ на 4K) и её время";
+        return;
+    }
     if (d.name != "depth") return;
     const std::string backend = Get<std::string>(d.params, "backend", "da3");
     if (DepthFamilyOf(backend).empty()) return;

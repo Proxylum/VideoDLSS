@@ -229,6 +229,16 @@ bool NrStage::CreateBackends(std::string& backend) {
             }
         }
         diag_ = backends_[0]->Diagnostics();
+        // PR-5 (spec §2c): every pass is a feature of its own - its VRAM, as each backend measured it around its CreateFeature
+        stats_.vramMibPerPass.clear();
+        for (const auto& b : backends_) {
+            const int64_t bytes = b->Diagnostics().vramFeatureBytes;
+            if (bytes < 0) {  // one not measured: none (a mixed list would read as the cost of fewer passes)
+                stats_.vramMibPerPass.clear();
+                break;
+            }
+            stats_.vramMibPerPass.push_back(std::round(static_cast<double>(bytes) / 1048576.0 * 10.0) / 10.0);
+        }
     } catch (const std::exception& e) {
         if (!options_.disableWhenUnavailable) throw;
         Disable(e.what());
@@ -276,6 +286,7 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         m.sourceHash = options_.sourceHash;
         m.stageParams = bypass_ ? nlohmann::json{{"backend", options_.backend}, {"bypass", true}} : backends_[0]->Describe();
         m.stageParams["passes"] = stats_.passes;          // model passes: 0 in the bypass (the estimates read it)
+        if (!stats_.vramMibPerPass.empty()) m.stageParams["vram_mib_per_pass"] = stats_.vramMibPerPass;  // PR-5: each pass's feature
         m.stageParams["intensity"] = options_.intensity;  // our edit strength after the model, not the model's (PR-7)
         if (!bypass_) m.stageParams["model_intensity"] = kNrModelIntensity;  // what the model got: also the mark of a PR-7 pass
         m.stageParams["model_scale"] = options_.modelScale;

@@ -34,7 +34,7 @@ struct NrStageOptions {
     std::string style = "natural";      // natural | cinematic | default (PR-2 E7: 3..6 = cinematic)
     float localTone = 1.f, localStructure = 1.f, skinStructure = -1.f;
     bool autoMask = false;
-    int passes = 1;                     // 1..2: the model applied again to its own output (own history per pass)
+    int passes = 1;                     // 1..4 (ParamSchema): the model applied again to its own output - a backend, feature and history per pass (PR-5)
     double modelScale = 1.0;            // model resolution relative to the colour (0.25..2)
     float transfer = 1.f;               // ratio transfer strength when modelScale != 1
     float maxRatio = 4.f;
@@ -111,6 +111,7 @@ public:
         uint32_t width = 0, height = 0, workWidth = 0, workHeight = 0;
         std::string backend, colorSource;  // colorSource: video | color_sr | slot
         int passes = 0;      // model passes: 0 in the bypass
+        std::vector<double> vramMibPerPass;  // each pass's feature: DXGI growth over its CreateFeature (PR-5; the stub: 0); empty: not measured
         bool bypass = false;  // intensity 0: the model was not called (PR-7)
         bool depthUsed = false, mvUsed = false;
         std::vector<std::string> masks;

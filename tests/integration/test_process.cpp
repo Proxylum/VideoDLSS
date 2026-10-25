@@ -233,6 +233,36 @@ TEST_CASE("RunProcess: an nr pass from before PR-7 with intensity != 1 is discar
     CHECK(Report(RunProcess(one), "nr").status == "reused");
 }
 
+// PR-5 (spec §2c): above 2 passes the model reworks its own output again - the plan notes it (the card's line); 1..2 and the bypass
+// (intensity 0: no model) say nothing.
+TEST_CASE("PlanProcess notes nr passes 3 and 4", "[integration][process]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("plan_passes");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.codec = "ffv1";
+    o.warp = true;
+    auto info = [&](std::initializer_list<const char*> specs) {
+        ProcessOptions q = o;
+        q.stages = StubStages(2);
+        for (const char* s : specs) ApplyParamSpec(q.stages, s);
+        for (const auto& d : PlanProcess(q).stages)
+            if (d.name == "nr") return d.info;
+        return std::string("no nr");
+    };
+    CHECK(info({"nr.passes=1"}).empty());
+    CHECK(info({"nr.passes=2"}).empty());
+    CHECK_THAT(info({"nr.passes=3"}), Catch::Matchers::ContainsSubstring("3 прохода"));
+    CHECK_THAT(info({"nr.passes=4"}), Catch::Matchers::ContainsSubstring("синтетичнее"));
+    CHECK(info({"nr.passes=4", "nr.intensity=0"}).empty());
+}
+
 // TASK-0047: with the source's frame count unknown (mkv) PassComplete looked at the last frame only, so a color_nr of a part
 // of the clip (dlssvid nr --start, no fingerprint) was adopted as the clip's pass. A pass of the clip starts at frame 0.
 TEST_CASE("RunProcess: a color_nr of a part of the clip (nr --start) is recomputed, not adopted", "[integration][process][regression]") {

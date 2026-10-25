@@ -417,6 +417,18 @@ class Helpers(unittest.TestCase):
         self.assertIs(old["identity"], False)
         self.assertIn("регрессия", " ".join(old["text"]))
         self.assertIn("до PR-7", " ".join(old["text"]))
+        # PR-5: E6 over p1..p4 - the slope to the most passes measured, the VRAM of each pass's feature
+        e6 = nr_ab.verdict_e6(v(p1={"nr": {"ms_per_frame_gpu": 14.0}}, p2={"nr": {"ms_per_frame_gpu": 20.0}}, p3={"nr": {"ms_per_frame_gpu": 26.5}},
+                                p4={"nr": {"ms_per_frame_gpu": 32.0, "vram_mib_per_pass": [503.9, 503.9, 503.9, 504.0]}}))
+        self.assertAlmostEqual(e6["ms_per_pass"], 6.0)
+        self.assertEqual(e6["vram_mib_per_pass"], [503.9, 503.9, 503.9, 504.0])
+        self.assertIn("p1 14.0 / p2 20.0 / p3 26.5 / p4 32.0", e6["text"][0])
+        gap = nr_ab.verdict_e6(v(p1={"nr": {"ms_per_frame_gpu": 14.0}}, p2={"nr": {"ms_per_frame_gpu": 20.0}}, p4={"nr": {"ms_per_frame_gpu": 32.0}}))
+        self.assertIn("p1 14.0 / p2 20.0 / p4 32.0", gap["text"][0])  # p3 failed (optional): each value names its pass
+        self.assertAlmostEqual(gap["ms_per_pass"], 6.0)
+        self.assertIn("всего 2015.7 МиБ", e6["text"][1])
+        self.assertAlmostEqual(nr_ab.verdict_e6(v(p1={"nr": {"ms_per_frame_gpu": 14.0}}, p2={"nr": {"ms_per_frame_gpu": 19.8}}))["ms_per_pass"], 5.8)
+        self.assertIsNone(nr_ab.verdict_e6(v(p1={"nr": {"ms_per_frame_gpu": 14.0}}))["ms_per_pass"])
         static = {"input_temporal": {"psnr_y": 100.0, "psnr_y_min": 100.0}}
         e4 = v(null={"temporal": {"psnr_y": 46.4}}, create_mv={"temporal": {"psnr_y": 47.6}})
         self.assertTrue(nr_ab.verdict_e4({**e4, **static})["create_better"])

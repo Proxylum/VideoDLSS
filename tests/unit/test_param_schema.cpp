@@ -164,6 +164,8 @@ TEST_CASE("Parameter values: the special value, the zero label, the suffix, the 
     CHECK(ParamValueLabel(*nr->Find("exposure"), -0.5) == "-0.5 EV");
     CHECK(ParamValueLabel(*nr->Find("style"), "natural") == "Естественный (1)");
     CHECK(ParamValueLabel(*nr->Find("passes"), 2) == "2");
+    CHECK(nr->Find("passes")->choices.size() == 4);  // PR-5: the toggle 1 | 2 | 3 | 4
+    CHECK(ParamValueLabel(*nr->Find("passes"), 4) == "4");
     CHECK(ParamDecimals(*nr->Find("intensity")) == 2);
     CHECK(ParamDecimals(*nr->Find("exposure")) == 2);  // the v1 migration stores 0.01 EV (1.5 -> 0.58)
     CHECK(ParamDecimals(*nr->Find("model_scale")) == 2);
@@ -284,6 +286,9 @@ TEST_CASE("ValidateStageParams catches types, ranges and choices; unknown keys p
     CHECK(ValidateStageParams("nr", {{"backend", 5}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"passes", 1.5}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"passes", 2}}).empty());
+    CHECK(ValidateStageParams("nr", {{"passes", 4}}).empty());  // PR-5: 1..4
+    CHECK(ValidateStageParams("nr", {{"passes", 5}}).size() == 1);
+    CHECK(ValidateStageParams("nr", {{"passes", 0}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"guides", "yes"}}).size() == 1);
     CHECK(ValidateStageParams("upscale", {{"scale", 2.5}}).size() == 1);
     CHECK(ValidateStageParams("upscale", {{"scale", 1.5}}).empty());
