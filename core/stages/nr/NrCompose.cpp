@@ -1,5 +1,6 @@
 #include "stages/nr/NrCompose.h"
 
+#include <cmath>
 #include <vector>
 
 #include "stages/nr/shaders/NrCompose_cs.h"
@@ -15,8 +16,10 @@ struct Constants {
     float transfer, maxRatio, temporal, threshold, skinBlend;
     float mvScaleX, mvScaleY;
     uint32_t flags;
-    uint32_t pad[3];
+    float gain;
+    uint32_t pad[2];
 };
+static_assert(sizeof(Constants) == 64, "NrCompose.hlsl cbuffer: 4 registers");
 }  // namespace
 
 NrCompose::NrCompose(D3D12Device& device) {
@@ -33,6 +36,7 @@ NrCompose::~NrCompose() = default;
 
 void NrCompose::Resolve(ID3D12GraphicsCommandList* cl, const NrResolveInputs& in, ID3D12Resource* output, const NrResolveParams& p) {
     if (!in.original || !in.model || !output) Throw("nr resolve: original, model and output are required");
+    if (!std::isfinite(p.gain) || p.gain < 0.f) Throw("nr resolve: the edit strength must be >= 0");
     const bool reduced = in.proxy && (p.workWidth != p.width || p.workHeight != p.height);
     Constants c{};
     c.width = p.width;
@@ -45,6 +49,7 @@ void NrCompose::Resolve(ID3D12GraphicsCommandList* cl, const NrResolveInputs& in
     c.temporal = p.temporal;
     c.threshold = p.temporalThreshold;
     c.skinBlend = p.skinBlend;
+    c.gain = p.gain;
     c.mvScaleX = p.mvWidth ? static_cast<float>(p.width) / static_cast<float>(p.mvWidth) : 1.f;
     c.mvScaleY = p.mvHeight ? static_cast<float>(p.height) / static_cast<float>(p.mvHeight) : 1.f;
     c.flags = (in.prev ? 1u : 0u) | (in.mv ? 2u : 0u) | (in.protect ? 4u : 0u) | (in.skin ? 8u : 0u);

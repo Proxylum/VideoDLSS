@@ -10,8 +10,7 @@ namespace dlssvid {
 namespace {
 struct Constants {
     uint32_t width, height;
-    float intensity, localTone, localStructure;
-    float pad[3];
+    float localTone, localStructure;
 };
 }  // namespace
 
@@ -58,7 +57,7 @@ NrRecreation StubNrBackend::RecreateFeature() {
 void StubNrBackend::Evaluate(ID3D12GraphicsCommandList* cl, const NrInputs& in, ID3D12Resource* output) {
     if (!kernel_) Throw("stub nr: not initialised");
     if (!in.color || !output) Throw("stub nr: colour input and output are required");
-    Constants c{config_.width, config_.height, config_.intensity, config_.localTone, config_.localStructure, {0, 0, 0}};
+    Constants c{config_.width, config_.height, config_.localTone, config_.localStructure};
     ComputeKernel::Transition(cl, in.color, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     ComputeKernel::Transition(cl, output, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     kernel_->Dispatch(cl, &c, sizeof(c), {in.color}, {output}, (config_.width + 7) / 8, (config_.height + 7) / 8);
@@ -71,7 +70,7 @@ void StubNrBackend::Evaluate(ID3D12GraphicsCommandList* cl, const NrInputs& in, 
 }
 
 nlohmann::json StubNrBackend::Describe() const {
-    return {{"backend", "stub"}, {"intensity", config_.intensity}, {"local_tone", config_.localTone}, {"local_structure", config_.localStructure}, {"guides", config_.useGuides}};
+    return {{"backend", "stub"}, {"local_tone", config_.localTone}, {"local_structure", config_.localStructure}, {"guides", config_.useGuides}};
 }
 
 }  // namespace dlssvid

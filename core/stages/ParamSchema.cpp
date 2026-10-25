@@ -260,8 +260,12 @@ std::vector<StageSchema> Build() {
         skin.rangeMin = 0.0;
         s.params = {
             In(style, "Модель"),
-            In(Number("intensity", "Интенсивность", ParamType::Float, 1.0, 0.0, 2.0, 0.05, ParamWidget::Slider,
-                      "Сила правки: 0 — почти без изменений, 1 — как обучена модель."),
+            // PR-7 (PR-2 E1, the user's decision): the edit strength after the model - NGX's own DLSSNR.Intensity is not one (above 1 = 1,
+            // below 1 darker, 0 black), the model always gets 1 and NrCompose blends
+            In(Display(Number("intensity", "Интенсивность", ParamType::Float, 1.0, 0.0, 2.0, 0.05, ParamWidget::Slider,
+                              "Сила правки после модели: 0 — кадр после апскейла (модель не вызывается), 1 — картинка модели, выше 1 — "
+                              "усиление (экстраполяция): ярче, возможны пересветы и шум."),
+                       "без модели"),
                "Модель"),
             In(Number("passes", "Проходы", ParamType::Int, 1, 1, 2, 1, ParamWidget::Toggle,
                       "Модель повторно обрабатывает собственный результат: 1 — как обучена, 2 — богаче. Каждый проход заметно увеличивает время.", false,

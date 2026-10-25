@@ -795,6 +795,14 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
             st.state = tr("пересчёт: пасс снят с переключателями A/B отдельного dlssvid nr");
         } else if (d->kind == "tool_changed") {
             st.state = tr("пересчёт: другая версия инструмента");
+            const nlohmann::json& app = d->diff.contains("tool") ? d->diff["tool"].value("app", nlohmann::json()) : nlohmann::json();
+            if (app.is_array() && app.size() == 2 && app[0].is_string() && app[1].is_string()) {
+                const auto added = AddedToolRevisions(app[0].get<std::string>(), app[1].get<std::string>());
+                auto has = [&](const char* r) { return std::find(added.begin(), added.end(), r) != added.end(); };
+                if (has("nr.i0")) st.state = tr("пересчёт: при силе 0 модель не вызывается");
+                else if (has("nr.gain")) st.state = tr("пересчёт: сила правки теперь после модели");
+                else if (has("nr.ev")) st.state = tr("пересчёт: экспозиция в ступенях EV");
+            }
         } else {
             st.state = tr("пересчёт");
         }
@@ -808,7 +816,9 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
         bool any = false;
         for (const auto& g : schema->guides) any = any || d->inputs.count(g) > 0;
         const bool guidesOff = stage == "nr" && d->params.contains("guides") && d->params["guides"].is_boolean() && !d->params["guides"].get<bool>();
-        if (guidesOff) st.warning = tr("глубина и векторы выключены: каждый кадр обрабатывается отдельно");
+        if (stage == "nr" && NrBypassParams(d->params)) {
+            // intensity 0: the model is not called, its guides are not needed (PR-7)
+        } else if (guidesOff) st.warning = tr("глубина и векторы выключены: каждый кадр обрабатывается отдельно");
         else if (!any) st.warning = tr("без глубины и векторов: качество ниже");
     }
     // the advice of the plan (TASK-0039, depth): licence, VRAM; an error blocks «Обработать»

@@ -6,8 +6,12 @@
 //           — the model's edit is carried onto the full-resolution frame as a per-channel ratio between what it
 //           returned and what it saw (`proxy`), so full-resolution detail survives a reduced model resolution.
 //   masks (ТЗ §5): protect = max(ui, ignore) -> back to the original; skin = max(face, skin) -> edit strength x skinBlend
-//   temporal (HACK against flicker of patched DLLs): res = lerp(res, prev(p + mv), temporal * gate * w), gate = 1 - |res - prev| / threshold
-// Output clamped to [0, 1], alpha 1.
+//   gain (nr.intensity, PR-7, HACK): res = lerp(original, edited, w * gain) - the edit strength after the model, which always gets
+//           DLSSNR.Intensity 1 (PR-2 E1: NGX's own intensity is not an edit strength); above 1 it extrapolates
+//   temporal (HACK against flicker of patched DLLs): res = lerp(res, prev(p + mv), temporal * gate * w * min(gain, 1)),
+//           gate = 1 - |res - prev| / threshold; below 1 the filter fades with the edit, so gain 0 gives the original exactly
+// Order of the strength controls (spec §2b): ratio transfer -> masks (w) -> gain, once after the last model pass -> temporal filter ->
+// saturate. Output clamped to [0, 1], alpha 1.
 
 cbuffer Constants : register(b0) {
     uint2 gSize;        // output size
@@ -20,7 +24,8 @@ cbuffer Constants : register(b0) {
     float gSkinBlend;
     float2 gMvScale;    // guide px -> output px
     uint gFlags;        // 1 prev, 2 mv, 4 protect mask, 8 skin mask
-    uint3 gPad;
+    float gGain;        // nr.intensity: the edit strength after the model (PR-7); 1 = the model's picture
+    uint2 gPad;
 };
 
 Texture2D<float4> gOriginal : register(t0);  // full-resolution tone-mapped frame
@@ -50,7 +55,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     float w = 1.0;
     if (gFlags & 4) w *= 1.0 - saturate(gProtect.SampleLevel(gLinear, uv, 0));
     if (gFlags & 8) w *= lerp(1.0, gSkinBlend, saturate(gSkin.SampleLevel(gLinear, uv, 0)));
-    float3 res = lerp(orig, edited, w);
+    float3 res = lerp(orig, edited, w * gGain);  // gain 1: w * 1 is w exactly - the resolve before PR-7
     if ((gFlags & 1) && gTemporal > 0.0) {
         float2 off = 0;
         if (gFlags & 2) off = gMv.SampleLevel(gLinear, uv, 0).xy * gMvScale;
@@ -58,7 +63,9 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         const bool inside = all(puv >= 0.0) && all(puv <= 1.0);
         const float3 prev = gPrev.SampleLevel(gLinear, puv, 0).rgb;
         const float gate = 1.0 - saturate(length(res - prev) / max(gThreshold, 1e-4));
-        res = lerp(res, prev, gTemporal * gate * w * (inside ? 1.0 : 0.0));  // protected pixels are not filtered either
+        float k = gTemporal * gate * w;
+        if (gGain < 1.0) k *= gGain;  // below 1 the filter fades with the edit (gain 0: the original); at 1 and above as before
+        res = lerp(res, prev, k * (inside ? 1.0 : 0.0));  // protected pixels are not filtered either
     }
     gOut[id.xy] = float4(saturate(res), 1.0);
 }

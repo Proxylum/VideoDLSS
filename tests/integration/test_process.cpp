@@ -165,6 +165,74 @@ TEST_CASE("RunProcess: a PNG16 colour pass from before TASK-0042 is recomputed, 
     CHECK(Report(RunProcess(o), "nr").status == "reused");
 }
 
+// PR-7 (review): nr.intensity went to NGX before PR-7 - a pass with intensity != 1 is another picture now (0 was a black frame).
+// Its fingerprint differs (+nr.gain / +nr.i0), so DecideStage reached the branch that keeps the current pass as a version: the
+// panel's «Вернуть» could bring it back. Discarded now, with or without a fingerprint, and the color_fg made from it too.
+TEST_CASE("RunProcess: an nr pass from before PR-7 with intensity != 1 is discarded, not kept as a version", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("old_intensity");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    ApplyParamSpec(o.stages, "nr.intensity=0.5");
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    const auto nrDir = o.passesRoot / "color_nr";
+    REQUIRE(Manifest::Load(nrDir).stageParams["model_intensity"] == 1.0);  // what this build writes
+    REQUIRE(Manifest::Load(nrDir).tool.value("app", std::string()) == std::string(kPassToolVersion) + "+nr.gain");
+    CHECK(Report(RunProcess(o), "nr").status == "reused");
+    auto stampOld = [&](bool keepFingerprint) {
+        Manifest m = Manifest::Load(nrDir);
+        m.stageParams.erase("model_intensity");
+        m.tool["app"] = std::string(kPassToolVersion);  // what the builds before stamped: no +nr.gain, so another fingerprint
+        m.fingerprint = keepFingerprint ? "sha256:" + std::string(64, '0') : std::string();
+        if (!keepFingerprint) m.tool = nlohmann::json::object();  // a standalone `dlssvid nr` pass, adopted as legacy
+        m.Save(nrDir);
+    };
+    stampOld(true);
+    const size_t nrVersions = ListPassVersions(o.passesRoot, "color_nr").size(), fgVersions = ListPassVersions(o.passesRoot, "color_fg").size();
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK_THAT(Report(r, "nr").reason, Catch::Matchers::ContainsSubstring("before PR-7"));
+    CHECK(Report(r, "fg").status == "ran");
+    CHECK(ListPassVersions(o.passesRoot, "color_nr").size() == nrVersions);  // discarded: before, it went to color_nr.v
+    CHECK(ListPassVersions(o.passesRoot, "color_fg").size() == fgVersions);
+    CHECK(Manifest::Load(nrDir).stageParams.contains("model_intensity"));
+    CHECK(Report(RunProcess(o), "nr").status == "reused");
+    stampOld(false);
+    CHECK(Report(RunProcess(o), "nr").status == "ran");  // nor adopted without a fingerprint
+    // the stage disabled after the discard (no DLL - the GUI runs --disable-unavailable): fg reads color_sr then, and the color_fg
+    // made from the discarded pass went to the history; discarded too now
+    stampOld(true);
+    const size_t fgBefore = ListPassVersions(o.passesRoot, "color_fg").size();
+    ProcessOptions ngx = o;
+    ngx.stages = StubStages(2);
+    ApplyParamSpec(ngx.stages, "nr.intensity=0.5");
+    ApplyParamSpec(ngx.stages, "nr.backend=ngx");
+    ngx.disableUnavailable = true;
+    const ProcessResult off = RunProcess(ngx);
+    CHECK(Report(off, "nr").status == "disabled");
+    CHECK_FALSE(Manifest::Exists(nrDir));
+    CHECK(Report(off, "fg").status == "ran");
+    CHECK_THAT(Report(off, "fg").reason, Catch::Matchers::ContainsSubstring("discarded"));
+    CHECK(ListPassVersions(o.passesRoot, "color_fg").size() == fgBefore);
+    // a pass of before PR-7 at intensity 1 is the same picture: kept
+    ProcessOptions one = o;
+    one.stages = StubStages(2);
+    RunProcess(one);
+    Manifest m = Manifest::Load(nrDir);
+    m.stageParams.erase("model_intensity");
+    m.Save(nrDir);
+    CHECK(Report(RunProcess(one), "nr").status == "reused");
+}
+
 // TASK-0047: with the source's frame count unknown (mkv) PassComplete looked at the last frame only, so a color_nr of a part
 // of the clip (dlssvid nr --start, no fingerprint) was adopted as the clip's pass. A pass of the clip starts at frame 0.
 TEST_CASE("RunProcess: a color_nr of a part of the clip (nr --start) is recomputed, not adopted", "[integration][process][regression]") {
@@ -387,13 +455,19 @@ TEST_CASE("RunProcess: an nr pass made with the old linear exposure 0 is recompu
     CHECK_THAT(Report(r, "fg").reason, Catch::Matchers::ContainsSubstring("stale"));
     CHECK(Report(RunProcess(o), "fg").status == "reused");
     CHECK(Manifest::Load(nrDir).stageParams["tonemap"].contains("exposure_ev"));
-    // the black pass went into the history: it is not restored for the same fingerprint either
+    // a black pass the builds before PR-7 put into the history (under another fingerprint): not restored for its own either
     stampOld(0.0, true);
+    REQUIRE(RetirePassVersion(o.passesRoot, "color_nr"));
+    CHECK(Report(RunProcess(o), "nr").status == "ran");  // no current pass: restore() would bring the black version back, «reused»
+    // under another fingerprint the black pass is discarded now, not kept as a version (review of PR-7)
+    stampOld(0.0, true);
+    const size_t versions = ListPassVersions(o.passesRoot, "color_nr").size();
     ProcessOptions again = o;
     again.stages = StubStages(2);
     ApplyParamSpec(again.stages, "nr.intensity=1.5");
-    RunProcess(again);  // retires the old-exposure pass
-    CHECK(Report(RunProcess(o), "nr").status == "ran");  // back to intensity 1: the retired black version is not restored
+    CHECK(Report(RunProcess(again), "nr").status == "ran");
+    CHECK(ListPassVersions(o.passesRoot, "color_nr").size() == versions);
+    CHECK(Report(RunProcess(o), "nr").status == "ran");  // back to intensity 1: the black version in the history is skipped
     stampOld(0.0, false);
     CHECK(Report(RunProcess(o), "nr").status == "ran");  // nor adopted without a fingerprint
 }

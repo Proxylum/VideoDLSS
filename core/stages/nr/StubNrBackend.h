@@ -7,7 +7,8 @@
 
 namespace dlssvid {
 
-// Deterministic stand-in for the model (StubNr.hlsl): local contrast + tone scaled by `intensity`.
+// Deterministic stand-in for the model (StubNr.hlsl): local contrast + tone at the model's own strength; the edit strength is
+// NrCompose's (PR-7).
 // Runs on WARP; exercises the stage, resolve, masks, temporal filter, pass count and model resolution
 // in tests. Never used as an automatic fallback.
 class StubNrBackend final : public INrBackend {

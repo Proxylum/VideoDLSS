@@ -156,6 +156,20 @@ TEST_CASE("ToolInfo JSON round trip and ToolForStage from parameters", "[unit][f
     CHECK(ToolForStage("nr", {{"exposure", 1.0}}).app == std::string(kPassToolVersion) + "+nr.ev");
     CHECK(ToolForStage("nr", {{"exposure", -0.5}, {"format", "png"}}).app == std::string(kPassToolVersion) + "+nr.ev+png.2");
     CHECK(ToolForStage("upscale", {{"exposure", 1.0}}).app == kPassToolVersion);
+    // PR-7: nr.intensity is the edit strength after the model (it went to NGX before) - 1 keeps the passes, other values are another
+    // picture, 0 does not call the model and loads no DLL
+    const std::string v = kPassToolVersion;
+    CHECK(ToolForStage("nr", {{"intensity", 1.0}}).app == v);
+    CHECK(ToolForStage("nr", {{"intensity", 1.4}}).app == v + "+nr.gain");
+    CHECK(ToolForStage("nr", {{"intensity", 0.5}}).app == v + "+nr.gain");
+    CHECK(ToolForStage("nr", {{"intensity", 0.0}}).app == v + "+nr.i0");
+    CHECK(ToolForStage("nr", {{"exposure", 1.0}, {"intensity", 2.0}, {"format", "png"}}).app == v + "+nr.ev+nr.gain+png.2");
+    CHECK(ToolForStage("upscale", {{"intensity", 2.0}}).app == v);
+    CHECK(ToolForStage("nr", {{"intensity", 0.0}}).dll.empty());
+    CHECK(ToolForStage("nr", {{"intensity", 0.0}}).dllFile.empty());
+    CHECK(AddedToolRevisions(v, v + "+nr.gain") == std::vector<std::string>{"nr.gain"});
+    CHECK(AddedToolRevisions(v + "+nr.ev", v + "+nr.ev+nr.i0+png.2") == std::vector<std::string>{"nr.i0", "png.2"});
+    CHECK(AddedToolRevisions(v + "+nr.gain", v).empty());
     CHECK_THROWS(ToolForStage("depth", {{"stabilize", 5}}));
     CHECK(ToolForStage("upscale", nlohmann::json::object()).dllFile == "nvngx_dlss.dll");
     CHECK(ToolForStage("upscale", {{"backend", "nis"}}).dllFile.empty());
@@ -189,6 +203,9 @@ TEST_CASE("Stage pass tables and timestamps", "[unit][fingerprint]") {
     // TASK-0045: nr with the guides off reads no depth / mv - they are no inputs of its fingerprint
     CHECK(StageInputCandidates("nr", {{"guides", false}}) == std::vector<std::vector<std::string>>{{"color_sr"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}});
     CHECK(StageInputCandidates("nr", {{"guides", true}}).size() == 7);
+    // PR-7: intensity 0 reads only the colour - the model, its guides and the masks are not used
+    CHECK(StageInputCandidates("nr", {{"intensity", 0.0}}) == std::vector<std::vector<std::string>>{{"color_sr"}});
+    CHECK(StageInputCandidates("nr", {{"intensity", 1.0}}).size() == 7);
     CHECK(StageInputCandidates("fg", {{"guides", false}}).size() == 3);  // nr's key only
 
     CHECK(CompactTimestamp("2026-09-22T14:09:31Z") == "20260922-140931");

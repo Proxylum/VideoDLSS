@@ -151,6 +151,8 @@ struct PlanState {
     std::set<std::string> ran;
     std::set<std::string> staleRan;  // passes rerun because they were stale (StageDecision::stale): a later stage built on
                                      // them is stale too although every fingerprint matches
+    std::set<std::string> discarded;  // stale passes removed (StageDecision::stale): a pass made from one is discarded too, whether
+                                      // its stage ran again or was disabled after the removal (review of PR-7)
 };
 
 // A pass without a fingerprint stands for its source and length; a y-up motion-vector pass also for its orientation:
@@ -186,7 +188,10 @@ void Advance(PlanState& s, const StageDecision& d) {
                 if (s.fp.count(out)) s.fp[out] = d.fingerprint;  // adopted: stamped with this fingerprint
         return;
     }
-    for (const auto& fam : StageFamilyPasses(d.name)) s.fp.erase(fam);  // retired or rewritten
+    for (const auto& fam : StageFamilyPasses(d.name)) {
+        s.fp.erase(fam);  // retired or rewritten
+        if (d.stale && d.current) s.discarded.insert(fam);
+    }
     for (const auto& out : d.outputs) {
         s.fp[out] = d.fingerprint;
         s.ran.insert(out);
@@ -231,6 +236,17 @@ bool OldExposurePass(const std::string& stage, const Manifest& m) {
 }
 constexpr const char* kOldExposure = "made with the old linear exposure (TASK-0043: exposure is in stops now)";
 
+// An nr pass made before PR-7, when nr.intensity went to NGX as DLSSNR.Intensity: any value but 1 is another picture now (0 was a
+// black frame, PR-2 E2). A pass of PR-7 carries model_intensity or bypass. Discarded like the old exposure: not reused, restored,
+// adopted or kept as a version (its fingerprint differs - +nr.gain / +nr.i0 - and DecideStage discards it in that branch too).
+bool OldIntensityPass(const std::string& stage, const Manifest& m) {
+    if (stage != "nr" || !m.stageParams.is_object()) return false;
+    const nlohmann::json& sp = m.stageParams;
+    if (sp.contains("model_intensity") || sp.contains("bypass") || !sp.contains("intensity") || !sp["intensity"].is_number()) return false;
+    return sp["intensity"].get<double>() != 1.0;
+}
+constexpr const char* kOldIntensity = "made before PR-7, when nr.intensity went to the model (it is the edit strength after the model now)";
+
 // An nr pass a standalone `dlssvid nr` made with its A/B switches (spec §2e: --mv-scale auto, --create-with-mv, --no-depth-guide):
 // the switches are not parameters, so adopting it - it has no fingerprint - would claim the default run (TASK-0048). It is a
 // real result of an experiment, not a broken pass: it goes to the history (kind ab_pass), the stages below are not stale.
@@ -241,6 +257,7 @@ constexpr const char* kAbPass = "made with the A/B switches of a standalone dlss
 const char* BrokenPassReason(const std::string& stage, const Manifest& m) {
     if (OldPngColourPass(stage, m)) return kOldPng;
     if (OldExposurePass(stage, m)) return kOldExposure;
+    if (OldIntensityPass(stage, m)) return kOldIntensity;
     return nullptr;
 }
 
@@ -306,6 +323,12 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     }
     d.current = have;
     if (have) d.currentFingerprint = m.fingerprint;
+    // the current pass was made from a broken pass this run removed (PlanState::discarded): it is broken too, even when that stage
+    // was disabled since and no longer feeds this one (no nr DLL: fg reads color_sr - the color_fg of the black nr went to the history)
+    std::vector<std::string> inputsDiscarded;
+    if (have)
+        for (const auto& [input, inputFp] : m.inputs)
+            if (state.discarded.count(input)) inputsDiscarded.push_back(input);
     const bool complete = have && PassComplete(d.outDir, d.frames, ctx.sourceHash);
     auto run = [&](const char* kind, std::string detail, bool retire) {
         d.action = "run";
@@ -328,8 +351,10 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
                                   : (have ? std::to_string(m.frameCount) : std::string("0")) + " of " + (d.frames > 0 ? std::to_string(d.frames) : std::string("all")) + " frames";
 
     if (!ctx.skipExisting || ctx.force.count(name)) {
-        run("forced", ctx.skipExisting ? "recomputed on request (--force)" : "every stage recomputed (--no-skip-existing)", have && m.fingerprint != fp.value);
-        d.stale = !inputsStale.empty() || (have && BrokenPassReason(name, m));
+        // a stale pass is discarded, never kept as a version: the card would promise «vN останется на диске» (review of PR-7)
+        const bool stale = !inputsStale.empty() || !inputsDiscarded.empty() || (have && BrokenPassReason(name, m));
+        run("forced", ctx.skipExisting ? "recomputed on request (--force)" : "every stage recomputed (--no-skip-existing)", have && m.fingerprint != fp.value && !stale);
+        d.stale = stale;
         return d;
     }
     // Every fingerprint may match, yet an input was stale when this pass (or a history version under the same fingerprint)
@@ -337,6 +362,12 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     if (!inputsStale.empty()) {
         d.diff["inputs"] = inputsStale;
         run("input_changed", "built on a stale pass that is recomputed: " + Join(inputsStale), false);
+        d.stale = true;
+        return d;
+    }
+    if (!inputsDiscarded.empty()) {
+        d.diff["inputs"] = inputsDiscarded;
+        run("input_changed", "built on a discarded pass: " + Join(inputsDiscarded), false);
         d.stale = true;
         return d;
     }
@@ -389,7 +420,17 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         }
         return d;
     }
-    // another fingerprinted version is current: restore a matching one, else say what changed
+    // another fingerprinted version is current. A broken one is discarded, not kept as a version: a revision that fixes it changes the
+    // fingerprint (+png.2, +nr.gain / +nr.i0), so it lands here, and «Вернуть» in the versions panel would bring the black frames back
+    // (review of PR-7). The card names the added revision.
+    if (const char* broken = BrokenPassReason(name, m)) {
+        const std::string oldApp = ToolInfo::FromJson(m.tool).app;
+        if (oldApp != fp.tool.app) d.diff["tool"]["app"] = nlohmann::json::array({oldApp, fp.tool.app});
+        run("tool_changed", broken, false);
+        d.stale = true;
+        return d;
+    }
+    // restore a matching one, else say what changed
     if (restore()) return d;
     if (m.sourceHash != ctx.sourceHash) {
         run("source_changed", "the pass was made from another source", true);
@@ -881,6 +922,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         }
         if (d.stale) {  // wrong under its own fingerprint: discarded, not kept as a version a later run would restore
             for (const auto& pass : StageFamilyPasses(name)) {
+                if (Manifest::Exists(root / pass)) state.discarded.insert(pass);  // what was made from it goes too, however this stage ends
                 std::error_code ec;
                 std::filesystem::remove_all(root / pass, ec);
                 if (ec) Throw("process: cannot remove the stale pass " + (root / pass).string() + ": " + ec.message());

@@ -1,5 +1,6 @@
 #include "pipeline/PassFingerprint.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -130,9 +131,34 @@ std::string PassToolVersionFor(const std::string& stage, const nlohmann::json& p
     if (stage == "depth" && Str(p, "stabilize", "auto") != "none") v += "+depth.2";
     // nr.exposure is in stops since TASK-0043 (a multiplier before): {"exposure": 1} is another run now
     if (stage == "nr" && p.is_object() && p.contains("exposure") && p["exposure"].is_number() && p["exposure"].get<double>() != 0.0) v += "+nr.ev";
+    // PR-7 (PR-2 E1/E2): nr.intensity is our blend after the model; before, it went to NGX (above 1 = 1, below 1 darker, 0 black), so
+    // any value but 1 is another picture now; 0 does not call the model at all
+    if (stage == "nr" && p.is_object() && p.contains("intensity") && p["intensity"].is_number()) {
+        const double s = p["intensity"].get<double>();
+        if (s == 0.0) v += "+nr.i0";
+        else if (s != 1.0) v += "+nr.gain";
+    }
     // colour passes in PNG16 were written unscaled (black) before TASK-0042: those passes are not reused
     if ((stage == "upscale" || stage == "nr" || stage == "fg") && Str(p, "format", "exr") == "png") v += "+png.2";
     return v;
+}
+
+std::vector<std::string> AddedToolRevisions(const std::string& oldApp, const std::string& newApp) {
+    auto split = [](const std::string& app) {
+        std::vector<std::string> out;
+        size_t pos = app.find('+');
+        while (pos != std::string::npos) {
+            const size_t next = app.find('+', pos + 1);
+            out.push_back(app.substr(pos + 1, next == std::string::npos ? std::string::npos : next - pos - 1));
+            pos = next;
+        }
+        return out;
+    };
+    const std::vector<std::string> before = split(oldApp);
+    std::vector<std::string> added;
+    for (const auto& r : split(newApp))
+        if (std::find(before.begin(), before.end(), r) == before.end()) added.push_back(r);
+    return added;
 }
 
 ToolInfo ToolForStage(const std::string& stage, const nlohmann::json& p) {
@@ -160,7 +186,7 @@ ToolInfo ToolForStage(const std::string& stage, const nlohmann::json& p) {
                 dll = dir / t.dllFile;
                 break;
             }
-    } else if (stage == "nr" && t.backend == "ngx") {
+    } else if (stage == "nr" && t.backend == "ngx" && !NrBypassParams(p)) {  // intensity 0: the DLL is not loaded (PR-7)
         t.dllFile = kNrDllName;
         dll = FindNrDll(dllDir);
     } else if (stage == "fg" && t.backend == "dlssg") {
@@ -225,6 +251,7 @@ std::vector<std::vector<std::string>> StageInputCandidates(const std::string& st
     if (stage == "flow") return {{"depth_raw"}};
     if (stage == "upscale") return {{"depth_dlss"}, {"mv_dlss"}};
     if (stage == "nr") {
+        if (NrBypassParams(params)) return {{"color_sr"}};  // intensity 0: the model and its guides and masks are not used (PR-7)
         if (params.is_object() && params.contains("guides") && params["guides"].is_boolean() && !params["guides"].get<bool>())
             return {{"color_sr"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}};
         return {{"color_sr"}, {"depth_dlss"}, {"mv_dlss"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}};

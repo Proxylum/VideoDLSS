@@ -394,6 +394,118 @@ TEST_CASE("NrStage: color_sr input, guides through the slot, masks, two passes, 
     CHECK(PassReader::Open(r2.outDir).Man().stageParams["guides"] == false);
 }
 
+// PR-7 (spec §2b): the edit strength is NrCompose's, once after the last model pass - two stub passes are not linear, so a gain inside
+// the backend or per pass would not give twice the edit of one at s = 2.
+TEST_CASE("NrStage applies the edit strength once, after the last model pass", "[integration][nr][regression]") {
+    const uint32_t w = 64, h = 32;
+    const int frames = 2;
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("strength");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    // a soft checker: twice the stub's two-pass edit stays inside [0, 1], so saturate clips (almost) nothing
+    auto soft = [&](int64_t i) {
+        PassImage img = MakePassImage(PassKind::ColorSr, w, h, PixelType::F16);
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+                for (size_t c = 0; c < 3; ++c)
+                    img.Set(x, y, c, (((x / 4 + y / 4) % 2) ? 0.55f : 0.45f) + 0.05f * static_cast<float>(c) * x / w - 0.01f * static_cast<float>(i));
+        return img;
+    };
+    WritePass(dir / "src" / "color_sr", PassKind::ColorSr, w, h, frames, FileFormat::Exr, [&](int64_t i, PassImage& img) { img = soft(i); });
+    D3D12Device dev({true, false});
+    auto run = [&](float s) {
+        NrStageOptions o;
+        o.backend = "stub";
+        o.colorDir = dir / "src" / "color_sr";
+        o.outputDir = dir / ("s" + std::to_string(static_cast<int>(s * 10)));
+        o.passes = 2;
+        o.intensity = s;
+        VideoDecoder dec(clip);
+        const NrRunResult r = RunNr(dec, dev, o);
+        CHECK(r.stats.frames == frames);
+        return PassReader::Open(r.outDir).ReadFrame(1);
+    };
+    const PassImage in = soft(1), one = run(1.f), two = run(2.f);
+    double edit = 0.0;  // the stub edits: else e2 = 2 e1 = 0 would pass for any strength
+    int64_t checked = 0;
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x)
+            for (size_t c = 0; c < 3; ++c) {
+                const double i0 = in.Get(x, y, c), e1 = one.Get(x, y, c) - i0, e2 = two.Get(x, y, c) - i0;
+                if (i0 + 2.0 * e1 < 0.005 || i0 + 2.0 * e1 > 0.995) continue;  // saturate clips the extrapolation there
+                INFO(x << "," << y << " c" << c);
+                CHECK(std::fabs(e2 - 2.0 * e1) < 2e-3);
+                edit = std::max(edit, std::fabs(e1));
+                ++checked;
+            }
+    INFO("checked " << checked);
+    REQUIRE(checked > static_cast<int64_t>(w) * h * 3 * 9 / 10);
+    CHECK(edit > 0.02);
+    const PassReader rd = PassReader::Open(dir / "s20" / "color_nr");
+    CHECK(rd.Man().stageParams["intensity"] == 2.0);
+    CHECK(rd.Man().stageParams["model_intensity"] == 1.0);  // what the model got, also the mark of a PR-7 pass
+}
+
+// PR-7 (E2): intensity 0 is the frame itself - no backend is created (ngx on WARP has neither an NVIDIA GPU nor the DLL), its guides
+// and masks are not read, the output is the tone-mapped input.
+TEST_CASE("NrStage intensity 0: no model, no DLL, no guides - the tone-mapped input is written", "[integration][nr][regression]") {
+    const uint32_t w = 48, h = 32;
+    const int frames = 2;
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("bypass");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const auto passes = dir / "passes";
+    WritePass(passes / "color_sr", PassKind::ColorSr, w, h, frames, FileFormat::Exr, [&](int64_t i, PassImage& img) { img = ColorFrame(i, w, h); });
+    WritePass(passes / "depth_dlss", PassKind::DepthDlss, w, h, frames, FileFormat::Exr, [&](int64_t, PassImage&) {});
+    WritePass(passes / "mv_dlss", PassKind::MvDlss, w, h, frames, FileFormat::Exr, [&](int64_t, PassImage&) {});
+    WritePass(passes / "mask_ui", PassKind::Mask, w, h, frames, FileFormat::Png, [&](int64_t, PassImage& img) {
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x) img.Set(x, y, 0, 255.f);
+    });
+    D3D12Device dev({true, false});  // WARP: an ngx backend would fail
+    NrStageOptions o;
+    o.backend = "ngx";
+    o.disableWhenUnavailable = false;
+    o.colorDir = passes / "color_sr";
+    o.depthDir = passes / "depth_dlss";
+    o.mvDir = passes / "mv_dlss";
+    o.masksDir = passes;
+    o.outputDir = dir / "out";
+    o.temporal = 0.5f;
+    o.intensity = 0.f;
+    VideoDecoder dec(clip);
+    const NrRunResult r = RunNr(dec, dev, o);
+    CHECK_FALSE(r.stats.disabled);
+    CHECK(r.stats.bypass);
+    CHECK(r.stats.passes == 0);
+    CHECK(r.stats.frames == frames);
+    CHECK_FALSE(r.stats.depthUsed);
+    CHECK_FALSE(r.stats.mvUsed);
+    CHECK(r.stats.masks.empty());
+    CHECK(r.backend["bypass"] == true);
+    CHECK(r.diagnostics.empty());
+    const PassReader rd = PassReader::Open(r.outDir);
+    CHECK(rd.Man().stageParams["bypass"] == true);
+    CHECK(rd.Man().stageParams["passes"] == 0);
+    CHECK(rd.Man().stageParams["intensity"] == 0.0);
+    CHECK_FALSE(rd.Man().stageParams.contains("model_intensity"));
+    CHECK(rd.Man().stageParams["ms_per_frame_gpu"].is_number());  // the estimates take this run's wall time beside it
+    for (int i = 0; i < frames; ++i) {
+        const PassImage in = ColorFrame(i, w, h), out = rd.ReadFrame(i);
+        double worst = 0.0;
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+                for (size_t c = 0; c < 3; ++c) worst = std::max(worst, std::fabs(static_cast<double>(out.Get(x, y, c)) - in.Get(x, y, c)));
+        CHECK(worst < 1e-3);  // passthrough tonemap: the input, the ui mask and the filter changed nothing
+    }
+}
+
 TEST_CASE("NrStage: the ngx backend without an NVIDIA GPU / DLL is disabled in a pipeline or fails with the instruction, never crashes", "[integration][nr]") {
     ClipSpec spec;
     spec.frames = 2;

@@ -361,7 +361,8 @@ not detected yet). A part of the clip carries `stage_params.range`, `process` ne
 range is not written over a `color_nr` that `process` made. `--params-file` takes one JSON object of the project's keys
 (`stages.nr.params`); a key the schema does not have is refused, so a typo cannot pass unnoticed. The A/B switches
 (`--mv-scale`, `--create-with-mv`, `--no-depth-guide`) are options of the standalone run only, never settings: a pass written
-with them carries `stage_params.ab`, and `process` never adopts or reuses it.
+with them carries `stage_params.ab`, and `process` never adopts or reuses it. `--intensity` is the edit strength after the
+model (`out = in + s * (model - in)`); at 0 the model is not called, and the A/B switches of its guides are refused.
 
 Frame Generation (stage 7): `color_fg` with `multiplier` x frames (real frame i at index i * multiplier), fps x multiplier;
 colour from `color_nr` / `color_sr` / the video, guides from `depth_dlss` / `mv_dlss` under the pass root.
@@ -451,7 +452,9 @@ follows the codec: .mp4, .mov for ProRes, .mkv for FFV1) and the pass versions o
 («Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»; a version names its values other than the default, the basic
 ones first). The NR card shows every DLSS 5 setting (TASK-0046): style (natural, cinematic, default - the numbers of
 Visual Enhancer's «Style N»; styles 3..6 and the render preset left the schema after PR-2 measured them: 3..6 = cinematic,
-the preset changed nothing), intensity, passes, local tone and structure, the flicker filter,
+the preset changed nothing), intensity (our edit strength after the model: 0 = the upscaled frame without the model, no
+DLL needed; 1 = the model's picture; above 1 extrapolates - brighter, possible clipped highlights and noise; the model
+always gets 1), passes, local tone and structure, the flicker filter,
 the automatic skin mask, the skin structure (enabled with the mask; «отдельно» off = as the local structure) and the
 strength on skin (shown when the plan has face / skin masks), and under «Ещё настройки» the flicker
 filter's threshold (with the filter on), the guides, the tonemap / input transfer / exposure in EV and the model

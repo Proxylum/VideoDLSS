@@ -123,6 +123,8 @@ TEST_CASE("NR form: groups, levels, conditions of the rows", "[unit][schema][nr]
         CHECK((p.advanced || !p.hint.empty()));   // and says what it does
     }
     CHECK(nr->Find("intensity")->step == 0.05);
+    CHECK(ParamValueLabel(*nr->Find("intensity"), 0.0) == "без модели");  // PR-7: 0 does not call the model
+    CHECK(nr->Find("intensity")->hint.find("выше 1") != std::string::npos);
     CHECK(nr->Find("style")->choices.size() == 3);  // PR-2 E7: 3..6 = cinematic, the preset changed nothing (TASK-0052)
     CHECK(nr->Find("preset") == nullptr);
 

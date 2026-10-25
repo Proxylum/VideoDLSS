@@ -117,6 +117,10 @@ int ParseNrStyle(const std::string& s) {
     Throw("nr: --style must be natural | cinematic | default (got '" + s + "')");
 }
 
+bool NrBypassParams(const nlohmann::json& params) {
+    return params.is_object() && params.contains("intensity") && params["intensity"].is_number() && params["intensity"].get<double>() == 0.0;
+}
+
 nlohmann::json NrRecreation::ToJson() const {
     auto orNull = [](auto v) { return v < 0 ? nlohmann::json(nullptr) : nlohmann::json(v); };
     return {{"ok", ok},

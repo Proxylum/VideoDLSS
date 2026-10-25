@@ -296,7 +296,8 @@ AppModel (Qt) ── ViewportWindow / панели ── TaskQueue (dlssvid <st
   задержкой 250 мс после правок) вызывает `PlanProcess` над проектом и раздаёт карточкам состояния
   (`AppModel::cardState`: «переиспользуется · 0 мин · посчитано вчера 14:02», «пересчёт: Интенсивность 1 → 1.4», «пересчёт:
   изменился вход · из-за «Улучшение»», «будет посчитано», «другой исходник», «досчитать…», «выключена»; тег версии vN;
-  предупреждение «без глубины и векторов: качество ниже», когда у NR/FG/апскейла нет guides среди входов, и «глубина и
+  предупреждение «без глубины и векторов: качество ниже», когда у NR/FG/апскейла нет guides среди входов (кроме NR при
+  `intensity 0`: модель не вызывается, PR-7), и «глубина и
   векторы выключены: каждый кадр обрабатывается отдельно» у NR с `guides: false`), панели
   «Что получится» (видео, время «к запуску k из m», совпавшие стадии, диск) и кнопке «Обработать · N стадий»
   (`Ctrl+Enter`, `dlssvid process --project … [--force …]`). Панель версий на диске — `ListPassVersions` с «Сравнить» /
@@ -405,9 +406,10 @@ NrStage ── цвет: color_sr (папка / слот кэша) или дек
    ▼                                                                                   │
  proxy (полное разрешение) ──[model-scale ≠ 1: Resampler → work]──▶ INrBackend × passes ─▶ model out (work)
    ▼                                                                                   │
- NrCompose::Resolve(original = proxy, model, proxy-work, prev, mv_dlss, mask protect / skin) ─▶ output RGBA16F
+ NrCompose::Resolve(original = proxy, model, proxy-work, prev, mv_dlss, mask protect / skin, gain = intensity) ─▶ output RGBA16F
    ▼
  readback ─▶ color_nr (EXR half / PNG16) + слот кэша + [--video]
+ intensity 0 (PR-7): proxy ─▶ readback — без бэкенда, DLL, guides и масок
 INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминированная правка для тестов, только явно)
 ```
 
@@ -429,7 +431,7 @@ INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминир�
      (`info, version` ComfyUI → `version, info` публичный → `version, params` OptiScaler), блок параметров `capability`
      (OptiScaler) или `alloc` (ComfyUI) с автоповтором;
   4. все `DLSSNR.*` пишутся перед `CreateFeature(18)` (тюнинг читается при создании) и заново перед каждым `EvaluateFeature`
-     (блок общий): `Enabled`, `Width/Height`, `Hint.Render.Preset`, `Intensity`, `Style`, `Local{Tone,Structure}Strength`,
+     (блок общий): `Enabled`, `Width/Height`, `Hint.Render.Preset`, `Intensity` (всегда 1, PR-7), `Style`, `Local{Tone,Structure}Strength`,
      `SkinStructureStrength`, `UseAutoMask`, `UICorrection`, `DepthInverted`, `Reset`, `ScalingRatio`, ресурсы
      `Color/Output/Backbuffer/Depth/MVec` с субректами, `MVecScaleX/Y`;
   5. `CreateFeature(18)` в `Init` со scratch-текстурами (с `--create-with-mv` — ещё и с нулевыми guides: MVec RG32F размера mv,
@@ -441,7 +443,9 @@ INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминир�
 - `NrStage`: цвет из `--color-dir` (по умолчанию `<passes>/color_sr`, если есть), слота кэша (`color_sr`) или декодированного
   кадра; guides из папок → слот кэша → текстуры; маски `mask_{ui,ignore,face,skin}` (PNG 8-бит, ТЗ §5) → `protect = max(ui,
   ignore)`, `skin = max(face, skin)`; `--passes 2` — вторая копия бэкенда со своей историей поверх результата первой;
-  `--model-scale` — модель на уменьшенном/увеличенном прокси, `NrCompose` переносит правку на полный кадр. Недоступный
+  `--model-scale` — модель на уменьшенном/увеличенном прокси, `NrCompose` переносит правку на полный кадр. `intensity` — сила
+  правки после модели (`NrCompose`, один раз после последнего прохода); при 0 бэкенд не создаётся, guides и маски не читаются,
+  выход — кадр после тонмаппинга (`stage_params.bypass`, `passes: 0`; PR-7). Недоступный
   бэкенд: CLI — ошибка с инструкцией (код 1); пайплайн (`disableWhenUnavailable`) — стадия отключается с предупреждением,
   кадры идут дальше без `color_nr` (ТЗ §4).
 - A/B настроек — `scripts/nr_ab.py` (TASK-0050): варианты = ключи схемы (`--params-file`) + переключатели A/B отдельного
@@ -589,7 +593,8 @@ PlanProcess / RunProcess ── для каждой включённой ста�
   которую бэкенд загрузит (`NvidiaDllSearchPaths` / `FindNrDll` / `FindDlssgDll`), её sha256 кэшируется по
   (путь, размер, mtime). Таблицы стадий (`StageOutputPasses`, `StageFamilyPasses`, `StageInputCandidates`) повторяют
   `ExistingPass()` раннера: flow читает `depth_raw`, upscale — `depth_dlss`/`mv_dlss`, nr — `color_sr` + guides +
-  `mask_*` (с `guides: false` — без guides), fg — `color_nr`, иначе `color_sr`. `ContentFingerprint` — отпечаток
+  `mask_*` (с `guides: false` — без guides; при `intensity 0` — только `color_sr`, и DLL в `tool` нет), fg — `color_nr`,
+  иначе `color_sr`. `ContentFingerprint` — отпечаток
   импортированного пасса по содержимому и раскладке (`dlssvid import --stamp`).
 - `core/pipeline/PassVersions`: текущая версия остаётся в `<root>/<pass>/` (ни один читатель не меняется), история —
   `<root>/<pass>.v/<id>/`, id = `created` манифеста (иначе mtime) + 8 символов отпечатка (`legacy` без него,
@@ -635,11 +640,12 @@ PlanProcess / RunProcess ── для каждой включённой ста�
 | `VideoEncoder` (превью `--video`) | цветовые теги (matrix/range) не записываются в поток | превью без аудио, для просмотра; финальный мукс — этап 8 `process` | этап 8: теги и аудио |
 | `core/stages/nr/forwarder/` (`nvngx.dll_dlssvid.dll`) | **форвардер**: все вызовы в `nvngx_dlssnr.dll` (`Init_Ext`, `CreateFeature`, `EvaluateFeature`, `ReleaseFeature`) идут из отдельной DLL, в имени которой есть `nvngx.dll`, без tail-call (`volatile`, `noinline`) | модель проверяет модуль по адресу возврата и отвечает `FAIL_PlatformError` любому другому (OptiScaler_DLSSNR, ComfyUI caller shim); proxy-путь через ядро даёт `0xBAD0000B` | когда NVIDIA откроет Feature 18 публичным SDK / Streamline |
 | `NgxNrBackend::Init` | перебор ABI `Init_Ext` сниппета (три порядка аргументов) и двух блоков параметров с автоповтором `CreateFeature(18)` | эталоны расходятся; на RTX 4070 Ti SUPER с DLL 310.8 (Ada-патч) сработали первый вариант (порядок ComfyUI) и capability-блок — перебор оставлен как страховка для других сборок DLL | когда появится публичный SDK Feature 18 |
+| `NrCompose` (`intensity`) | **сила правки вне модели**: модель всегда получает `DLSSNR.Intensity = 1`; `res = orig + w·s·(edited − orig)` (при s = 1 — прежний resolve побитно); 0 — обход: бэкенд, DLL, guides и маски не нужны, выход — кадр после тонмаппинга (ревизия `+nr.i0`); выше 1 — экстраполяция (`+nr.gain`). Один раз после последнего прохода и переноса отношением, вместе с масками, до фильтра мерцания (его вес ниже 1 затухает с s) и saturate | PR-2 E1/E2 на DLL 310.8: выше 1 побитно = 1, ниже 1 темнее и дрейфует даже в still-режиме, 0 — чёрный кадр; решение пользователя 2026-10-25 | если NVIDIA задокументирует `Intensity` или новая DLL поведёт себя иначе (перемер — скрытым флагом A/B, когда он понадобится) |
 | `NrCompose` (`model-scale ≠ 1`) | **перенос отношением**: `edited = original · clamp(model↑ / proxy↑, 1/maxRatio, maxRatio)` с силой `transfer` | упрощённый resolve OptiScaler (без OkLab и разделения яркость/цвет): модель на уменьшенном прокси дешевле, детали полного разрешения остаются | если модель примет `ScalingRatio` напрямую |
 | `NrCompose` (`--temporal`) | **temporal-фильтр**: смешивание с предыдущим выходом, смещённым по `mv_dlss`, с порогом по разности цвета и весом правки | мерцание пропатченных DLL (ТЗ §4 «известная проблема»); опция, по умолчанию выключена | когда guides уберут мерцание |
 | `StubNrBackend` | детерминированная «правка» (локальный контраст + тон) вместо модели | стадия, resolve, маски, temporal и pass count тестируются на WARP без DLL; в продукте только явно `--backend stub`, без fallback | — (остаётся тестовым бэкендом) |
 | `NrStage::Process` | результат читается на CPU (readback) для записи пасса и заново грузится в слот; guides и маски грузятся с диска каждый кадр | простота; как в `UpscaleStage` | этап 8: слот → слот без CPU |
-| `dlssvid nr --mv-scale / --create-with-mv / --no-depth-guide` | временные переключатели A/B, не ключи схемы; `process` их не задаёт; пасс с ними помечен `stage_params.ab` и не усыновляется (`StalePassReason`) | E3–E5 не решены, а ключи схемы навсегда попали бы в проекты, пресеты и отпечатки (спецификация §0.1) | PR-7: победитель зашивается в код за `+nr.mv`, флаги удаляются |
+| `dlssvid nr --mv-scale / --create-with-mv / --no-depth-guide` | временные переключатели A/B, не ключи схемы; `process` их не задаёт; пасс с ними помечен `stage_params.ab` и не усыновляется (`StalePassReason`); при `--intensity 0` отвергаются (модель не вызывается) | E3–E5 не решены, а ключи схемы навсегда попали бы в проекты, пресеты и отпечатки (спецификация §0.1) | подача MV и глубины не меняется до межкадрового PSNR с компенсацией по mv (DECISION 2026-10-25); тогда победитель зашивается в код за `+nr.mv`, флаги удаляются |
 | `dlssvid nr --start` | перемотка по pts с частотой потока (`SeekToFrame`) — верно только для постоянной частоты кадров; VFR не распознаётся | превью и A/B на отрезке нужны раньше, чем детекция VFR | строка матрицы `media-vfr` и отказ в превью PR-10 |
 | `INrBackend` (драйвер) | версия драйвера NVIDIA из UMD-версии DXGI (`CheckInterfaceSupport`), а не из NVAPI | NVAPI не подключён; формула `(subversion mod 10)·100 + build/100` проверена на 591.86 | при подключении NVAPI |
 | `DlssgFrameGenerator` (камера) | **синтетические константы камеры** для DLSS-G: перспектива FOV 60°, near 0.1 / far 1000 (`BuildFgCamera`), `clipToPrevClip = prevClipToClip = I`, `cameraMotionIncluded = 1`, `menuDetectionEnabled = 0`, `motionVectorsInvalidValue = FLT_MAX` | у видео нет камеры; всё движение — в `mv_dlss`, как у DLSS5-Feeder для игр без DLSS | если модель заметно выиграет от оценки движения камеры (этап 8: оценка из MV) |

@@ -465,6 +465,41 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     CHECK(model.outcome().reused.size() == 5);
     CHECK(model.sourceHashStatus() == QString::fromUtf8("совпадает с пассами"));
 
+    // PR-7 (review): an nr pass of before PR-7 with intensity != 1 is recomputed and discarded - the card names the revision, not
+    // the guides dropped at 0, and promises no version on disk
+    {
+        const auto manifestPath = d / "passes" / "color_nr" / "manifest.json";
+        std::string saved;
+        {
+            std::ifstream f(manifestPath, std::ios::binary);
+            saved.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+        }
+        auto stampOld = [&](double intensity) {
+            nlohmann::json j = nlohmann::json::parse(saved);
+            j["stage_params"].erase("model_intensity");
+            j["stage_params"]["intensity"] = intensity;
+            j["params_canonical"]["intensity"] = intensity;
+            std::ofstream(manifestPath, std::ios::binary) << j.dump(2);
+            model.setStageParam("nr", "intensity", intensity);
+            model.reloadSources();
+        };
+        stampOld(0.5);
+        CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: сила правки теперь после модели"));
+        CHECK_FALSE(model.cardState("nr").sub.contains(QString::fromUtf8("останется")));
+        model.setForce("nr", true);  // forced: discarded all the same, no version promised
+        model.refreshPlan();
+        CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт (принудительно)"));
+        CHECK_FALSE(model.cardState("nr").sub.contains(QString::fromUtf8("останется")));
+        model.clearForce();
+        stampOld(0.0);
+        CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: при силе 0 модель не вызывается"));
+        CHECK(model.cardState("nr").warning.isEmpty());  // no guides read at 0: no «без глубины и векторов»
+        std::ofstream(manifestPath, std::ios::binary) << saved;
+        model.setStageParam("nr", "intensity", 1.0);
+        model.reloadSources();
+        CHECK(model.cardState("nr").state == QString::fromUtf8("переиспользуется"));
+    }
+
     // a changed parameter: nr recomputes, fg follows, the rest stays
     model.setStageParam("nr", "intensity", 1.4);
     model.refreshPlan();

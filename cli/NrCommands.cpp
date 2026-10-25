@@ -195,7 +195,7 @@ NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStage
     if (clipFrames > 0) last = last < 0 ? clipFrames - 1 : std::min(last, clipFrames - 1);
     else last = -1;
     CheckCoverage(o.colorDir, "the colour pass", r.from, last, true);
-    if (o.useGuides) {
+    if (o.useGuides && o.intensity != 0.f) {  // intensity 0: the model and its guides are not used (PR-7)
         CheckCoverage(o.depthDir, "the depth pass", r.from, last, false);
         CheckCoverage(o.mvDir, "the motion-vector pass", r.from, last, false);
     }
@@ -358,7 +358,9 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     o.mvScale = a.mvScale;  // the A/B switches: options of the run, never settings (spec §2e)
     o.createWithMv = a.createWithMv;
     o.depthGuide = !a.noDepthGuide;
-    if (const auto problems = NrAbProblems(o); !problems.empty()) Throw("nr: " + Join(problems));
+    NrStageOptions ab = o;
+    if (a.check) ab.intensity = 1.f;  // --check always creates the feature: the refusal at --intensity 0 is the run's (review of PR-7)
+    if (const auto problems = NrAbProblems(ab); !problems.empty()) Throw("nr: " + Join(problems));
     if (a.checkRepeat > 0 && a.checkFeatures > 0)
         Throw("nr: --check-repeat and --check-features measure one thing each - give one of them per run");
     if ((a.checkRepeat > 0 || a.checkFeatures > 0) && !a.check) Throw("nr: --check-repeat and --check-features belong to --check");
@@ -412,7 +414,8 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     std::printf("backend:     %s\n", r.stats.backend.c_str());
     std::printf("colour from: %s\n", r.stats.colorSource.c_str());
     std::printf("size:        %ux%u (model at %ux%u)\n", r.stats.width, r.stats.height, r.stats.workWidth, r.stats.workHeight);
-    std::printf("passes:      %d\nguides:      depth %s, mv %s\n", r.stats.passes, r.stats.depthUsed ? "yes" : "no", r.stats.mvUsed ? "yes" : "no");
+    std::printf("passes:      %d%s\nguides:      depth %s, mv %s\n", r.stats.passes, r.stats.bypass ? " (intensity 0: the model is not called)" : "",
+                r.stats.depthUsed ? "yes" : "no", r.stats.mvUsed ? "yes" : "no");
     std::string masks;
     for (const auto& m : r.stats.masks) masks += (masks.empty() ? "" : ", ") + m;
     std::printf("masks:       %s\n", masks.empty() ? "none" : masks.c_str());
@@ -439,6 +442,7 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
                               {"size", {r.stats.width, r.stats.height}},
                               {"work_size", {r.stats.workWidth, r.stats.workHeight}},
                               {"passes", r.stats.passes},
+                              {"bypass", r.stats.bypass},
                               {"depth_used", r.stats.depthUsed},
                               {"mv_used", r.stats.mvUsed},
                               {"masks", r.stats.masks},
@@ -490,7 +494,10 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_option("--masks-dir,--masks_dir", na_.masksDir, "root with mask_ui / mask_ignore / mask_face / mask_skin pass folders (default: <output>)");
     nr_->add_flag("--no-auto,--no_auto", na_.noAuto, "do not pick pass folders under --output automatically");
     nr_->add_option("--backend", na_.backend, "ngx (nvngx_dlssnr.dll) | stub (deterministic test edit)")->default_val("ngx");
-    nr_->add_option("--intensity", na_.intensity, "DLSSNR.Intensity 0..2")->default_val(1.f);
+    nr_->add_option("--intensity", na_.intensity,
+                    "edit strength after the model 0..2: 0 = the upscaled frame (the model is not called), 1 = the model's picture, >1 extrapolates; "
+                    "the model always gets DLSSNR.Intensity 1")
+        ->default_val(1.f);
     nr_->add_option("--style", na_.style, "natural | cinematic | default")->default_val("natural");
     nr_->add_option("--local-tone,--local_tone", na_.localTone, "DLSSNR.LocalToneStrength 0..2")->default_val(1.f);
     nr_->add_option("--local-structure,--local_structure", na_.localStructure, "DLSSNR.LocalStructureStrength 0..2")->default_val(1.f);
@@ -503,7 +510,8 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_option("--max-ratio,--max_ratio", na_.maxRatio, "ratio transfer guard")->default_val(4.f);
     nr_->add_flag("--no-guides,--no_guides,!--guides", na_.noGuides, "A/B: no depth / motion vectors to the model (still-image mode); --guides overrides --params-file");
     // A/B switches (spec §2e, E3-E5): standalone only, not schema keys - a project, a preset, --params-file or `process` never sets
-    // them, and a pass made with them (stage_params.ab) is never adopted by `process`; PR-7 wires the winner in and drops them
+    // them, and a pass made with them (stage_params.ab) is never adopted by `process`; the winner waits for a PSNR compensated by mv
+    // (DECISION 2026-10-25: PR-2 could not tell the variants apart on identical frames)
     nr_->add_option("--mv-scale,--mv_scale", na_.mvScale, "A/B: DLSSNR.MVecScale - unit (mv_dlss pixels as is, the sub-rect carries the size) | auto (x model size / mv size)")
         ->default_val("unit");
     nr_->add_flag("--create-with-mv,--create_with_mv", na_.createWithMv, "A/B: CreateFeature with zero motion vectors (and depth) bound instead of none (ComfyUI)");
