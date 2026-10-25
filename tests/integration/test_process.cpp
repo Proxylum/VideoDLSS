@@ -237,6 +237,88 @@ TEST_CASE("RunProcess: a part of the clip under the passes root is neither fg's 
     CHECK(r.framesOut == 4);
 }
 
+// TASK-0048 (spec §2e): the A/B switches are not parameters - an nr pass a standalone run made with them (stage_params.ab) is
+// never reused, restored or adopted as the default run, with or without a fingerprint; fg built on it reruns.
+TEST_CASE("RunProcess: an nr pass made with the A/B switches of a standalone run is not adopted, reused or restored", "[integration][process][nr]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("ab_pass");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    const auto nrDir = o.passesRoot / "color_nr";
+    auto markAb = [&](bool keepFingerprint) {
+        Manifest m = Manifest::Load(nrDir);
+        m.stageParams["ab"] = {{"mv_scale", "auto"}};
+        if (!keepFingerprint) {
+            m.fingerprint.clear();
+            m.tool = nlohmann::json::object();
+        }
+        m.Save(nrDir);
+    };
+    markAb(true);
+    ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK(Report(r, "nr").reason.find("A/B") != std::string::npos);
+    CHECK(Report(r, "fg").status == "reused");  // a real result of an experiment, not a broken pass: nothing below is stale
+    CHECK(Report(RunProcess(o), "nr").status == "reused");  // the rerun is the default run
+    markAb(false);  // what a standalone run leaves: no fingerprint
+    const size_t versions = ListPassVersions(o.passesRoot, "color_nr").size();
+    r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "ran");  // not adopted
+    CHECK(Report(r, "fg").status == "reused");
+    // kept in the history to compare (before: deleted, and fg deleted and recomputed with it)
+    const auto history = ListPassVersions(o.passesRoot, "color_nr");
+    CHECK(history.size() == versions + 1);
+    bool abKept = false;
+    for (const auto& v : history) abKept = abKept || (!v.current && Manifest::Load(v.dir).stageParams.contains("ab"));
+    CHECK(abKept);
+}
+
+// Review of TASK-0048: an A/B color_nr under the passes root was fg's colour and the result when nr is off in the project
+TEST_CASE("RunProcess: an A/B pass under the passes root is neither fg's input nor the result", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("ab_not_input");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    for (auto& s : o.stages)
+        if (s.name == "nr") s.enabled = false;
+    o.codec = "ffv1";
+    o.warp = true;
+    const ProcessResult first = RunProcess(o);
+    {  // what `dlssvid nr -o <passes> --mv-scale auto` leaves: the whole clip, stage_params.ab
+        const Manifest sr = Manifest::Load(o.passesRoot / "color_sr");
+        Manifest m = Manifest::ForPass(PassKind::ColorNr, sr.width, sr.height, FileFormat::Exr);
+        m.stageParams["ab"] = {{"mv_scale", "auto"}};
+        PassWriter w(o.passesRoot / "color_nr", m);
+        for (int64_t i = 0; i < 4; ++i) w.WriteFrame(i, MakePassImage(PassKind::ColorNr, sr.width, sr.height));
+        w.Finish();
+    }
+    ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "fg").status == "reused");  // its colour is color_sr, as before
+    CHECK(r.framesOut == first.framesOut);
+    for (auto& s : o.stages)
+        if (s.name == "fg") s.enabled = false;
+    std::filesystem::remove_all(o.passesRoot / "color_fg");
+    r = RunProcess(o);
+    CHECK(r.finalPass.filename() == "color_sr");  // the result is not the A/B pass
+}
+
 // TASK-0043: the fingerprint hashed the schema's view of the parameters while the stages read the raw ones - an alias ran
 // at its value under a fingerprint saying the default. The parameters are normalised for both now (the handoff of the
 // effective parameters to the stages is covered by the mirror test in test_param_schema: with the defaults in agreement

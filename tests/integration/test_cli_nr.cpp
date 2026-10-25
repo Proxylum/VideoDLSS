@@ -146,6 +146,7 @@ TEST_CASE("dlssvid nr --check reports the diagnostics: stub ok, ngx on WARP fail
     CHECK(bad.out.find("status:       FAILED") != std::string::npos);
     const nlohmann::json j = ReadJson(json);
     CHECK(j["ok"] == false);
+    CHECK(j["init_ms"].is_null());  // stopped before NGX: no time, not -1
     CHECK(!std::string(j["hint"]).empty());
     CHECK(j.contains("driver"));
     CHECK(j.contains("dll"));
@@ -396,6 +397,103 @@ TEST_CASE("dlssvid nr --params-file; explicit flags override the file", "[integr
     refused(R"({"backend":"stub"})", {"--intensity", "5"}, "must be");
     refused(R"({"backend":"stub","intensty":1.2})", {}, "intensty");  // a typo changed nothing and said nothing
     refused(R"({"backend":"stub","start":3})", {}, "option of dlssvid nr");
-    refused(R"({"backend":"stub","mv_scale":"auto"})", {}, "not an nr setting");  // no such option (yet): not sent to the command line
+    refused(R"({"backend":"stub","mv_scale":"auto"})", {}, "option of dlssvid nr");  // an A/B switch (TASK-0048): a flag, not a setting
     refused(R"({"backend":"stub","preset":9})", {"--check"}, "must be");
+}
+
+// TASK-0048 (spec §2e): the A/B switches of the standalone run - the mv scale, zero guides at CreateFeature, no depth guide -
+// reported in the summary and the JSON, written into the pass (stage_params.ab); contradictions refused before the GPU starts.
+TEST_CASE("dlssvid nr A/B switches on the stub: --mv-scale, --create-with-mv, --no-depth-guide; contradictions refused", "[integration][cli][nr][ab]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("ab");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    auto guides = [&](const std::filesystem::path& root) {  // half-size depth_dlss and mv_dlss under -o, picked up automatically
+        for (PassKind kind : {PassKind::DepthDlss, PassKind::MvDlss}) {
+            PassWriter w(root / Spec(kind).name, Manifest::ForPass(kind, 24, 16, FileFormat::Exr));
+            for (int64_t f = 0; f < 2; ++f) w.WriteFrame(f, MakePassImage(kind, 24, 16));
+            w.Finish();
+        }
+    };
+    auto run = [&](const char* name, std::vector<std::string> extra) {
+        guides(dir / name);
+        std::vector<std::string> args{"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / name).string(), "--frames", "2", "--json",
+                                      (dir / (std::string(name) + ".json")).string()};
+        args.insert(args.end(), extra.begin(), extra.end());
+        return RunCli(args);
+    };
+    {
+        const CliResult r = run("auto", {"--mv-scale", "auto", "--create-with-mv"});
+        INFO(r.out);
+        REQUIRE(r.code == 0);
+        CHECK(r.out.find("a/b:") != std::string::npos);
+        CHECK(r.out.find("mv scale:") != std::string::npos);
+        const nlohmann::json j = ReadJson(dir / "auto.json");
+        CHECK(j["ab"]["mv_scale"] == "auto");
+        CHECK(j["ab"]["create_with_mv"] == true);
+        REQUIRE(j["stats"]["mv_scale"].is_array());
+        CHECK(j["stats"]["mv_scale"][0] == 2.0);  // mv 24x16 -> model 48x32
+        CHECK(Manifest::Load(dir / "auto" / "color_nr").stageParams["ab"]["mv_scale"] == "auto");
+    }
+    {
+        const CliResult r = run("no_depth", {"--no-depth-guide"});
+        INFO(r.out);
+        REQUIRE(r.code == 0);
+        const nlohmann::json j = ReadJson(dir / "no_depth.json");
+        CHECK(j["stats"]["depth_used"] == false);
+        CHECK(j["stats"]["mv_used"] == true);
+        CHECK(j["ab"] == nlohmann::json{{"depth_guide", false}});
+    }
+    {
+        const CliResult r = run("plain", {});
+        REQUIRE(r.code == 0);
+        CHECK(ReadJson(dir / "plain.json")["ab"].empty());
+        CHECK_FALSE(Manifest::Load(dir / "plain" / "color_nr").stageParams.contains("ab"));
+    }
+    {  // never over the pass of a processed project, as a range (review of TASK-0048: an A/B run overwrote it in place)
+        Manifest m = Manifest::Load(dir / "plain" / "color_nr");
+        m.fingerprint = "sha256:processed";
+        m.Save(dir / "plain" / "color_nr");
+        const CliResult r = run("plain", {"--mv-scale", "auto"});
+        CHECK(r.code != 0);
+        CHECK(r.out.find("processed project") != std::string::npos);
+        CHECK(Manifest::Load(dir / "plain" / "color_nr").fingerprint == "sha256:processed");  // left as it was
+    }
+    const CliResult pixels = run("pixels", {"--mv-scale", "pixels"});
+    CHECK(pixels.code != 0);
+    CHECK(pixels.out.find("must be unit | auto") != std::string::npos);
+    const CliResult still = run("still", {"--no-guides", "--create-with-mv"});
+    CHECK(still.code != 0);
+    CHECK(still.out.find("--no-guides") != std::string::npos);
+    const CliResult help = RunCli({"nr", "--help"});
+    for (const char* flag : {"--mv-scale", "--create-with-mv", "--no-depth-guide"}) {
+        INFO(flag);
+        CHECK(help.out.find(flag) != std::string::npos);
+    }
+}
+
+// TASK-0048 (spec E6, E8): `nr --check` prints what creating the feature costs - the device, NGX init and CreateFeature times
+// and the feature's video memory (DXGI, this process); the same lines for the stub on WARP.
+TEST_CASE("dlssvid nr --check prints the device, init and create times and the feature VRAM", "[integration][cli][nr]") {
+    const auto dir = Dir("check_times");
+    const auto json = dir / "c.json";
+    const CliResult ok = RunCli({"nr", "--check", "--warp", "--backend", "stub", "--json", json.string()});
+    INFO(ok.out);
+    REQUIRE(ok.code == 0);
+    CHECK(ok.out.find("time:         device") != std::string::npos);
+    CHECK(ok.out.find("vram:") != std::string::npos);
+    const nlohmann::json j = ReadJson(json);
+    CHECK(j["device_ms"].get<double>() >= 0.0);
+    CHECK(j["init_ms"].get<double>() >= 0.0);
+    CHECK(j["create_ms"] == 0.0);
+    CHECK(j.contains("vram_feature_bytes"));
+    CHECK(j["ab"].empty());
+    const CliResult ab = RunCli({"nr", "--check", "--warp", "--backend", "stub", "--create-with-mv", "--mv-scale", "auto", "--json", json.string()});
+    CHECK(ab.code == 0);
+    CHECK(ReadJson(json)["ab"]["create_with_mv"] == true);
+    const CliResult still = RunCli({"nr", "--check", "--warp", "--backend", "stub", "--no-guides", "--no-depth-guide"});
+    CHECK(still.code != 0);
+    CHECK(still.out.find("--no-guides") != std::string::npos);
 }

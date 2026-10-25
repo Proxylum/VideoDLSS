@@ -27,6 +27,8 @@ public:
         double modelScale = 1.0;
         float transfer = 1.f, maxRatio = 4.f;
         bool noGuides = false;
+        std::string mvScale = "unit";                     // A/B (spec §2e): not a setting, never in a project
+        bool createWithMv = false, noDepthGuide = false;  // A/B
         float temporal = 0.f, temporalThreshold = 0.1f, skinBlend = 1.f;
         std::string tonemap = "passthrough", inputTransfer = "srgb";
         float exposure = 0.f;  // EV

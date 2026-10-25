@@ -38,6 +38,12 @@ struct NrStageOptions {
     float transfer = 1.f;               // ratio transfer strength when modelScale != 1
     float maxRatio = 4.f;
     bool useGuides = true;              // depth_dlss / mv_dlss to the model (A/B: --no-guides)
+    // A/B switches of the standalone `dlssvid nr` (spec §2e: E3-E5): not schema keys - ApplyNrParams never reads them, so a
+    // project, a preset, --param, --params-file or `process` cannot set them; a pass made with them carries stageParams.ab and
+    // process never adopts, reuses or restores it
+    std::string mvScale = "unit";       // unit | auto (NrMvScale)
+    bool createWithMv = false;          // zero guides bound at CreateFeature
+    bool depthGuide = true;             // false: mv_dlss to the model, depth_dlss not
     float temporal = 0.f;               // temporal filter weight (0 = off)
     float temporalThreshold = 0.1f;
     float skinBlend = 1.f;              // edit strength inside face / skin masks
@@ -75,6 +81,10 @@ nlohmann::json NrParamsFromOptions(const NrStageOptions& o);
 // The backend's configuration for the options at the model's size: what NrStage creates its features with and what
 // `dlssvid nr --check` creates one with - the tuning NGX takes at CreateFeature is the same in both (TASK-0047).
 NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t workH);
+// The A/B switches away from their defaults ({} when none: a default run's manifest stays as it was) - stageParams.ab, nr --json.
+nlohmann::json NrAbJson(const NrStageOptions& o);
+// Problems of the switches: an unknown --mv-scale, and switches about the guides together with --no-guides (an A/B measuring nothing).
+std::vector<std::string> NrAbProblems(const NrStageOptions& o);
 
 class NrStage final : public IStage {
 public:
@@ -92,6 +102,7 @@ public:
         double msSum = 0.0;  // GPU submit + wait per frame
         int64_t warmup = 0;   // of them before NrStageOptions::writeFrom: history only
         int64_t written = 0, firstWritten = -1, lastWritten = -1;
+        float mvScaleX = 0.f, mvScaleY = 0.f;  // DLSSNR.MVecScale of the first frame with mv_dlss (0: no vectors), A/B E3
         double MeanMs() const { return frames ? msSum / static_cast<double>(frames) : 0.0; }
         uint32_t width = 0, height = 0, workWidth = 0, workHeight = 0;
         std::string backend, colorSource;  // colorSource: video | color_sr | slot

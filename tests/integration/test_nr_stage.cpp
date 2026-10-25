@@ -181,6 +181,106 @@ TEST_CASE("NrStage writeFrom: earlier frames build the history and are not outpu
     CHECK_FALSE(std::filesystem::exists(late.videoOut));  // the encoder opens at the first output frame
 }
 
+// TASK-0048 (spec §2e: E3-E5): the A/B switches reach the backend - the mv scale, the zero guides at CreateFeature sized from the
+// pass folders, the depth guide dropped - and the pass names them (stageParams.ab); a default run's manifest has no "ab".
+TEST_CASE("NrStage A/B switches reach the backend: mv scale auto, zero guides at creation, no depth guide", "[integration][nr][ab]") {
+    const uint32_t w = 96, h = 64, gw = 48, gh = 32;
+    const int frames = 2;
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = gw;
+    spec.height = gh;
+    const auto dir = Dir("ab");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const auto passes = dir / "passes";
+    WritePass(passes / "color_sr", PassKind::ColorSr, w, h, frames, FileFormat::Exr, [&](int64_t i, PassImage& img) { img = ColorFrame(i, w, h); });
+    WritePass(passes / "depth_dlss", PassKind::DepthDlss, gw, gh, frames, FileFormat::Exr, [&](int64_t, PassImage& img) {
+        for (uint32_t y = 0; y < gh; ++y)
+            for (uint32_t x = 0; x < gw; ++x) img.Set(x, y, 0, 0.5f);
+    });
+    WritePass(passes / "mv_dlss", PassKind::MvDlss, gw, gh, frames, FileFormat::Exr, [&](int64_t, PassImage&) {});
+    D3D12Device dev({true, false});
+    auto options = [&](const char* name) {
+        NrStageOptions o;
+        o.backend = "stub";
+        o.outputDir = dir / name;
+        o.colorDir = passes / "color_sr";
+        o.depthDir = passes / "depth_dlss";
+        o.mvDir = passes / "mv_dlss";
+        return o;
+    };
+    struct Out {
+        NrConfig config;
+        NrStage::Stats stats;
+        bool hadDepth = false, hadMv = false;
+        nlohmann::json stageParams;
+    };
+    auto run = [&](const NrStageOptions& o) {
+        Pipeline pipeline(dev, 4);
+        auto stage = std::make_unique<NrStage>(o);
+        NrStage* raw = stage.get();
+        pipeline.AddStage(std::move(stage));
+        pipeline.Init();
+        VideoDecoder dec(clip);
+        CpuFrame f;
+        while (dec.NextFrame(f)) {
+            pipeline.Cache().Acquire(f.index, f.desc);
+            pipeline.ProcessFrame(f);
+        }
+        pipeline.Finish();
+        Out out;
+        const auto* stub = dynamic_cast<const StubNrBackend*>(raw->Backend(0));
+        REQUIRE(stub);
+        out.config = stub->Config();
+        out.stats = raw->GetStats();
+        out.hadDepth = stub->LastHadDepth();
+        out.hadMv = stub->LastHadMv();
+        pipeline.Shutdown();
+        out.stageParams = Manifest::Load(o.outputDir / "color_nr").stageParams;
+        return out;
+    };
+
+    NrStageOptions a = options("auto");
+    a.mvScale = "auto";
+    a.createWithMv = true;
+    const Out ra = run(a);
+    CHECK(ra.config.mvScale == "auto");
+    CHECK(ra.config.createWithMv);
+    CHECK(ra.config.createMvWidth == gw);  // from the mv folder, before any frame
+    CHECK(ra.config.createMvHeight == gh);
+    CHECK(ra.config.createDepthWidth == gw);
+    CHECK(ra.stats.mvScaleX == 2.f);  // mv 48x32 -> model 96x64
+    CHECK(ra.stats.mvScaleY == 2.f);
+    CHECK(ra.hadDepth);
+    CHECK(ra.hadMv);
+    CHECK(ra.stageParams["ab"] == nlohmann::json{{"mv_scale", "auto"}, {"create_with_mv", true}});
+
+    NrStageOptions b = options("no_depth");
+    b.depthGuide = false;
+    const Out rb = run(b);
+    CHECK_FALSE(rb.hadDepth);
+    CHECK(rb.hadMv);
+    CHECK_FALSE(rb.stats.depthUsed);
+    CHECK(rb.stats.mvUsed);
+    CHECK(rb.stageParams["depth_used"] == false);
+    CHECK(rb.stageParams["ab"] == nlohmann::json{{"depth_guide", false}});
+    CHECK(rb.stats.mvScaleX == 1.f);
+
+    const Out rc = run(options("default"));
+    CHECK_FALSE(rc.stageParams.contains("ab"));  // a default run's manifest is as it was
+    CHECK(rc.config.mvScale == "unit");
+
+    NrStageOptions bad = options("bad");
+    bad.mvScale = "pixels";
+    VideoDecoder dec1(clip);
+    CHECK_THROWS_WITH(RunNr(dec1, dev, bad), Catch::Matchers::ContainsSubstring("must be unit | auto"));
+    NrStageOptions still = options("still");
+    still.useGuides = false;
+    still.createWithMv = true;
+    VideoDecoder dec2(clip);
+    CHECK_THROWS_WITH(RunNr(dec2, dev, still), Catch::Matchers::ContainsSubstring("drop --no-guides"));
+}
+
 TEST_CASE("NrStage: color_sr input, guides through the slot, masks, two passes, model resolution and the temporal filter", "[integration][nr]") {
     const uint32_t w = 96, h = 64, gw = 48, gh = 32;
     const int frames = 3;
@@ -346,6 +446,10 @@ TEST_CASE("Neural Rendering (NGX Feature 18) produces color_nr on an NVIDIA GPU 
     CHECK(r.diagnostics["ok"] == true);
     CHECK(std::string(r.diagnostics["dll_sha256"]).size() == 64);
     CHECK(std::string(r.diagnostics["create_result"]).find("Success") != std::string::npos);
+    // what creating the feature cost (TASK-0048, spec E6 / E8): measured on the real feature, the VRAM by DXGI for this process
+    CHECK(r.diagnostics["init_ms"].get<double>() > 0.0);
+    CHECK(r.diagnostics["create_ms"].get<double>() > 0.0);
+    CHECK(r.diagnostics["vram_feature_bytes"].is_number());
     const PassReader rd = PassReader::Open(r.outDir);
     CHECK(rd.Man().frameCount == 4);
     VideoDecoder dec2(clip);

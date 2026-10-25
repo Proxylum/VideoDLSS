@@ -21,6 +21,18 @@ std::string Narrow(const wchar_t* w) {
 
 }  // namespace
 
+int64_t VideoMemoryGrowth(const std::optional<VideoMemoryInfo>& before, const std::optional<VideoMemoryInfo>& after) {
+    if (!before || !after) return -1;
+    return after->currentUsage > before->currentUsage ? static_cast<int64_t>(after->currentUsage - before->currentUsage) : 0;
+}
+
+std::optional<VideoMemoryInfo> D3D12Device::LocalVideoMemory() const {
+    if (!adapter3_) return std::nullopt;
+    DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+    if (FAILED(adapter3_->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) return std::nullopt;  // node 0: CreationNodeMask 1
+    return VideoMemoryInfo{info.CurrentUsage, info.Budget};
+}
+
 D3D12Device::D3D12Device(const Options& options) {
     UINT factoryFlags = 0;
     if (options.debugLayer) {
@@ -39,6 +51,7 @@ D3D12Device::D3D12Device(const Options& options) {
 
     ComPtr<IDXGIAdapter1> adapter;
     PickAdapter(options, factory, adapter);
+    adapter.As(&adapter3_);  // video memory readings (nr --check); stays null where unsupported
 
     CheckHr(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device_)), "D3D12CreateDevice");
 

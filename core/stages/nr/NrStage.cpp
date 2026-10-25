@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <tuple>
 
 #include "gpu/ComputeKernel.h"
 #include "gpu/GpuFrameCache.h"
@@ -116,14 +117,35 @@ NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t w
     cfg.dllDir = o.dllDir;
     cfg.paramsBlock = o.paramsBlock;
     cfg.requireDriver = o.requireDriver;
+    cfg.mvScale = o.mvScale;
+    cfg.createWithMv = o.createWithMv;
+    cfg.depthGuide = o.depthGuide;
     return cfg;
+}
+
+nlohmann::json NrAbJson(const NrStageOptions& o) {
+    nlohmann::json j = nlohmann::json::object();
+    if (o.mvScale != "unit") j["mv_scale"] = o.mvScale;
+    if (o.createWithMv) j["create_with_mv"] = true;
+    if (!o.depthGuide) j["depth_guide"] = false;
+    return j;
+}
+
+std::vector<std::string> NrAbProblems(const NrStageOptions& o) {
+    std::vector<std::string> p;
+    if (o.mvScale != "unit" && o.mvScale != "auto") p.push_back("--mv-scale must be unit | auto (got '" + o.mvScale + "')");
+    if (!o.useGuides && (o.mvScale != "unit" || o.createWithMv || !o.depthGuide))
+        p.push_back("--mv-scale auto, --create-with-mv and --no-depth-guide change how the guides reach the model: drop --no-guides (or guides: false in --params-file)");
+    return p;
 }
 
 void NrStage::Init(const StageConfig& config, D3D12Device& device) {
     device_ = &device;
     ApplyParams(config.params);
     // every value against the schema's range and choices, whether the options came from a project or from the CLI
-    if (const auto problems = ValidateStageParams("nr", NrParamsFromOptions(options_)); !problems.empty()) {
+    auto problems = ValidateStageParams("nr", NrParamsFromOptions(options_));
+    for (auto& p : NrAbProblems(options_)) problems.push_back(std::move(p));
+    if (!problems.empty()) {
         std::string all;
         for (const auto& p : problems) all += (all.empty() ? "" : "; ") + p;
         Throw("nr: " + all);
@@ -182,6 +204,17 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
     stats_.passes = options_.passes;
 
     NrConfig cfg = NrConfigFromOptions(options_, workW_, workH_);
+    if (options_.createWithMv) {
+        // Setup runs before the first frame's guides are bound (Process): the zero guides take the sizes of the pass folders, the
+        // model's without one (slot guides of a pipeline: `process` never sets the switch)
+        cfg.createMvWidth = mvReader_ ? mvReader_->Man().width : workW_;
+        cfg.createMvHeight = mvReader_ ? mvReader_->Man().height : workH_;
+        if (options_.depthGuide && depthReader_) {
+            cfg.createDepthWidth = depthReader_->Man().width;
+            cfg.createDepthHeight = depthReader_->Man().height;
+        }
+        if (!mvReader_) Log()->warn("nr: --create-with-mv without an mv_dlss pass folder: zero vectors at CreateFeature, the frames run without vectors");
+    }
 
     std::string backend = options_.backend;
     try {
@@ -241,6 +274,7 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["tonemap"] = {{"curve", options_.tonemap.curve}, {"input_transfer", options_.tonemap.inputTransfer}, {"exposure_ev", options_.tonemap.exposureEv}};
         m.stageParams["guides"] = options_.useGuides;
         m.stageParams["masks"] = stats_.masks;
+        if (nlohmann::json ab = NrAbJson(options_); !ab.empty()) m.stageParams["ab"] = std::move(ab);  // process never adopts it
         passManifest_ = std::move(m);  // the writer opens at the first output frame (OpenOutputs)
     }
     Log()->info("nr: {} {}x{}{} — {} pass(es), guides {}, tonemap {}, temporal {}, masks [{}]", backend, w, h,
@@ -343,10 +377,10 @@ void NrStage::Process(FrameContext& ctx) {
     in.reset = first_;
     const bool wantGuides = options_.useGuides && !backends_.empty() && backends_[0]->UsesGuides();
     if (wantGuides && slot) {
-        if (depthReader_ && depthReader_->HasFrame(frame.index)) ctx.cache.UploadPass(*slot, "depth_dlss", depthReader_->ReadFrame(frame.index));
+        if (options_.depthGuide && depthReader_ && depthReader_->HasFrame(frame.index)) ctx.cache.UploadPass(*slot, "depth_dlss", depthReader_->ReadFrame(frame.index));
         if (mvReader_ && mvReader_->HasFrame(frame.index)) ctx.cache.UploadPass(*slot, "mv_dlss", mvReader_->ReadFrame(frame.index));
         if (options_.useCachePasses || depthReader_ || mvReader_) {
-            if (auto it = slot->passes.find("depth_dlss"); it != slot->passes.end() && it->second.texture) {
+            if (auto it = slot->passes.find("depth_dlss"); options_.depthGuide && it != slot->passes.end() && it->second.texture) {
                 in.depth = it->second.texture.Get();
                 in.depthWidth = it->second.width;
                 in.depthHeight = it->second.height;
@@ -359,6 +393,11 @@ void NrStage::Process(FrameContext& ctx) {
                 stats_.mvUsed = true;
             }
         }
+    }
+    if (in.mv && stats_.mvScaleX == 0.f) {  // A/B E3: what reaches the model, so an A/B that changes nothing is visible
+        std::tie(stats_.mvScaleX, stats_.mvScaleY) = NrMvScale(options_.mvScale, workW_, workH_, in.mvWidth, in.mvHeight);
+        Log()->info("nr: mv_dlss {}x{} -> model {}x{}: MVecScale {:.3f} x {:.3f} (--mv-scale {})", in.mvWidth, in.mvHeight, workW_, workH_, stats_.mvScaleX,
+                    stats_.mvScaleY, options_.mvScale);
     }
     LoadMasks(frame.index);
 

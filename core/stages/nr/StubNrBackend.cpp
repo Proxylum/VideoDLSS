@@ -1,5 +1,7 @@
 #include "stages/nr/StubNrBackend.h"
 
+#include <chrono>
+
 #include "stages/nr/shaders/StubNr_cs.h"
 #include "util/Error.h"
 
@@ -15,15 +17,25 @@ struct Constants {
 
 void StubNrBackend::Init(D3D12Device& device, const NrConfig& config) {
     config_ = config;
+    diag_ = {};
+    NrMvScale(config.mvScale, 1, 1, 0, 0);  // unit | auto, else throws - as the ngx backend
     ComputeKernel::Desc d;
     d.bytecode = g_StubNrCS;
     d.bytecodeSize = sizeof(g_StubNrCS);
     d.srvCount = 1;
     d.uavCount = 1;
     d.maxDispatches = 16;
+    // the timings and memory reading of the ngx backend, so `nr --check` prints the same lines for either: the stub's init is
+    // its compute kernel, there is no feature to create (0 ms), its VRAM is what the kernel's buffers take (0 or ? on WARP)
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto memBefore = device.LocalVideoMemory();
     kernel_ = std::make_unique<ComputeKernel>(device, d);
+    diag_.initMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    diag_.createMs = 0.0;
+    diag_.vramInitBytes = VideoMemoryGrowth(memBefore, device.LocalVideoMemory());
+    diag_.vramFeatureBytes = memBefore ? 0 : -1;
+    if (memBefore) diag_.vramBudgetBytes = static_cast<int64_t>(memBefore->budget);
     calls_ = 0;
-    diag_ = {};
     diag_.gpu = device.AdapterName();
     diag_.architecture = GpuArchitectureFromName(device.AdapterName());
     diag_.driver = NvidiaDriverFromUmd(device.UmdDriverVersion());

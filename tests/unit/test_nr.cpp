@@ -3,6 +3,7 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <windows.h>
 
@@ -371,4 +372,42 @@ TEST_CASE("StubNrBackend edits deterministically and scales with intensity", "[n
     }
     CHECK(diffA > 0.0);
     CHECK(diffC > diffA);  // more intensity, more edit
+}
+
+// TASK-0048 (spec §2e, E3): DLSSNR.MVecScale - "unit" passes mv_dlss pixels of its own resolution as they are (the sub-rect
+// carries the size), "auto" rescales them to the model's working pixels; no vectors, nothing to scale.
+TEST_CASE("NrMvScale: unit passes mv_dlss pixels as is, auto rescales them to the model size", "[nr][unit]") {
+    using P = std::pair<float, float>;
+    CHECK(NrMvScale("unit", 2560, 1440, 1280, 720) == P{1.f, 1.f});
+    CHECK(NrMvScale("auto", 2560, 1440, 1280, 720) == P{2.f, 2.f});
+    CHECK(NrMvScale("auto", 1280, 720, 1280, 720) == P{1.f, 1.f});  // the same size: auto changes nothing (E3 measures nothing)
+    CHECK(NrMvScale("auto", 2560, 1440, 0, 0) == P{1.f, 1.f});
+    const auto [x, y] = NrMvScale("auto", 1920, 1080, 960, 544);  // each axis on its own
+    CHECK(x == Approx(2.0));
+    CHECK(y == Approx(1080.0 / 544.0));
+    CHECK_THROWS_WITH(NrMvScale("pixels", 1, 1, 1, 1), Catch::Matchers::ContainsSubstring("unit | auto"));
+}
+
+// TASK-0048 (spec E6, E8): the cost of creating the feature - null in JSON until measured (never -1 read as a time); the stub
+// measures its own init on WARP so `nr --check` prints the same lines for either backend.
+TEST_CASE("NR diagnostics: init / create times and VRAM are null until measured; the stub measures them on WARP", "[nr][unit][gpu]") {
+    const nlohmann::json j = NrDiagnostics{}.ToJson();
+    for (const char* k : {"init_ms", "create_ms", "vram_init_bytes", "vram_feature_bytes", "vram_budget_bytes"}) {
+        INFO(k);
+        CHECK(j.at(k).is_null());
+    }
+    D3D12Device dev({true, false});
+    StubNrBackend stub;
+    NrConfig cfg;
+    cfg.backend = "stub";
+    cfg.width = 16;
+    cfg.height = 16;
+    stub.Init(dev, cfg);
+    CHECK(stub.Diagnostics().initMs >= 0.0);
+    CHECK(stub.Diagnostics().createMs == 0.0);
+    CHECK((stub.Diagnostics().vramFeatureBytes == 0 || stub.Diagnostics().vramFeatureBytes == -1));  // WARP may not report
+    CHECK(stub.Diagnostics().ToJson()["init_ms"].is_number());
+    stub.Shutdown();
+    cfg.mvScale = "pixels";
+    CHECK_THROWS(stub.Init(dev, cfg));
 }

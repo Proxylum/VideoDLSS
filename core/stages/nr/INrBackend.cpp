@@ -55,7 +55,15 @@ std::string GpuArchitectureFromComputeCapability(int major, int minor) {
     return "";
 }
 
+std::pair<float, float> NrMvScale(const std::string& mode, uint32_t modelWidth, uint32_t modelHeight, uint32_t mvWidth, uint32_t mvHeight) {
+    if (mode == "unit") return {1.f, 1.f};
+    if (mode != "auto") Throw("nr: --mv-scale must be unit | auto (got '" + mode + "')");
+    if (!mvWidth || !mvHeight) return {1.f, 1.f};
+    return {static_cast<float>(modelWidth) / static_cast<float>(mvWidth), static_cast<float>(modelHeight) / static_cast<float>(mvHeight)};
+}
+
 nlohmann::json NrDiagnostics::ToJson() const {
+    auto orNull = [](auto v) { return v < 0 ? nlohmann::json(nullptr) : nlohmann::json(v); };  // -1 is «not measured», never a time
     return {{"gpu", gpu},
             {"architecture", architecture},
             {"driver", driver.ToString()},
@@ -68,6 +76,11 @@ nlohmann::json NrDiagnostics::ToJson() const {
             {"init_abi", initAbi},
             {"params_block", paramsBlock},
             {"create_result", createResult},
+            {"init_ms", orNull(initMs)},
+            {"create_ms", orNull(createMs)},
+            {"vram_init_bytes", orNull(vramInitBytes)},
+            {"vram_feature_bytes", orNull(vramFeatureBytes)},
+            {"vram_budget_bytes", orNull(vramBudgetBytes)},
             {"ok", ok},
             {"hint", hint}};
 }

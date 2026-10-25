@@ -411,7 +411,9 @@ INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминир�
 - `NgxNrBackend` — Feature 18 по образцу ComfyUI-DLSS5-NR (последовательность вызовов) и OptiScaler_DLSSNR (имена параметров):
   1. диагностика **до** любого вызова: GPU, архитектура (CUDA compute capability, иначе по имени), версия драйвера из UMD-версии
      DXGI (`32.0.15.9186` → 591.86; порог **616.56**, `--skip-driver-check`), путь + размер + **SHA-256** `nvngx_dlssnr.dll`,
-     путь форвардера — всё в лог и в `NrDiagnostics` (`dlssvid nr --check`, `--json`);
+     путь форвардера — всё в лог и в `NrDiagnostics` (`dlssvid nr --check`, `--json`); время инициализации NGX и `CreateFeature`
+     и видеопамять фичи — рост `CurrentUsage` процесса по DXGI `QueryVideoMemoryInfo` (локальный сегмент) до и после
+     (`init_ms`, `create_ms`, `vram_*_bytes`; TASK-0048);
   2. ядро NGX через общий `gpu/Ngx` (`Init_with_ProjectID`, рефкаунт на процесс; тот же, что у DLSS SR);
   3. `LoadLibraryEx(nvngx_dlssnr.dll)` + форвардер `nvngx.dll_dlssvid.dll` (см. хаки): `Init_Ext` сниппета с перебором ABI
      (`info, version` ComfyUI → `version, info` публичный → `version, params` OptiScaler), блок параметров `capability`
@@ -420,9 +422,11 @@ INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминир�
      (блок общий): `Enabled`, `Width/Height`, `Hint.Render.Preset`, `Intensity`, `Style`, `Local{Tone,Structure}Strength`,
      `SkinStructureStrength`, `UseAutoMask`, `UICorrection`, `DepthInverted`, `Reset`, `ScalingRatio`, ресурсы
      `Color/Output/Backbuffer/Depth/MVec` с субректами, `MVecScaleX/Y`;
-  5. `CreateFeature(18)` в `Init` со scratch-текстурами — результат в лог; `FAIL_FeatureNotSupported` на не-Blackwell →
+  5. `CreateFeature(18)` в `Init` со scratch-текстурами (с `--create-with-mv` — ещё и с нулевыми guides: MVec RG32F размера mv,
+     depth R32F = дальняя плоскость) — результат в лог; `FAIL_FeatureNotSupported` на не-Blackwell →
      подсказка `dlssvid nr-patch`; `FAIL_PlatformError` → диагностика форвардера.
-  Guides: `depth_dlss` (R32F, reverse-Z → `DepthInverted=1`) и `mv_dlss` (RG32F, пиксели, backward → `MVecScale=1`) субректами в
+  Guides: `depth_dlss` (R32F, reverse-Z → `DepthInverted=1`) и `mv_dlss` (RG32F, пиксели, backward → `MVecScale = 1` при
+  `--mv-scale unit`, по умолчанию, или отношение размеров модели и mv при `auto` — A/B E3) субректами в
   своём разрешении; без MV — «still»-режим (`Reset=1` на каждом кадре, как ComfyUI), с MV — temporal (`Reset` на первом кадре).
 - `NrStage`: цвет из `--color-dir` (по умолчанию `<passes>/color_sr`, если есть), слота кэша (`color_sr`) или декодированного
   кадра; guides из папок → слот кэша → текстуры; маски `mask_{ui,ignore,face,skin}` (PNG 8-бит, ТЗ §5) → `protect = max(ui,
@@ -554,7 +558,7 @@ PlanProcess / RunProcess ── для каждой включённой ста�
    `tool.app` — версия алгоритма пассов `kPassToolVersion` (с 0.2.0 не равна версии релиза: релиз не обесценивает пассы)
    манифест <root>/<pass>/:  совпал и полный ─▶ reuse (exact)          │ совпал, кадров мало ─▶ run (incomplete, на месте)
                              без отпечатка   ─▶ reuse (legacy, штамп)  │ другой ─▶ такая версия в истории ─▶ restore
-                                                                       │         иначе run (source_changed | params_changed | input_changed | tool_changed) + retire
+                                                                       │         иначе run (source_changed | params_changed | input_changed | tool_changed | ab_pass) + retire
    run: <root>/<pass>/ ─▶ <root>/<pass>.v/<YYYYMMDD-HHMMSS_<fp8>>/, стадия пишет на место, манифест получает
         fingerprint / inputs / tool / params_canonical / created; после прогона gc (keepVersions, по умолчанию 2)
 ```
@@ -615,6 +619,7 @@ PlanProcess / RunProcess ── для каждой включённой ста�
 | `NrCompose` (`--temporal`) | **temporal-фильтр**: смешивание с предыдущим выходом, смещённым по `mv_dlss`, с порогом по разности цвета и весом правки | мерцание пропатченных DLL (ТЗ §4 «известная проблема»); опция, по умолчанию выключена | когда guides уберут мерцание |
 | `StubNrBackend` | детерминированная «правка» (локальный контраст + тон) вместо модели | стадия, resolve, маски, temporal и pass count тестируются на WARP без DLL; в продукте только явно `--backend stub`, без fallback | — (остаётся тестовым бэкендом) |
 | `NrStage::Process` | результат читается на CPU (readback) для записи пасса и заново грузится в слот; guides и маски грузятся с диска каждый кадр | простота; как в `UpscaleStage` | этап 8: слот → слот без CPU |
+| `dlssvid nr --mv-scale / --create-with-mv / --no-depth-guide` | временные переключатели A/B, не ключи схемы; `process` их не задаёт; пасс с ними помечен `stage_params.ab` и не усыновляется (`StalePassReason`) | E3–E5 не решены, а ключи схемы навсегда попали бы в проекты, пресеты и отпечатки (спецификация §0.1) | PR-7: победитель зашивается в код за `+nr.mv`, флаги удаляются |
 | `dlssvid nr --start` | перемотка по pts с частотой потока (`SeekToFrame`) — верно только для постоянной частоты кадров; VFR не распознаётся | превью и A/B на отрезке нужны раньше, чем детекция VFR | строка матрицы `media-vfr` и отказ в превью PR-10 |
 | `INrBackend` (драйвер) | версия драйвера NVIDIA из UMD-версии DXGI (`CheckInterfaceSupport`), а не из NVAPI | NVAPI не подключён; формула `(subversion mod 10)·100 + build/100` проверена на 591.86 | при подключении NVAPI |
 | `DlssgFrameGenerator` (камера) | **синтетические константы камеры** для DLSS-G: перспектива FOV 60°, near 0.1 / far 1000 (`BuildFgCamera`), `clipToPrevClip = prevClipToClip = I`, `cameraMotionIncluded = 1`, `menuDetectionEnabled = 0`, `motionVectorsInvalidValue = FLT_MAX` | у видео нет камеры; всё движение — в `mv_dlss`, как у DLSS5-Feeder для игр без DLSS | если модель заметно выиграет от оценки движения камеры (этап 8: оценка из MV) |

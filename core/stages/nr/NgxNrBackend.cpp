@@ -1,7 +1,10 @@
 #include "stages/nr/NgxNrBackend.h"
 
+#include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "util/Error.h"
 #include "util/Log.h"
@@ -95,8 +98,26 @@ void SetAllParams(NVSDK_NGX_Parameter* p, const NrConfig& c, ID3D12Resource* col
     NVSDK_NGX_Parameter_SetD3d12Resource(p, "DLSSNR.Backbuffer", output);
     SetRes(p, "DLSSNR.Depth", depth, dw, dh, "Depth");
     SetRes(p, "DLSSNR.MVec", mv, mw, mh, "MVec");
-    NVSDK_NGX_Parameter_SetF(p, "DLSSNR.MVecScaleX", mv ? c.mvScaleX : 1.f);
-    NVSDK_NGX_Parameter_SetF(p, "DLSSNR.MVecScaleY", mv ? c.mvScaleY : 1.f);
+    const auto [sx, sy] = NrMvScale(c.mvScale, c.width, c.height, mw, mh);  // A/B E3: unit | auto
+    NVSDK_NGX_Parameter_SetF(p, "DLSSNR.MVecScaleX", mv ? c.mvScaleX * sx : 1.f);
+    NVSDK_NGX_Parameter_SetF(p, "DLSSNR.MVecScaleY", mv ? c.mvScaleY * sy : 1.f);
+}
+
+double MsSince(std::chrono::steady_clock::time_point t0) { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); }
+
+// zeros uploaded, not left to the default heap: its zeroing is the OS's doing, not a D3D12 promise the model's input should rest on
+ComPtr<ID3D12Resource> ZeroTexture(D3D12Device& d, uint32_t w, uint32_t h, DXGI_FORMAT f, size_t texel) {
+    ComPtr<ID3D12Resource> t = d.CreateTexture2D(w, h, f);
+    const std::vector<uint8_t> zeros(static_cast<size_t>(w) * h * texel, 0);
+    d.UploadTexture2D(t.Get(), zeros.data(), static_cast<size_t>(w) * texel);
+    return t;
+}
+
+std::string MiB(int64_t b) {
+    if (b < 0) return "?";
+    char s[32];
+    std::snprintf(s, sizeof(s), "%.1f MiB", static_cast<double>(b) / 1048576.0);
+    return s;
 }
 
 std::string Hex(int r) {
@@ -123,6 +144,8 @@ struct NgxNrBackend::Impl {
     bool paramsAllocated = false;
     NVSDK_NGX_Handle* feature = nullptr;
     ComPtr<ID3D12Resource> scratchColor, scratchOutput;  // bound at CreateFeature
+    // zero guides bound at CreateFeature (--create-with-mv), kept to Shutdown: whether the feature holds what it was created with is unknown
+    ComPtr<ID3D12Resource> createMv, createDepth;
     bool warnedDepth = false, warnedMv = false;
     int64_t frames = 0;
 };
@@ -186,6 +209,10 @@ void NgxNrBackend::Init(D3D12Device& device, const NrConfig& config) {
     }
 
     // ---- NGX core (shared with DLSS SR), the snippet and the forwarder ----
+    // E8 T_init = NGX + Init_Ext + CreateFeature, timed in parts; the process's DXGI video memory read around them (E6)
+    const auto initStart = std::chrono::steady_clock::now();
+    const auto memBeforeInit = device.LocalVideoMemory();
+    if (memBeforeInit) diag_.vramBudgetBytes = static_cast<int64_t>(memBeforeInit->budget);
     im.runtime = ngx::Runtime::Acquire(device, {diag_.dll.parent_path()});
     im.snippet = LoadLibraryExW(diag_.dll.wstring().c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
     if (!im.snippet) {
@@ -229,6 +256,7 @@ void NgxNrBackend::Init(D3D12Device& device, const NrConfig& config) {
         diag_.paramsBlock = kind;
     };
     if (config.paramsBlock != "capability" && config.paramsBlock != "alloc") Throw("nr: --params-block must be capability | alloc");
+    NrMvScale(config.mvScale, 1, 1, 0, 0);  // unit | auto, else throws (direct users of the backend: --check)
     acquireParams(config.paramsBlock);
 
     // ---- the snippet's own Init_Ext: its ABI is not the public one and the references disagree, so try in turn ----
@@ -261,6 +289,8 @@ void NgxNrBackend::Init(D3D12Device& device, const NrConfig& config) {
                 break;
             }
         }
+        diag_.initMs = MsSince(initStart);  // a failed Init_Ext has its time too
+        diag_.vramInitBytes = VideoMemoryGrowth(memBeforeInit, device.LocalVideoMemory());
         if (!ok) {
             diag_.initResult = tried;
             diag_.hint = "the snippet's Init_Ext failed for every known argument order: " + tried + " — see the NGX log in " + ngx::AppDataPath().string();
@@ -271,14 +301,31 @@ void NgxNrBackend::Init(D3D12Device& device, const NrConfig& config) {
     // ---- CreateFeature(18) with scratch textures; the result is what ТЗ §4 asks to log ----
     im.scratchColor = device.CreateTexture2D(config.width, config.height, DXGI_FORMAT_R16G16B16A16_FLOAT);
     im.scratchOutput = device.CreateTexture2D(config.width, config.height, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    // A/B E4 (--create-with-mv): ComfyUI binds a zero MVec at creation and re-creates the feature when the motion contract changes
+    // (dlss5nr_bridge.cpp EnsureFeature); whether NGX fixes the contract at creation is what the A/B measures
+    uint32_t cmw = 0, cmh = 0, cdw = 0, cdh = 0;
+    if (config.createWithMv && config.useGuides) {
+        cmw = config.createMvWidth ? config.createMvWidth : config.width;
+        cmh = config.createMvHeight ? config.createMvHeight : config.height;
+        im.createMv = ZeroTexture(device, cmw, cmh, DXGI_FORMAT_R32G32_FLOAT, 8);
+        if (config.depthGuide && config.createDepthWidth && config.createDepthHeight) {
+            cdw = config.createDepthWidth;
+            cdh = config.createDepthHeight;
+            im.createDepth = ZeroTexture(device, cdw, cdh, DXGI_FORMAT_R32_FLOAT, 4);  // reverse-Z 0 = the far plane
+        }
+    }
+    const auto memBeforeCreate = device.LocalVideoMemory();  // after our scratch and zero guides: they are not the feature's
+    const auto createStart = std::chrono::steady_clock::now();
     auto create = [&]() {
-        SetAllParams(im.params, config_, im.scratchColor.Get(), im.scratchOutput.Get(), nullptr, 0, 0, nullptr, 0, 0, true);
+        SetAllParams(im.params, config_, im.scratchColor.Get(), im.scratchOutput.Get(), im.createDepth.Get(), cdw, cdh, im.createMv.Get(), cmw, cmh, true);
         int r = 0;
         device.ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) {
-            ComputeKernel::Transition(cl, im.scratchColor.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+            for (ID3D12Resource* res : {im.scratchColor.Get(), im.createDepth.Get(), im.createMv.Get()})
+                if (res) ComputeKernel::Transition(cl, res, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
             ComputeKernel::Transition(cl, im.scratchOutput.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             r = im.fwdCreate(im.snipCreate, cl, kFeatureId, im.params, reinterpret_cast<void**>(&im.feature));
-            ComputeKernel::Transition(cl, im.scratchColor.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+            for (ID3D12Resource* res : {im.scratchColor.Get(), im.createDepth.Get(), im.createMv.Get()})
+                if (res) ComputeKernel::Transition(cl, res, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
             ComputeKernel::Transition(cl, im.scratchOutput.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
         });
         return r;
@@ -298,6 +345,7 @@ void NgxNrBackend::Init(D3D12Device& device, const NrConfig& config) {
         Log()->info("nr: CreateFeature(18) [{} block] -> {}", other, ngx::ResultString(again));
         created = again;
     }
+    diag_.createMs = MsSince(createStart);
     if (created != static_cast<int>(NVSDK_NGX_Result_Success) || !im.feature) {
         im.feature = nullptr;
         if (created == static_cast<int>(NVSDK_NGX_Result_FAIL_FeatureNotSupported)) {
@@ -314,7 +362,10 @@ void NgxNrBackend::Init(D3D12Device& device, const NrConfig& config) {
         }
         Throw("nr: " + diag_.hint);
     }
+    diag_.vramFeatureBytes = VideoMemoryGrowth(memBeforeCreate, device.LocalVideoMemory());
     diag_.ok = true;
+    Log()->info("nr: NGX init {:.0f} ms (+{}), CreateFeature(18) {:.0f} ms (+{}){}", diag_.initMs, MiB(diag_.vramInitBytes), diag_.createMs,
+                MiB(diag_.vramFeatureBytes), im.createMv ? " with zero guides (--create-with-mv)" : "");
     Log()->info("nr: {}x{} ready (intensity {}, style {}, preset {}, guides {}, {} block)", config.width, config.height, config.intensity, config.style, config.preset,
                 config.useGuides ? "on" : "off (still mode)", diag_.paramsBlock);
 }
@@ -323,9 +374,9 @@ void NgxNrBackend::Evaluate(ID3D12GraphicsCommandList* cl, const NrInputs& in, I
     if (!impl_ || !impl_->feature) Throw("nr: not initialised");
     Impl& im = *impl_;
     if (!in.color || !output) Throw("nr: colour input and output are required");
-    ID3D12Resource* depth = config_.useGuides ? in.depth : nullptr;
+    ID3D12Resource* depth = config_.useGuides && config_.depthGuide ? in.depth : nullptr;  // --no-depth-guide: vectors only (A/B E5)
     ID3D12Resource* mv = config_.useGuides ? in.mv : nullptr;
-    if (config_.useGuides && !in.depth && !im.warnedDepth) {
+    if (config_.useGuides && config_.depthGuide && !in.depth && !im.warnedDepth) {
         Log()->warn("nr: no depth_dlss for frame {} — the model runs without a depth guide (run `dlssvid depth` or pass --depth-dir)", in.frameIndex);
         im.warnedDepth = true;
     }
@@ -381,6 +432,8 @@ void NgxNrBackend::Shutdown() {
     im.params = nullptr;
     im.scratchColor.Reset();
     im.scratchOutput.Reset();
+    im.createMv.Reset();
+    im.createDepth.Reset();
     im.runtime.reset();
     if (im.forwarder) FreeLibrary(im.forwarder);
     if (im.snippet) FreeLibrary(im.snippet);

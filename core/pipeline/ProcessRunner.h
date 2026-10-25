@@ -96,7 +96,7 @@ struct ProcessResult {
 struct StageDecision {
     std::string name;
     std::string action;  // run | reuse | restore
-    std::string kind;    // exact | legacy | missing | incomplete | params_changed | input_changed | source_changed | tool_changed | forced | restored | changed
+    std::string kind;    // exact | legacy | missing | incomplete | params_changed | input_changed | source_changed | tool_changed | ab_pass | forced | restored | changed
     std::string detail;  // human-readable: "intensity: 1 -> 1.4", "input changed: color_nr", ...
     nlohmann::json diff = nlohmann::json::object();  // {"params": {key: [old, new]}, "inputs": [pass...], "tool": {field: [old, new]}}
     std::string fingerprint;                         // the pass this run needs ("sha256:<hex>")
