@@ -442,7 +442,9 @@ INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминир�
   своём разрешении; без MV — «still»-режим (`Reset=1` на каждом кадре, как ComfyUI), с MV — temporal (`Reset` на первом кадре).
 - `NrStage`: цвет из `--color-dir` (по умолчанию `<passes>/color_sr`, если есть), слота кэша (`color_sr`) или декодированного
   кадра; guides из папок → слот кэша → текстуры; маски `mask_{ui,ignore,face,skin}` (PNG 8-бит, ТЗ §5) → `protect = max(ui,
-  ignore)`, `skin = max(face, skin)`; `--passes 2` — вторая копия бэкенда со своей историей поверх результата первой;
+  ignore)`, `skin = max(face, skin)`; `--passes 1…4` — N копий бэкенда цепочкой, каждая со своей фичей и историей поверх
+  результата предыдущей (одни guides и Reset); VRAM фичи каждой — `stage_params.vram_mib_per_pass`, при 3–4 план пишет
+  подсказку (`AdviseStage`; PR-5);
   `--model-scale` — модель на уменьшенном/увеличенном прокси, `NrCompose` переносит правку на полный кадр. `intensity` — сила
   правки после модели (`NrCompose`, один раз после последнего прохода); при 0 бэкенд не создаётся, guides и маски не читаются,
   выход — кадр после тонмаппинга (`stage_params.bypass`, `passes: 0`; PR-7). Недоступный

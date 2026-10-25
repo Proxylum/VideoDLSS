@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -419,6 +420,11 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     std::string masks;
     for (const auto& m : r.stats.masks) masks += (masks.empty() ? "" : ", ") + m;
     std::printf("masks:       %s\n", masks.empty() ? "none" : masks.c_str());
+    if (!r.stats.vramMibPerPass.empty()) {
+        std::string vram;
+        for (const double v : r.stats.vramMibPerPass) vram += (vram.empty() ? "" : " / ") + std::to_string(static_cast<int>(std::lround(v)));
+        std::printf("feature VRAM: %s MiB per pass\n", vram.c_str());
+    }
     std::printf("frames:      %lld\nms/frame:    %.1f (GPU %.1f)\n", static_cast<long long>(r.stats.frames), r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0,
                 r.stats.MeanMs());
     if (range.Ranged())
@@ -442,6 +448,7 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
                               {"size", {r.stats.width, r.stats.height}},
                               {"work_size", {r.stats.workWidth, r.stats.workHeight}},
                               {"passes", r.stats.passes},
+                              {"vram_mib_per_pass", r.stats.vramMibPerPass},  // each pass's feature (DXGI, CreateFeature; stub 0); empty: not measured
                               {"bypass", r.stats.bypass},
                               {"depth_used", r.stats.depthUsed},
                               {"mv_used", r.stats.mvUsed},
@@ -504,7 +511,7 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_option("--skin-structure,--skin_structure", na_.skinStructure, "DLSSNR.SkinStructureStrength (-1 = model default)")->default_val(-1.f);
     nr_->add_flag("--auto-mask,--auto_mask,!--no-auto-mask,!--no_auto_mask", na_.autoMask,
                   "DLSSNR.UseAutoMask (the model's automatic skin mask); --no-auto-mask overrides --params-file");
-    nr_->add_option("--passes", na_.passes, "model passes 1 | 2")->default_val(1);
+    nr_->add_option("--passes", na_.passes, "model passes 1..4: each a feature of its own, the next reads the last one's output")->default_val(1);
     nr_->add_option("--model-scale,--model_scale", na_.modelScale, "model resolution relative to the colour (0.25..2); != 1 uses the ratio transfer resolve")->default_val(1.0);
     nr_->add_option("--transfer", na_.transfer, "ratio transfer strength 0..1 (model-scale != 1)")->default_val(1.f);
     nr_->add_option("--max-ratio,--max_ratio", na_.maxRatio, "ratio transfer guard")->default_val(4.f);

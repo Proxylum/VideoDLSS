@@ -111,6 +111,7 @@ public:
         uint32_t width = 0, height = 0, workWidth = 0, workHeight = 0;
         std::string backend, colorSource;  // colorSource: video | color_sr | slot
         int passes = 0;      // model passes: 0 in the bypass
+        std::vector<double> vramMibPerPass;  // each pass's feature: DXGI growth over its CreateFeature (PR-5; the stub: 0); empty: not measured
         bool bypass = false;  // intensity 0: the model was not called (PR-7)
         bool depthUsed = false, mvUsed = false;
         std::vector<std::string> masks;

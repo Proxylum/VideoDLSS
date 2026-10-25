@@ -78,7 +78,7 @@ class Variant:
     flags: list = field(default_factory=list)     # A/B options of the standalone `dlssvid nr` (AB_FLAGS), not schema keys (spec §0.1)
     inputs: dict = field(default_factory=dict)    # "color" / "depth" / "mv": another pass folder; "@mv_target" = --mv-target-dir (E3 C)
     expect: dict = field(default_factory=dict)    # stats `nr --json` must report ({"depth_used": False}): a flag that did nothing fails the run
-    optional: bool = False                        # a failure is recorded and the experiment goes on (passes 3-4 before PR-5); never the baseline
+    optional: bool = False                        # a failure is recorded and the experiment goes on (E3 C without its vectors, E6 p3-p4 without the VRAM); never the baseline
 
 
 @dataclass
@@ -416,7 +416,7 @@ def read_nr(path: Path) -> dict:
     j = json.loads(Path(path).read_text(encoding="utf-8"))
     st, dg = j.get("stats", {}), j.get("diagnostics", {}) or {}
     out = {k: st.get(k) for k in ("ms_per_frame_gpu", "ms_per_frame_wall", "depth_used", "mv_used", "work_size", "passes", "mv_scale",
-                                  "frames_written", "warmup_frames", "masks", "bypass")}
+                                  "frames_written", "warmup_frames", "masks", "bypass", "vram_mib_per_pass")}
     out.update({k: dg.get(k) for k in ("init_ms", "create_ms", "gpu", "driver", "dll_sha256")})
     vram = dg.get("vram_feature_bytes")
     out["vram_mib"] = round(vram / 1048576.0, 1) if isinstance(vram, (int, float)) else None
@@ -667,9 +667,20 @@ def verdict_e5(res):
 
 
 def verdict_e6(res):
-    p1, p2 = _get(res, "p1", "nr", "ms_per_frame_gpu"), _get(res, "p2", "nr", "ms_per_frame_gpu")
-    step = None if None in (p1, p2) else p2 - p1
-    return {"ms_per_pass": step, "text": [] if step is None else [f"GPU на добавленный проход: {step:.1f} мс/кадр (константа оценок — 6.4 мс на 1440p)"]}
+    """GPU per added pass: the slope from p1 to the most passes measured (p1..p4, spec §2c). VRAM per pass (PR-5): every pass is a feature of
+    its own - stats.vram_mib_per_pass of the run with the most passes."""
+    ms = {p: _get(res, f"p{p}", "nr", "ms_per_frame_gpu") for p in (1, 2, 3, 4)}
+    have = [p for p, t in ms.items() if isinstance(t, (int, float))]
+    top = max(have) if have else None
+    step = None if 1 not in have or top == 1 else (ms[top] - ms[1]) / (top - 1)
+    text = []
+    if step is not None:
+        text.append(f"GPU на добавленный проход: {step:.1f} мс/кадр (p1…p{top}: {' / '.join(fmt_num(ms[p]) for p in have)}; константа оценок — 6.4 мс на 1440p)")
+    most = max((p for p in (1, 2, 3, 4) if _get(res, f"p{p}", "nr", "vram_mib_per_pass")), default=None)
+    vram = _get(res, f"p{most}", "nr", "vram_mib_per_pass") if most else None
+    if vram:
+        text.append(f"VRAM фич p{most}: {' / '.join(fmt_num(v) for v in vram)} МиБ, всего {fmt_num(sum(vram))} МиБ")
+    return {"ms_per_pass": step, "vram_mib_per_pass": vram, "text": text}
 
 
 def verdict_e7(res):

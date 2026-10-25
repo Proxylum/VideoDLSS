@@ -99,7 +99,7 @@ TEST_CASE("dlssvid nr --backend stub --warp writes color_nr and a JSON summary",
     // TASK-0044: the standalone run checks every value against the schema (before: `--intensity 5` went to NGX); styles 3..6
     // are refused too since PR-2 E7 (TASK-0052)
     for (const std::vector<std::string>& bad : std::vector<std::vector<std::string>>{
-             {"--intensity", "5"}, {"--passes", "5"}, {"--exposure", "20"}, {"--style", "7"}, {"--style", "4"}, {"--local-tone", "3"}}) {
+             {"--intensity", "5"}, {"--passes", "5"}, {"--passes", "0"}, {"--exposure", "20"}, {"--style", "7"}, {"--style", "4"}, {"--local-tone", "3"}}) {
         std::vector<std::string> args{"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "bad").string(), "--frames", "1"};
         args.insert(args.end(), bad.begin(), bad.end());
         const CliResult b = RunCli(args);
