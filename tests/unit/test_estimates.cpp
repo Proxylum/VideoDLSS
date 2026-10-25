@@ -173,12 +173,16 @@ TEST_CASE("NR estimate follows passes and model scale; a GPU-only ms/frame is no
     src.width = 1280;
     src.height = 720;
     src.fps = 24.0;
-    src.frames = 300;
+    src.frames = 30;  // the run's own length spreads the creation, not the record's 300 frames
     save(1, {{"ms_per_frame", 410.0}, {"ms_per_frame_gpu", 15.9}});
     RunOutcome o = EstimateRun(plan, stages, src);
     REQUIRE(!o.stages.empty());
     CHECK(o.stages[0].recorded);
-    CHECK(o.stages[0].msPerFrame == Approx(*two));
+    const auto short2 = RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 30);
+    REQUIRE(short2);
+    CHECK(o.stages[0].msPerFrame == Approx(*short2));
+    CHECK(o.stages[0].msPerFrame > *two);
+    src.frames = 300;
     save(1, {{"ms_per_frame_gpu", 15.9}});  // a standalone run's pass: the baseline, moved to two passes - not 16 ms
     const double base = BaselineMsPerFrame("nr", "ngx", 1280.0 * 720 / 1e6);
     o = EstimateRun(plan, stages, src);
