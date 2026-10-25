@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""scripts/nr_ab.py (TASK-0050): the helpers that decide what an A/B reads (ctest scripts.nr_ab, no dlssvid), and a whole A/B on the stub
-backend and WARP over a generated Y4M clip (ctest scripts.nr_ab_stub: --cli <dlssvid> --work <scratch>). Standard library only."""
+"""scripts/nr_ab.py (TASK-0050): the helpers that decide what an A/B reads and when a stored result answers again (ctest scripts.nr_ab, no
+dlssvid), and a whole A/B on the stub backend and WARP over a generated Y4M clip (ctest scripts.nr_ab_stub: --cli <dlssvid> --work
+<scratch>). Standard library only."""
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -45,19 +48,88 @@ def manifest(folder: Path, first: int, last: int) -> Path:
     return folder
 
 
+def run_res(meta: dict) -> dict:
+    return {"title": "t", "start": 0, "frames": 1, "warmup": 0, "still": True, "fixed": {}, "baseline": "a", "metrics": ["time"], "variants": {},
+            "failed": {}, "meta": meta}
+
+
 class Helpers(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.cat = {e.id: e for e in nr_ab.EXPERIMENTS}
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    @staticmethod
+    def args(**kw) -> argparse.Namespace:
+        a = argparse.Namespace(start=6, frames=0, warmup=6, only=[], backend="stub", format="exr", warp=True, nr_arg=[], keep=False, check_runs=3,
+                               check_size="1280x720", force=False, prepare_backends="stub,stub,bicubic")
+        vars(a).update(kw)
+        return a
+
+    def load(self, j: dict) -> nr_ab.Experiment:
+        p = self.root / "v.json"
+        p.write_text(json.dumps(j), encoding="utf-8")
+        return nr_ab.load_variants(p)
+
+    def dry(self, exp, inp, **kw):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            res = nr_ab.run_experiment(self.args(**kw), "dlssvid", inp, exp, {}, self.root / "out", True)
+        return res, out.getvalue().splitlines()
 
     def test_normalize_and_merge_params(self):
         self.assertEqual(nr_ab.merge_params({"intensity": 1, "local-tone": 2}, {"temporal": 0.0}, {"intensity": 0.5, "local_tone": 0}),
                          {"intensity": 0.5, "local_tone": 0, "temporal": 0.0})
         self.assertEqual(nr_ab.normalize_params({"no_guides": True}), {"guides": False})
         self.assertEqual(nr_ab.merge_params({}, {"guides": False}, {"no-guides": False}), {"guides": True})  # the variant wins
+
+    def test_style_is_normalized_as_dlssvid_reads_it(self):
+        self.assertEqual(nr_ab.normalize_params({"style": 1}), {"style": "natural"})
+        self.assertEqual(nr_ab.normalize_params({"style": "2"}), {"style": "cinematic"})
+        self.assertEqual(nr_ab.normalize_params({"style": 4}), {"style": "4"})
+        self.assertEqual(nr_ab.normalize_params({"style": "natural"}), {"style": "natural"})
+
+    def test_run_params_leave_out_the_options_of_nr_ab(self):
+        # --backend / --format of nr_ab win over a base file's: params.json must not claim another
+        self.assertEqual(nr_ab.run_params({"backend": "ngx", "format": "png16", "intensity": 1.5}, {}, {}), {"intensity": 1.5})
+
+    def test_lost_params_find_a_setting_that_did_not_reach_the_run(self):
+        params = {"intensity": 0, "style": "3", "guides": False, "skin_structure": -1}
+        self.assertEqual(nr_ab.lost_params(params, {"intensity": 0.0, "style": "3", "guides": False, "skin_structure": -1.0, "passes": 1}), [])
+        self.assertEqual(nr_ab.lost_params(params, {"style": "3"}), [])  # left out by the run (another backend's, a default): not a loss
+        lost = nr_ab.lost_params(params, {"intensity": 1.0, "style": "natural", "guides": False})
+        self.assertEqual(len(lost), 2)
+        self.assertTrue(lost[0].startswith("intensity=0"))
+
+    def test_options_beside_the_variants_are_run_options_only(self):
+        # a setting or an A/B switch in --nr-arg would make every variant one run; flags of a variant are the A/B switches
+        self.assertEqual(nr_ab.check_options(["--skip-driver-check", "--dll-dir=D", "--params_block", "alloc"], nr_ab.NR_ARG_OK, "x"),
+                         ["--skip-driver-check", "--dll-dir=D", "--params_block", "alloc"])
+        for bad in (["--intensity=1"], ["--create-with-mv"], ["--local-structure", "0"], ["D"], ["--dll-dir"],
+                    ["--dll-dir=", "--create-with-mv"], ["--params-block="], ["--skip-driver-check=1"]):  # CLI11 would take the next token
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                nr_ab.check_options(bad, nr_ab.NR_ARG_OK, "--nr-arg")
+        nr_ab.check_options(["--mv-scale", "auto", "--create-with-mv"], nr_ab.AB_FLAGS, "flags")
+        with self.assertRaises(RuntimeError):
+            nr_ab.check_options(["--intensity", "2"], nr_ab.AB_FLAGS, "flags")
+        self.assertEqual(nr_ab.option_value(["--x", "--dll-dir", "D"], "--dll-dir"), "D")
+        self.assertEqual(nr_ab.option_value(["--dll_dir=E"], "--dll-dir"), "E")
+        self.assertIsNone(nr_ab.option_value([], "--dll-dir"))
+        self.assertEqual(nr_ab.expected_ab(["--mv-scale", "auto", "--create-with-mv"]), {"mv_scale": "auto", "create_with_mv": True})  # NrAbJson
+        self.assertEqual(nr_ab.expected_ab(["--mv-scale=unit", "--no-depth-guide"]), {"depth_guide": False})
+        self.assertEqual(nr_ab.expected_ab([]), {})
+        help_text = "--local-tone,--local_tone FLOAT\n--no-guides,--no_guides,!--guides\n--mv-scale,--mv_scale TEXT\n--start INT\n--no-auto\n--dll-dir TEXT"
+        keys = nr_ab.setting_keys(help_text)  # a run option in a params.json fails the run after the variants before it ran
+        self.assertTrue({"local_tone", "guides"} <= keys)
+        self.assertFalse({"mv_scale", "start", "auto", "no_auto", "dll_dir"} & keys)
+        self.assertEqual(nr_ab.names_only(r"missing pass frame 12: D:\clips\mv_dlss\000012.exr"), "missing pass frame 12: 000012.exr")
+        self.assertEqual(nr_ab.names_only("pass folder not found: /tmp/x/color_sr (no manifest)"), "pass folder not found: color_sr (no manifest)")
+        for e in nr_ab.EXPERIMENTS:  # the catalogue keeps the same rules as a variants file
+            for v in e.variants:
+                nr_ab.check_options(v.flags, nr_ab.AB_FLAGS, f"{e.id}/{v.name}")
+                self.assertFalse(set(v.params) & set(nr_ab.RUN_KEYS), v.name)
 
     def test_base_params_from_preset(self):
         p = self.root / "preset.json"
@@ -102,6 +174,18 @@ class Helpers(unittest.TestCase):
         for c in (edit, nxt):
             self.assertFalse(any(x.startswith("-") and x[1:].isdigit() for x in map(str, c)))  # no negative numbers in an argv
 
+    def test_edit_is_measured_against_what_the_variant_read(self):
+        bic = manifest(self.root / "bic" / "color_sr", 2, 40)
+        exp = nr_ab.Experiment("x", "x", [nr_ab.Variant("a"), nr_ab.Variant("b", inputs={"color": str(bic)})], "a", metrics=("edit",))
+        res, lines = self.dry(exp, nr_ab.Inputs(Path("clip.mp4")))
+        edits = [x for x in lines if " compare " in x and "cmp_input" in x]
+        self.assertEqual(len(edits), 2)
+        self.assertIn("clip.mp4", edits[0])  # a: the run's input, the video from frame 0
+        self.assertIn("--offset 6", edits[0])
+        self.assertIn(str(bic), edits[1])  # b: its own color_sr, indexed from its first frame
+        self.assertIn("--offset 4", edits[1])
+        self.assertIn("--frames 12", edits[1])  # every compare bounded to the frames written
+
     def test_pass_range_and_covers(self):
         d = manifest(self.root / "p", 2, 9)
         self.assertEqual(nr_ab.pass_range(d), (2, 9, 8))
@@ -113,7 +197,7 @@ class Helpers(unittest.TestCase):
         self.assertIsNone(nr_ab.pass_range(self.root / "bad"))
         self.assertFalse(nr_ab.covers(None, 0, 0))
 
-    def test_read_compare_caps_identical(self):
+    def test_read_compare_caps_identical_and_checks_the_count(self):
         f = self.root / "c.json"
         f.write_text(json.dumps({"summary": {"frames": 3, "psnr_y_mean": 100.0, "psnr_y_min": None, "psnr_rgb_mean": 100.0, "ssim_y_mean": 1.0}}),
                      encoding="utf-8")
@@ -123,25 +207,61 @@ class Helpers(unittest.TestCase):
         self.assertIsNone(c["mae_rgb"])
         self.assertEqual(nr_ab.fmt_num(c["mae_rgb"]), "—")
         self.assertEqual(nr_ab.fmt_db(38.123), "38.12")
+        self.assertEqual(nr_ab.read_compare(f, 3)["frames"], 3)
+        with self.assertRaises(RuntimeError):  # a pair missing or one too many: the metric would mix runs
+            nr_ab.read_compare(f, 4)
+
+    def test_no_output_of_an_earlier_run_survives(self):
+        def fails(*_a, **_k):
+            raise RuntimeError("compare failed")
+
+        old = self.root / "cmp.json"
+        old.write_text(json.dumps({"summary": {"frames": 3}}), encoding="utf-8")
+        run, nr_ab.run = nr_ab.run, fails
+        try:
+            with self.assertRaises(RuntimeError):
+                nr_ab.measure("dlssvid", "a", "b", old, 3, False)
+            self.assertFalse(old.exists())  # removed before the command, so a failure cannot report it
+            edir = self.root / "E8"
+            edir.mkdir()
+            (edir / "check_0.json").write_text(json.dumps({"ok": True, "init_ms": 1.0, "gpu": "G"}), encoding="utf-8")
+            res = nr_ab.run_check(self.args(check_runs=1), "dlssvid", nr_ab.Inputs(Path("clip.mp4")), self.cat["E8"], edir, False)
+            self.assertEqual(res["checks"], [{"ok": False, "init_ms": None, "create_ms": None, "device_ms": None, "vram_mib": None, "run_s": None}])
+        finally:
+            nr_ab.run = run
+        if os.name == "nt":  # an open file cannot be deleted on Windows: the frames left behind stop the run
+            folder = manifest(self.root / "color_nr", 0, 0)
+            with open(folder / "frame.exr", "wb"):
+                with self.assertRaises(RuntimeError):
+                    nr_ab.clear(folder)
+        nr_ab.clear(self.root / "color_nr")
+        self.assertFalse((self.root / "color_nr").exists())
 
     def test_variants_file_validation(self):
-        def load(j):
-            p = self.root / "v.json"
-            p.write_text(json.dumps(j), encoding="utf-8")
-            return nr_ab.load_variants(p)
-
-        ok = load({"id": "s", "still": True, "variants": [{"name": "a"}, {"name": "b", "params": {"local-tone": 0}}], "groups": [["a", "b"]]})
+        ok = self.load({"id": "s", "still": True, "metrics": ["base", "time", "pairs"], "variants": [{"name": "a"}, {"name": "b", "params": {"local-tone": 0}}],
+                        "groups": [["a", "b"]]})
         self.assertEqual(ok.baseline, "a")
         self.assertEqual(ok.fixed, {"guides": False, "temporal": 0.0})
         self.assertEqual(ok.variants[1].params, {"local_tone": 0})
         for bad in ({"variants": [{"name": "a"}, {"name": "a"}]}, {"variants": [{"name": "a/b"}]}, {"baseline": "z", "variants": [{"name": "a"}]},
-                    {"metrics": ["speed"], "variants": [{"name": "a"}]}, {"groups": [["a", "q"]], "variants": [{"name": "a"}]}, {"variants": []}):
+                    {"metrics": ["speed"], "variants": [{"name": "a"}]}, {"metrics": ["pairs"], "groups": [["a", "q"]], "variants": [{"name": "a"}]},
+                    {"variants": []},
+                    {"variants": [{"name": "a", "optional": True}, {"name": "b"}]},  # the baseline: every other variant is measured against it
+                    {"needs": ["color"], "variants": [{"name": "a"}]},
+                    {"groups": [["a", "b"]], "variants": [{"name": "a"}, {"name": "b"}]},  # groups without the pairs metric do nothing
+                    {"metrics": ["pairs"], "variants": [{"name": "a"}]},
+                    {"variants": [{"name": "a"}, {"name": "b", "params": {"format": "png16"}}]},  # nr_ab's own options: one run twice
+                    {"fixed": {"backend": "stub"}, "variants": [{"name": "a"}]},
+                    {"variants": [{"name": "a"}, {"name": "b", "flags": ["--intensity", "2"]}]},  # a setting as a flag
+                    {"variants": [{"name": "a"}, {"name": "b", "flags": ["--mv-scale", "half"]}]},
+                    {"variants": [{"name": "a"}, {"name": "b", "inputs": {"colour": "x"}}]},  # would run on the run's colour under another name
+                    {"variants": [{"name": "a", "expect": {"color_source": "color_sr"}}]}):  # a stat nr_ab does not read: never met
             with self.subTest(bad=bad):
                 with self.assertRaises(RuntimeError):
-                    load(bad)
+                    self.load(bad)
 
     def test_catalogue(self):
-        cat = {e.id: e for e in nr_ab.EXPERIMENTS}
+        cat = self.cat
         self.assertEqual(len(cat["E1"].variants), 8)
         self.assertEqual(cat["E1"].baseline, "i1")
         for i in ("E1", "E2", "E7", "E10", "E11"):
@@ -151,6 +271,14 @@ class Helpers(unittest.TestCase):
         self.assertEqual([len(g) for g in cat["E7"].groups], [7, 4])
         styles = {v.params.get("style") for v in cat["E7"].variants}
         self.assertTrue({"3", "4", "5", "6"} <= styles)
+        base = {"preset": 1, "style": "cinematic"}  # a --params / --project-params with both axes must not leak into either group
+        for v in cat["E7"].variants:
+            p = nr_ab.run_params(base, cat["E7"].fixed, v.params)
+            self.assertEqual(p["style"] if v.name.startswith("preset") else p["preset"], "natural" if v.name.startswith("preset") else 3, v.name)
+        self.assertEqual(nr_ab.run_params(base, cat["E7"].fixed, {"style": "natural", "preset": 3}), {**cat["E7"].fixed, "style": "natural", "preset": 3})
+        self.assertEqual(nr_ab.run_expect(cat["E3"], cat["E3"].variants[2]), {"mv_used": True})  # the experiment needs vectors: every run binds them
+        self.assertEqual(nr_ab.run_expect(cat["E5"], cat["E5"].variants[1]), {"depth_used": False, "mv_used": True})
+        self.assertEqual(nr_ab.run_expect(cat["E1"], cat["E1"].variants[0]), {})
         self.assertEqual([v.optional for v in cat["E6"].variants], [False, False, True, True])
         self.assertTrue(cat["E8b"].unsupported)
         self.assertEqual(cat["E9"].requires, ("--scene-cut",))
@@ -166,12 +294,35 @@ class Helpers(unittest.TestCase):
         self.assertFalse(e1["monotone"])
         self.assertIsNone(nr_ab.verdict_e1(v(**{"i1.5": {"vs_base": {"psnr_y": 50}}}))["saturated"])
         self.assertFalse(nr_ab.verdict_e2(v(i0={"edit": {"psnr_y": 40}}))["identity"])
-        self.assertTrue(nr_ab.verdict_e4(v(null={"temporal": {"psnr_y": 46.4}}, create_mv={"temporal": {"psnr_y": 47.6}}))["create_better"])
+        static = {"input_temporal": {"psnr_y": 100.0, "psnr_y_min": 100.0}}
+        e4 = v(null={"temporal": {"psnr_y": 46.4}}, create_mv={"temporal": {"psnr_y": 47.6}})
+        self.assertTrue(nr_ab.verdict_e4({**e4, **static})["create_better"])
+        for moving in ({"input_temporal": {"psnr_y": 25.0, "psnr_y_min": 24.0}},  # a pan measures the motion (§2e: identical frames)
+                       {"input_temporal": {"psnr_y": 66.0, "psnr_y_min": 30.0}}):  # a few identical pairs at 100 dB lift the mean, not the minimum
+            r = nr_ab.verdict_e4({**e4, **moving})
+            self.assertIsNone(r["create_better"])
+            self.assertTrue(any("не статичен" in t for t in r["text"]))
         self.assertTrue(nr_ab.verdict_e5(v(no_depth={"vs_base": {"psnr_y": 52}}))["no_difference"])
         self.assertEqual(nr_ab.verdict_e7({"pairs": [{"a": "a", "b": "b", "psnr_y": 50}, {"a": "a", "b": "c", "psnr_y": 30}]})["same_pairs"], 1)
+        part = nr_ab.verdict_e7({"pairs": [{"a": "a", "b": "c", "psnr_y": 30}], "pairs_missing": [["a", "b"]]})
+        self.assertNotIn("все пары различаются", part["text"])  # a subset cannot say that
+        self.assertTrue(any("неполный" in t for t in part["text"]))
+        sub = nr_ab.verdict_e7({"groups": [["a", "b", "c"]], "pairs": [{"a": "a", "b": "b", "psnr_y": 30}]})  # --only: b, c never paired
+        self.assertNotIn("все пары различаются", sub["text"])
+        self.assertEqual(sub["missing_pairs"], 2)
+        full = nr_ab.verdict_e7({"groups": [["a", "b"]], "pairs": [{"a": "a", "b": "b", "psnr_y": 30}]})
+        self.assertEqual(full["text"], ["все пары различаются"])
         self.assertTrue(nr_ab.verdict_e11(v(**{n: {"vs_base": {"psnr_y": 46.5}} for n in ("s0", "s1", "s2")}))["no_effect"])
         e3 = nr_ab.verdict_e3(v(unit={"temporal": {"psnr_y": 40}, "nr": {"mv_scale": [1, 1]}}, auto={"temporal": {"psnr_y": 41}, "nr": {"mv_scale": [1, 1]}}))
         self.assertTrue(any("ничего не меряет" in t for t in e3["text"]))
+        e3 = v(unit={"temporal": {"psnr_y": 44.0}}, auto={"temporal": {"psnr_y": 46.0}}, target={"temporal": {"psnr_y": 46.5}})
+        for inp in (static, {"input_temporal": {"psnr_y": 25.0, "psnr_y_min": 24.0}}):  # zero vectors on identical frames: units cannot matter
+            r = nr_ab.verdict_e3({**e3, **inp})
+            self.assertIsNone(r["auto_better"])
+            self.assertTrue(any("компенсаци" in t for t in r["text"]))
+        e8 = nr_ab.verdict_e8({"checks": [{"ok": False}, {"ok": True, "init_ms": 1500.0, "create_ms": 200.0, "vram_mib": 249.0, "run_s": 3.1}]})
+        self.assertIn("сбой в проверках 1", e8["text"])  # numbered as the table's «Прогон»
+        self.assertEqual(e8["init_ms"], 1500.0)
 
     def test_render_table(self):
         res = {"title": "Проверка", "start": 4, "frames": 3, "warmup": 2, "still": False, "fixed": {"temporal": 0.0}, "baseline": "base",
@@ -180,22 +331,143 @@ class Helpers(unittest.TestCase):
                                      "edit": {"psnr_y": 30.0, "psnr_y_min": 29.0, "mae_rgb": 0.01}, "temporal": {"psnr_y": 40.0, "psnr_y_min": 39.0}},
                             "x": {"nr": {}, "run_s": 0.4, "params": {"intensity": 0.5}, "vs_base": {"psnr_y": 100.0, "psnr_y_min": 100.0, "ssim_y": 1.0},
                                   "edit": None, "temporal": None}},
-               "failed": {"p3": "nr.passes must be within 1..2"}, "input_temporal": {"psnr_y": 41.0, "psnr_y_min": 40.0},
+               "failed": {"p3": "nr.passes must be within 1..2", "t": f"missing pass frame 12: {self.root / 'mv_dlss' / '000012.exr'}"},
+               "input_temporal": {"psnr_y": 41.0, "psnr_y_min": 40.0},
                "verdict": {"text": ["вывод"]}}
         md = nr_ab.render_experiment("smoke", res)
         self.assertIn("### smoke — Проверка", md)
         self.assertIn("| base |", md)
         self.assertIn("| x | intensity=0.5 |", md)
+        self.assertIn("| base | — |", md)  # its params are the fixed ones, in the heading
+        self.assertIn("t: не выполнен — missing pass frame 12: 000012.exr", md)
         self.assertIn("база", md)
         self.assertIn("∞", md)
         self.assertIn("—", md)
         self.assertIn("p3: не выполнен", md)
         self.assertIn("- вывод", md)
         self.assertNotIn(str(self.root), md)
+        res["variants"]["x"]["inputs"] = {"mv": str(self.root / "mv_dlss")}  # a variants file's own folder: its name only ([hygiene])
+        res["variants"]["x"]["params"] = {"intensity": 0.5, "temporal": 0.4}  # an override of a fixed key: the heading says 0, the row 0.4
+        res["pairs_missing"] = [["base", "x"]]
+        md = nr_ab.render_experiment("smoke", res)
+        self.assertIn("mv: mv_dlss", md)
+        self.assertIn("temporal=0.4", md)
+        self.assertIn("Пары без замера", md)
+        self.assertNotIn(str(self.root), md)
+
+    def test_render_run_keeps_each_experiment_build(self):
+        m = {"version": "1.0", "gpu": "G", "driver": "616", "dll_sha256": "aaaaaaaa11", "inputs": "color_sr", "masks": ""}
+        md = nr_ab.render_run("run", {"E1": run_res(m), "E2": run_res(m)})
+        self.assertIn("## run — dlssvid 1.0, G, драйвер 616, nvngx_dlssnr.dll sha256 aaaaaaaa…", md)
+        self.assertEqual(md.count("Вход NR: color_sr; маски: выкл."), 1)
+        self.assertNotIn("Сборка:", md)
+        md = nr_ab.render_run("run", {"E1": run_res(m), "E2": run_res({**m, "dll_sha256": "bbbbbbbb22", "exe_sha256": "cccccccc33", "masks": "mask_face"})})
+        self.assertNotIn("sha256", md.splitlines()[0])  # E1 reused from results.json, E2 of another build: each its own line
+        self.assertIn("Сборка: dlssvid 1.0, G, драйвер 616, nvngx_dlssnr.dll sha256 aaaaaaaa…", md)
+        self.assertIn("Сборка: dlssvid 1.0 (exe cccccccc…), G, драйвер 616, nvngx_dlssnr.dll sha256 bbbbbbbb…", md)
+        self.assertIn("маски: mask_face", md)
+
+    def test_signature_follows_the_content_and_the_build(self):
+        e1, e3 = self.cat["E1"], self.cat["E3"]
+        sr, mv = manifest(self.root / "color_sr", 0, 40), manifest(self.root / "mv_dlss", 0, 40)
+        inp = nr_ab.Inputs(Path("clip.mp4"), color=sr, mv=mv)
+        build = {"dlssvid": "exe1"}
+        sig = lambda a=None, i=inp, e=e1, base=None, b=build: nr_ab.run_signature(a or self.args(), i, e, base or {}, b)
+        s = sig()
+        self.assertEqual(s, sig())
+        self.assertEqual(s, sig(self.args(warmup=2)))  # still mode runs without a warm-up
+        self.assertNotEqual(sig(e=e3), sig(self.args(warmup=2), e=e3))
+        with_target = nr_ab.Inputs(Path("clip.mp4"), color=sr, mv=mv, mv_target=manifest(self.root / "mvt", 0, 40))
+        self.assertEqual(sig(i=with_target), s)  # only E3 C reads --mv-target-dir
+        t0, t1 = sig(e=e3), sig(i=with_target, e=e3)
+        self.assertEqual(t0["common"], t1["common"])
+        self.assertEqual({n for n in t0["variants"] if t0["variants"][n] != t1["variants"][n]}, {"target"})
+        changed = [sig(base={"local_tone": 0.5}), sig(b={"dlssvid": "exe2"}), sig(self.args(start=8)), sig(self.args(nr_arg=["--skip-driver-check"])),
+                   sig(i=nr_ab.Inputs(Path("clip.mp4"), color=manifest(self.root / "sr2", 0, 41), mv=mv)),
+                   sig(e=nr_ab.Experiment("E1", e1.title, e1.variants, "i0", e1.fixed, e1.metrics)),  # another baseline
+                   sig(e=nr_ab.Experiment("E1", e1.title, e1.variants, e1.baseline, e1.fixed, ("base",)))]
+        for c in changed:
+            self.assertNotEqual(c, s)
+        manifest(sr, 0, 39)  # the same folder rewritten (--prepare, another backend): another input
+        self.assertNotEqual(sig(), s)
+
+    def test_reuse_and_what_an_only_run_keeps(self):
+        e1 = self.cat["E1"]
+        inp = nr_ab.Inputs(Path("clip.mp4"), color=manifest(self.root / "color_sr", 0, 40))
+        sig = nr_ab.run_signature(self.args(), inp, e1, {}, {"dlssvid": "x"})
+        prev = {"sig": sig, "variants": {"i1": {}, "i2": {}}, "failed": {"i0": "x"}}
+        self.assertTrue(nr_ab.reusable(prev, sig, ["i1", "i2", "i0"], False, "i1"))
+        self.assertFalse(nr_ab.reusable(prev, sig, ["i1", "i0.5"], False, "i1"))  # a stored --only subset does not answer more
+        self.assertFalse(nr_ab.reusable(prev, sig, ["i1"], True, "i1"))
+        self.assertFalse(nr_ab.reusable({**prev, "pairs_missing": [["i1", "i2"]]}, sig, ["i1"], False, "i1"))
+        self.assertFalse(nr_ab.reusable({"variants": {"i1": {}}}, sig, ["i1"], False, "i1"))  # stored before signatures: redone
+        self.assertFalse(nr_ab.reusable(None, sig, [], False))
+        other = json.loads(json.dumps(sig))
+        other["variants"]["i2"]["params"]["intensity"] = 3  # a variant changed since: its stored row is stale
+        self.assertFalse(nr_ab.reusable(prev, other, ["i1"], False, "i1"))
+        self.assertEqual(nr_ab.valid_stored(prev, other, "i1"), {"i1", "i0"})
+        other["variants"]["i1"]["params"]["intensity"] = 3  # the baseline changed: nothing stored is measured against it
+        self.assertEqual(nr_ab.valid_stored(prev, other, "i1"), set())
+        self.assertEqual(nr_ab.valid_stored(prev, nr_ab.run_signature(self.args(), inp, e1, {}, {"dlssvid": "y"}), "i1"), set())
+        check = nr_ab.run_signature(self.args(), inp, self.cat["E8"], {}, {"dlssvid": "x"})
+        self.assertTrue(nr_ab.reusable({"sig": check, "checks": []}, check, [], False))
+
+    def test_e3_c_without_its_vectors_is_not_run(self):
+        inp = nr_ab.Inputs(Path("clip.mp4"), mv=Path("m"))
+        res, lines = self.dry(self.cat["E3"], inp)
+        self.assertNotIn("target", res["variants"])
+        self.assertIn("--mv-target-dir", res["failed"]["target"])
+        self.assertEqual(sum(" nr " in x for x in lines), 2)
+        self.assertTrue(any("нет варианта C" in t for t in nr_ab.verdict_e3(res)["text"]))
+        must = nr_ab.Experiment("m", "m", [nr_ab.Variant("a"), nr_ab.Variant("b", inputs={"mv": "@mv_target"})], "a")
+        with self.assertRaises(RuntimeError):  # not optional: the experiment stops before any run
+            self.dry(must, inp)
+
+    def test_masks_need_mask_passes(self):
+        passes = self.root / "passes"
+        a = self.args(clip="clip.mp4", passes=str(passes), project=None, prepare=False, color_dir=None, depth_dir=None, mv_dir=None, masks=True,
+                      mv_target_dir=None)
+        with self.assertRaises(RuntimeError):  # the report would say masks over runs that had none
+            nr_ab.resolve_inputs(a, self.root, "dlssvid", False)
+        manifest(passes / "mask_face", 0, 9)
+        self.assertEqual(nr_ab.resolve_inputs(a, self.root, "dlssvid", False).masks, passes)
+        a.prepare = True
+        with self.assertRaises(RuntimeError):
+            nr_ab.resolve_inputs(a, self.root, "dlssvid", False)
+        a.masks = False
+        with self.assertRaises(RuntimeError):  # --prepare reads the passes it makes: --passes beside it would be dropped without a word
+            nr_ab.resolve_inputs(a, self.root, "dlssvid", False)
+        a.passes = None
+        inp = nr_ab.resolve_inputs(a, self.root, "dlssvid", False)
+        self.assertIsNone(inp.masks)
+        self.assertEqual(inp.color, nr_ab.prepare_root(self.root, a, Path("clip.mp4")) / "passes" / "color_sr")
+        self.assertTrue(nr_ab.prepare_root(self.root, a, Path("clip.mp4")).name.startswith("clip-"))
+        self.assertTrue(nr_ab.prepare_root(self.root, a, Path("clip.mp4")).name.endswith("-stub-stub-bicubic"))
+
+    def test_prepared_passes_belong_to_the_clip(self):
+        a = self.args()
+        clips = [self.root / d / "face.mp4" for d in ("a", "b")]
+        for c in clips:
+            c.parent.mkdir()
+            c.write_bytes(b"x" * 10)
+        work = [nr_ab.prepare_root(self.root, a, c) for c in clips]
+        self.assertNotEqual(work[0], work[1])  # one name, two clips: two folders
+        passes = work[0] / "passes"
+        inp = nr_ab.Inputs(clips[0], *(manifest(passes / n, 0, 20) for n in ("color_sr", "depth_dlss", "mv_dlss")))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertTrue(nr_ab.prepare(a, "dlssvid", inp, self.root, 17, True))  # no stamp: made from what?
+        self.assertIn(" process ", out.getvalue())
+        (work[0] / "clip.json").write_text(json.dumps(nr_ab.file_identity(clips[0])), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertFalse(nr_ab.prepare(a, "dlssvid", inp, self.root, 17, True))
+            self.assertTrue(nr_ab.prepare(a, "dlssvid", inp, self.root, 30, True))  # do not cover the range
+        clips[0].write_bytes(b"y" * 11)  # the clip re-encoded in place
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(nr_ab.prepare(a, "dlssvid", inp, self.root, 17, True))
 
 
 class StubRun(unittest.TestCase):
-    """A whole A/B on the stub backend and WARP: prepare, ranged runs, compares, the table (scripts.nr_ab_stub)."""
+    """A whole A/B on the stub backend and WARP: prepare, ranged runs, compares, the table, reuse (scripts.nr_ab_stub)."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -214,7 +486,8 @@ class StubRun(unittest.TestCase):
                                                       {"name": "nodepth", "flags": ["--no-depth-guide"], "expect": {"depth_used": False, "mv_used": True}},
                                                       {"name": "mv", "flags": ["--mv-scale", "auto", "--create-with-mv"]}]}), encoding="utf-8")
         cls.out = cls.work / "out"
-        cls.result = cls.run_ab(["--variants", str(cls.smoke), "--experiment", "E2", "--start", "4", "--frames", "3", "--warmup", "2", "--out", str(cls.out)])
+        cls.result = cls.run_ab(["--variants", str(cls.smoke), "--experiment", "E2,E8", "--check-runs", "1", "--start", "4", "--frames", "3", "--warmup", "2",
+                                 "--out", str(cls.out)])
 
     @classmethod
     def run_ab(cls, args: list) -> subprocess.CompletedProcess:
@@ -239,16 +512,98 @@ class StubRun(unittest.TestCase):
         self.assertLess(smoke["base"]["temporal"]["psnr_y"], 100.0)
         self.assertIsNotNone(res["smoke"]["input_temporal"])
         self.assertIsInstance(smoke["base"]["nr"]["ms_per_frame_gpu"], (int, float))
+        self.assertEqual(smoke["i05"]["nr"]["params"]["intensity"], 0.5)  # what the run reported it ran with
         self.assertEqual(res["E2"]["warmup"], 0)  # still mode: no warm-up
         self.assertIs(res["E2"]["verdict"]["identity"], True)  # the stub at intensity 0 returns its input
+        e8 = res["E8"]
+        self.assertEqual([c["ok"] for c in e8["checks"]], [True])
+        self.assertEqual(e8["size"], "192x128")  # the feature at the size NR runs at: color_sr's
+        self.assertTrue(e8["meta"]["gpu"])  # the build line keeps the check's GPU (nothing else ran in E8)
+        self.assertTrue(res["smoke"]["meta"]["exe_sha256"])
         md = (self.out / "nr_ab.md").read_text(encoding="utf-8")
-        for s in ("### smoke", "| i05 |", "∞", "E2"):
+        for s in ("### smoke", "| i05 |", "∞", "E2", "### E8", e8["meta"]["gpu"], "Вход NR: color_sr, depth_dlss, mv_dlss; маски: выкл."):
             self.assertIn(s, md)
         self.assertEqual(list(self.out.rglob("color_nr")), [])  # cleaned up without --keep
-        prep = self.out / "prepare" / "clip" / "passes"
-        self.assertFalse((self.out / "prepare" / "clip" / "prepare.mkv").exists())
+        work = nr_ab.prepare_root(self.out, argparse.Namespace(prepare_backends="stub,stub,bicubic"), self.clip)
+        self.assertEqual(json.loads((work / "clip.json").read_text(encoding="utf-8")), nr_ab.file_identity(self.clip))
+        self.assertFalse((work / "prepare.mkv").exists())
         for name in ("color_sr", "depth_dlss", "mv_dlss"):
-            self.assertTrue(nr_ab.covers(prep / name, 0, 6), name)
+            self.assertTrue(nr_ab.covers(work / "passes" / name, 0, 6), name)
+
+    def test_resume_reuses_only_the_same_run_and_only_adds(self):
+        out = self.work / "resume"
+        args = ["--variants", str(self.smoke), "--start", "4", "--frames", "3", "--warmup", "2", "--out", str(out)]
+        stored = lambda: json.loads((out / "results.json").read_text(encoding="utf-8"))["clip-stub"]["experiments"]["smoke"]
+        log = lambda n: (out / "clip-stub" / "smoke" / n / "nr.log").stat().st_mtime_ns
+        r = self.run_ab(args + ["--only", "i05"])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(set(stored()["variants"]), {"base", "i05"})
+        r = self.run_ab(args)  # the stored subset does not answer the whole experiment
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("пропущен", r.stdout)
+        full = stored()
+        self.assertEqual(set(full["variants"]), {"base", "i05", "nodepth", "mv"})
+        r = self.run_ab(args)  # the same run: reused
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("пропущен", r.stdout)
+        self.assertEqual(stored(), full)
+        r = self.run_ab(args + ["--dry-run"])  # a dry run tells what a real one would skip, and writes nothing
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("пропущен", r.stdout)
+        self.assertFalse([x for x in r.stdout.splitlines() if " nr " in x or " compare " in x])
+        before = {n: log(n) for n in ("i05", "nodepth")}
+        r = self.run_ab(args + ["--only", "nodepth", "--force"])  # redo one variant: added to the stored run, not replacing it
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        now = stored()
+        self.assertEqual(list(now["variants"]), ["base", "i05", "nodepth", "mv"])
+        self.assertEqual(now["variants"]["i05"], full["variants"]["i05"])
+        self.assertEqual(log("i05"), before["i05"])
+        self.assertGreater(log("nodepth"), before["nodepth"])
+        r = self.run_ab(args + ["--warmup", "1"])  # another warm-up: another signature, the whole experiment again
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertNotIn("пропущен", r.stdout)
+        self.assertGreater(log("i05"), before["i05"])
+        self.assertEqual(stored()["warmup"], 1)
+
+    def test_pairs_are_measured_again_unless_kept_by_an_only_merge(self):
+        out, ab = self.work / "pairs", self.work / "pairs_ab.json"
+        ab.write_text(json.dumps({"id": "pairs_ab", "baseline": "base", "metrics": ["base", "pairs"], "groups": [["base", "i05", "nodepth"]],
+                                  "variants": [{"name": "base"}, {"name": "i05", "params": {"intensity": 0.5}}, {"name": "nodepth", "flags": ["--no-depth-guide"]}]}),
+                      encoding="utf-8")
+        args = ["--variants", str(ab), "--start", "4", "--frames", "3", "--warmup", "2", "--out", str(out)]
+        path = out / "results.json"
+        stored = lambda: json.loads(path.read_text(encoding="utf-8"))["clip-stub"]["experiments"]["pairs_ab"]
+        pairs = lambda: {(p["a"], p["b"]): p["psnr_y"] for p in stored()["pairs"]}
+
+        def tamper(pair, value):
+            j = json.loads(path.read_text(encoding="utf-8"))
+            for p in j["clip-stub"]["experiments"]["pairs_ab"]["pairs"]:
+                if (p["a"], p["b"]) == pair:
+                    p["psnr_y"] = value
+            path.write_text(json.dumps(j), encoding="utf-8")
+
+        r = self.run_ab(args + ["--keep"])
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        first = pairs()
+        self.assertEqual(set(first), {("base", "i05"), ("base", "nodepth"), ("i05", "nodepth")})
+        tamper(("base", "i05"), 1.0)
+        r = self.run_ab(args + ["--keep", "--force"])  # every variant ran again: every pair is measured again
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(pairs()[("base", "i05")], first[("base", "i05")])
+        tamper(("base", "nodepth"), 2.0)
+        r = self.run_ab(args + ["--only", "i05", "--force"])  # an --only merge: the pair without i05 stays, i05's are measured (nodepth kept)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        now = pairs()
+        self.assertEqual(now[("base", "nodepth")], 2.0)
+        self.assertEqual(now[("i05", "nodepth")], first[("i05", "nodepth")])
+        self.assertEqual(stored()["pairs_missing"], [])
+        r = self.run_ab(args + ["--only", "nodepth", "--force"])  # i05's color_nr is gone (no --keep above): its pair with nodepth has no number
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(stored()["pairs_missing"], [["i05", "nodepth"]])
+        self.assertTrue(any("неполный" in t for t in stored()["verdict"]["text"]))
+        r = self.run_ab(args)  # a result with a pair missing is not reused
+        self.assertNotIn("пропущен", r.stdout)
+        self.assertEqual(stored()["pairs_missing"], [])
 
     def test_dry_run_prints_commands_only(self):
         out = self.work / "dry"
@@ -262,14 +617,21 @@ class StubRun(unittest.TestCase):
         self.assertEqual(sum(" compare " in x for x in lines), 37)  # 21 + 6 pairs and 10 edit compares
         self.assertFalse(out.exists() and any(out.rglob("*")))
 
-    def test_unknown_key_is_refused_before_any_run(self):
+    def test_refused_before_any_run(self):
         bad = self.work / "bad.json"
         bad.write_text(json.dumps({"id": "bad", "variants": [{"name": "a", "params": {"no_such_key": 1}}]}), encoding="utf-8")
-        out = self.work / "bad_out"
-        r = self.run_ab(["--variants", str(bad), "--out", str(out)])
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("no_such_key", r.stderr)
-        self.assertEqual(list(out.rglob("nr.log")) if out.exists() else [], [])
+        switch = self.work / "switch.json"  # an A/B switch in params: dlssvid would refuse it after the baseline ran
+        switch.write_text(json.dumps({"id": "switch", "variants": [{"name": "a"}, {"name": "b", "params": {"mv_scale": "auto"}}]}), encoding="utf-8")
+        taken = self.work / "E7.json"  # its id is the file name: results.json, folder and verdict of the catalogue's E7
+        taken.write_text(json.dumps({"variants": [{"name": "a"}]}), encoding="utf-8")
+        for args, word in ((["--variants", str(bad)], "no_such_key"), (["--experiment", "E2", "--nr-arg=--intensity=1"], "--intensity=1"),
+                           (["--variants", str(switch)], "mv_scale"), (["--variants", str(taken)], "taken"),
+                           (["--experiment", "E2", "--passes", str(self.work)], "--prepare makes")):
+            out = self.work / "bad_out"
+            r = self.run_ab(args + ["--out", str(out)])
+            self.assertEqual(r.returncode, 1, word)
+            self.assertIn(word, r.stderr)
+            self.assertEqual(list(out.rglob("nr.log")) if out.exists() else [], [])
 
 
 if __name__ == "__main__":
