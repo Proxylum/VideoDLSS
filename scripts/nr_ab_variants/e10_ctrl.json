@@ -1,0 +1,2 @@
+{"id": "E10c", "title": "E10: контроль — локальный тон и структура 2", "baseline": "base", "still": true, "metrics": ["base", "edit", "time"],
+ "variants": [{"name": "base"}, {"name": "tone2", "params": {"local_tone": 2}}, {"name": "structure2", "params": {"local_structure": 2}}]}

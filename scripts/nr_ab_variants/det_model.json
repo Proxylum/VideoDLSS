@@ -1,0 +1,2 @@
+{"id": "det_model", "title": "Повторяемость NGX: история модели (два одинаковых прогона)", "baseline": "a", "fixed": {"temporal": 0},
+ "needs": ["mv"], "metrics": ["base", "temporal", "time"], "variants": [{"name": "a"}, {"name": "b"}]}

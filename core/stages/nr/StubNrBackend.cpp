@@ -29,6 +29,7 @@ void StubNrBackend::Init(D3D12Device& device, const NrConfig& config) {
     // its compute kernel, there is no feature to create (0 ms), its VRAM is what the kernel's buffers take (0 or ? on WARP)
     const auto t0 = std::chrono::steady_clock::now();
     const auto memBefore = device.LocalVideoMemory();
+    device_ = &device;
     kernel_ = std::make_unique<ComputeKernel>(device, d);
     diag_.initMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     diag_.createMs = 0.0;
@@ -42,6 +43,16 @@ void StubNrBackend::Init(D3D12Device& device, const NrConfig& config) {
     diag_.driverOk = diag_.driver.AtLeast(kNrMinDriverMajor, kNrMinDriverMinor);
     diag_.initResult = diag_.createResult = "stub";
     diag_.ok = true;
+}
+
+NrRecreation StubNrBackend::RecreateFeature() {
+    if (!kernel_ || !device_) Throw("stub nr: not initialised");
+    NrRecreation rec;
+    rec.result = "stub";
+    rec.ok = true;
+    rec.releaseMs = rec.createMs = 0.0;
+    if (const auto m = device_->LocalVideoMemory()) rec.vramAfterRelease = rec.vramAfterCreate = static_cast<int64_t>(m->currentUsage);
+    return rec;
 }
 
 void StubNrBackend::Evaluate(ID3D12GraphicsCommandList* cl, const NrInputs& in, ID3D12Resource* output) {

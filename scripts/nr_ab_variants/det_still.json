@@ -1,0 +1,2 @@
+{"id": "det_still", "title": "Повторяемость NGX: still (два одинаковых прогона)", "baseline": "a", "still": true, "metrics": ["base", "time"],
+ "variants": [{"name": "a"}, {"name": "b"}]}

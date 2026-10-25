@@ -231,16 +231,97 @@ int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
         error = e.what();
     }
     const NrDiagnostics d = backend->Diagnostics();
-    backend->Shutdown();
     PrintDiagnostics(d, error, deviceMs);
+    auto usage = [&]() -> int64_t {
+        const auto m = device.LocalVideoMemory();
+        return m ? static_cast<int64_t>(m->currentUsage) : -1;
+    };
+    const int64_t usageAfterInit = d.ok ? usage() : -1;
+    bool failed = !d.ok;
+
+    // E6: more features alive with the first - each a whole Init as the passes of a run are - until one fails (the limit observed) or
+    // the process nears 80 % of its DXGI budget (a TDR or an out-of-memory would take the desktop with it)
+    nlohmann::json features = nlohmann::json::array();
+    std::string featuresStop;
+    std::vector<std::unique_ptr<INrBackend>> more;
+    if (d.ok && a.checkFeatures > 1) {
+        auto entry = [&](int index, const NrDiagnostics& fd, const std::string& err) {
+            features.push_back({{"index", index},
+                                {"ok", fd.ok},
+                                {"create_result", fd.createResult},
+                                {"init_ms", fd.initMs < 0 ? nlohmann::json(nullptr) : nlohmann::json(fd.initMs)},
+                                {"create_ms", fd.createMs < 0 ? nlohmann::json(nullptr) : nlohmann::json(fd.createMs)},
+                                {"vram_feature_bytes", fd.vramFeatureBytes < 0 ? nlohmann::json(nullptr) : nlohmann::json(fd.vramFeatureBytes)},
+                                {"vram_usage_bytes", usage() < 0 ? nlohmann::json(nullptr) : nlohmann::json(usage())},
+                                {"error", err}});
+            std::printf("feature %2d:   %s, init %s, create %s, feature %s, process %s\n", index, fd.ok ? "ok" : "FAILED", Ms(fd.initMs).c_str(),
+                        Ms(fd.createMs).c_str(), MiB(fd.vramFeatureBytes).c_str(), MiB(usage()).c_str());
+        };
+        entry(1, d, "");
+        for (int i = 2; i <= a.checkFeatures; ++i) {
+            const auto m = device.LocalVideoMemory();
+            if (m && m->budget > 0 && static_cast<double>(m->currentUsage) > 0.8 * static_cast<double>(m->budget)) {
+                featuresStop = "budget";
+                std::printf("features:     stopped before %d: %s of the %s budget in use (80 %% guard)\n", i, MiB(static_cast<int64_t>(m->currentUsage)).c_str(),
+                            MiB(static_cast<int64_t>(m->budget)).c_str());
+                break;
+            }
+            std::unique_ptr<INrBackend> b = CreateNrBackend(o.backend);
+            std::string err;
+            try {
+                b->Init(device, cfg);
+            } catch (const std::exception& e) {
+                err = e.what();
+            }
+            entry(i, b->Diagnostics(), err);
+            if (!err.empty()) {
+                featuresStop = "failure";
+                failed = true;
+                b->Shutdown();
+                break;
+            }
+            more.push_back(std::move(b));
+        }
+        std::printf("features:     %zu alive at once%s\n", more.size() + 1, featuresStop.empty() ? "" : (" (" + featuresStop + ")").c_str());
+    }
+
+    // E8: re-creations inside the same Init (the preview's phase 2 re-creates the feature on a change of its settings); the first
+    // failure stops - it is the answer
+    nlohmann::json recreations = nlohmann::json::array();
+    if (d.ok && a.checkRepeat > 0) {
+        int okCount = 0;
+        for (int i = 1; i <= a.checkRepeat; ++i) {
+            const NrRecreation r = backend->RecreateFeature();
+            nlohmann::json e = r.ToJson();
+            e["index"] = i;
+            recreations.push_back(std::move(e));
+            std::printf("recreate %3d: %s, release %s, create %s, process %s after release, %s after create\n", i, r.result.c_str(), Ms(r.releaseMs).c_str(),
+                        Ms(r.createMs).c_str(), MiB(r.vramAfterRelease).c_str(), MiB(r.vramAfterCreate).c_str());
+            if (!r.ok) {
+                failed = true;
+                break;
+            }
+            ++okCount;
+        }
+        std::printf("recreate:     %d of %d ok (process %s after the first Init)\n", okCount, a.checkRepeat, MiB(usageAfterInit).c_str());
+    }
+    for (auto it = more.rbegin(); it != more.rend(); ++it) (*it)->Shutdown();
+    backend->Shutdown();
     if (!a.json.empty()) {
         nlohmann::json j = d.ToJson();
         j["error"] = error;
         j["device_ms"] = deviceMs;
         j["ab"] = NrAbJson(o);
+        j["vram_usage_after_init_bytes"] = usageAfterInit < 0 ? nlohmann::json(nullptr) : nlohmann::json(usageAfterInit);
+        if (a.checkFeatures > 1) {
+            j["features"] = features;
+            j["features_alive"] = d.ok ? static_cast<int>(more.size()) + 1 : 0;
+            j["features_stop"] = featuresStop;
+        }
+        if (a.checkRepeat > 0) j["recreations"] = recreations;
         std::ofstream(a.json) << j.dump(2) << "\n";
     }
-    return d.ok ? 0 : 1;
+    return failed ? 1 : 0;
 }
 
 int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
@@ -254,6 +335,9 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     o.createWithMv = a.createWithMv;
     o.depthGuide = !a.noDepthGuide;
     if (const auto problems = NrAbProblems(o); !problems.empty()) Throw("nr: " + Join(problems));
+    if (a.checkRepeat > 0 && a.checkFeatures > 1)
+        Throw("nr: --check-repeat and --check-features measure one thing each - give one of them per run");
+    if ((a.checkRepeat > 0 || a.checkFeatures > 1) && !a.check) Throw("nr: --check-repeat and --check-features belong to --check");
     if (a.check) return CmdNrCheck(a, o);
     if (a.input.empty()) Throw("nr: -i/--input is required (or --check)");
     if (a.output.empty()) Throw("nr: -o/--output is required");
@@ -426,6 +510,14 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_flag("--skip-driver-check,--skip_driver_check", na_.skipDriverCheck, "try even with a driver older than 616.56");
     nr_->add_flag("--check", na_.check, "no processing: initialise the backend, print GPU / driver / DLL / CreateFeature(18) diagnostics and exit 0/1");
     nr_->add_option("--check-size,--check_size", na_.checkSize, "resolution for --check")->default_val("1280x720");
+    nr_->add_option("--check-repeat,--check_repeat", na_.checkRepeat,
+                    "--check: release and create the feature N more times inside one init (times, VRAM after each; the first failure stops)")
+        ->check(CLI::Range(0, 1000));
+    // at most 4 (passes 1..4, spec §2c): a probe of up to 18 NGX features at 1440p hung the whole machine with no TDR and no bugcheck,
+    // a hard reset was needed (INCIDENT 2026-10-25, TASK-0053) - the 80 % budget guard below did not apply, ~9 GB of 15
+    nr_->add_option("--check-features,--check_features", na_.checkFeatures,
+                    "--check: N features alive at once, 1..4 (time and VRAM of each; stops at a failure or at 80 % of the DXGI budget)")
+        ->check(CLI::Range(1, 4));
     nr_->add_option("--json", na_.json, "write the run summary / diagnostics to this JSON file");
 
     patch_ = app.add_subcommand("nr-patch", "patch your nvngx_dlssnr.dll for RTX 20/30/40 with dlssnr-patcher (external tool, CUDA 13.3) into bin/nvidia/");

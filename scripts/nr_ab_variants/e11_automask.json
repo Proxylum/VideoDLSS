@@ -1,0 +1,4 @@
+{"id": "E11am", "title": "E11: контроль — структура кожи с автомаской", "baseline": "am_follow", "still": true, "fixed": {"auto_mask": true},
+ "metrics": ["base", "edit", "time"],
+ "variants": [{"name": "am_follow", "params": {"skin_structure": -1}}, {"name": "am_s0", "params": {"skin_structure": 0}},
+              {"name": "am_s2", "params": {"skin_structure": 2}}]}

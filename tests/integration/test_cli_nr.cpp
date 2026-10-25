@@ -157,6 +157,51 @@ TEST_CASE("dlssvid nr --check reports the diagnostics: stub ok, ngx on WARP fail
     CHECK(j.contains("dll"));
 }
 
+// TASK-0053: the plumbing of the E8 / E6 measurements on the stub (WARP); the NGX numbers come from nr_ab.py on the GPU (PR-2)
+TEST_CASE("dlssvid nr --check --check-repeat re-creates the feature N times and --check-features keeps N alive", "[integration][cli][nr]") {
+    const auto dir = Dir("check_repeat");
+    const auto json = dir / "repeat.json";
+    const CliResult rep = RunCli({"nr", "--check", "--warp", "--backend", "stub", "--check-repeat", "3", "--json", json.string()});
+    REQUIRE(rep.code == 0);
+    CHECK(rep.out.find("recreate:     3 of 3 ok") != std::string::npos);
+    const nlohmann::json j = ReadJson(json);
+    REQUIRE(j["recreations"].size() == 3);
+    for (const auto& r : j["recreations"]) {
+        CHECK(r["ok"] == true);
+        CHECK(r.contains("vram_after_release_bytes"));
+        CHECK(r.contains("create_ms"));
+    }
+    CHECK(j["recreations"][2]["index"] == 3);
+    CHECK(!j.contains("features"));
+
+    const auto fjson = dir / "features.json";
+    const CliResult feat = RunCli({"nr", "--check", "--warp", "--backend", "stub", "--check-features", "3", "--json", fjson.string()});
+    REQUIRE(feat.code == 0);
+    CHECK(feat.out.find("features:     3 alive at once") != std::string::npos);
+    const nlohmann::json f = ReadJson(fjson);
+    REQUIRE(f["features"].size() == 3);
+    CHECK(f["features_alive"] == 3);
+    CHECK(f["features_stop"] == "");
+    CHECK(f["features"][1]["ok"] == true);
+    CHECK(!f.contains("recreations"));
+
+    // one measurement per run, and only with --check
+    CHECK(RunCli({"nr", "--check", "--warp", "--backend", "stub", "--check-repeat", "2", "--check-features", "2"}).code != 0);
+    CHECK(RunCli({"nr", "--warp", "--backend", "stub", "--check-repeat", "2", "-i", "x.mp4", "-o", dir.string()}).code != 0);
+    CHECK(RunCli({"nr", "--check", "--warp", "--backend", "stub", "--check-features", "0"}).code != 0);
+    // regression (INCIDENT 2026-10-25): a probe of up to 18 NGX features hung the machine - more than the 4 passes need is refused
+    const CliResult many = RunCli({"nr", "--check", "--warp", "--backend", "stub", "--check-features", "5"});
+    CHECK(many.code != 0);
+    CHECK(many.out.find("feature  5") == std::string::npos);
+    // ngx on WARP fails at the first Init: neither measurement starts, the JSON says why
+    const auto bad = dir / "bad.json";
+    const CliResult ngx = RunCli({"nr", "--check", "--warp", "--backend", "ngx", "--check-repeat", "5", "--json", bad.string()});
+    CHECK(ngx.code == 1);
+    const nlohmann::json b = ReadJson(bad);
+    CHECK(b["recreations"].empty());
+    CHECK(b["vram_usage_after_init_bytes"].is_null());
+}
+
 TEST_CASE("dlssvid nr-patch runs the patcher, hashes the result and writes the sidecar", "[integration][cli][nr]") {
     if (!HavePython()) SKIP("python not on PATH");
     const auto dir = Dir("patch");

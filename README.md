@@ -343,6 +343,8 @@ Neural Rendering (stage 6): `color_nr` from `color_sr` (or the video) with `dept
 
 ```bat
 dlssvid nr --check                                                                    :: GPU, driver (>= 616.56), DLL + SHA-256, CreateFeature(18); init / create times and the feature's VRAM
+dlssvid nr --check --check-repeat 100 --check-size 2560x1440 --json e8.json             :: the feature released and created again N times in one init (times, VRAM after each)
+dlssvid nr --check --check-features 4 --check-size 3840x2160                            :: 1..4 features alive at once: VRAM per feature (passes 1..4)
 dlssvid nr-patch --input C:\dlls\nvngx_dlssnr.dll --patcher <SDK>\dlssnr-patcher --cuda-bin "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\bin"
 dlssvid nr -i input.mp4 -o passes                                                     :: color_sr + guides + masks under passes\ are picked up
 dlssvid nr -i input.mp4 -o passes --intensity 1.2 --style cinematic --passes 2 --model-scale 0.75 --temporal 0.4

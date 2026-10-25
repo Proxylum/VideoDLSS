@@ -19,6 +19,7 @@ public:
     const NrDiagnostics& Diagnostics() const override { return diag_; }
     nlohmann::json Describe() const override;
     void Shutdown() override { kernel_.reset(); }
+    NrRecreation RecreateFeature() override;  // nothing to release: the --check-repeat plumbing on WARP (test_cli_nr)
     int Calls() const { return calls_; }
     const NrConfig& Config() const { return config_; }  // the A/B switches reach the backend (test_nr_stage)
     bool LastHadDepth() const { return lastDepth_; }
@@ -27,6 +28,7 @@ public:
 
 private:
     std::unique_ptr<ComputeKernel> kernel_;
+    D3D12Device* device_ = nullptr;
     NrConfig config_;
     NrDiagnostics diag_;
     int calls_ = 0;
