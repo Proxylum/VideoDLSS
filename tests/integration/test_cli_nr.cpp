@@ -96,10 +96,10 @@ TEST_CASE("dlssvid nr --backend stub --warp writes color_nr and a JSON summary",
     // missing input
     CHECK(RunCli({"nr", "--backend", "stub", "--warp", "-o", (dir / "passes3").string()}).code != 0);
 
-    // TASK-0044: the standalone run checks every value against the schema (before: `--intensity 5` and `--preset 9` went
-    // to NGX); an experimental style is a valid one
+    // TASK-0044: the standalone run checks every value against the schema (before: `--intensity 5` went to NGX); styles 3..6
+    // are refused too since PR-2 E7 (TASK-0052)
     for (const std::vector<std::string>& bad : std::vector<std::vector<std::string>>{
-             {"--intensity", "5"}, {"--preset", "9"}, {"--passes", "5"}, {"--exposure", "20"}, {"--style", "7"}, {"--local-tone", "3"}}) {
+             {"--intensity", "5"}, {"--passes", "5"}, {"--exposure", "20"}, {"--style", "7"}, {"--style", "4"}, {"--local-tone", "3"}}) {
         std::vector<std::string> args{"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "bad").string(), "--frames", "1"};
         args.insert(args.end(), bad.begin(), bad.end());
         const CliResult b = RunCli(args);
@@ -107,11 +107,12 @@ TEST_CASE("dlssvid nr --backend stub --warp writes color_nr and a JSON summary",
         CHECK(b.code != 0);
         CHECK(b.out.find("must be") != std::string::npos);
     }
-    CHECK(RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "style4").string(), "--frames", "1", "--style", "4"}).code == 0);
+    CHECK(RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "cinematic").string(), "--frames", "1", "--style", "2"}).code == 0);
     // --check too: the values it hands the backend are checked the same way (review of TASK-0044)
-    const CliResult check = RunCli({"nr", "--check", "--backend", "stub", "--warp", "--preset", "9"});
+    const CliResult check = RunCli({"nr", "--check", "--backend", "stub", "--warp", "--style", "5"});
     CHECK(check.code != 0);
     CHECK(check.out.find("must be") != std::string::npos);
+    CHECK(RunCli({"nr", "--check", "--backend", "stub", "--warp", "--preset", "3"}).code != 0);  // PR-2 E7: no preset option any more
 }
 
 // TASK-0044: the schema offers tiff, npz and raw for the nr pass and `process` took them, while `dlssvid nr` (the GUI's
@@ -462,7 +463,8 @@ TEST_CASE("dlssvid nr --params-file; explicit flags override the file", "[integr
     refused(R"({"backend":"stub","intensty":1.2})", {}, "intensty");  // a typo changed nothing and said nothing
     refused(R"({"backend":"stub","start":3})", {}, "option of dlssvid nr");
     refused(R"({"backend":"stub","mv_scale":"auto"})", {}, "option of dlssvid nr");  // an A/B switch (TASK-0048): a flag, not a setting
-    refused(R"({"backend":"stub","preset":9})", {"--check"}, "must be");
+    refused(R"({"backend":"stub","style":"4"})", {"--check"}, "must be");
+    refused(R"({"backend":"stub","preset":3})", {"--check"}, "preset");  // PR-2 E7: not a setting any more
 }
 
 // TASK-0048 (spec §2e): the A/B switches of the standalone run - the mv scale, zero guides at CreateFeature, no depth guide -

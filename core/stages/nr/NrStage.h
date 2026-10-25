@@ -29,8 +29,7 @@ struct NrStageOptions {
     std::string backend = "ngx";        // ngx | stub
     // model (docs/plans/06-nr.md)
     float intensity = 1.f;
-    std::string style = "natural";      // natural | cinematic | default | 3..6 (experimental)
-    int preset = 3;                     // 0..3
+    std::string style = "natural";      // natural | cinematic | default (PR-2 E7: 3..6 = cinematic)
     float localTone = 1.f, localStructure = 1.f, skinStructure = -1.f;
     bool autoMask = false;
     int passes = 1;                     // 1..2: the model applied again to its own output (own history per pass)

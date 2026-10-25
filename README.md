@@ -449,10 +449,11 @@ source's within the codec, and the bitrate, «Авто» — chosen from the res
 `core/io/EncodeDefaults` — or a preset in Mbit/s or a custom value, with the rough file size; the result's extension
 follows the codec: .mp4, .mov for ProRes, .mkv for FFV1) and the pass versions on disk
 («Сравнить» / «Вернуть» / «Удалить» / «Очистить старые»; a version names its values other than the default, the basic
-ones first). The NR card shows every DLSS 5 setting (TASK-0046): style (with the numbers of Visual Enhancer's «Style N»
-and the experimental 3..6, which the card warns about), intensity, passes, local tone and structure, the flicker filter,
+ones first). The NR card shows every DLSS 5 setting (TASK-0046): style (natural, cinematic, default - the numbers of
+Visual Enhancer's «Style N»; styles 3..6 and the render preset left the schema after PR-2 measured them: 3..6 = cinematic,
+the preset changed nothing), intensity, passes, local tone and structure, the flicker filter,
 the automatic skin mask, the skin structure (enabled with the mask; «отдельно» off = as the local structure) and the
-strength on skin (shown when the plan has face / skin masks), and under «Ещё настройки» the model preset, the flicker
+strength on skin (shown when the plan has face / skin masks), and under «Ещё настройки» the flicker
 filter's threshold (with the filter on), the guides, the tonemap / input transfer / exposure in EV and the model
 resolution with the transfer strength and the ratio limit (at a resolution ≠ 1). A changed value whose row its
 condition hides is named on «Ещё настройки» as «не действует». The look follows the mockups of `docs/ux-guidelines.md`

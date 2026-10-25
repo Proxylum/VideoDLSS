@@ -27,7 +27,7 @@ double BaselineMsPerFrame(const std::string& stage, const std::string& backend, 
 // `frames` (0: the record's own) with NrMovedMsPerFrame.
 std::optional<double> RecordedMsPerFrame(const std::filesystem::path& passesRoot, const std::string& stage, const nlohmann::json& tool = {},
                                          const nlohmann::json& params = {}, int64_t frames = 0);
-// nr: the model's GPU time of one pass at `workPixels`: the `--passes 2` step of docs/benchmarks.md (17.6 ms at 2560x1440, Ada)
+// nr: the model's GPU time of one pass at `workPixels`: the `passes 2` step of PR-2 E6 (6.4 ms at 2560x1440, Ada)
 // scaled by the working pixels; 0 for the stub. Only this per-pass step is scaled. The stage's whole time is not fitted to
 // megapixels: model_scale 0.5 cost 13.4 ms GPU against 15.9, which such a fit contradicts.
 double NrModelMsPerPass(const std::string& backend, double workPixels);

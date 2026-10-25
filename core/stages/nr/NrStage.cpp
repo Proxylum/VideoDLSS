@@ -53,7 +53,6 @@ void ApplyNrParams(const nlohmann::json& p, NrStageOptions& o) {
     get("backend", nullptr, o.backend);
     get("intensity", nullptr, o.intensity);
     get("style", nullptr, o.style);
-    get("preset", nullptr, o.preset);
     get("local_tone", "local-tone", o.localTone);
     get("local_structure", "local-structure", o.localStructure);
     get("skin_structure", "skin-structure", o.skinStructure);
@@ -74,16 +73,14 @@ void ApplyNrParams(const nlohmann::json& p, NrStageOptions& o) {
 
 nlohmann::json NrParamsFromOptions(const NrStageOptions& o) {
     std::string style = o.style;
-    try {  // "Natural", "1" -> natural; "4" stays; an unknown value stays for the schema to name it
+    try {  // "Natural", "1" -> natural; an unknown value stays for the schema to name it
         static const char* named[] = {"default", "natural", "cinematic"};
-        const int id = ParseNrStyle(o.style);
-        style = id <= 2 ? named[id] : std::to_string(id);
+        style = named[ParseNrStyle(o.style)];
     } catch (const std::exception&) {
     }
     return {{"backend", o.backend},
             {"intensity", o.intensity},
             {"style", style},
-            {"preset", o.preset},
             {"passes", o.passes},
             {"model_scale", o.modelScale},
             {"transfer", o.transfer},
@@ -107,8 +104,7 @@ NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t w
     cfg.width = workW;
     cfg.height = workH;
     cfg.intensity = o.intensity;
-    cfg.style = ParseNrStyle(o.style);
-    cfg.preset = o.preset;
+    cfg.style = ParseNrStyle(o.style);  // the render preset stays NrConfig's 3: 0..2 changed nothing (PR-2 E7)
     cfg.localTone = o.localTone;
     cfg.localStructure = o.localStructure;
     cfg.skinStructure = o.skinStructure;

@@ -84,7 +84,6 @@ nlohmann::json ArgsAsParams(const NrCommands::NrArgs& a) {
     o.backend = a.backend;
     o.intensity = a.intensity;
     o.style = a.style;
-    o.preset = a.preset;
     o.localTone = a.localTone;
     o.localStructure = a.localStructure;
     o.skinStructure = a.skinStructure;
@@ -492,8 +491,7 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_flag("--no-auto,--no_auto", na_.noAuto, "do not pick pass folders under --output automatically");
     nr_->add_option("--backend", na_.backend, "ngx (nvngx_dlssnr.dll) | stub (deterministic test edit)")->default_val("ngx");
     nr_->add_option("--intensity", na_.intensity, "DLSSNR.Intensity 0..2")->default_val(1.f);
-    nr_->add_option("--style", na_.style, "natural | cinematic | default | 3..6 (experimental)")->default_val("natural");
-    nr_->add_option("--preset", na_.preset, "DLSSNR.Hint.Render.Preset 0..3")->default_val(3);
+    nr_->add_option("--style", na_.style, "natural | cinematic | default")->default_val("natural");
     nr_->add_option("--local-tone,--local_tone", na_.localTone, "DLSSNR.LocalToneStrength 0..2")->default_val(1.f);
     nr_->add_option("--local-structure,--local_structure", na_.localStructure, "DLSSNR.LocalStructureStrength 0..2")->default_val(1.f);
     nr_->add_option("--skin-structure,--skin_structure", na_.skinStructure, "DLSSNR.SkinStructureStrength (-1 = model default)")->default_val(-1.f);

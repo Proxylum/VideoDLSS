@@ -369,14 +369,12 @@ class Helpers(unittest.TestCase):
             self.assertEqual({k: cat[i].fixed[k] for k in ("guides", "temporal")}, {"guides": False, "temporal": 0.0}, i)
         for i in ("E3", "E4", "E5", "E6"):
             self.assertEqual(cat[i].fixed, {"temporal": 0.0}, i)
-        self.assertEqual([len(g) for g in cat["E7"].groups], [7, 4])
-        styles = {v.params.get("style") for v in cat["E7"].variants}
-        self.assertTrue({"3", "4", "5", "6"} <= styles)
-        base = {"preset": 1, "style": "cinematic"}  # a --params / --project-params with both axes must not leak into either group
+        self.assertEqual(cat["E7"].groups, [["default", "natural", "cinematic"]])  # PR-2: 3..6 = cinematic, no preset (TASK-0052)
+        self.assertEqual({v.params["style"] for v in cat["E7"].variants}, {"default", "natural", "cinematic"})
+        self.assertFalse(any("preset" in v.params for e in nr_ab.EXPERIMENTS for v in e.variants))
+        base = {"style": "cinematic"}  # a --params / --project-params style does not leak into the variants
         for v in cat["E7"].variants:
-            p = nr_ab.run_params(base, cat["E7"].fixed, v.params)
-            self.assertEqual(p["style"] if v.name.startswith("preset") else p["preset"], "natural" if v.name.startswith("preset") else 3, v.name)
-        self.assertEqual(nr_ab.run_params(base, cat["E7"].fixed, {"style": "natural", "preset": 3}), {**cat["E7"].fixed, "style": "natural", "preset": 3})
+            self.assertEqual(nr_ab.run_params(base, cat["E7"].fixed, v.params)["style"], v.name)
         self.assertEqual(nr_ab.run_expect(cat["E3"], cat["E3"].variants[2]), {"mv_used": True})  # the experiment needs vectors: every run binds them
         self.assertEqual(nr_ab.run_expect(cat["E5"], cat["E5"].variants[1]), {"depth_used": False, "mv_used": True})
         self.assertEqual(nr_ab.run_expect(cat["E1"], cat["E1"].variants[0]), {})
@@ -728,9 +726,9 @@ class StubRun(unittest.TestCase):
         lines = r.stdout.splitlines()
         self.assertEqual(sum(" process " in x for x in lines), 1)
         nr = [x for x in lines if " nr " in x]
-        self.assertEqual(len(nr), 10)
+        self.assertEqual(len(nr), 3)
         self.assertTrue(all("--warmup 0" in x and "--params-file" in x for x in nr))
-        self.assertEqual(sum(" compare " in x for x in lines), 37)  # 21 + 6 pairs and 10 edit compares
+        self.assertEqual(sum(" compare " in x for x in lines), 6)  # 3 pairs and 3 edit compares
         self.assertFalse(out.exists() and any(out.rglob("*")))
 
     def test_refused_before_any_run(self):

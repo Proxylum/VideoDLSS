@@ -1325,7 +1325,7 @@ TEST_CASE("StageCard NR: hidden changed values, folded aliases, the followed val
 
     // a long summary wraps instead of widening the card
     const int narrow = card.minimumSizeHint().width();
-    model.setStageParams("nr", {{"backend", "ngx"}, {"preset", 0}, {"tonemap", "aces"}, {"input_transfer", "pq"}, {"exposure", 0.5},
+    model.setStageParams("nr", {{"backend", "ngx"}, {"model_scale", 0.5}, {"tonemap", "aces"}, {"input_transfer", "pq"}, {"exposure", 0.5},
                                 {"temporal_threshold", 0.2}, {"transfer", 0.8}, {"max_ratio", 6}});
     card.refresh();
     CHECK(card.minimumSizeHint().width() <= narrow);
@@ -1392,43 +1392,17 @@ TEST_CASE("StageCard: the reset of the backend drops the old backend's model, as
     CHECK(model.stageEntry("depth")->params == nlohmann::json{{"backend", "da3"}, {"model", "da3mono-large"}});
 }
 
-// TASK-0046: an experimental style (3..6, not documented by NVIDIA) warns on the card.
-TEST_CASE("Card state: an experimental style warns", "[app][card][nr]") {
-    App();
-    const auto d = Dir("card_experimental");
-    ClipSpec spec;
-    spec.frames = 2;
-    spec.width = 48;
-    spec.height = 32;
-    Project p = Project::Create(WriteClip(d / "clip.mkv", spec), d / "passes");
-    for (auto& st : p.stages) {
-        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
-        if (st.name == "upscale") st.params["backend"] = "nis";
-        if (st.name == "fg") st.params["backend"] = "blend";
-    }
-    p.Save(d / "proj.dlssvid.json");
-    AppModel model(true);
-    model.openProject(Q(d / "proj.dlssvid.json"));
-    const QString text = QString::fromUtf8("экспериментальный");
-    CHECK_FALSE(model.cardState("nr").warning.contains(text));
-    model.setStageParam("nr", "style", "4");
-    model.refreshPlan();
-    CHECK(model.cardState("nr").warning.contains(text));
-    model.setStageParam("nr", "style", 1);  // natural, as a number
-    model.refreshPlan();
-    CHECK_FALSE(model.cardState("nr").warning.contains(text));
-}
-
 // TASK-0046 (D7): the versions panel named only the intensity, so two NR versions with another style looked the same.
 TEST_CASE("Versions panel names the values other than the default, the basic ones first", "[app][versions][regression]") {
     const nlohmann::json p = {{"backend", "ngx"},      {"style", "cinematic"},       {"intensity", 1.0}, {"local_tone", 1.5},
-                              {"auto_mask", true},     {"skin_structure", 0.5},      {"preset", 0},      {"temporal_threshold", 0.2},
+                              {"auto_mask", true},     {"skin_structure", 0.5},      {"model_scale", 0.5}, {"temporal_threshold", 0.2},
                               {"guides", false},       {"format", "png"}};
     QString tip;
     const QString s = dlssvid::HumanStageParams("nr", p, &tip);
     INFO(s.toStdString());
     CHECK(s.startsWith(QString::fromUtf8("Стиль Кинематографичный (2) · Интенсивность 1 · Локальный тон 1.5")));
-    CHECK(s.indexOf(QString::fromUtf8("Структура кожи")) < s.indexOf(QString::fromUtf8("Пресет модели")));  // basic before «Ещё»
+    CHECK(s.indexOf(QString::fromUtf8("Структура кожи")) < s.indexOf(QString::fromUtf8("Порог подавления мерцания")));  // basic before «Ещё»
+    CHECK_FALSE(s.contains(QString::fromUtf8("Разрешение модели")));  // the 8th of nine values: cut off
     CHECK(s.endsWith(QString::fromUtf8("…")));  // nine values, six shown
     CHECK_FALSE(s.contains(QString::fromUtf8("Формат пасса")));
     CHECK(tip.contains("style = "));

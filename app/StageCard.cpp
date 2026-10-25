@@ -397,13 +397,8 @@ QWidget* StageCard::MakeParamWidget(const ParamSpec& spec) {
             auto* combo = new QComboBox(form_);
             combo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);  // the card, not the longest item, sets the width
             combo->setMinimumContentsLength(10);
-            bool separated = false;
             for (const ParamChoice& c : spec.choices) {
-                if (c.experimental && !separated) {  // the experimental ones after a separator (nr.style 3..6, TASK-0046)
-                    combo->insertSeparator(combo->count());
-                    separated = true;
-                }
-                combo->addItem(QString::fromStdString(c.label) + (c.experimental ? tr(" (эксп.)") : QString()), QString::fromStdString(c.value));
+                combo->addItem(QString::fromStdString(c.label), QString::fromStdString(c.value));
                 combo->setItemData(combo->count() - 1, QString::fromStdString(c.hint), Qt::ToolTipRole);
             }
             connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this, spec, combo](int i) {

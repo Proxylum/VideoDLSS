@@ -20,7 +20,6 @@ public:
         std::string backend = "ngx";
         float intensity = 1.f;
         std::string style = "natural";
-        int preset = 3;
         float localTone = 1.f, localStructure = 1.f, skinStructure = -1.f;
         bool autoMask = false;
         int passes = 1;
