@@ -675,7 +675,7 @@ def verdict_e6(res):
     step = None if 1 not in have or top == 1 else (ms[top] - ms[1]) / (top - 1)
     text = []
     if step is not None:
-        text.append(f"GPU на добавленный проход: {step:.1f} мс/кадр (p1…p{top}: {' / '.join(fmt_num(ms[p]) for p in have)}; константа оценок — 6.4 мс на 1440p)")
+        text.append(f"GPU на добавленный проход: {step:.1f} мс/кадр ({' / '.join(f'p{p} {fmt_num(ms[p])}' for p in have)}; константа оценок — 6.4 мс на 1440p)")
     most = max((p for p in (1, 2, 3, 4) if _get(res, f"p{p}", "nr", "vram_mib_per_pass")), default=None)
     vram = _get(res, f"p{most}", "nr", "vram_mib_per_pass") if most else None
     if vram:

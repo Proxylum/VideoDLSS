@@ -422,7 +422,10 @@ class Helpers(unittest.TestCase):
                                 p4={"nr": {"ms_per_frame_gpu": 32.0, "vram_mib_per_pass": [503.9, 503.9, 503.9, 504.0]}}))
         self.assertAlmostEqual(e6["ms_per_pass"], 6.0)
         self.assertEqual(e6["vram_mib_per_pass"], [503.9, 503.9, 503.9, 504.0])
-        self.assertIn("p1…p4", e6["text"][0])
+        self.assertIn("p1 14.0 / p2 20.0 / p3 26.5 / p4 32.0", e6["text"][0])
+        gap = nr_ab.verdict_e6(v(p1={"nr": {"ms_per_frame_gpu": 14.0}}, p2={"nr": {"ms_per_frame_gpu": 20.0}}, p4={"nr": {"ms_per_frame_gpu": 32.0}}))
+        self.assertIn("p1 14.0 / p2 20.0 / p4 32.0", gap["text"][0])  # p3 failed (optional): each value names its pass
+        self.assertAlmostEqual(gap["ms_per_pass"], 6.0)
         self.assertIn("всего 2015.7 МиБ", e6["text"][1])
         self.assertAlmostEqual(nr_ab.verdict_e6(v(p1={"nr": {"ms_per_frame_gpu": 14.0}}, p2={"nr": {"ms_per_frame_gpu": 19.8}}))["ms_per_pass"], 5.8)
         self.assertIsNone(nr_ab.verdict_e6(v(p1={"nr": {"ms_per_frame_gpu": 14.0}}))["ms_per_pass"])

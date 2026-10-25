@@ -34,7 +34,7 @@ struct NrStageOptions {
     std::string style = "natural";      // natural | cinematic | default (PR-2 E7: 3..6 = cinematic)
     float localTone = 1.f, localStructure = 1.f, skinStructure = -1.f;
     bool autoMask = false;
-    int passes = 1;                     // 1..2: the model applied again to its own output (own history per pass)
+    int passes = 1;                     // 1..4 (ParamSchema): the model applied again to its own output - a backend, feature and history per pass (PR-5)
     double modelScale = 1.0;            // model resolution relative to the colour (0.25..2)
     float transfer = 1.f;               // ratio transfer strength when modelScale != 1
     float maxRatio = 4.f;

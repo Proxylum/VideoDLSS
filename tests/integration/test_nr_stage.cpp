@@ -674,10 +674,17 @@ TEST_CASE("Neural Rendering runs four passes on NGX: four features, the VRAM of 
     CHECK(r.stats.frames == 3);
     CHECK(r.stats.passes == 4);
     REQUIRE(r.stats.vramMibPerPass.size() == 4);
-    for (const double v : r.stats.vramMibPerPass) CHECK(v >= 0.0);
+    // a real feature holds memory (E6: 504 MiB at 1440p, 933 at 4K): 0 would mean the window missed its CreateFeature; the passes
+    // are the same feature, so about the same size
+    const double first = r.stats.vramMibPerPass[0];
+    CHECK(first > 0.0);
+    for (const double v : r.stats.vramMibPerPass) {
+        CHECK(v > 0.5 * first);
+        CHECK(v < 2.0 * first);
+    }
     const PassReader rd = PassReader::Open(r.outDir);
     CHECK(rd.Man().stageParams["passes"] == 4);
-    CHECK(rd.Man().stageParams["vram_mib_per_pass"].size() == 4);
+    CHECK(rd.Man().stageParams["vram_mib_per_pass"] == nlohmann::json(r.stats.vramMibPerPass));
     const PassImage out = rd.ReadFrame(2);
     for (uint32_t y = 0; y < out.height; y += 9)
         for (uint32_t x = 0; x < out.width; x += 7)
