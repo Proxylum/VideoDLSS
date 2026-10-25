@@ -194,6 +194,7 @@ TEST_CASE("RunProcess: an nr pass from before PR-7 with intensity != 1 is discar
         m.tool["app"] = std::string(kPassToolVersion);  // what the builds before stamped: no +nr.gain, so another fingerprint
         m.fingerprint = keepFingerprint ? "sha256:" + std::string(64, '0') : std::string();
         if (!keepFingerprint) m.tool = nlohmann::json::object();  // a standalone `dlssvid nr` pass, adopted as legacy
+        m.stageParams.erase("scene_cut_threshold");  // nor a key of PR-6 (review of PR-6, round 2: that check kept it as a version)
         m.Save(nrDir);
     };
     stampOld(true);
@@ -207,7 +208,12 @@ TEST_CASE("RunProcess: an nr pass from before PR-7 with intensity != 1 is discar
     CHECK(Manifest::Load(nrDir).stageParams.contains("model_intensity"));
     CHECK(Report(RunProcess(o), "nr").status == "reused");
     stampOld(false);
-    CHECK(Report(RunProcess(o), "nr").status == "ran");  // nor adopted without a fingerprint
+    const size_t nrLegacy = ListPassVersions(o.passesRoot, "color_nr").size(), fgLegacy = ListPassVersions(o.passesRoot, "color_fg").size();
+    const ProcessResult legacy = RunProcess(o);
+    CHECK(Report(legacy, "nr").status == "ran");  // nor adopted without a fingerprint
+    CHECK_THAT(Report(legacy, "nr").reason, Catch::Matchers::ContainsSubstring("before PR-7"));
+    CHECK(ListPassVersions(o.passesRoot, "color_nr").size() == nrLegacy);  // discarded, not kept as a version
+    CHECK(ListPassVersions(o.passesRoot, "color_fg").size() == fgLegacy);
     // the stage disabled after the discard (no DLL - the GUI runs --disable-unavailable): fg reads color_sr then, and the color_fg
     // made from the discarded pass went to the history; discarded too now
     stampOld(true);
