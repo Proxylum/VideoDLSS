@@ -263,6 +263,45 @@ TEST_CASE("PlanProcess notes nr passes 3 and 4", "[integration][process]") {
     CHECK(info({"nr.passes=4", "nr.intensity=0"}).empty());
 }
 
+// PR-6 (review): a standalone nr pass of before PR-6 has no fingerprint and no scene_cut_threshold - its history crossed every cut.
+// Adopted as legacy it was stamped with scene_cut 0.24; recomputed now (the old one kept as a version). At scene_cut 0 it is that run.
+TEST_CASE("RunProcess: an nr pass without a fingerprint from before PR-6 is not adopted under a scene-cut reset", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("old_scene_cut");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    const auto nrDir = o.passesRoot / "color_nr";
+    REQUIRE(Manifest::Load(nrDir).stageParams.contains("scene_cut_threshold"));  // what this build writes
+    auto stampOld = [&](bool before) {
+        Manifest m = Manifest::Load(nrDir);
+        m.fingerprint.clear();  // a standalone `dlssvid nr` pass
+        m.tool = nlohmann::json::object();
+        if (before) m.stageParams.erase("scene_cut_threshold");
+        m.Save(nrDir);
+    };
+    stampOld(false);
+    CHECK(Report(RunProcess(o), "nr").status == "reused");  // a standalone pass of this build: adopted
+    stampOld(true);
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK_THAT(Report(r, "nr").reason, Catch::Matchers::ContainsSubstring("PR-6"));
+    stampOld(true);
+    ProcessOptions off = o;
+    off.stages = StubStages(2);
+    ApplyParamSpec(off.stages, "nr.scene_cut=0");
+    CHECK(Report(RunProcess(off), "nr").status == "reused");  // scene_cut 0: the run it is
+}
+
 // TASK-0047: with the source's frame count unknown (mkv) PassComplete looked at the last frame only, so a color_nr of a part
 // of the clip (dlssvid nr --start, no fingerprint) was adopted as the clip's pass. A pass of the clip starts at frame 0.
 TEST_CASE("RunProcess: a color_nr of a part of the clip (nr --start) is recomputed, not adopted", "[integration][process][regression]") {

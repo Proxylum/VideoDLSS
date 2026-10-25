@@ -545,12 +545,22 @@ TEST_CASE("NrStage resets the history at a scene cut of the source", "[integrati
     CHECK(rdOff.Man().stageParams["scene_cut_threshold"] == 0.0);
     CHECK_FALSE(rdOff.Man().stageParams.contains("scene_cuts"));  // not checked
     // still mode without the filter: no history to reset, the detector does not run
-    NrStageOptions still = options(0.24f, 0.f, "still");
-    still.useGuides = false;
-    VideoDecoder dec(clip);
-    const NrRunResult s = RunNr(dec, dev, still);
+    auto stillRun = [&](float sceneCut, float temporal, const char* name) {
+        NrStageOptions so = options(sceneCut, temporal, name);
+        so.useGuides = false;
+        VideoDecoder d2(clip);
+        return RunNr(d2, dev, so);
+    };
+    const NrRunResult s = stillRun(0.24f, 0.f, "still");
     CHECK_FALSE(s.stats.sceneCutActive);
     CHECK_FALSE(PassReader::Open(dir / "still" / "color_nr").Man().stageParams.contains("scene_cuts"));
+    // still mode with the filter (spec D12): the detector runs for the filter alone - no blend of scene A into B
+    const NrRunResult st = stillRun(0.24f, 0.5f, "still_t"), stOff = stillRun(0.f, 0.5f, "still_t_off");
+    CHECK(st.stats.sceneCutActive);
+    CHECK(st.stats.sceneCuts == std::vector<int64_t>{cutAt});
+    CHECK(worst("still_t", "still", cutAt) < 1e-3);
+    CHECK(worst("still_t_off", "still", cutAt) > 0.05);
+    CHECK(worst("still_t", "still", cutAt + 1) > 1e-3);
 }
 
 TEST_CASE("NrStage applies the edit strength once, after the last model pass", "[integration][nr][regression]") {

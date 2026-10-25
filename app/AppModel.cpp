@@ -775,8 +775,12 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
                     const std::string newBackend = StageBackend(stage, d->params);
                     const nlohmann::json& bd = d->diff["params"].contains("backend") ? d->diff["params"]["backend"] : nlohmann::json();
                     const std::string oldBackend = bd.is_array() && !bd.empty() && bd[0].is_string() ? bd[0].get<std::string>() : newBackend;
-                    parts << QString("%1 %2 → %3").arg(label, spec ? QString::fromStdString(ParamValueLabel(*spec, o, oldBackend)) : QString::fromStdString(o.dump()),
-                                                          spec ? QString::fromStdString(ParamValueLabel(*spec, n, newBackend)) : QString::fromStdString(n.dump()));
+                    const QString now = spec ? QString::fromStdString(ParamValueLabel(*spec, n, newBackend)) : QString::fromStdString(n.dump());
+                    if (o.is_null() && !n.is_null()) {
+                        parts << tr("%1: новая настройка, %2").arg(label, now);  // the old pass predates the key (review of PR-6: «null → 0.24»)
+                        continue;
+                    }
+                    parts << QString("%1 %2 → %3").arg(label, spec ? QString::fromStdString(ParamValueLabel(*spec, o, oldBackend)) : QString::fromStdString(o.dump()), now);
                 }
             st.state = tr("пересчёт: %1").arg(parts.isEmpty() ? QString::fromStdString(d->detail) : parts.join(", "));
         } else if (d->kind == "input_changed") {

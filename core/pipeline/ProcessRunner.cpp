@@ -405,6 +405,11 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             // then - adopting it would stamp the old depth with the depth.2 revision
             d.diff["tool"]["app"] = nlohmann::json::array({kPassToolVersion, PassToolVersionFor(name, p)});
             run("tool_changed", "depth made before the temporal alignment of TASK-0038", true);
+        } else if (name == "nr" && p.value("scene_cut", 0.0) > 0.0 && m.stageParams.is_object() && !m.stageParams.contains("scene_cut_threshold") &&
+                   !m.stageParams.value("bypass", false)) {
+            // a standalone `dlssvid nr` from before PR-6: the model's and the filter's history ran across every cut - adopting it would
+            // stamp it with scene_cut (review of PR-6). A real picture of scene_cut 0: kept in the history
+            run("tool_changed", "nr made before the scene-cut reset of PR-6", true);
         } else if (AbNrPass(name, m)) {  // kept in the history to compare; the run of the project is restored or recomputed
             if (restore()) return d;
             run("ab_pass", kAbPass, true);

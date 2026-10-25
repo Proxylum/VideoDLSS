@@ -4,6 +4,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -234,6 +235,17 @@ TEST_CASE("NormalizeStageParams: aliases take the schema's key; validation and t
     CHECK(NormalizeStageParams("fg", {{"backbuffer-format", "rgba8"}}) == nlohmann::json{{"backbuffer_format", "rgba8"}});
     CHECK(NormalizeStageParams("depth", {{"z-near", 1}}) == nlohmann::json{{"z-near", 1}});  // no aliases there: unknown keys stay
     CHECK(EffectiveStageParams("nr", {{"model-scale", 0.5}})["model_scale"] == 0.5);
+    // every snake key under its kebab spelling (review of PR-6: scene-cut ran at the default 0.24 under a fingerprint with both keys)
+    for (const ParamSpec& s : FindStageSchema("nr")->params) {
+        if (s.key.find('_') == std::string::npos) continue;
+        std::string kebab = s.key;
+        std::replace(kebab.begin(), kebab.end(), '_', '-');
+        INFO(kebab);
+        CHECK(NormalizeStageParams("nr", {{kebab, s.def}}) == nlohmann::json{{s.key, s.def}});
+    }
+    CHECK(EffectiveStageParams("nr", {{"scene-cut", 0.0}})["scene_cut"] == 0.0);
+    CHECK_FALSE(EffectiveStageParams("nr", {{"scene-cut", 0.0}}).contains("scene-cut"));
+    CHECK_FALSE(ValidateStageParams("nr", {{"scene-cut", 2.0}}).empty());
     CHECK_FALSE(EffectiveStageParams("nr", {{"model-scale", 0.5}}).contains("model-scale"));
     CHECK_FALSE(ValidateStageParams("nr", {{"local-tone", 5.0}}).empty());  // out of range under its alias too
     CHECK_FALSE(ValidateStageParams("nr", {{"no-guides", "yes"}}).empty());  // a non-boolean inverse: guides of the wrong type

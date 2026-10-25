@@ -397,11 +397,13 @@ nlohmann::json NormalizeStageParams(const std::string& stage, const nlohmann::js
         out.erase(from);
     };
     if (stage == "nr") {
-        for (const char* key : {"local_tone", "local_structure", "skin_structure", "auto_mask", "model_scale", "max_ratio", "temporal_threshold", "skin_blend",
-                                "input_transfer"}) {
-            std::string kebab = key;
+        // every snake key of the schema under its kebab spelling (ApplyNrParams reads both): from the schema, so a new key cannot be
+        // forgotten here - scene-cut was (review of PR-6)
+        for (const ParamSpec& s : FindStageSchema("nr")->params) {
+            if (s.key.find('_') == std::string::npos) continue;
+            std::string kebab = s.key;
             std::replace(kebab.begin(), kebab.end(), '_', '-');
-            alias(kebab.c_str(), key);
+            alias(kebab.c_str(), s.key.c_str());
         }
         // a style given as a number (JSON, --param nr.style=4) or as the index of a named one: the schema's string
         if (out.contains("style") && out["style"].is_number_integer()) out["style"] = std::to_string(out["style"].get<int64_t>());
