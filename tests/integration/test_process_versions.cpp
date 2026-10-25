@@ -380,7 +380,9 @@ TEST_CASE("Schema defaults are the same run; --force recomputes one stage in pla
     ProcessOptions o = Options(dir, clip);
     const ProcessResult base = RunProcess(o);
     CHECK(Statuses(base) == std::vector<std::string>(5, "ran"));
-    CHECK(Manifest::Load(o.passesRoot / "color_nr").stageParams["ms_per_frame"].get<double>() > 0);  // recorded for the estimates
+    const Manifest nr = Manifest::Load(o.passesRoot / "color_nr");
+    CHECK(nr.stageParams["ms_per_frame"].get<double>() > 0);  // recorded for the estimates
+    CHECK(nr.stageParams["ms_per_frame"].get<double>() >= nr.stageParams["ms_per_frame_gpu"].get<double>());  // the wall time beside the stage's (D8)
     CHECK(Manifest::Load(o.passesRoot / "depth_dlss").stageParams["ms_per_frame"].get<double>() > 0);
     CHECK(Manifest::Load(o.passesRoot / "color_nr").paramsCanonical["style"] == "natural");  // the defaults are part of the fingerprint
 

@@ -9,6 +9,7 @@
 #include "passes/Manifest.h"
 #include "pipeline/Estimates.h"
 #include "stages/ParamSchema.h"
+#include "stages/nr/NrStage.h"
 
 using namespace dlssvid;
 using Catch::Approx;
@@ -33,6 +34,7 @@ TEST_CASE("Baselines scale with the source size, the recorded ms/frame wins, byt
     CHECK(!RecordedMsPerFrame(root, "nr"));
     Manifest m = Manifest::ForPass(PassKind::ColorNr, 8, 4, FileFormat::Exr);
     m.stageParams["ms_per_frame"] = 123.5;
+    m.stageParams["ms_per_frame_gpu"] = 20.0;  // as process records it: the wall time beside the stage's GPU time (D8)
     m.Save(root / "color_nr");
     CHECK(RecordedMsPerFrame(root, "nr") == Approx(123.5));
     Manifest d = Manifest::ForPass(PassKind::DepthRaw, 8, 4, FileFormat::Exr);
@@ -107,4 +109,90 @@ TEST_CASE("EstimateRun combines the plan, the stages and the source", "[unit][es
     CHECK(o.width == 1920);
     CHECK(o.stagesTotal == 1);
     CHECK(o.stages.back().frames == 240);
+}
+
+// D8 (TASK-0049): a standalone `dlssvid nr` (the GUI's «Запустить отдельно») recorded its 16 ms GPU time as ms_per_frame and
+// `process` adopted the pass with it - the NR ETA came out ~25x short; passes and model_scale did not move the estimate at all.
+TEST_CASE("NR estimate follows passes and model scale; a GPU-only ms/frame is not wall time", "[unit][estimates][regression]") {
+    const auto root = std::filesystem::path(DLSSVID_TEST_TMP) / "estimates_nr";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    auto save = [&](int passes, const nlohmann::json& times) {
+        Manifest m = Manifest::ForPass(PassKind::ColorNr, 2560, 1440, FileFormat::Exr);
+        m.frameCount = 300;
+        m.stageParams = {{"backend", "ngx"}, {"passes", passes}, {"model_scale", 1.0}, {"work_size", {2560, 1440}}};
+        m.stageParams.update(times);
+        m.Save(root / "color_nr");
+    };
+    auto params = [](int passes, double scale) { return EffectiveStageParams("nr", {{"passes", passes}, {"model_scale", scale}}); };
+    const nlohmann::json ngx = {{"backend", "ngx"}};
+
+    // GPU-only times are not wall times
+    for (const nlohmann::json& times : {nlohmann::json{{"ms_per_frame_gpu", 15.9}}, nlohmann::json{{"ms_per_frame", 15.9}},
+                                        nlohmann::json{{"ms_per_frame", 12.0}, {"ms_per_frame_gpu", 15.9}}}) {
+        INFO(times.dump());
+        save(1, times);
+        CHECK_FALSE(RecordedMsPerFrame(root, "nr", ngx, params(1, 1.0), 300));
+    }
+    // a process record: as it is for the same run
+    save(1, {{"ms_per_frame", 410.0}, {"ms_per_frame_gpu", 15.9}});
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 1.0), 300) == Approx(410.0));
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx) == Approx(410.0));
+
+    CHECK(NrModelMsPerPass("ngx", 2560.0 * 1440) == Approx(17.6));
+    CHECK(NrModelMsPerPass("ngx", 3840.0 * 2160) == Approx(17.6 * 2.25));
+    CHECK(NrModelMsPerPass("stub", 2560.0 * 1440) == 0.0);
+
+    // two passes: the model's step plus the second feature created once, spread over the frames
+    const auto two = RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 300);
+    REQUIRE(two);
+    CHECK(*two > 410.0 + 17.6);
+    CHECK(*two < 410.0 + 17.6 + 10.0);
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 30) > *two);  // a short run carries more of the creation
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 1000000) == Approx(410.0 + 17.6).margin(0.01));
+    // the model's resolution
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 0.5), 300) == Approx(410.0 - 17.6 + 17.6 / 4));
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 2.0), 300) == Approx(410.0 - 17.6 + 17.6 * 4));
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(2, 0.5), 300) < *two);
+    // a two-pass record moved to one pass: the creation is not taken back
+    save(2, {{"ms_per_frame", 464.0}, {"ms_per_frame_gpu", 33.5}});
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(1, 1.0), 300) == Approx(464.0 - 17.6));
+    CHECK(*RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 300) == Approx(464.0));
+
+    // EstimateRun: NR works on the upscaled frame (1280x720 x2 = 2560x1440)
+    ProcessPlan plan;
+    plan.passesRoot = root;
+    StageDecision d;
+    d.name = "nr";
+    d.action = "run";
+    d.params = EffectiveStageParams("nr", {{"passes", 2}});
+    d.tool = ngx;
+    plan.stages.push_back(d);
+    const std::vector<ProcessStage> stages = DefaultProcessStages();
+    SourceInfo src;
+    src.width = 1280;
+    src.height = 720;
+    src.fps = 24.0;
+    src.frames = 30;  // the run's own length spreads the creation, not the record's 300 frames
+    save(1, {{"ms_per_frame", 410.0}, {"ms_per_frame_gpu", 15.9}});
+    RunOutcome o = EstimateRun(plan, stages, src);
+    REQUIRE(!o.stages.empty());
+    CHECK(o.stages[0].recorded);
+    const auto short2 = RecordedMsPerFrame(root, "nr", ngx, params(2, 1.0), 30);
+    REQUIRE(short2);
+    CHECK(o.stages[0].msPerFrame == Approx(*short2));
+    CHECK(o.stages[0].msPerFrame > *two);
+    src.frames = 300;
+    save(1, {{"ms_per_frame_gpu", 15.9}});  // a standalone run's pass: the baseline, moved to two passes - not 16 ms
+    const double base = BaselineMsPerFrame("nr", "ngx", 1280.0 * 720 / 1e6);
+    o = EstimateRun(plan, stages, src);
+    CHECK_FALSE(o.stages[0].recorded);
+    CHECK(o.stages[0].msPerFrame > base + 17.6);
+    CHECK(o.stages[0].msPerFrame < base + 17.6 + 10.0);
+    plan.stages[0].params = EffectiveStageParams("nr", nlohmann::json::object());
+    o = EstimateRun(plan, stages, src);
+    CHECK(o.stages[0].msPerFrame == Approx(base));
+
+    CHECK(NrWorkSize(2560, 1440, 0.5) == std::pair<uint32_t, uint32_t>{1280, 720});
+    CHECK(NrWorkSize(1281, 721, 1.0) == std::pair<uint32_t, uint32_t>{1280, 720});
 }

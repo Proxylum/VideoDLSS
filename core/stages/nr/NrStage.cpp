@@ -123,6 +123,11 @@ NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t w
     return cfg;
 }
 
+std::pair<uint32_t, uint32_t> NrWorkSize(uint32_t w, uint32_t h, double modelScale) {
+    auto side = [&](uint32_t v) { return std::max(2u, static_cast<uint32_t>(std::lround(v * modelScale)) & ~1u); };
+    return {side(w), side(h)};
+}
+
 nlohmann::json NrAbJson(const NrStageOptions& o) {
     nlohmann::json j = nlohmann::json::object();
     if (o.mvScale != "unit") j["mv_scale"] = o.mvScale;
@@ -194,8 +199,7 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
     setup_ = true;
     inW_ = w;
     inH_ = h;
-    workW_ = std::max(2u, static_cast<uint32_t>(std::lround(w * options_.modelScale)) & ~1u);
-    workH_ = std::max(2u, static_cast<uint32_t>(std::lround(h * options_.modelScale)) & ~1u);
+    std::tie(workW_, workH_) = NrWorkSize(w, h, options_.modelScale);
     reduced_ = workW_ != w || workH_ != h;
     stats_.width = w;
     stats_.height = h;
@@ -489,7 +493,9 @@ void NrStage::Process(FrameContext& ctx) {
 void NrStage::Finish() {
     if (writer_) {
         Manifest& m = const_cast<Manifest&>(writer_->Man());
-        m.stageParams["ms_per_frame"] = stats_.MeanMs();
+        // the stage's own GPU time (submit + wait); the wall time of a run is process's to write (StampPass) - the estimates take
+        // only that: a standalone run's 16 ms recorded as ms_per_frame put the NR ETA ~25x short (D8, TASK-0049)
+        m.stageParams["ms_per_frame_gpu"] = stats_.MeanMs();
         m.stageParams["depth_used"] = stats_.depthUsed;
         m.stageParams["mv_used"] = stats_.mvUsed;
         m.stageParams["color_source"] = stats_.colorSource;

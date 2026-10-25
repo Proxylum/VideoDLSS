@@ -81,6 +81,9 @@ nlohmann::json NrParamsFromOptions(const NrStageOptions& o);
 // The backend's configuration for the options at the model's size: what NrStage creates its features with and what
 // `dlssvid nr --check` creates one with - the tuning NGX takes at CreateFeature is the same in both (TASK-0047).
 NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t workH);
+// The model's resolution for a colour frame of w x h at `modelScale`: even sides, at least 2. NrStage::Setup and the estimates
+// (Estimates.cpp, D8) use this one formula, so a recorded work_size compares with the run's.
+std::pair<uint32_t, uint32_t> NrWorkSize(uint32_t w, uint32_t h, double modelScale);
 // The A/B switches away from their defaults ({} when none: a default run's manifest stays as it was) - stageParams.ab, nr --json.
 nlohmann::json NrAbJson(const NrStageOptions& o);
 // Problems of the switches: an unknown --mv-scale, and switches about the guides together with --no-guides (an A/B measuring nothing).
@@ -99,7 +102,7 @@ public:
 
     struct Stats {
         int64_t frames = 0;   // through the model, warm-up included: what msSum averages over
-        double msSum = 0.0;  // GPU submit + wait per frame
+        double msSum = 0.0;  // GPU submit + wait per evaluated frame (warm-up frames included) -> ms_per_frame_gpu
         int64_t warmup = 0;   // of them before NrStageOptions::writeFrom: history only
         int64_t written = 0, firstWritten = -1, lastWritten = -1;
         float mvScaleX = 0.f, mvScaleY = 0.f;  // DLSSNR.MVecScale of the first frame with mv_dlss (0: no vectors), A/B E3
