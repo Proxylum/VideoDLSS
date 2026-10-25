@@ -28,6 +28,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
@@ -50,7 +51,7 @@ NR_ARG_OK = {"--skip-driver-check": False, "--dll-dir": True, "--params-block": 
 # options of `dlssvid nr` that are not stages.nr.params keys (cli/NrCommands.cpp): ResolveNrParams refuses them in --params-file, after the
 # variants before ran - known_keys of --help minus these is what a params.json may hold
 NOT_SETTINGS = {"input", "output", "color_dir", "depth_dir", "mv_dir", "masks_dir", "no_auto", "auto", "video", "codec", "frames", "start", "warmup",
-                "params_file", "warp", "check", "check_size", "json", "help", "depth_guide"} | {o[2:].replace("-", "_") for o in (*AB_FLAGS, *NR_ARG_OK)}
+                "params_file", "warp", "check", "check_size", "check_repeat", "check_features", "json", "help", "depth_guide"} | {o[2:].replace("-", "_") for o in (*AB_FLAGS, *NR_ARG_OK)}
 INPUT_KEYS = ("color", "depth", "mv")  # a variant's own folders: what nr_command passes as --color-dir / --depth-dir / --mv-dir
 EXPECT_KEYS = ("depth_used", "mv_used", "work_size", "passes", "mv_scale", "frames_written", "warmup_frames", "masks")  # stats read_nr keeps
 NR_DLLS = ("nvngx_dlssnr.dll", "nvngx.dll_dlssvid.dll")  # kNrDllName, kNrForwarderName (core/stages/nr/INrBackend.h)
@@ -120,7 +121,8 @@ EXPERIMENTS = [
                + [_v(f"preset{p}", params={"style": "natural", "preset": p}) for p in (0, 1, 2)],
                "natural", STILL, ("pairs", "edit", "time"),
                groups=[["default", "natural", "cinematic", "style3", "style4", "style5", "style6"], ["preset0", "preset1", "preset2", "natural"]]),
-    Experiment("E6f", "Несколько фич одновременно: VRAM на фичу (§2c)", [], kind="check", check="features", metrics=("time",)),
+    Experiment("E6f", "Несколько фич одновременно: VRAM на фичу (§2c)", [], kind="check", check="features", metrics=("time",),
+               requires=("--check-features",)),
     Experiment("E8", "Цена создания фичи (§2f)", [], kind="check", check="runs", metrics=("time",)),
     Experiment("E8b", "Смена настроек без пересоздания фичи (§2f)", [],
                unsupported="нужен режим смены intensity/tone посреди прогона без пересоздания фичи — не входит в PR-1d"),
@@ -553,8 +555,8 @@ def valid_stored(prev: Optional[dict], sig: dict, baseline: str) -> set:
 
 def reusable(prev: Optional[dict], sig: dict, want: list, force: bool, baseline: str = "") -> bool:
     """A stored experiment answers this invocation: every stored variant still true, every wanted one among them, no pair left unmeasured."""
-    if force or not prev or prev.get("pairs_missing") or (prev.get("sig") or {}).get("common") != sig["common"]:
-        return False
+    if force or not prev or prev.get("pairs_missing") or prev.get("measured") is False or (prev.get("sig") or {}).get("common") != sig["common"]:
+        return False  # an unmeasured check (a timeout, a crash, no JSON) is measured again
     stored = set(prev.get("variants", {})) | set(prev.get("failed", {}))
     return set(want) <= stored and valid_stored(prev, sig, baseline) == stored
 
@@ -659,6 +661,11 @@ def phase2(rep: Optional[dict]):
     """The preview's phase 2 condition from N re-creations in one process (None: not measured)."""
     if not rep:
         return None, []
+    if rep.get("error"):
+        return None, [f"пересоздания не измерены: {rep['error']} — условие фазы 2 превью этим не проверено"]
+    if rep.get("stop") in ("budget", "growth"):
+        return False, [f"пересоздания остановлены ({'бюджет VRAM' if rep['stop'] == 'budget' else 'память растёт больше чем на фичу'}) после "
+                       f"{rep.get('ok')} из {rep.get('requested')} — условие фазы 2 превью не выполнено"]
     creates = [x for x in rep.get("create_ms", []) if x is not None]
     released = [x for x in rep.get("vram_after_release_mib", []) if x is not None]
     made = [x for x in rep.get("vram_after_create_mib", []) if x is not None]
@@ -700,6 +707,11 @@ def verdict_e8(res):
 
 def verdict_e6f(res):
     feats = res.get("features", [])
+    if not res.get("wrote_json", True):
+        return {"alive": None, "mib_per_feature": None,
+                "text": [f"не измерено на {res.get('size')}: dlssvid не записал JSON (тайм-аут, сбой или опция не поддерживается) — см. features.log"]}
+    if not feats or not feats[0].get("ok"):
+        return {"alive": 0, "mib_per_feature": None, "text": [f"первая фича на {res.get('size')} не создалась — вывода нет (см. features.log)"]}
     alive = res.get("alive", 0)
     sizes = sorted(f["vram_mib"] for f in feats if f.get("ok") and f.get("vram_mib") is not None)
     per = sizes[len(sizes) // 2] if sizes else None
@@ -750,21 +762,29 @@ def run(cmd: list, log: Optional[Path], dry: bool) -> float:
     if dry:
         print(subprocess.list2cmdline([str(c) for c in cmd]))
         return 0.0
+    args = [str(c) for c in cmd]
     t0 = time.perf_counter()
-    try:  # on a timeout subprocess.run kills the child: the GPU is free again
-        r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=TIMEOUT)
-    except subprocess.TimeoutExpired as e:
-        if log:
-            log.parent.mkdir(parents=True, exist_ok=True)
-            out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
-            log.write_text(subprocess.list2cmdline([str(c) for c in cmd]) + "\n\n" + out + f"\n[nr_ab: killed after {TIMEOUT:g} s]\n", encoding="utf-8")
-        raise RuntimeError(f"{Path(str(cmd[0])).name} {cmd[1]} timed out after {TIMEOUT:g} s (killed)") from None
+    # the output into a file, not pipes: a grandchild of dlssvid (the ONNX export of --prepare, a worker) holding inherited handles
+    # cannot block the wait; on a timeout the whole tree is killed while dlssvid still lives (taskkill /T finds it by the parent)
+    with tempfile.TemporaryFile() as buf:
+        p = subprocess.Popen(args, stdout=buf, stderr=subprocess.STDOUT)
+        try:
+            rc = p.wait(timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, timeout=60)
+            p.kill()
+            p.wait()
+            rc = None
+        buf.seek(0)
+        out = buf.read().decode("utf-8", "replace")
     if log:
         log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text(subprocess.list2cmdline([str(c) for c in cmd]) + "\n\n" + r.stdout + r.stderr, encoding="utf-8")
-    if r.returncode != 0:
-        tail = "\n".join((r.stdout + r.stderr).strip().splitlines()[-6:])
-        raise RuntimeError(f"{Path(str(cmd[0])).name} {cmd[1]} failed ({r.returncode}):\n{tail}")
+        log.write_text(subprocess.list2cmdline(args) + "\n\n" + out + ("" if rc is not None else f"\n[nr_ab: killed after {TIMEOUT:g} s]\n"), encoding="utf-8")
+    if rc is None:
+        raise RuntimeError(f"{Path(args[0]).name} {args[1]} timed out after {TIMEOUT:g} s (killed with its children)")
+    if rc != 0:
+        tail = "\n".join(out.strip().splitlines()[-6:])
+        raise RuntimeError(f"{Path(args[0]).name} {args[1]} failed ({rc}):\n{tail}")
     return time.perf_counter() - t0
 
 
@@ -992,7 +1012,9 @@ def run_check(a, cli: Path, inp: Inputs, exp: Experiment, edir: Path, dry: bool)
     if exp.check == "features":
         j = check_once(a, cli, size, edir / "features.json", edir / "features.log", dry, ["--check-features", str(a.check_features)])
         if not dry:
-            res.update({"requested": a.check_features, "alive": j.get("features_alive", 0), "stop": j.get("features_stop"),
+            wrote = any(not k.startswith("_") for k in j)  # dlssvid writes its JSON only at the end: none after a timeout, a crash, an unknown option
+            res.update({"wrote_json": wrote, "measured": bool(j.get("features")), "requested": a.check_features, "alive": j.get("features_alive", 0),
+                        "stop": j.get("features_stop"),
                         "budget_mib": mib(j.get("vram_budget_bytes")), "usage_mib": mib((j.get("features") or [{}])[-1].get("vram_usage_bytes")),
                         "features": [{"index": x.get("index"), "ok": x.get("ok"), "init_ms": x.get("init_ms"), "create_ms": x.get("create_ms"),
                                       "vram_mib": mib(x.get("vram_feature_bytes")), "usage_mib": mib(x.get("vram_usage_bytes"))} for x in j.get("features") or []]})
@@ -1017,17 +1039,22 @@ def run_check(a, cli: Path, inp: Inputs, exp: Experiment, edir: Path, dry: bool)
         if j.get("gpu") and "diag" not in res:
             res["diag"] = {k: j.get(k) for k in ("gpu", "driver", "dll_sha256")}  # the report's build line (experiment_meta)
         vram = j.get("vram_feature_bytes")
-        res["checks"].append({"ok": ok and bool(j.get("ok")), "init_ms": j.get("init_ms"), "create_ms": j.get("create_ms"), "device_ms": j.get("device_ms"),
+        res["checks"].append({"ok": ok and bool(j.get("ok")), "json": bool(j), "init_ms": j.get("init_ms"), "create_ms": j.get("create_ms"), "device_ms": j.get("device_ms"),
                               "vram_mib": round(vram / 1048576.0, 1) if isinstance(vram, (int, float)) else None, "run_s": None if run_s is None else round(run_s, 2)})
     if a.check_repeat > 0:  # the re-creations in one process: the preview's phase 2 condition (spec §2f)
         j = check_once(a, cli, size, edir / "repeat.json", edir / "repeat.log", dry, ["--check-repeat", str(a.check_repeat)])
-        if not dry:
+        if not dry and "recreations" not in j:  # no JSON: a CLI error, a timeout kill or a crash - not a measurement
+            res["repeat"] = {"requested": a.check_repeat, "error": "dlssvid не записал JSON (ошибка CLI, тайм-аут или сбой) — см. repeat.log",
+                             "run_s": j.get("_run_s")}
+        elif not dry:
             recs = j.get("recreations") or []
             res["repeat"] = {"requested": a.check_repeat, "ok": sum(1 for r in recs if r.get("ok")), "usage_after_init_mib": mib(j.get("vram_usage_after_init_bytes")),
                              "create_ms": [r.get("create_ms") for r in recs], "vram_after_release_mib": [mib(r.get("vram_after_release_bytes")) for r in recs],
-                             "vram_after_create_mib": [mib(r.get("vram_after_create_bytes")) for r in recs],
+                             "vram_after_create_mib": [mib(r.get("vram_after_create_bytes")) for r in recs], "stop": j.get("recreations_stop") or "",
                              "failed": next((r.get("result") for r in recs if not r.get("ok")), None), "run_s": j.get("_run_s")}
     if not dry:
+        # a failed check is an answer; one without its JSON (a timeout, a crash) is not
+        res["measured"] = all(c.get("json") for c in res["checks"]) and not (res.get("repeat") or {}).get("error")
         res["verdict"] = verdict_e8(res)
     return res
 
@@ -1076,7 +1103,9 @@ def render_experiment(exp_id: str, res: dict, own: tuple = ()) -> str:
         for i, c in enumerate(res["checks"]):
             lines.append(f"| {i + 1} | {'да' if c['ok'] else 'нет'} | {fmt_num(c['init_ms'], 0)} | {fmt_num(c['create_ms'], 0)} | {fmt_num(c['vram_mib'])} | {fmt_num(c['run_s'], 2)} |")
         rep = res.get("repeat")
-        if rep:
+        if rep and rep.get("error"):
+            lines += ["", f"`--check-repeat {rep['requested']}`: не измерено — {rep['error']}"]
+        elif rep:
             cs = sorted(x for x in rep["create_ms"] if x is not None)
             lines += ["", f"`--check-repeat {rep['requested']}`: {rep['ok']} пересозданий ok" + (f", сбой: {rep['failed']}" if rep.get("failed") else "") +
                       (f"; create min / медиана / max {fmt_num(cs[0], 0)} / {fmt_num(cs[len(cs) // 2], 0)} / {fmt_num(cs[-1], 0)} мс" if cs else "")]
@@ -1199,6 +1228,8 @@ def main(argv=None) -> int:
     ap.add_argument("--list", action="store_true")
     a = ap.parse_args(argv)
     a.only = [x for s in a.only for x in s.split(",") if x]
+    if not 0 <= a.check_repeat <= 1000:
+        ap.error("--check-repeat: 0..1000, as dlssvid nr --check-repeat")
     global TIMEOUT
     TIMEOUT = a.timeout if a.timeout and a.timeout > 0 else None
     if hasattr(sys.stdout, "reconfigure"):
@@ -1266,8 +1297,8 @@ def main(argv=None) -> int:
     for e in exps:
         sig = run_signature(a, inp, e, base_params, build)  # after prepare: the identities of the passes the variants read
         prev = stored.get(e.id)
-        if a.dry_run and repass and (e.kind == "run" or inp.color):  # the real run rewrites the passes first: no stored experiment on them keeps
-            # its signature; E8 creates the feature at color_sr's size, known only after them - its --check-size below is provisional
+        if a.dry_run and repass and (e.kind == "run" or (inp.color and not a.check_size)):  # the real run rewrites the passes first: no stored
+            # experiment on them keeps its signature; E8 / E6f without --check-size create the feature at the new color_sr's size - provisional below
             print(f"# {e.id}: --prepare перепишет пассы — будет переснят" + (" (размер фичи — по новому color_sr)" if e.kind == "check" else ""))
             prev = None
         if reusable(prev, sig, [v.name for v in selected(e, a.only)], a.force, e.baseline):

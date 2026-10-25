@@ -121,6 +121,7 @@ nlohmann::json NrRecreation::ToJson() const {
     auto orNull = [](auto v) { return v < 0 ? nlohmann::json(nullptr) : nlohmann::json(v); };
     return {{"ok", ok},
             {"result", result},
+            {"release_result", releaseResult},
             {"release_ms", orNull(releaseMs)},
             {"create_ms", orNull(createMs)},
             {"vram_after_release_bytes", orNull(vramAfterRelease)},

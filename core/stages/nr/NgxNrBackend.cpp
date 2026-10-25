@@ -379,10 +379,15 @@ NrRecreation NgxNrBackend::RecreateFeature() {
     NrRecreation rec;
     im.device->WaitIdle();
     const auto releaseStart = std::chrono::steady_clock::now();
-    im.fwdRelease(im.snipRelease, im.feature);
+    const int released = im.fwdRelease(im.snipRelease, im.feature);
     im.feature = nullptr;
     rec.releaseMs = MsSince(releaseStart);
+    rec.releaseResult = ngx::ResultString(released);
     if (const auto m = im.device->LocalVideoMemory()) rec.vramAfterRelease = static_cast<int64_t>(m->currentUsage);
+    if (released != static_cast<int>(NVSDK_NGX_Result_Success)) {  // the feature may still be alive: never stack another one on it
+        rec.result = "release: " + rec.releaseResult;
+        return rec;
+    }
     const auto createStart = std::chrono::steady_clock::now();
     const int r = CreateFeatureCall();
     rec.createMs = MsSince(createStart);
@@ -448,7 +453,13 @@ nlohmann::json NgxNrBackend::Describe() const {
 void NgxNrBackend::Shutdown() {
     if (!impl_) return;
     Impl& im = *impl_;
-    if (im.device) im.device->WaitIdle();
+    if (im.device) {
+        try {
+            im.device->WaitIdle();
+        } catch (...) {
+            // a removed device (TDR): release what we hold anyway; the destructor calls this and must not throw
+        }
+    }
     if (im.feature && im.fwdRelease) im.fwdRelease(im.snipRelease, im.feature);
     im.feature = nullptr;
     if (im.params && im.paramsAllocated) NVSDK_NGX_D3D12_DestroyParameters(im.params);

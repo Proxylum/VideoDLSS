@@ -48,7 +48,7 @@ void StubNrBackend::Init(D3D12Device& device, const NrConfig& config) {
 NrRecreation StubNrBackend::RecreateFeature() {
     if (!kernel_ || !device_) Throw("stub nr: not initialised");
     NrRecreation rec;
-    rec.result = "stub";
+    rec.result = rec.releaseResult = "stub";
     rec.ok = true;
     rec.releaseMs = rec.createMs = 0.0;
     if (const auto m = device_->LocalVideoMemory()) rec.vramAfterRelease = rec.vramAfterCreate = static_cast<int64_t>(m->currentUsage);

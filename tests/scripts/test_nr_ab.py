@@ -121,10 +121,11 @@ class Helpers(unittest.TestCase):
         self.assertEqual(nr_ab.expected_ab(["--mv-scale=unit", "--no-depth-guide"]), {"depth_guide": False})
         self.assertEqual(nr_ab.expected_ab([]), {})
         help_text = ("--local-tone,--local_tone FLOAT\n--no-guides,--no_guides,!--guides\n--mv-scale,--mv_scale TEXT\n--start INT\n--no-auto\n"
-                     "--dll-dir TEXT\n--auto-mask,--auto_mask,!--no-auto-mask,!--no_auto_mask")
+                     "--dll-dir TEXT\n--auto-mask,--auto_mask,!--no-auto-mask,!--no_auto_mask\n--check-repeat,--check_repeat INT\n"
+                     "--check-features,--check_features INT")
         keys = nr_ab.setting_keys(help_text)  # a run option in a params.json fails the run after the variants before it ran
         self.assertTrue({"local_tone", "guides", "auto_mask"} <= keys)
-        self.assertFalse({"mv_scale", "start", "auto", "no_auto", "dll_dir", "no_auto_mask", "no_guides"} & keys)
+        self.assertFalse({"mv_scale", "start", "auto", "no_auto", "dll_dir", "no_auto_mask", "no_guides", "check_repeat", "check_features"} & keys)
         self.assertEqual(nr_ab.names_only(r"missing pass frame 12: D:\clips\mv_dlss\000012.exr"), "missing pass frame 12: 000012.exr")
         self.assertEqual(nr_ab.names_only("pass folder not found: /tmp/x/color_sr (no manifest)"), "pass folder not found: color_sr (no manifest)")
         self.assertEqual(nr_ab.names_only(r"missing pass frame 12: D:\My Clips\face\mv_dlss\000012.exr"), "missing pass frame 12: 000012.exr")
@@ -243,7 +244,8 @@ class Helpers(unittest.TestCase):
             edir.mkdir()
             (edir / "check_0.json").write_text(json.dumps({"ok": True, "init_ms": 1.0, "gpu": "G"}), encoding="utf-8")
             res = nr_ab.run_check(self.args(check_runs=1), "dlssvid", nr_ab.Inputs(Path("clip.mp4")), self.cat["E8"], edir, False)
-            self.assertEqual(res["checks"], [{"ok": False, "init_ms": None, "create_ms": None, "device_ms": None, "vram_mib": None, "run_s": None}])
+            self.assertEqual(res["checks"], [{"ok": False, "json": False, "init_ms": None, "create_ms": None, "device_ms": None, "vram_mib": None, "run_s": None}])
+            self.assertIs(res["measured"], False)  # no JSON: not an answer - reusable() measures it again
         finally:
             nr_ab.run = run
         if os.name == "nt":  # an open file cannot be deleted on Windows: the frames left behind stop the run
@@ -301,6 +303,33 @@ class Helpers(unittest.TestCase):
             self.assertIn("| 3 | нет |", nr_ab.render_experiment("E6f", f))
         finally:
             nr_ab.run = run
+        def silent(cmd, log, dry):  # a timeout kill or a crash: no JSON at all
+            raise RuntimeError("timed out")
+
+        def first_fails(cmd, log, dry):
+            Path(cmd[cmd.index("--json") + 1]).write_text(json.dumps({"ok": False, "features": [], "features_alive": 0, "features_stop": ""}), encoding="utf-8")
+            raise RuntimeError("failed (1)")
+
+        for k, (fake_run, word) in enumerate(((silent, "не измерено"), (first_fails, "не создалась"))):
+            nr_ab.run = fake_run
+            try:
+                f = nr_ab.run_check(self.args(check_features=4), "dlssvid", inp, self.cat["E6f"], self.root / f"E6f_{k}", False)
+                e8 = nr_ab.run_check(self.args(check_runs=1, check_repeat=5), "dlssvid", inp, self.cat["E8"], self.root / f"E8_{k}", False)
+            finally:
+                nr_ab.run = run
+            self.assertIn(word, f["verdict"]["text"][0])
+            self.assertNotIn("все запрошенные созданы", f["verdict"]["text"][0])
+            self.assertIs(f["measured"], False)
+            self.assertFalse(nr_ab.reusable({**f, "sig": {"common": {}, "variants": {}}}, {"common": {}, "variants": {}}, [], False))
+            self.assertIsNone(e8["verdict"]["phase2"])  # the re-creations were not measured: neither met nor failed
+            self.assertIn("не измерено", nr_ab.render_experiment("E8", e8))
+        sr = nr_ab.Inputs(Path("clip.mp4"), color=manifest(self.root / "color_sr", 0, 0))  # manifest() writes 8x8
+        self.assertEqual(nr_ab.check_size(self.args(check_size="2560x1440"), sr), "2560x1440")  # an explicit --check-size beats color_sr
+        self.assertEqual(nr_ab.check_size(self.args(check_size=None), sr), "8x8")
+        self.assertEqual(nr_ab.check_size(self.args(check_size=None), nr_ab.Inputs(Path("clip.mp4"))), "1280x720")
+        stopped = {"requested": 100, "ok": 17, "stop": "growth", "create_ms": [100.0] * 17, "vram_after_release_mib": [2048.0] * 17,
+                   "vram_after_create_mib": [2552.0] * 17, "usage_after_init_mib": 2552.0}
+        self.assertIs(nr_ab.phase2(stopped)[0], False)  # a release that frees nothing
         rep = {"requested": 20, "ok": 20, "usage_after_init_mib": 2552.0, "create_ms": [200.0] * 10 + [400.0] * 10,
                "vram_after_release_mib": [2048.0] * 20, "vram_after_create_mib": [2552.0] * 20}
         self.assertIs(nr_ab.phase2(rep)[0], False)  # twice slower at the end

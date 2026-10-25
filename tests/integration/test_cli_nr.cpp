@@ -172,6 +172,8 @@ TEST_CASE("dlssvid nr --check --check-repeat re-creates the feature N times and 
         CHECK(r.contains("create_ms"));
     }
     CHECK(j["recreations"][2]["index"] == 3);
+    CHECK(j["recreations"][0]["release_result"] == "stub");
+    CHECK(j["recreations_stop"] == "");
     CHECK(!j.contains("features"));
 
     const auto fjson = dir / "features.json";
@@ -187,7 +189,19 @@ TEST_CASE("dlssvid nr --check --check-repeat re-creates the feature N times and 
 
     // one measurement per run, and only with --check
     CHECK(RunCli({"nr", "--check", "--warp", "--backend", "stub", "--check-repeat", "2", "--check-features", "2"}).code != 0);
-    CHECK(RunCli({"nr", "--warp", "--backend", "stub", "--check-repeat", "2", "-i", "x.mp4", "-o", dir.string()}).code != 0);
+    const auto notClip = dir / "x.mp4";
+    std::ofstream(notClip) << "x";  // exists for CLI::ExistingFile: the refusal comes before the decoder opens it
+    const CliResult noCheck = RunCli({"nr", "--warp", "--backend", "stub", "--check-repeat", "2", "-i", notClip.string(), "-o", dir.string()});
+    CHECK(noCheck.code != 0);
+    CHECK(noCheck.out.find("belong to --check") != std::string::npos);
+    const CliResult noCheckF = RunCli({"nr", "--warp", "--backend", "stub", "--check-features", "2", "-i", notClip.string(), "-o", dir.string()});
+    CHECK(noCheckF.out.find("belong to --check") != std::string::npos);
+    // one feature asked: its row is written as for more (nr_ab E6f --check-features 1)
+    const auto one = dir / "one.json";
+    REQUIRE(RunCli({"nr", "--check", "--warp", "--backend", "stub", "--check-features", "1", "--json", one.string()}).code == 0);
+    const nlohmann::json o = ReadJson(one);
+    CHECK(o["features_alive"] == 1);
+    CHECK(o["features"].size() == 1);
     CHECK(RunCli({"nr", "--check", "--warp", "--backend", "stub", "--check-features", "0"}).code != 0);
     // regression (INCIDENT 2026-10-25): a probe of up to 18 NGX features hung the machine - more than the 4 passes need is refused
     const CliResult many = RunCli({"nr", "--check", "--warp", "--backend", "stub", "--check-features", "5"});

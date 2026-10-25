@@ -244,7 +244,7 @@ int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
     nlohmann::json features = nlohmann::json::array();
     std::string featuresStop;
     std::vector<std::unique_ptr<INrBackend>> more;
-    if (d.ok && a.checkFeatures > 1) {
+    if (d.ok && a.checkFeatures > 0) {
         auto entry = [&](int index, const NrDiagnostics& fd, const std::string& err) {
             features.push_back({{"index", index},
                                 {"ok", fd.ok},
@@ -287,23 +287,45 @@ int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
 
     // E8: re-creations inside the same Init (the preview's phase 2 re-creates the feature on a change of its settings); the first
     // failure stops - it is the answer
+    // stops: a failure (the answer), the 80 % budget guard of E6, or memory growing by more than one feature - a release that frees
+    // nothing would stack a feature per round, and many features hung the machine (INCIDENT 2026-10-25)
     nlohmann::json recreations = nlohmann::json::array();
+    std::string recreateStop;
     if (d.ok && a.checkRepeat > 0) {
         int okCount = 0;
         for (int i = 1; i <= a.checkRepeat; ++i) {
-            const NrRecreation r = backend->RecreateFeature();
+            const auto m = device.LocalVideoMemory();
+            if (m && m->budget > 0 && static_cast<double>(m->currentUsage) > 0.8 * static_cast<double>(m->budget)) {
+                recreateStop = "budget";
+                failed = true;
+                break;
+            }
+            NrRecreation r;
+            try {
+                r = backend->RecreateFeature();
+            } catch (const std::exception& e) {  // a removed device or a failed submit: the rounds so far and the JSON are kept
+                r.ok = false;
+                r.result = std::string("exception: ") + e.what();
+            }
             nlohmann::json e = r.ToJson();
             e["index"] = i;
             recreations.push_back(std::move(e));
             std::printf("recreate %3d: %s, release %s, create %s, process %s after release, %s after create\n", i, r.result.c_str(), Ms(r.releaseMs).c_str(),
                         Ms(r.createMs).c_str(), MiB(r.vramAfterRelease).c_str(), MiB(r.vramAfterCreate).c_str());
             if (!r.ok) {
+                recreateStop = "failure";
                 failed = true;
                 break;
             }
             ++okCount;
+            if (usageAfterInit >= 0 && r.vramAfterCreate >= 0 && d.vramFeatureBytes > 0 && r.vramAfterCreate - usageAfterInit > d.vramFeatureBytes) {
+                recreateStop = "growth";
+                failed = true;
+                break;
+            }
         }
-        std::printf("recreate:     %d of %d ok (process %s after the first Init)\n", okCount, a.checkRepeat, MiB(usageAfterInit).c_str());
+        std::printf("recreate:     %d of %d ok (process %s after the first Init)%s\n", okCount, a.checkRepeat, MiB(usageAfterInit).c_str(),
+                    recreateStop.empty() ? "" : (", stopped: " + recreateStop).c_str());
     }
     for (auto it = more.rbegin(); it != more.rend(); ++it) (*it)->Shutdown();
     backend->Shutdown();
@@ -313,12 +335,15 @@ int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
         j["device_ms"] = deviceMs;
         j["ab"] = NrAbJson(o);
         j["vram_usage_after_init_bytes"] = usageAfterInit < 0 ? nlohmann::json(nullptr) : nlohmann::json(usageAfterInit);
-        if (a.checkFeatures > 1) {
+        if (a.checkFeatures > 0) {
             j["features"] = features;
             j["features_alive"] = d.ok ? static_cast<int>(more.size()) + 1 : 0;
             j["features_stop"] = featuresStop;
         }
-        if (a.checkRepeat > 0) j["recreations"] = recreations;
+        if (a.checkRepeat > 0) {
+            j["recreations"] = recreations;
+            j["recreations_stop"] = recreateStop;
+        }
         std::ofstream(a.json) << j.dump(2) << "\n";
     }
     return failed ? 1 : 0;
@@ -335,9 +360,9 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     o.createWithMv = a.createWithMv;
     o.depthGuide = !a.noDepthGuide;
     if (const auto problems = NrAbProblems(o); !problems.empty()) Throw("nr: " + Join(problems));
-    if (a.checkRepeat > 0 && a.checkFeatures > 1)
+    if (a.checkRepeat > 0 && a.checkFeatures > 0)
         Throw("nr: --check-repeat and --check-features measure one thing each - give one of them per run");
-    if ((a.checkRepeat > 0 || a.checkFeatures > 1) && !a.check) Throw("nr: --check-repeat and --check-features belong to --check");
+    if ((a.checkRepeat > 0 || a.checkFeatures > 0) && !a.check) Throw("nr: --check-repeat and --check-features belong to --check");
     if (a.check) return CmdNrCheck(a, o);
     if (a.input.empty()) Throw("nr: -i/--input is required (or --check)");
     if (a.output.empty()) Throw("nr: -o/--output is required");
