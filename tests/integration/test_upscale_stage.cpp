@@ -15,6 +15,7 @@
 #include "io/VideoDecoder.h"
 #include "passes/ImageMetrics.h"
 #include "passes/PassSequence.h"
+#include "passes/ScenesPass.h"
 #include "gpu/GpuFrameCache.h"
 #include "pipeline/Pipeline.h"
 #include "ml/ModelRegistry.h"
@@ -505,4 +506,119 @@ TEST_CASE("UpscaleStage: RealBasicVSR through the worker upscales a window of fr
                 ++n;
             }
     CHECK(diff / static_cast<double>(n) < 0.15);
+}
+
+// PR-13 (regression): at a cut of the clip's list DLSS SR starts its history again (reset on frames 0 and the cut, nowhere else), and a
+// window of a video model ends before the cut - no window holds frames of both shots, the overlap of the last one is not blended into the
+// first frame of the next; every frame is written once. The upscalers are recorders injected into the stage (no DLL, no worker).
+namespace {
+struct ResetRecorder final : IUpscaler {
+    std::shared_ptr<std::vector<std::pair<int64_t, bool>>> log = std::make_shared<std::vector<std::pair<int64_t, bool>>>();
+    std::string_view Name() const override { return "rec"; }
+    void Init(D3D12Device&, const UpscalerConfig&) override {}
+    void Evaluate(ID3D12GraphicsCommandList*, const UpscaleInputs& in, ID3D12Resource*) override { log->push_back({in.frameIndex, in.reset}); }
+    nlohmann::json Describe() const override { return {{"backend", "rec"}}; }
+};
+struct WindowRecorder final : IUpscaler {  // window k (from 1) paints every frame it returns 0.125 * k
+    std::shared_ptr<std::vector<size_t>> windows = std::make_shared<std::vector<size_t>>();
+    std::string_view Name() const override { return "rec_window"; }
+    void Init(D3D12Device&, const UpscalerConfig&) override {}
+    void Evaluate(ID3D12GraphicsCommandList*, const UpscaleInputs&, ID3D12Resource*) override {}
+    bool ProcessesOnCpu() const override { return true; }
+    int WindowSize() const override { return 4; }
+    int WindowOverlap() const override { return 1; }
+    void EvaluateCpuWindow(const std::vector<const PassImage*>& in, uint32_t w, uint32_t h, std::vector<PassImage>& out) override {
+        windows->push_back(in.size());
+        const float v = 0.125f * static_cast<float>(windows->size());
+        out.assign(in.size(), PassImage{});
+        for (PassImage& img : out) {
+            img.Allocate(w, h, PixelType::F16, {"R", "G", "B", "A"});
+            for (uint32_t y = 0; y < h; ++y)
+                for (uint32_t x = 0; x < w; ++x)
+                    for (size_t c = 0; c < 4; ++c) img.Set(x, y, c, v);
+        }
+    }
+    nlohmann::json Describe() const override { return {{"backend", "rec_window"}}; }
+};
+SceneList Cuts(std::vector<int64_t> cuts) {
+    SceneList l;
+    l.cuts = std::move(cuts);
+    l.id = SceneCutsId(l.cuts);
+    l.threshold = 0.24;
+    l.frames = 7;
+    l.reachedEnd = true;
+    return l;
+}
+template <class Backend>
+UpscaleStage::Stats RunInjected(const std::filesystem::path& clip, D3D12Device& dev, UpscaleStageOptions o, std::unique_ptr<Backend> backend) {
+    VideoDecoder dec(clip);
+    o.color = ColorInfoFromStream(dec.Info());
+    Pipeline pipeline(dev, 2);
+    auto stage = std::make_unique<UpscaleStage>(o, std::move(backend));
+    UpscaleStage* raw = stage.get();
+    pipeline.AddStage(std::move(stage));
+    pipeline.Init();
+    CpuFrame f;
+    while (dec.NextFrame(f)) {
+        pipeline.Cache().Acquire(f.index, f.desc);
+        pipeline.ProcessFrame(f);
+    }
+    pipeline.Finish();
+    const UpscaleStage::Stats st = raw->GetStats();
+    pipeline.Shutdown();
+    return st;
+}
+}  // namespace
+
+TEST_CASE("UpscaleStage resets DLSS SR's history at a cut of the scene list and ends a window of a video model before it", "[integration][upscale][scenes][regression]") {
+    const auto dir = Dir("scene_cuts");
+    ClipSpec spec;
+    spec.frames = 7;
+    spec.width = 40;
+    spec.height = 24;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    D3D12Device dev({true, false});
+    {  // a GPU backend: reset on the first frame and the cut
+        auto rec = std::make_unique<ResetRecorder>();
+        const auto log = rec->log;
+        UpscaleStageOptions o;
+        o.outputDir = dir / "gpu";
+        o.sceneCuts = Cuts({3});
+        const UpscaleStage::Stats st = RunInjected(clip, dev, o, std::move(rec));
+        REQUIRE(log->size() == 7);
+        for (const auto& [frame, reset] : *log) {
+            INFO("frame " << frame);
+            CHECK(reset == (frame == 0 || frame == 3));
+        }
+        CHECK(st.sceneCutCount == 1);
+        const Manifest m = Manifest::Load(dir / "gpu" / "color_sr");
+        CHECK(m.stageParams["scene_cuts_id"] == SceneCutsId({3}));
+        CHECK(m.stageParams["scene_cuts"] == nlohmann::json::array({3}));
+        CHECK_FALSE(m.stageParams.contains("window_breaks"));
+    }
+    auto windowed = [&](const char* name, const SceneList& cuts, std::vector<size_t>& windows) {
+        auto rec = std::make_unique<WindowRecorder>();
+        const auto w = rec->windows;
+        UpscaleStageOptions o;
+        o.outputDir = dir / name;
+        o.sceneCuts = cuts;
+        const UpscaleStage::Stats st = RunInjected(clip, dev, o, std::move(rec));
+        windows = *w;
+        return st;
+    };
+    auto value = [&](const char* name, int64_t f) { return PassReader::Open(dir / name / "color_sr").ReadFrame(f).Get(0, 0, 0); };
+    std::vector<size_t> plain, cut;
+    windowed("plain", SceneList{}, plain);
+    CHECK(plain == std::vector<size_t>{4, 4, 1});  // [0..3] [3..6] [6]: frame 3 re-estimated, blended half and half
+    CHECK(value("plain", 3) == 0.1875f);
+    const UpscaleStage::Stats st = windowed("cut", Cuts({3}), cut);
+    CHECK(cut == std::vector<size_t>{3, 4, 1});  // [0..2] [3..6] [6]: no window holds frames 2 and 3
+    CHECK(st.windowBreaks == 1);
+    CHECK(st.frames == 7);  // every frame once
+    for (int64_t f = 0; f < 3; ++f) CHECK(value("cut", f) == 0.125f);
+    CHECK(value("cut", 3) == 0.25f);  // the next shot's window alone: nothing of the last one blended in
+    CHECK(value("cut", 6) == 0.3125f);  // the overlap within a shot still blends
+    const Manifest m = Manifest::Load(dir / "cut" / "color_sr");
+    CHECK(m.stageParams["window_breaks"] == 1);
+    CHECK(m.stageParams["scene_cut_count"] == 1);
 }

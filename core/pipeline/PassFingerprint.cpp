@@ -258,12 +258,16 @@ std::string PipelineStageNamesText() {
 bool StageReadsSceneCuts(const std::string& stage, const nlohmann::json& p) {
     // nr: a history to reset - the model's (guides on: it keeps one with mv) or the flicker filter's; the bypass has neither (NrStage::Init)
     if (stage == "flow") return true;  // zero vectors at a cut (PR-13)
+    if (stage == "upscale") {  // a history: DLSS SR's (reset) and the worker's windows (broken at a cut); nis, bicubic, trt keep none
+        const std::string b = Str(p, "backend", "dlss");
+        return b == "dlss" || b == "worker";
+    }
     if (stage == "nr") {
         const bool guidesOff = p.is_object() && p.contains("guides") && p["guides"].is_boolean() && !p["guides"].get<bool>();
         const double temporal = p.is_object() && p.contains("temporal") && p["temporal"].is_number() ? p["temporal"].get<double>() : 0.0;
         return !NrBypassParams(p) && (!guidesOff || temporal > 0.0);
     }
-    return false;  // the consumers come one by one (PR-13: upscale, fg); depth keeps its own segment breaks
+    return false;  // the consumers come one by one (PR-13: fg); depth keeps its own segment breaks
 }
 
 bool UpscaleReadsGuides(const nlohmann::json& p) { return Str(p, "backend", "dlss") == "dlss"; }
@@ -278,8 +282,10 @@ std::string StageForPass(const std::string& pass) {
 std::vector<std::vector<std::string>> StageInputCandidates(const std::string& stage, const nlohmann::json& params) {
     if (stage == "flow") return {{"depth_raw"}, {kScenesPass}};
     if (stage == "upscale") {
-        if (!UpscaleReadsGuides(params)) return {};
-        return {{"depth_dlss"}, {"mv_dlss"}};
+        std::vector<std::vector<std::string>> groups;
+        if (UpscaleReadsGuides(params)) groups = {{"depth_dlss"}, {"mv_dlss"}};
+        if (StageReadsSceneCuts(stage, params)) groups.push_back({kScenesPass});
+        return groups;
     }
     if (stage == "nr") {
         if (NrBypassParams(params)) return {{"color_sr"}};  // intensity 0: the model and its guides and masks are not used (PR-7)

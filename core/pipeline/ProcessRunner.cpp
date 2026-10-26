@@ -1167,6 +1167,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 o.format = ParsePassFormat(Get<std::string>(p, "format", "exr"), true);
                 o.sourceFile = sourceFile;
                 o.sourceHash = sourceHash;
+                o.sceneCuts = CutsFor(d, ctx);
                 const UpscaleRunResult r = RunUpscale(decoder, device, o, options.frames, progressFor(name), p);
                 rep.frames = r.stats.frames;
                 rep.outDir = r.outDir;

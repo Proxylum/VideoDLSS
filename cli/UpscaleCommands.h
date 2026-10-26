@@ -34,6 +34,8 @@ public:
         int tile = 0;           // trt: tile size
         std::string modelsDir;  // trt / worker: folder with registry.json
         int window = 0, overlap = 0;  // worker: frames per pass, re-estimated overlap
+        std::string scenesDir;        // PR-13: the clip's scene-cut list (default: <output>/scenes when present)
+        bool noScenes = false;
     };
     struct CompareArgs {
         std::string ref, test;

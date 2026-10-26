@@ -217,14 +217,17 @@ TEST_CASE("Stage pass tables and timestamps", "[unit][fingerprint]") {
     CHECK_FALSE(StageReadsSceneCuts("depth", nlohmann::json::object()));
     CHECK_FALSE(StageReadsSceneCuts("scenes", nlohmann::json::object()));
     CHECK(StageInputCandidates("fg", {{"guides", false}}).size() == 3);  // nr's key only
-    // PR-13: upscale reads depth and vectors with DLSS alone
-    CHECK(StageInputCandidates("upscale") == std::vector<std::vector<std::string>>{{"depth_dlss"}, {"mv_dlss"}});
-    CHECK(StageInputCandidates("upscale", {{"backend", "dlss"}}).size() == 2);
+    // PR-13: upscale reads depth and vectors with DLSS alone; the list with DLSS and the worker, which keep a history
+    CHECK(StageInputCandidates("upscale") == std::vector<std::vector<std::string>>{{"depth_dlss"}, {"mv_dlss"}, {"scenes"}});
+    CHECK(StageInputCandidates("upscale", {{"backend", "dlss"}}).size() == 3);
+    CHECK(StageInputCandidates("upscale", {{"backend", "worker"}}) == std::vector<std::vector<std::string>>{{"scenes"}});
     for (const char* b : {"nis", "bicubic", "trt", "worker"}) {
         INFO(b);
-        CHECK(StageInputCandidates("upscale", {{"backend", b}}).empty());
+        if (std::string(b) != "worker") CHECK(StageInputCandidates("upscale", {{"backend", b}}).empty());
         CHECK(!UpscaleReadsGuides({{"backend", b}}));
+        CHECK(StageReadsSceneCuts("upscale", {{"backend", b}}) == (std::string(b) == "worker"));
     }
+    CHECK(StageReadsSceneCuts("upscale", nlohmann::json::object()));  // dlss
     CHECK(UpscaleReadsGuides(nlohmann::json::object()));  // the schema default: dlss
     CHECK(StageInputCandidates("scenes").empty());
 

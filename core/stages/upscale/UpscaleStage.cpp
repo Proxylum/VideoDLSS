@@ -173,12 +173,24 @@ void UpscaleStage::Process(FrameContext& ctx) {
     if (frame.desc.width != inW_ || frame.desc.height != inH_) Throw("upscale: frame size changed mid-stream");
     cache_ = &ctx.cache;
 
+    // PR-13: a cut of the clip's list - the history starts again (DLSS SR reset, the worker's window ends before it)
+    const bool cut = !first_ && options_.sceneCuts.IsCut(frame.index);
+    if (cut) {
+        ++stats_.sceneCutCount;
+        if (stats_.sceneCuts.size() < kMaxSceneCuts) stats_.sceneCuts.push_back(frame.index);
+        Log()->info("upscale: scene cut at frame {}", frame.index);
+    }
+
     // colour -> RGBA16F
     const PassImage rgba = YuvToRgba16f(frame, options_.color);
 
     if (upscaler_->ProcessesOnCpu()) {
         // CPU-side models: one frame at a time (TensorRT), or a window of frames for video models (the PyTorch worker)
         if (upscaler_->WindowSize() > 1) {
+            if (cut && !pending_.empty()) {  // the frames before the cut go out as they are: a short window, its overlap tail dropped
+                RunCpuWindow(true);
+                ++stats_.windowBreaks;
+            }
             pending_.push_back({frame.index, rgba});
             first_ = false;
             if (static_cast<int>(pending_.size()) >= upscaler_->WindowSize()) RunCpuWindow(false);
@@ -198,7 +210,7 @@ void UpscaleStage::Process(FrameContext& ctx) {
     GpuFrameCache::Slot* slot = ctx.cache.Find(frame.index);
     UpscaleInputs in;
     in.frameIndex = frame.index;
-    in.reset = first_;
+    in.reset = first_ || cut;
     in.frameTimeMs = options_.fps.num > 0 ? 1000.0 / options_.fps.ToDouble() : 0.0;
     if (upscaler_->WantsDepthAndMv() && slot) {
         if (depthReader_ && depthReader_->HasFrame(frame.index)) ctx.cache.UploadPass(*slot, "depth_dlss", depthReader_->ReadFrame(frame.index));
@@ -330,6 +342,9 @@ void UpscaleStage::Finish() {
         m.stageParams["ms_per_frame_gpu"] = stats_.MeanMs();
         m.stageParams["depth_used"] = stats_.depthUsed;
         m.stageParams["mv_used"] = stats_.mvUsed;
+        // the label (PR-13): by the backend asked for - a fallback dlss -> nis keeps it, the fingerprint counted the list
+        StampSceneCuts(m.stageParams, options_.sceneCuts, stats_.sceneCuts, stats_.sceneCutCount);
+        if (!options_.sceneCuts.id.empty() && upscaler_ && upscaler_->WindowSize() > 1) m.stageParams["window_breaks"] = stats_.windowBreaks;
         writer_->Finish();
     }
     if (encoder_) encoder_->Close();

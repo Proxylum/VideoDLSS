@@ -10,6 +10,7 @@
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
+#include "passes/ScenesPass.h"
 #include "pipeline/IStage.h"
 #include "stages/upscale/BicubicUpscaler.h"
 #include "stages/upscale/IUpscaler.h"
@@ -47,6 +48,9 @@ struct UpscaleStageOptions {
     Rational fps;
     std::string sourceFile, sourceHash;
     std::function<void(int64_t frame, double ms)> onFrame;
+    // PR-13: the clip's cuts (stage scenes); empty: no reset but the first frame. At a cut DLSS SR starts its history again and a
+    // window of the worker does not reach across it (no blend of the overlap either); nis, bicubic and trt keep no history
+    SceneList sceneCuts;
 };
 
 class UpscaleStage final : public IStage {
@@ -69,6 +73,9 @@ public:
         bool fellBack = false;
         int jitterPhases = 0;
         bool depthUsed = false, mvUsed = false;
+        int64_t sceneCutCount = 0;       // cuts of the list met in the run (PR-13)
+        std::vector<int64_t> sceneCuts;  // their frames (the first kMaxSceneCuts)
+        int64_t windowBreaks = 0;        // windowed backends: windows ended early at a cut
     };
     const Stats& GetStats() const { return stats_; }
     const IUpscaler* Upscaler() const { return upscaler_.get(); }
