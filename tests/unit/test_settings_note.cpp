@@ -4,6 +4,7 @@
 #include <string>
 
 #include "passes/Manifest.h"
+#include "pipeline/PassVersions.h"
 #include "pipeline/SettingsNote.h"
 
 using namespace dlssvid;
@@ -69,14 +70,37 @@ TEST_CASE("Settings note: one segment per stage that ran, values from stageParam
     {
         Manifest m = Manifest::ForPass(PassKind::ColorFg, 3840, 2160, FileFormat::Exr);
         m.stageParams = {{"backend", "blend"}, {"multiplier", 2}, {"color_source", "pass"}};
-        m.inputs["color_nr"] = "sha256:00";
+        m.inputs["color_nr"] = LegacyPassId(Manifest::Load(root / "color_nr"));  // what process records for the nr pass on disk
         m.fingerprint = "sha256:01";  // inputs are written with the fingerprint (a pass process stamped)
         m.Save(root / "color_fg");
         CHECK(BuildSettingsNote(root, "color_fg").find("| nr: stub | fg: blend x2") != std::string::npos);
     }
-    // the bypass (intensity 0, PR-7): no model
-    Save(root, "color_nr", PassKind::ColorNr, {{"backend", "ngx"}, {"bypass", true}, {"passes", 0}, {"intensity", 0.0}, {"color_source", "color_sr"}});
+    // "pass:" (a folder given with a trailing separator) falls back to the recorded input; another folder is not this root's pass
+    {
+        Manifest m = Manifest::ForPass(PassKind::ColorFg, 3840, 2160, FileFormat::Exr);
+        m.stageParams = {{"backend", "blend"}, {"multiplier", 2}, {"color_source", "pass:"}};
+        m.inputs["color_nr"] = LegacyPassId(Manifest::Load(root / "color_nr"));  // what process records for the nr pass on disk
+        m.fingerprint = "sha256:01";
+        m.Save(root / "color_fg");
+        CHECK(BuildSettingsNote(root, "color_fg").find("| nr: stub") != std::string::npos);
+        m.stageParams["color_source"] = "pass:nr_elsewhere";
+        m.Save(root / "color_fg");
+        CHECK(BuildSettingsNote(root, "color_fg").find("nr:") == std::string::npos);
+    }
+    // the bypass (intensity 0, PR-7): no model - nor its filter or resolution (review of PR-11)
+    Save(root, "color_nr", PassKind::ColorNr,
+         {{"backend", "ngx"}, {"bypass", true}, {"passes", 0}, {"intensity", 0.0}, {"temporal", 0.3}, {"model_scale", 0.5}, {"color_source", "color_sr"}});
     CHECK(BuildSettingsNote(root, "color_nr").find("nr: ngx (no model) intensity=0") != std::string::npos);
+    CHECK(BuildSettingsNote(root, "color_nr").find("temporal=") == std::string::npos);
+    CHECK(BuildSettingsNote(root, "color_nr").find("model_scale=") == std::string::npos);
+    // what acts only with its switch: the filter's threshold with the filter on, the ratio transfer at another model resolution
+    Save(root, "color_nr", PassKind::ColorNr,
+         {{"backend", "ngx"}, {"temporal", 0.3}, {"temporal_threshold", 0.2}, {"model_scale", 0.5}, {"transfer", 0.8}, {"max_ratio", 6.0}, {"color_source", "video"}});
+    CHECK(BuildSettingsNote(root, "color_nr").find("temporal=0.3 temporal_threshold=0.2 model_scale=0.5 transfer=0.8 max_ratio=6") != std::string::npos);
+    Save(root, "color_nr", PassKind::ColorNr,
+         {{"backend", "ngx"}, {"temporal", 0.0}, {"temporal_threshold", 0.2}, {"model_scale", 1.0}, {"max_ratio", 6.0}, {"color_source", "video"}});
+    CHECK(BuildSettingsNote(root, "color_nr").find("threshold") == std::string::npos);
+    CHECK(BuildSettingsNote(root, "color_nr").find("max_ratio") == std::string::npos);
     // nothing encoded from a colour pass (passthrough), or no manifest: the app alone
     CHECK(BuildSettingsNote(root, "") == std::string("VideoDLSS ") + DLSSVID_VERSION);
     CHECK(BuildSettingsNote(Root("empty"), "color_fg") == std::string("VideoDLSS ") + DLSSVID_VERSION);
@@ -86,4 +110,31 @@ TEST_CASE("Settings note: one segment per stage that ran, values from stageParam
     nlohmann::json odd = BuildSettingsJson(root, "color_nr");
     odd["stages"]["nr"]["backend"] = "\xd0\xb1";  // «б»
     for (const char c : SettingsNoteText(odd)) CHECK((c >= 32 && c <= 126));
+}
+
+// review of PR-11: a color_fg kept while nr was recomputed under it (fg unchecked, then nr.intensity changed) - the result is made of
+// the nr version process recorded in its inputs, not of the current color_nr; that version from the history, or named as gone.
+TEST_CASE("Settings note follows the versions the encoded pass was made from", "[unit][encode][regression]") {
+    const auto root = Root("versions");
+    auto nr = [&](const char* fp, double intensity) {
+        Manifest m = Manifest::ForPass(PassKind::ColorNr, 1920, 1080, FileFormat::Exr);
+        m.stageParams = {{"backend", "ngx"}, {"intensity", intensity}, {"color_source", "video"}};
+        m.fingerprint = std::string("sha256:") + std::string(64, fp[0]);
+        m.Save(root / "color_nr");
+        return m.fingerprint;
+    };
+    const std::string a = nr("a", 1.2);
+    REQUIRE(RetirePassVersion(root, "color_nr"));
+    nr("b", 1.4);
+    Manifest fg = Manifest::ForPass(PassKind::ColorFg, 1920, 1080, FileFormat::Exr);
+    fg.stageParams = {{"backend", "blend"}, {"multiplier", 2}, {"color_source", "pass:color_nr"}};
+    fg.fingerprint = std::string("sha256:") + std::string(64, 'f');
+    fg.inputs["color_nr"] = a;
+    fg.Save(root / "color_fg");
+    const std::string note = BuildSettingsNote(root, "color_fg");
+    CHECK(note.find("nr: ngx intensity=1.2") != std::string::npos);  // before: 1.4, the current pass
+    CHECK(note.find("1.4") == std::string::npos);
+    CHECK(BuildSettingsNote(root, "color_nr").find("intensity=1.4") != std::string::npos);  // encoded from color_nr: the current one
+    std::filesystem::remove_all(root / "color_nr.v");  // gc took it
+    CHECK(BuildSettingsNote(root, "color_fg").find("nr: ? (that version is not on disk)") != std::string::npos);
 }

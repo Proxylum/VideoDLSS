@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "passes/Manifest.h"
+#include "pipeline/PassVersions.h"
 
 namespace dlssvid {
 namespace {
@@ -19,6 +20,24 @@ std::optional<Manifest> Load(const std::filesystem::path& dir) {
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+
+std::string IdOf(const Manifest& m) { return m.fingerprint.empty() ? LegacyPassId(m) : m.fingerprint; }
+
+// The version of `pass` the pass `down` was made from: process records it among `inputs` - the current folder when it matches,
+// else the history version with that fingerprint (a color_fg kept while nr was recomputed under it, review of PR-11); without
+// a record (a standalone pass) the current folder. nullopt: that version is not on disk any more.
+std::optional<Manifest> Upstream(const std::filesystem::path& root, const std::string& pass, const Manifest& down, bool& found) {
+    found = true;
+    const auto it = down.inputs.find(pass);
+    std::optional<Manifest> cur = Load(root / pass);
+    if (it == down.inputs.end() || it->second.empty()) return cur;
+    if (cur && IdOf(*cur) == it->second) return cur;
+    for (const auto& v : ListPassVersions(root, pass))
+        if (!v.current && v.fingerprint == it->second)
+            if (auto m = Load(v.dir)) return m;
+    found = false;
+    return std::nullopt;
 }
 
 // a number as a short text: 2, 1.2, 0.24
@@ -60,13 +79,15 @@ nlohmann::json Nr(const Manifest& m) {
         Pick(p, s, {"intensity", "passes", "local_tone", "local_structure"});
         if (p.contains("skin_structure") && p["skin_structure"].is_number())
             s["skin_structure"] = p["skin_structure"].get<double>() < 0 ? nlohmann::json("follow") : p["skin_structure"];
-        Pick(p, s, {"auto_mask", "guides"});
+        Pick(p, s, {"auto_mask", "guides", "temporal", "model_scale"});
+        // what acts only with its switch: the filter's threshold with the filter, the ratio transfer at another model resolution
+        if (p.value("temporal", 0.0) > 0.0) Pick(p, s, {"temporal_threshold"});
+        if (p.contains("model_scale") && p["model_scale"].is_number() && p["model_scale"].get<double>() != 1.0) Pick(p, s, {"transfer", "max_ratio"});
     }
     if (p.contains("scene_cut_count")) {  // the detector ran (PR-6)
         Pick(p, s, {"scene_cut_threshold"});
         s["cuts"] = p["scene_cut_count"];
     }
-    Pick(p, s, {"temporal", "model_scale"});
     if (p.contains("tonemap") && p["tonemap"].is_object()) {
         const nlohmann::json& t = p["tonemap"];
         if (t.value("curve", std::string("passthrough")) != "passthrough") s["tonemap"] = t["curve"];
@@ -97,29 +118,35 @@ nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::s
         if (m.stageParams.value("adopted", false)) s["adopted"] = true;
         return s;
     };
+    // walk back from the encoded pass: each stage names what it read (color_source) and process recorded which version (inputs); a
+    // stage it did not read is not in the result, a version no longer on disk is named as such
+    const char* stageOf[] = {"color_fg", "fg", "color_nr", "nr", "color_sr", "upscale"};
+    auto stage = [&](const std::string& pass) {
+        for (size_t i = 0; i < 6; i += 2)
+            if (pass == stageOf[i]) return std::string(stageOf[i + 1]);
+        return std::string();
+    };
     std::string pass = finalPass;
-    // walk back from the encoded pass: each stage names what it read (color_source); a stage it did not read is not in the result
-    if (pass == "color_fg") {
-        const auto m = Load(root / "color_fg");
-        if (!m) return out;
-        stages["fg"] = mark(Fg(*m), *m);
-        // pass:<folder> | slot:<pass> | video; "pass" alone (before PR-11): the input process fingerprinted, color_nr before color_sr
+    std::optional<Manifest> m = stage(pass).empty() ? std::nullopt : Load(root / pass);
+    while (m) {
+        const std::string name = stage(pass);
+        stages[name] = mark(name == "fg" ? Fg(*m) : name == "nr" ? Nr(*m) : Upscale(*m), *m);
         std::string src = m->stageParams.value("color_source", std::string());
-        if (src.rfind("pass:", 0) == 0) src = src.substr(5);
-        else if (src.rfind("slot:", 0) == 0) src = src.substr(5);
-        else if (src == "pass") src = m->inputs.count("color_nr") ? "color_nr" : m->inputs.count("color_sr") ? "color_sr" : std::string();
-        pass = src == "color_nr" || src == "color_sr" ? src : std::string();
-    }
-    if (pass == "color_nr") {
-        const auto m = Load(root / "color_nr");
-        if (!m) return out;
-        stages["nr"] = mark(Nr(*m), *m);
-        const std::string src = m->stageParams.value("color_source", std::string());
-        pass = src == "color_sr" || src == "slot" ? "color_sr" : std::string();
-    }
-    if (pass == "color_sr") {
-        const auto m = Load(root / "color_sr");
-        if (m) stages["upscale"] = mark(Upscale(*m), *m);
+        if (name == "fg") {
+            // pass:<folder> | slot:<pass> | video; "pass" alone (before PR-11) or "pass:" of a folder given with a trailing separator:
+            // the input process recorded, color_nr before color_sr. Another folder name: not this root's pass - the walk stops
+            if (src.rfind("pass:", 0) == 0 || src.rfind("slot:", 0) == 0) src = src.substr(5);
+            if (src == "pass" || src.empty()) src = m->inputs.count("color_nr") ? "color_nr" : m->inputs.count("color_sr") ? "color_sr" : std::string();
+        } else if (name == "nr") {
+            src = src == "color_sr" || src == "slot" ? "color_sr" : std::string();
+        } else {
+            src.clear();
+        }
+        if (src != "color_nr" && src != "color_sr") break;
+        bool found = true;
+        m = Upstream(root, src, *m, found);
+        pass = src;
+        if (!found) stages[stage(src)] = {{"backend", "?"}, {"missing", true}};  // made from a version that is gone
     }
     return out;
 }
@@ -131,7 +158,7 @@ std::string SettingsNoteText(const nlohmann::json& settings) {
     const std::vector<std::pair<const char*, std::vector<std::string>>> order = {
         {"upscale", {"scale", "quality", "model", "fallback"}},
         {"nr", {"bypass", "style", "intensity", "passes", "local_tone", "local_structure", "skin_structure", "auto_mask", "guides", "scene_cut_threshold", "cuts",
-                "temporal", "model_scale", "tonemap", "input_transfer", "exposure", "masks"}},
+                "temporal", "temporal_threshold", "model_scale", "transfer", "max_ratio", "tonemap", "input_transfer", "exposure", "masks"}},
         {"fg", {"multiplier", "model"}}};
     for (const auto& [name, keys] : order) {
         if (!stages.contains(name)) continue;
@@ -146,6 +173,7 @@ std::string SettingsNoteText(const nlohmann::json& settings) {
             if (k == "scale" || k == "multiplier") seg += " x" + Num(v);
             else if (k == "scene_cut_threshold") seg += " scene_cut=" + Num(v);
             else if (k == "bypass") seg += " (no model)";
+            else if (k == "missing") seg += " (that version is not on disk)";
             else seg += " " + k + "=" + Num(v);
         }
         if (s.value("adopted", false)) seg += " (adopted)";
