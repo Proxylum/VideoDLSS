@@ -102,13 +102,39 @@ void PrintPlan(const ProcessPlan& p) {
     std::printf("%-10s %-8s %-9s %-9s  %s\n", "stage", "action", "needs", "on disk", "why");
     for (const auto& s : p.stages) {
         const std::string onDisk = !s.current ? "-" : s.currentFingerprint.empty() ? "legacy" : ShortFingerprint(s.currentFingerprint);
-        std::printf("%-10s %-8s %-9s %-9s  %s%s%s\n", s.name.c_str(), s.action.c_str(), ShortFingerprint(s.fingerprint).c_str(), onDisk.c_str(), s.kind.c_str(),
-                    s.detail.empty() ? "" : ": ", s.detail.c_str());
+        // PR-13: a provisional decision says so - the list is analysed first, the run decides on it
+        const char* mark = s.name == "scenes" && s.action == "run" && !s.sceneCuts.known ? " (pending: the scene list is analysed first)"
+                           : s.pending && s.pendingRule == "no_cut"                    ? " (pending: reused if no cut is found)"
+                           : s.pending && s.pendingRule == "same_list"                 ? " (pending: reused if the same cuts are found)"
+                           : s.pending                                                 ? " (pending: reused if the stages above are)"
+                                                                                       : "";
+        std::printf("%-10s %-8s %-9s %-9s  %s%s%s%s\n", s.name.c_str(), s.action.c_str(), ShortFingerprint(s.fingerprint).c_str(), onDisk.c_str(), s.kind.c_str(),
+                    s.detail.empty() ? "" : ": ", s.detail.c_str(), mark);
     }
     for (const auto& s : p.stages) {  // the advice of the stages (TASK-0039: licence, VRAM)
         for (const auto& w : s.warnings) std::printf("warning: %s: %s\n", s.name.c_str(), w.c_str());
         if (!s.info.empty()) std::printf("note: %s: %s\n", s.name.c_str(), s.info.c_str());
         if (!s.error.empty()) std::printf("error: %s: %s\n", s.name.c_str(), s.error.c_str());
+    }
+    // PR-13: the scene-cut list and the stages that reset at it
+    const StageDecision* scenes = nullptr;
+    std::string readers, unlisted;
+    for (const auto& s : p.stages) {
+        if (s.name == "scenes") scenes = &s;
+        else if (s.inputs.count("scenes")) readers += (readers.empty() ? "" : ", ") + s.name;
+        else if (StageReadsSceneCuts(s.name, s.params)) unlisted += (unlisted.empty() ? "" : ", ") + s.name;
+    }
+    if (scenes && scenes->action == "run" && !scenes->sceneCuts.known) {
+        std::printf("note: scenes: not analysed yet; the stages below are reused if the list comes out as the one they were made with\n");
+    } else if (scenes && scenes->sceneCuts.known && !readers.empty()) {
+        std::string cuts;
+        for (size_t i = 0; i < scenes->sceneCuts.cuts.size() && i < 10; ++i) cuts += (cuts.empty() ? "" : ", ") + std::to_string(scenes->sceneCuts.cuts[i]);
+        if (scenes->sceneCuts.cuts.size() > 10) cuts += ", ...";
+        std::printf("note: scenes: %lld cut(s) (%s); reset by %s\n", static_cast<long long>(scenes->sceneCuts.count), cuts.c_str(), readers.c_str());
+    } else if (!scenes && !readers.empty()) {
+        std::printf("note: scenes: the list on disk is used; reset by %s\n", readers.c_str());
+    } else if (!scenes && !unlisted.empty()) {
+        std::printf("note: scenes is off and no scene list is on disk: %s do not reset at cuts\n", unlisted.c_str());
     }
     std::printf("plan: %d stage(s) to run, %d reused; result from %s; passes in %s\n", p.runCount, p.reuseCount,
                 p.finalPass.empty() ? "the source (passthrough)" : p.finalPass.c_str(), p.passesRoot.string().c_str());
@@ -257,7 +283,9 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_option("-o,--output", pa_.output, "output video file (default: the project's result or <input>_result.mp4)");
     process_->add_option("--passes", pa_.passes, "pass cache root (default: the project's or <output>_passes)");
     process_->add_option("--project", pa_.project, "*.dlssvid.json: stages and their parameters as the GUI saved them")->check(CLI::ExistingFile);
-    process_->add_option("--stages", pa_.stages, "comma list of stages to run (depth,flow,upscale,nr,fg); default: the project's enabled stages");
+    std::string names;
+    for (const auto& n : PipelineStageNames()) names += (names.empty() ? "" : ",") + n;
+    process_->add_option("--stages", pa_.stages, "comma list of stages to run (" + names + "); default: the project's enabled stages");
     process_->add_option("--param", pa_.params, "stage parameter stage.key=value (repeatable), e.g. nr.intensity=1.2, fg.backend=rife");
     process_->add_option("--depth-backend,--depth_backend", pa_.depthBackend, "da3 | vda | worker | worker:vda | stub");
     process_->add_option("--flow-backend,--flow_backend", pa_.flowBackend, "ofa | searaft | stub");

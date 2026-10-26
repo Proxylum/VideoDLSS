@@ -19,6 +19,7 @@
 #include "io/VideoDecoder.h"
 #include "passes/ImageMetrics.h"
 #include "passes/PassSequence.h"
+#include "passes/ScenesPass.h"
 #include "pipeline/Pipeline.h"
 #include "stages/nr/NrStage.h"
 #include "stages/nr/StubNrBackend.h"
@@ -461,10 +462,10 @@ TEST_CASE("NrStage runs four passes, one backend each", "[integration][nr]") {
     CHECK(e4 > e2);
 }
 
-// PR-6 (spec §2d): a hard cut in the source resets every pass's history and the flicker filter's - the frame at the cut is the one
-// a run without the filter makes; at scene_cut 0 the filter blends the last scene into the new one. The detector reads the decoded
-// source, not the colour pass.
-TEST_CASE("NrStage resets the history at a scene cut of the source", "[integration][nr][regression]") {
+// PR-6 (spec §2d), PR-13: at a cut of the clip's list every pass's history and the flicker filter's start again - the frame at the cut
+// is the one a run without the filter makes; without a list the filter blends the last scene into the new one. The list comes from
+// the stage scenes (NrStageOptions::sceneCuts); NR has no detector of its own any more.
+TEST_CASE("NrStage resets the history at a cut of the clip's scene list", "[integration][nr][regression]") {
     const uint32_t w = 64, h = 32;
     const int frames = 6, cutAt = 3;
     ClipSpec spec;
@@ -472,7 +473,7 @@ TEST_CASE("NrStage resets the history at a scene cut of the source", "[integrati
     spec.width = w;
     spec.height = h;
     const auto dir = Dir("scene_cut");
-    // scene A brightens 4 levels a frame (no cut: 0.02), a hard cut at frame 3 to scene B, the gradient inverted (≈ 0.5)
+    // scene A brightens 4 levels a frame, a hard cut at frame 3 to scene B, the gradient inverted
     const auto clip = WriteClipWith(dir / "clip.mkv", spec, [&](int64_t i) {
         CpuFrame f = SyntheticFrame(i, w, h);
         uint8_t* y = f.Plane(0);
@@ -480,19 +481,25 @@ TEST_CASE("NrStage resets the history at a scene cut of the source", "[integrati
             for (uint32_t c = 0; c < w; ++c) y[r * w + c] = static_cast<uint8_t>(i < cutAt ? 40 + c + 4 * i : 220 - c);
         return f;
     });
+    SceneList list;
+    list.cuts = {cutAt};
+    list.id = SceneCutsId(list.cuts);
+    list.threshold = 0.24;
+    list.frames = frames;
+    list.reachedEnd = true;
     D3D12Device dev({true, false});
-    auto options = [&](float sceneCut, float temporal, const char* name) {
+    auto options = [&](bool withList, float temporal, const char* name) {
         NrStageOptions o;
         o.backend = "stub";
         o.outputDir = dir / name;
         o.passes = 2;
         o.temporal = temporal;
         o.temporalThreshold = 1.f;  // the colour gate open: the blend is the filter's weight alone
-        o.sceneCut = sceneCut;
+        if (withList) o.sceneCuts = list;
         return o;
     };
     {  // frame by frame: Reset reaches both passes at the cut, and only there after the first frame
-        NrStageOptions o = options(0.24f, 0.5f, "on");
+        NrStageOptions o = options(true, 0.5f, "on");
         VideoDecoder dec(clip);
         o.color = ColorInfoFromStream(dec.Info());
         Pipeline pipeline(dev, 4);
@@ -517,11 +524,11 @@ TEST_CASE("NrStage resets the history at a scene cut of the source", "[integrati
         CHECK(raw->GetStats().sceneCutCount == 1);
         pipeline.Shutdown();
     }
-    auto run = [&](float sceneCut, float temporal, const char* name) {
+    auto run = [&](bool withList, float temporal, const char* name) {
         VideoDecoder dec(clip);
-        return RunNr(dec, dev, options(sceneCut, temporal, name));
+        return RunNr(dec, dev, options(withList, temporal, name));
     };
-    const NrRunResult off = run(0.f, 0.5f, "off"), plain = run(0.24f, 0.f, "plain");
+    const NrRunResult off = run(false, 0.5f, "off"), plain = run(true, 0.f, "plain");
     CHECK_FALSE(off.stats.sceneCutActive);
     CHECK(off.stats.sceneCuts.empty());
     CHECK(plain.stats.sceneCuts == std::vector<int64_t>{cutAt});  // guides on: the model's history is reset without the filter too
@@ -534,33 +541,52 @@ TEST_CASE("NrStage resets the history at a scene cut of the source", "[integrati
         return d;
     };
     CHECK(worst("on", "plain", cutAt) < 1e-3);      // at the cut the filter does not blend
-    CHECK(worst("off", "plain", cutAt) > 0.05);     // without the reset it blends scene A into B
+    CHECK(worst("off", "plain", cutAt) > 0.05);     // without the list it blends scene A into B
     CHECK(worst("on", "plain", cutAt - 1) > 1e-3);  // the filter does blend within a scene
     CHECK(worst("on", "plain", cutAt + 1) > 1e-3);  // and again after the cut
     const PassReader on = PassReader::Open(dir / "on" / "color_nr");
     CHECK(on.Man().stageParams["scene_cuts"] == nlohmann::json::array({cutAt}));
     CHECK(on.Man().stageParams["scene_cut_count"] == 1);
+    CHECK(on.Man().stageParams["scene_cuts_id"] == list.id);  // the label: the list it was made with (SceneLabelOf)
+    CHECK(SceneLabelOf(on.Man()) == list.id);
     CHECK_THAT(on.Man().stageParams["scene_cut_threshold"].get<double>(), Catch::Matchers::WithinAbs(0.24, 1e-6));
     const PassReader rdOff = PassReader::Open(dir / "off" / "color_nr");
-    CHECK(rdOff.Man().stageParams["scene_cut_threshold"] == 0.0);
-    CHECK_FALSE(rdOff.Man().stageParams.contains("scene_cuts"));  // not checked
-    // still mode without the filter: no history to reset, the detector does not run
-    auto stillRun = [&](float sceneCut, float temporal, const char* name) {
-        NrStageOptions so = options(sceneCut, temporal, name);
+    for (const char* key : {"scene_cuts_id", "scene_cut_threshold", "scene_cuts", "scene_cut_count"}) CHECK_FALSE(rdOff.Man().stageParams.contains(key));  // no list
+    CHECK(SceneLabelOf(rdOff.Man()).empty());
+    // still mode without the filter: no history to reset - the list is not used, no label
+    auto stillRun = [&](bool withList, float temporal, const char* name) {
+        NrStageOptions so = options(withList, temporal, name);
         so.useGuides = false;
         VideoDecoder d2(clip);
         return RunNr(d2, dev, so);
     };
-    const NrRunResult s = stillRun(0.24f, 0.f, "still");
+    const NrRunResult s = stillRun(true, 0.f, "still");
     CHECK_FALSE(s.stats.sceneCutActive);
-    CHECK_FALSE(PassReader::Open(dir / "still" / "color_nr").Man().stageParams.contains("scene_cuts"));
-    // still mode with the filter (spec D12): the detector runs for the filter alone - no blend of scene A into B
-    const NrRunResult st = stillRun(0.24f, 0.5f, "still_t"), stOff = stillRun(0.f, 0.5f, "still_t_off");
+    CHECK_FALSE(PassReader::Open(dir / "still" / "color_nr").Man().stageParams.contains("scene_cuts_id"));
+    // still mode with the filter (spec D12): the list for the filter alone - no blend of scene A into B
+    const NrRunResult st = stillRun(true, 0.5f, "still_t"), stOff = stillRun(false, 0.5f, "still_t_off");
     CHECK(st.stats.sceneCutActive);
     CHECK(st.stats.sceneCuts == std::vector<int64_t>{cutAt});
     CHECK(worst("still_t", "still", cutAt) < 1e-3);
     CHECK(worst("still_t_off", "still", cutAt) > 0.05);
     CHECK(worst("still_t", "still", cutAt + 1) > 1e-3);
+    // the bypass (intensity 0): no model, no filter - nothing to reset
+    NrStageOptions bp = options(true, 0.5f, "bypass");
+    bp.intensity = 0.f;
+    VideoDecoder d3(clip);
+    CHECK_FALSE(RunNr(d3, dev, bp).stats.sceneCutActive);
+    CHECK_FALSE(PassReader::Open(dir / "bypass" / "color_nr").Man().stageParams.contains("scene_cuts_id"));
+    // a part of the clip (dlssvid nr --start F --warmup K): absolute indices - a cut in the warm-up resets there, one at the first
+    // frame read (F - K) is that frame's reset alone
+    auto ranged = [&](int64_t from, int64_t first, const char* name) {
+        NrStageOptions ro = options(true, 0.5f, name);
+        ro.writeFrom = first;
+        VideoDecoder d4(clip);
+        REQUIRE(d4.SeekToFrame(from));
+        return RunNr(d4, dev, ro);
+    };
+    CHECK(ranged(2, 4, "warm").stats.sceneCuts == std::vector<int64_t>{cutAt});
+    CHECK(ranged(3, 4, "at_cut").stats.sceneCuts.empty());
 }
 
 TEST_CASE("NrStage applies the edit strength once, after the last model pass", "[integration][nr][regression]") {

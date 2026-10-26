@@ -31,9 +31,13 @@ public:
     // This frame against the last one given: true on a cut (score > threshold). The first frame after construction or Reset
     // and a frame without samples are no cut (an empty frame keeps the last thumb). `score`: the frame's score, 0 for those.
     bool Next(const CpuFrame& frame, double threshold, double* score = nullptr);
+    // The frame's score against the last frame given (PR-13: the stage scenes stores it, the threshold is applied after): 0 for the
+    // first frame and for a frame without samples (it keeps the last thumb), 1 for another size. Independent of any threshold.
+    double Score(const CpuFrame& frame);
     void Reset() { prev_ = {}; }
 
 private:
+    double Push(const CpuFrame& frame, bool& compared);  // the score; compared: there was a last frame to compare with
     ColorInfo info_;
     uint32_t maxWidth_;
     LumaThumb prev_;

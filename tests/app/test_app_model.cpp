@@ -51,6 +51,7 @@
 #include "ProjectPanel.h"
 #include "RecentPreviews.h"
 #include "ResultBar.h"
+#include "SceneCutsView.h"
 #include "StageCard.h"
 #include "StartPage.h"
 #include "Theme.h"
@@ -58,6 +59,7 @@
 #include "TestClips.h"
 #include "util/Subprocess.h"
 #include "pipeline/PassVersions.h"
+#include "viewport/ViewportState.h"
 #include "passes/PassSequence.h"
 #include "viewport/Project.h"
 #include "viewport/ViewportProxy.h"
@@ -426,10 +428,10 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     CHECK(model.sourceInfo().width == 48);
     CHECK(model.sourceInfo().frames == 4);
     CHECK(model.sourceInfo().audio);
-    REQUIRE(model.plan().stages.size() == 5);
+    REQUIRE(model.plan().stages.size() == 6);
     CHECK(model.outcome().width == 96);
     CHECK(model.outcome().fps == Approx(48.0));
-    CHECK(model.outcome().stagesToRun == 6);
+    CHECK(model.outcome().stagesToRun == 7);  // scenes .. fg + the encode
     CHECK(model.outcome().seconds > 0.0);
     CHECK(model.cardState("depth").state == QString::fromUtf8("будет посчитано"));
     CHECK(model.cardState("depth").tone == "run");
@@ -443,6 +445,16 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     model.setStageParam("nr", "guides", true);
     model.refreshPlan();
     CHECK(model.cardState("nr").warning.isEmpty());
+    // PR-13: nis reads no depth and vectors - without depth and flow only nr warns
+    model.setStageEnabled("depth", false);
+    model.setStageEnabled("flow", false);
+    model.refreshPlan();
+    CHECK(model.cardState("upscale").warning.isEmpty());
+    CHECK(model.cardState("nr").warning == QString::fromUtf8("без глубины и векторов: качество ниже"));
+    model.setStageEnabled("depth", true);
+    model.setStageEnabled("flow", true);
+    model.refreshPlan();
+    CHECK(model.cardState("upscale").warning.isEmpty());
     CHECK(model.sourceHashStatus() == QString::fromUtf8("пассов пока нет"));
     CHECK(!model.plan().sourceHash.empty());
     CHECK(model.project().sourceHash == model.plan().sourceHash);  // cached in the project
@@ -461,8 +473,10 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     CHECK(model.cardState("depth").tone == "ok");
     CHECK(model.cardState("depth").version == "v1");
     CHECK(model.cardState("depth").sub.startsWith(QString::fromUtf8("0 мин")));
+    CHECK(model.cardState("scenes").state == QString::fromUtf8("переиспользуется"));  // PR-13: the list, a pass without frames
+    CHECK(model.cardState("scenes").sub.startsWith(QString::fromUtf8("0 мин · посчитано")));
     CHECK(model.outcome().stagesToRun == 1);  // only the encode
-    CHECK(model.outcome().reused.size() == 5);
+    CHECK(model.outcome().reused.size() == 6);
     CHECK(model.sourceHashStatus() == QString::fromUtf8("совпадает с пассами"));
 
     // PR-7 (review): an nr pass of before PR-7 with intensity != 1 is recomputed and discarded - the card names the revision, not
@@ -494,16 +508,26 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
         stampOld(0.0);
         CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: при силе 0 модель не вызывается"));
         CHECK(model.cardState("nr").warning.isEmpty());  // no guides read at 0: no «без глубины и векторов»
-        // PR-6 (review): a pass of before the key - «новая настройка», not «null → 0.24»
+        // PR-6 (review): a pass of before the key - «новая настройка», not «null → 0.1»
         {
             nlohmann::json j = nlohmann::json::parse(saved);
-            j["params_canonical"].erase("scene_cut");
+            j["params_canonical"].erase("temporal_threshold");
             j["fingerprint"] = "sha256:" + std::string(64, '1');
             std::ofstream(manifestPath, std::ios::binary) << j.dump(2);
             model.setStageParam("nr", "intensity", 1.0);
             model.reloadSources();
-            CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: Сброс на склейках: новая настройка, 0.24"));
+            CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: Порог подавления мерцания: новая настройка, 0.1"));
             CHECK_FALSE(model.cardState("nr").state.contains("null"));
+        }
+        // PR-13: an nr pass of PR-6 hashed its own threshold - the card says where it went, not «scene_cut 0.24 → null»
+        {
+            nlohmann::json j = nlohmann::json::parse(saved);
+            j["params_canonical"]["scene_cut"] = 0.24;
+            j["fingerprint"] = "sha256:" + std::string(64, '2');
+            std::ofstream(manifestPath, std::ios::binary) << j.dump(2);
+            model.setStageParam("nr", "intensity", 1.0);
+            model.reloadSources();
+            CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: сброс на склейках перенесён в «Склейки»"));
         }
         std::ofstream(manifestPath, std::ios::binary) << saved;
         model.setStageParam("nr", "intensity", 1.0);
@@ -599,9 +623,9 @@ TEST_CASE("AppModel remembers recents and dialog folders, tracks unsaved changes
     CHECK(model.recents()[0].isProject);
     CHECK(model.recents()[0].exists);
     CHECK(model.recents()[0].info.startsWith(QString::fromUtf8("1 пасс")));
-    // the start screen's card: «proj — глубина посчитана» over «1 из 5 стадий · сегодня …»; no source video, no preview
+    // the start screen's card: «proj — глубина посчитана» over «1 из 6 стадий · сегодня …»; no source video, no preview
     CHECK(model.recents()[0].state == QString::fromUtf8("глубина посчитана"));
-    CHECK(model.recents()[0].progress == QString::fromUtf8("1 из 5 стадий"));
+    CHECK(model.recents()[0].progress == QString::fromUtf8("1 из 6 стадий"));
     CHECK(!model.recents()[0].when.isEmpty());
     CHECK(model.recents()[0].video.isEmpty());
     CHECK(model.recents()[0].result.isEmpty());
@@ -1131,7 +1155,7 @@ TEST_CASE("StartPage lays the recents out as cards with a preview, a state and a
     REQUIRE(page.cardTitles().size() == 2);
     CHECK(page.cardTitles()[0] == QString::fromUtf8("clip — глубина посчитана"));
     CHECK(page.cardTitles()[1] == "clip");
-    CHECK(page.cardMetas()[0].contains(QString::fromUtf8("1 из 5 стадий")));
+    CHECK(page.cardMetas()[0].contains(QString::fromUtf8("1 из 6 стадий")));
     CHECK(page.cardMetas()[1].contains(QString::fromUtf8("есть проект")));
     // the third line is the file's path (native separators); the tooltip carries the title, the path and the state
     CHECK(page.cardPaths()[0] == QDir::toNativeSeparators(Q(d / "clip.dlssvid.json")));
@@ -1140,7 +1164,7 @@ TEST_CASE("StartPage lays the recents out as cards with a preview, a state and a
     Pump([&] { return page.cardHasPreview(0) && page.cardHasPreview(1); }, 15000);
     CHECK(page.cardHasPreview(0));
     CHECK(page.cardHasPreview(1));
-    CHECK(page.cardMetas()[0].startsWith(QString::fromUtf8("48×32 24 fps · 1 из 5 стадий · ")));
+    CHECK(page.cardMetas()[0].startsWith(QString::fromUtf8("48×32 24 fps · 1 из 6 стадий · ")));
     CHECK(page.cardMetas()[1].startsWith(QString::fromUtf8("48×32 24 fps · есть проект · ")));
     // a click on a card asks the window to open that file; «очистить» empties the list
     QSignalSpy opened(&page, &dlssvid::StartPage::openPathRequested);
@@ -1867,4 +1891,195 @@ TEST_CASE("StageCard NR screenshots for a merge request", "[.shots]") {
     shot("nr_changed", false);
     shot("nr_more", true);
     QSettings().remove("card/nr/more");
+}
+
+// PR-13: the card «Склейки» says what the list is and what a threshold costs (no decoding over the stored scores, «станет N (было M)»),
+// the stages that read it say what the cuts do to them; its chips show a cut on the source's time; off, the list on disk still acts.
+TEST_CASE("AppModel: the card of the scene list, its chips and the lines of the stages that read the list", "[app][model][scenes][gpu]") {
+    App();
+    const auto d = Dir("scenes");
+    const uint32_t w = 48, h = 32;
+    ClipSpec spec;
+    spec.frames = 6;
+    spec.width = w;
+    spec.height = h;
+    const auto clip = WriteClipWith(d / "clip.mkv", spec, [&](int64_t i) {  // a hard cut at frame 3
+        CpuFrame f = SyntheticFrame(i, w, h);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < h; ++r)
+            for (uint32_t c = 0; c < w; ++c) y[r * w + c] = static_cast<uint8_t>(i < 3 ? 40 + c + 4 * i : 220 - c);
+        return f;
+    });
+    Project p = Project::Create(clip, d / "passes");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.params["backend"] = "blend";
+    }
+    p.resultVideo = d / "result.mkv";
+    p.codec = "ffv1";
+    p.Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    REQUIRE(model.planError().isEmpty());
+    REQUIRE(model.plan().stages.front().name == "scenes");
+    // before the first analysis
+    CHECK(model.cardState("scenes").state == QString::fromUtf8("будет посчитано"));
+    CHECK(model.cardState("scenes").sub.contains(QString::fromUtf8("один проход декодирования исходника")));
+    CHECK(model.cardState("flow").scenes == QString::fromUtf8("склейки найдутся перед этой стадией"));
+    CHECK(model.cardState("upscale").scenes.isEmpty());  // nis keeps no history
+    QWidget host;
+    dlssvid::SceneCutsView view(model, &host);
+    CHECK(view.isHidden());  // the list is not known yet
+
+    REQUIRE(model.saveProject());
+    QStringList args = model.processArgs();
+    args << "--warp";
+    std::vector<std::string> cmd{DLSSVID_CLI_PATH};
+    for (const QString& a : args) cmd.push_back(a.toStdString());
+    std::string out;
+    REQUIRE(Subprocess::Run(cmd, &out) == 0);
+    model.reloadSources();
+    CHECK(model.cardState("scenes").state == QString::fromUtf8("переиспользуется"));
+    CHECK(model.cardState("scenes").sub.contains(QString::fromUtf8("посчитано")));
+    CHECK(model.cardState("scenes").sub.endsWith(QString::fromUtf8("1 склейка")));
+    CHECK(model.cardState("flow").scenes == QString::fromUtf8("склейки: 1 — векторы на них нулевые"));
+    CHECK(model.cardState("nr").scenes == QString::fromUtf8("склейки: 1 — история модели и подавления мерцания сбрасывается"));
+    CHECK(model.cardState("fg").scenes == QString::fromUtf8("склейки: 1 — вместо промежуточных кадров повтор последнего кадра сцены"));
+    CHECK(model.cardState("depth").scenes.isEmpty());
+    // the chips: the cut on the source's time (the result runs at 48 fps, the source at 24)
+    view.refresh();
+    REQUIRE_FALSE(view.isHidden());
+    const auto chips = view.findChildren<QToolButton*>();
+    REQUIRE(chips.size() == 1);
+    CHECK(chips[0]->text() == QString::fromStdString(FormatTimecode(3.0 / 24.0)));
+    chips[0]->click();
+    CHECK(model.time() == Approx(3.0 / 24.0));
+    CHECK(model.store().FrameAt("source", model.time()) == 3);  // the cut frame itself, not the next one (review of PR-13)
+    CHECK(model.store().FrameAt("result", model.time()) == 6);  // 48 fps: real frame 3 of the result
+    model.seekToSourceFrame(2);
+    CHECK(model.store().FrameAt("source", model.time()) == 2);
+    const auto labels = view.findChildren<QLabel*>();
+    CHECK(std::any_of(labels.begin(), labels.end(), [](QLabel* l) { return l->text() == QString::fromUtf8("Найдено 1 склейка"); }));
+
+    // a re-analysis: the stages made with the list are reused if it comes out the same (review of PR-13)
+    model.setForce("scenes", true);
+    model.refreshPlan();
+    CHECK(model.cardState("flow").state == QString::fromUtf8("пересчёт, если склейки изменятся"));
+    CHECK(model.cardState("flow").sub.contains(QString::fromUtf8("список склеек посчитается первым")));
+    model.clearForce();
+    model.refreshPlan();
+    // another threshold, the same list: over the stored scores, nothing below
+    model.setStageParam("scenes", "threshold", 0.3);
+    model.refreshPlan();
+    CHECK(model.cardState("scenes").state.startsWith(QString::fromUtf8("пересчёт: Порог склейки")));
+    CHECK(model.cardState("scenes").sub.startsWith(QString::fromUtf8("без декодирования · 1 склейка")));
+    CHECK(model.cardState("flow").state == QString::fromUtf8("переиспользуется"));
+    view.refresh();
+    CHECK(std::any_of(labels.begin(), labels.end(), [](QLabel* l) { return l->text() == QString::fromUtf8("Список не изменится — стадии ниже не пересчитываются"); }));
+    // no cut at 0.6: «станет 0 (было 1)», the readers say the list changed
+    model.setStageParam("scenes", "threshold", 0.6);
+    model.refreshPlan();
+    CHECK(model.cardState("scenes").sub.contains(QString::fromUtf8("станет 0 склеек (было 1)")));
+    CHECK(model.cardState("flow").state == QString::fromUtf8("пересчёт: изменились склейки"));
+    CHECK(model.cardState("flow").sub.contains(QString::fromUtf8("1 → 0")));
+    CHECK(model.cardState("flow").scenes.isEmpty());  // no cut: nothing to say
+    view.refresh();
+    const auto after = view.findChildren<QLabel*>();
+    CHECK(std::any_of(after.begin(), after.end(), [](QLabel* l) { return l->text().startsWith(QString::fromUtf8("При этих настройках: 0 склеек (сейчас 1) — пересчитаются векторы")); }));
+    // threshold 0
+    model.setStageParam("scenes", "threshold", 0.0);
+    model.refreshPlan();
+    CHECK(model.cardState("scenes").state == QString::fromUtf8("выкл: без сброса"));
+    // the stage off: the list on disk is read all the same, the card says so
+    model.setStageParam("scenes", "threshold", 0.24);
+    model.setStageEnabled("scenes", false);
+    model.refreshPlan();
+    CHECK(model.cardState("scenes").state == QString::fromUtf8("выключена"));
+    CHECK(model.cardState("scenes").sub == QString::fromUtf8("действует список с диска: 1 склейка · без сброса — порог 0"));
+    CHECK(model.cardState("flow").scenes == QString::fromUtf8("склейки: 1 — векторы на них нулевые"));
+    view.refresh();
+    CHECK(view.isHidden());
+    // a v3 project without the entry: the switch creates it in its place (Project::EnsureStage) and counts as a change
+    auto& stages = model.project().stages;
+    stages.erase(std::remove_if(stages.begin(), stages.end(), [](const StageEntry& e) { return e.name == "scenes"; }), stages.end());
+    const size_t before = stages.size();
+    QSignalSpy changed(&model, &AppModel::projectChanged);
+    model.setStageEnabled("scenes", true);
+    REQUIRE(model.project().stages.size() == before + 1);
+    CHECK(model.project().stages.front().name == "scenes");
+    CHECK(model.project().stages.front().enabled);
+    CHECK(changed.count() == 1);
+    CHECK(model.dirty());
+    // a parameter of a stage the file lacks: inserted as the card shows it - off
+    stages.erase(stages.begin());
+    model.setStageParam("scenes", "threshold", 0.3);
+    CHECK(model.project().stages.front().name == "scenes");
+    CHECK_FALSE(model.project().stages.front().enabled);
+    CHECK(model.project().stages.front().params["threshold"] == 0.3);
+}
+
+// Review of PR-13, round 2: «Список не изменится» names the stages made with another list, which run again all the same; a stage that
+// reads the list on disk (the stage off) says how many cuts it will meet
+TEST_CASE("AppModel: the same list names the stages made with another one; the list on disk counts for a stage off", "[app][model][scenes][gpu][regression]") {
+    App();
+    const auto d = Dir("scenes_again");
+    const uint32_t w = 48, h = 32;
+    ClipSpec spec;
+    spec.frames = 6;
+    spec.width = w;
+    spec.height = h;
+    const auto clip = WriteClipWith(d / "clip.mkv", spec, [&](int64_t i) {  // a hard cut at frame 3
+        CpuFrame f = SyntheticFrame(i, w, h);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < h; ++r)
+            for (uint32_t c = 0; c < w; ++c) y[r * w + c] = static_cast<uint8_t>(i < 3 ? 40 + c + 4 * i : 220 - c);
+        return f;
+    });
+    Project p = Project::Create(clip, d / "passes");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.params["backend"] = "blend";
+    }
+    p.resultVideo = d / "result.mkv";
+    p.codec = "ffv1";
+    p.Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    auto run = [&] {
+        REQUIRE(model.saveProject());
+        QStringList args = model.processArgs();
+        args << "--warp";
+        std::vector<std::string> cmd{DLSSVID_CLI_PATH};
+        for (const QString& a : args) cmd.push_back(a.toStdString());
+        std::string out;
+        REQUIRE(Subprocess::Run(cmd, &out) == 0);
+        model.reloadSources();
+    };
+    run();  // the list {3}: flow, nr, fg made with it
+    model.setStageEnabled("nr", false);
+    model.setStageParam("scenes", "threshold", 0.6);  // no cut: flow and fg run without a list, nr keeps {3}
+    run();
+    model.setStageEnabled("nr", true);
+    model.setStageParam("scenes", "threshold", 0.7);  // still no cut: the same (empty) list - but nr was made with {3}
+    model.refreshPlan();
+    QWidget host;
+    dlssvid::SceneCutsView view(model, &host);
+    view.refresh();
+    const auto labels = view.findChildren<QLabel*>();
+    CHECK(std::any_of(labels.begin(), labels.end(),
+                      [](QLabel* l) { return l->text() == QString::fromUtf8("Список не изменится — пересчитаются улучшение: сделаны с другим списком"); }));
+    CHECK(model.cardState("nr").runs);  // its vectors and its list changed: «изменился вход»
+    // the stage off: the stages read the list on disk, and the count of the cuts comes from it
+    run();  // threshold 0.7: no list anywhere
+    model.setStageEnabled("scenes", false);
+    model.setStageEnabled("flow", false);  // its vectors stay: nr's only new input is the list
+    std::string out;  // a list with a cut on disk, as `dlssvid scenes` (or «Вернуть» of a version) leaves it
+    REQUIRE(Subprocess::Run({DLSSVID_CLI_PATH, "scenes", "-i", clip.string(), "-o", (d / "passes").string(), "--threshold", "0.24"}, &out) == 0);
+    model.reloadSources();
+    model.refreshPlan();
+    CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: изменились склейки"));
+    CHECK(model.cardState("nr").sub.contains(QString::fromUtf8("0 → 1")));  // before: «0 → 0», the stage off had no count
+    CHECK(model.cardState("nr").scenes == QString::fromUtf8("склейки: 1 — история модели и подавления мерцания сбрасывается"));
 }

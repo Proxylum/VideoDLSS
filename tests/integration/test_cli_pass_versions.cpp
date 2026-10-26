@@ -44,6 +44,13 @@ nlohmann::json ReadJson(const std::filesystem::path& p) {
     return j;
 }
 
+// a stage of a plan or run report by name: the indices move when a stage is added (PR-13: scenes first)
+const nlohmann::json& StageJson(const nlohmann::json& report, const std::string& name) {
+    for (const auto& s : report["stages"])
+        if (s["name"] == name) return s;
+    throw std::runtime_error("no stage " + name);
+}
+
 std::vector<std::string> operator+(std::vector<std::string> a, const std::vector<std::string>& b) {
     a.insert(a.end(), b.begin(), b.end());
     return a;
@@ -65,13 +72,13 @@ TEST_CASE("dlssvid process --plan decides without running; passes list / use / g
 
     const CliResult plan = RunCli(common + std::vector<std::string>{"--plan", "--json", (dir / "plan.json").string()});
     CHECK(plan.code == 0);
-    CHECK(plan.out.find("plan: 5 stage(s) to run, 0 reused") != std::string::npos);
+    CHECK(plan.out.find("plan: 6 stage(s) to run, 0 reused") != std::string::npos);
     CHECK(plan.out.find("missing") != std::string::npos);
     const nlohmann::json pj = ReadJson(dir / "plan.json");
-    REQUIRE(pj["stages"].size() == 5);
-    CHECK(pj["stages"][0]["action"] == "run");
-    CHECK(pj["stages"][0]["kind"] == "missing");
-    CHECK(pj["run_count"] == 5);
+    REQUIRE(pj["stages"].size() == 6);  // PR-13: scenes first
+    CHECK(StageJson(pj, "scenes")["action"] == "run");
+    CHECK(StageJson(pj, "depth")["kind"] == "missing");
+    CHECK(pj["run_count"] == 6);
     CHECK(pj["final_pass"] == "color_fg");
     CHECK(!std::filesystem::exists(root));
     CHECK(!std::filesystem::exists(dir / "result.mkv"));
@@ -79,14 +86,15 @@ TEST_CASE("dlssvid process --plan decides without running; passes list / use / g
     const CliResult run = RunCli(common + std::vector<std::string>{"--json", (dir / "run.json").string()});
     CHECK(run.code == 0);
     const nlohmann::json rj = ReadJson(dir / "run.json");
-    CHECK(rj["stages"][3]["status"] == "ran");
-    CHECK(rj["stages"][3]["fingerprint"] == pj["stages"][3]["fingerprint"]);
-    CHECK(rj["stages"][3]["retired"] == "");
+    CHECK(StageJson(rj, "nr")["status"] == "ran");
+    CHECK(StageJson(rj, "upscale")["fingerprint"] == StageJson(pj, "upscale")["fingerprint"]);
+    CHECK(StageJson(pj, "nr")["inputs"]["scenes"] == "pending:scenes");  // PR-13: nr's planned fingerprint waits for the list
+    CHECK(StageJson(rj, "nr")["retired"] == "");
     CHECK(run.out.find("[") != std::string::npos);  // the short fingerprint in the report
 
     const CliResult plan2 = RunCli(common + std::vector<std::string>{"--plan"});
     CHECK(plan2.code == 0);
-    CHECK(plan2.out.find("plan: 0 stage(s) to run, 5 reused") != std::string::npos);
+    CHECK(plan2.out.find("plan: 0 stage(s) to run, 6 reused") != std::string::npos);
 
     const CliResult list = RunCli({"passes", "list", "--passes", root.string(), "--json", (dir / "list.json").string()});
     CHECK(list.code == 0);
@@ -94,7 +102,7 @@ TEST_CASE("dlssvid process --plan decides without running; passes list / use / g
     CHECK(list.out.find("current") != std::string::npos);
     CHECK(list.out.find("total:") != std::string::npos);
     const nlohmann::json lj = ReadJson(dir / "list.json");
-    REQUIRE(lj["versions"].size() == 7);
+    REQUIRE(lj["versions"].size() == 8);  // the list scenes among them (PR-13)
     for (const auto& v : lj["versions"]) {
         CHECK(v["current"] == true);
         CHECK(v["version"] == "current");
@@ -107,10 +115,11 @@ TEST_CASE("dlssvid process --plan decides without running; passes list / use / g
     const CliResult run2 = RunCli(common + std::vector<std::string>{"--param", "nr.intensity=1.5", "--json", (dir / "run2.json").string()});
     CHECK(run2.code == 0);
     const nlohmann::json rj2 = ReadJson(dir / "run2.json");
-    CHECK(rj2["stages"][0]["status"] == "reused");
-    CHECK(rj2["stages"][3]["status"] == "ran");
-    CHECK(rj2["stages"][3]["decision"]["kind"] == "params_changed");
-    const std::string oldId = rj2["stages"][3]["retired"];
+    CHECK(StageJson(rj2, "scenes")["status"] == "reused");
+    CHECK(StageJson(rj2, "depth")["status"] == "reused");
+    CHECK(StageJson(rj2, "nr")["status"] == "ran");
+    CHECK(StageJson(rj2, "nr")["decision"]["kind"] == "params_changed");
+    const std::string oldId = StageJson(rj2, "nr")["retired"];
     CHECK(!oldId.empty());
     CHECK(run2.out.find("params_changed") != std::string::npos);
 
@@ -118,10 +127,10 @@ TEST_CASE("dlssvid process --plan decides without running; passes list / use / g
     const CliResult forced = RunCli(common + std::vector<std::string>{"--param", "nr.intensity=1.5", "--force", "fg", "--json", (dir / "force.json").string()});
     CHECK(forced.code == 0);
     const nlohmann::json fj = ReadJson(dir / "force.json");
-    CHECK(fj["stages"][4]["status"] == "ran");
-    CHECK(fj["stages"][4]["decision"]["kind"] == "forced");
-    CHECK(fj["stages"][4]["retired"] == "");
-    CHECK(fj["stages"][3]["status"] == "reused");
+    CHECK(StageJson(fj, "fg")["status"] == "ran");
+    CHECK(StageJson(fj, "fg")["decision"]["kind"] == "forced");
+    CHECK(StageJson(fj, "fg")["retired"] == "");
+    CHECK(StageJson(fj, "nr")["status"] == "reused");
     CHECK(RunCli(common + std::vector<std::string>{"--force", "bogus"}).code != 0);
     CHECK(RunCli(common + std::vector<std::string>{"--param", "nr.intensity=9", "--plan"}).code != 0);
 
@@ -131,7 +140,7 @@ TEST_CASE("dlssvid process --plan decides without running; passes list / use / g
     REQUIRE(lj2["versions"].size() == 2);
     CHECK(lj2["versions"][1]["version"] == oldId);
     const std::string oldFp = lj2["versions"][1]["fingerprint"], newFp = lj2["versions"][0]["fingerprint"];
-    CHECK(rj["stages"][3]["fingerprint"] == oldFp);
+    CHECK(StageJson(rj, "nr")["fingerprint"] == oldFp);
     CHECK(lj2["versions"][1]["params"]["intensity"] == 1);
     CHECK(lj2["versions"][0]["params"]["intensity"] == 1.5);
 

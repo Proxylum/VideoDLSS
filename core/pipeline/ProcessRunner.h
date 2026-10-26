@@ -29,7 +29,7 @@ struct ColorInfo;
 // (PassVersions.h) and a matching version found in the history is restored instead of recomputed. `PlanProcess`
 // makes exactly these decisions without running anything.
 struct ProcessStage {
-    std::string name;  // depth | flow | upscale | nr | fg
+    std::string name;  // scenes | depth | flow | upscale | nr | fg
     bool enabled = true;
     nlohmann::json params = nlohmann::json::object();
 };
@@ -94,6 +94,21 @@ struct ProcessResult {
 };
 
 // What RunProcess will do for one stage, decided from the passes on disk without running anything.
+// The scene-cut list after a decision of the stage scenes (PR-13): known for a reuse, a restore, threshold 0 and a run over stored
+// scores; not known (pending) when the source has to be decoded first.
+struct SceneCutsPlan {
+    bool known = false, rederive = false, off = false;
+    std::string id;      // "cuts:…" | "pending:scenes" (not known) | "" (no cut: no input of the stages below)
+    int64_t count = 0;   // cuts after the decision
+    int64_t before = -1;  // cuts of the current pass (-1: none or unreadable)
+    std::string beforeId;  // its list's id: the same as `id` - the list does not change
+    std::vector<int64_t> cuts;
+    std::vector<std::pair<int64_t, float>> nearMisses;
+    double threshold = 0.0;
+    int64_t frames = 0;  // the frames the list covers (the density of a clip of unknown length)
+    nlohmann::json ToJson() const;
+};
+
 struct StageDecision {
     std::string name;
     std::string action;  // run | reuse | restore
@@ -121,7 +136,20 @@ struct StageDecision {
     std::vector<std::string> warnings;
     std::string info;
     std::string error;
+    SceneCutsPlan sceneCuts;     // scenes only: the list after this decision (PR-13)
+    bool pending = false;        // a stage that reruns only because the scene list is not known yet (a plan only, PR-13)
+    // when a pending stage is reused after all: "no_cut" (made without a list: if none is found), "same_list" (made with one: if the
+    // analysis gives it again), "unchanged" (it reads a pending stage: if that one is reused)
+    std::string pendingRule;
+    std::string currentCreated;  // the current pass's manifest.created (the card's «посчитано …» of a pass without frames)
     nlohmann::json ToJson() const;
+};
+
+// The scene list on disk when the plan was made (PR-13): what the stages below read while the stage scenes is off.
+struct SceneListOnDisk {
+    int64_t count = 0, frames = 0;
+    double threshold = 0.0;
+    bool off = false;
 };
 
 struct ProcessPlan {
@@ -131,6 +159,7 @@ struct ProcessPlan {
     std::vector<StageDecision> stages;  // enabled stages in run order
     std::string finalPass;              // colour pass the encode step would use ("" -> the source is passed through)
     int runCount = 0, reuseCount = 0;   // reuseCount includes restores
+    std::optional<SceneListOnDisk> scenesOnDisk;  // a readable list of this source under the root (PR-13)
     nlohmann::json ToJson() const;
 };
 

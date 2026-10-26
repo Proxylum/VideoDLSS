@@ -12,6 +12,7 @@
 
 #include "TestClips.h"
 #include "passes/Manifest.h"
+#include "passes/ScenesPass.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/ProcessRunner.h"
@@ -72,7 +73,7 @@ std::vector<std::string> Statuses(const ProcessResult& r) {
     return out;
 }
 
-const std::vector<std::string> kStages{"depth", "flow", "upscale", "nr", "fg"};
+const std::vector<std::string> kStages{"scenes", "depth", "flow", "upscale", "nr", "fg"};  // PR-13: the scene-cut list first
 
 }  // namespace
 
@@ -86,31 +87,35 @@ TEST_CASE("RunProcess stamps every pass with its fingerprint; PlanProcess predic
     ProcessOptions o = Options(dir, clip);
 
     const ProcessPlan plan0 = PlanProcess(o);
-    REQUIRE(plan0.stages.size() == 5);
-    CHECK(Actions(plan0) == std::vector<std::string>(5, "run"));
+    REQUIRE(plan0.stages.size() == 6);
+    CHECK(Actions(plan0) == std::vector<std::string>(6, "run"));
     for (const auto& s : plan0.stages) {
         CHECK(s.kind == "missing");
         CHECK(!s.current);
         CHECK(s.fingerprint.rfind("sha256:", 0) == 0);
         CHECK(!s.retire);
     }
-    CHECK(plan0.runCount == 5);
+    CHECK(plan0.runCount == 6);
     CHECK(plan0.reuseCount == 0);
     CHECK(plan0.finalPass == "color_fg");
     CHECK(plan0.frames == -1);  // MKV carries no frame count: the run covers the whole source
-    CHECK(Decision(plan0, "nr").inputs.size() == 3);  // color_sr, depth_dlss, mv_dlss — as the run will produce them
+    // color_sr, depth_dlss, mv_dlss - as the run will produce them - and the scene list, not analysed yet (PR-13): the fingerprints of
+    // flow and nr, which read it, and fg's above them are provisional in this plan; the clip has no cut, so the run's have no input scenes
+    CHECK(Decision(plan0, "nr").inputs.size() == 4);
+    CHECK(Decision(plan0, "nr").inputs.at("scenes") == kScenesPendingId);
     CHECK(Decision(plan0, "nr").inputs.at("color_sr") == Decision(plan0, "upscale").fingerprint);
     CHECK(Decision(plan0, "fg").inputs.at("color_nr") == Decision(plan0, "nr").fingerprint);
     CHECK(Decision(plan0, "nr").params["intensity"] == 1);
     CHECK(Decision(plan0, "nr").tool["backend"] == "stub");
     CHECK(!std::filesystem::exists(o.passesRoot));  // planning writes nothing
-    CHECK(plan0.ToJson()["stages"].size() == 5);
+    CHECK(plan0.ToJson()["stages"].size() == 6);
 
     const ProcessResult r = RunProcess(o);
-    CHECK(Statuses(r) == std::vector<std::string>(5, "ran"));
+    CHECK(Statuses(r) == std::vector<std::string>(6, "ran"));
     for (const auto& name : kStages) {
         const ProcessStageReport& s = Report(r, name);
-        CHECK(s.fingerprint == Decision(plan0, name).fingerprint);  // the plan and the run agree
+        if (name == "flow" || name == "nr" || name == "fg") CHECK(s.fingerprint != Decision(plan0, name).fingerprint);  // provisional: the list was pending
+        else CHECK(s.fingerprint == Decision(plan0, name).fingerprint);  // the plan and the run agree
         CHECK(s.decision["kind"] == "missing");
         CHECK(s.retired.empty());
         CHECK_THAT(s.reason, ContainsSubstring("missing"));
@@ -129,25 +134,25 @@ TEST_CASE("RunProcess stamps every pass with its fingerprint; PlanProcess predic
     CHECK(Manifest::Load(o.passesRoot / "mv_raw").fingerprint == Manifest::Load(o.passesRoot / "mv_dlss").fingerprint);
     CHECK(Manifest::Load(o.passesRoot / "color_fg").inputs.at("color_nr") == nr.fingerprint);
     CHECK(Report(r, "encode").fingerprint == Report(r, "fg").fingerprint);
-    CHECK(r.ToJson()["stages"][3]["fingerprint"] == nr.fingerprint);
-    CHECK(r.ToJson()["stages"][3]["decision"]["kind"] == "missing");
+    CHECK(r.ToJson()["stages"][4]["fingerprint"] == nr.fingerprint);  // scenes, depth, flow, upscale, nr
+    CHECK(r.ToJson()["stages"][4]["decision"]["kind"] == "missing");
 
     const ProcessPlan plan1 = PlanProcess(o);
-    CHECK(Actions(plan1) == std::vector<std::string>(5, "reuse"));
+    CHECK(Actions(plan1) == std::vector<std::string>(6, "reuse"));
     for (const auto& s : plan1.stages) {
         CHECK(s.kind == "exact");
         CHECK(s.current);
         CHECK(s.currentFingerprint == s.fingerprint);
     }
     CHECK(plan1.runCount == 0);
-    CHECK(plan1.reuseCount == 5);
+    CHECK(plan1.reuseCount == 6);
     const ProcessResult again = RunProcess(o);
-    CHECK(Statuses(again) == std::vector<std::string>(5, "reused"));
+    CHECK(Statuses(again) == std::vector<std::string>(6, "reused"));
     for (const auto& name : kStages) {
         CHECK(Report(again, name).reason.empty());
         CHECK(Report(again, name).fingerprint == Report(r, name).fingerprint);
     }
-    CHECK(ListPassVersions(o.passesRoot).size() == 7);  // seven current passes, no history
+    CHECK(ListPassVersions(o.passesRoot).size() == 8);  // eight current passes (the list scenes among them), no history
 }
 
 TEST_CASE("Regression (stage-8 gap): a changed NR parameter recomputes nr and fg, keeps the stages above and the old versions", "[integration][process][versions]") {
@@ -163,7 +168,7 @@ TEST_CASE("Regression (stage-8 gap): a changed NR parameter recomputes nr and fg
 
     ApplyParamSpec(o.stages, "nr.intensity=1.4");
     const ProcessPlan plan = PlanProcess(o);
-    CHECK(Actions(plan) == std::vector<std::string>{"reuse", "reuse", "reuse", "run", "run"});
+    CHECK(Actions(plan) == std::vector<std::string>{"reuse", "reuse", "reuse", "reuse", "run", "run"});
     const StageDecision& nr = Decision(plan, "nr");
     CHECK(nr.kind == "params_changed");
     CHECK(nr.diff["params"]["intensity"] == nlohmann::json({1, 1.4}));
@@ -178,7 +183,7 @@ TEST_CASE("Regression (stage-8 gap): a changed NR parameter recomputes nr and fg
     CHECK(plan.runCount == 2);
 
     const ProcessResult r = RunProcess(o);
-    CHECK(Statuses(r) == std::vector<std::string>{"reused", "reused", "reused", "ran", "ran"});
+    CHECK(Statuses(r) == std::vector<std::string>{"reused", "reused", "reused", "reused", "ran", "ran"});
     CHECK(Report(r, "nr").status == "ran");  // before MR A this was "reused": the parameter change went unnoticed
     CHECK_THAT(Report(r, "nr").reason, ContainsSubstring("params_changed"));
     CHECK(Report(r, "nr").fingerprint == nr.fingerprint);
@@ -218,15 +223,15 @@ TEST_CASE("Switching a parameter back restores the previous version instead of r
 
     ApplyParamSpec(o.stages, "nr.intensity=1.0");
     const ProcessPlan plan = PlanProcess(o);
-    CHECK(Actions(plan) == std::vector<std::string>{"reuse", "reuse", "reuse", "restore", "restore"});
+    CHECK(Actions(plan) == std::vector<std::string>{"reuse", "reuse", "reuse", "reuse", "restore", "restore"});
     CHECK(Decision(plan, "nr").kind == "restored");
     CHECK(Decision(plan, "nr").version == Report(run14, "nr").retired);
     CHECK(Decision(plan, "nr").fingerprint == nr10);
     CHECK(Decision(plan, "fg").fingerprint == fg10);
     CHECK(plan.runCount == 0);
-    CHECK(plan.reuseCount == 5);
+    CHECK(plan.reuseCount == 6);
     const ProcessResult back = RunProcess(o);
-    CHECK(Statuses(back) == std::vector<std::string>(5, "reused"));
+    CHECK(Statuses(back) == std::vector<std::string>(6, "reused"));
     CHECK(Report(back, "nr").restored == Report(run14, "nr").retired);
     CHECK(Report(back, "fg").restored == Report(run14, "fg").retired);
     CHECK_THAT(Report(back, "nr").reason, ContainsSubstring("restored"));
@@ -276,7 +281,7 @@ TEST_CASE("Passes made before fingerprints are adopted on the first run; another
         CHECK(Manifest::Load(o.passesRoot / name).fingerprint.empty());
     }
     const ProcessPlan plan = PlanProcess(o);
-    CHECK(Actions(plan) == std::vector<std::string>(5, "reuse"));
+    CHECK(Actions(plan) == std::vector<std::string>(6, "reuse"));
     for (const auto& s : plan.stages) {
         CHECK(s.kind == "legacy");
         CHECK(s.current);
@@ -284,7 +289,7 @@ TEST_CASE("Passes made before fingerprints are adopted on the first run; another
     }
     CHECK(Decision(plan, "nr").inputs.at("color_sr") == Decision(plan, "upscale").fingerprint);  // adopted passes count with their new fingerprint
     const ProcessResult adopted = RunProcess(o);
-    CHECK(Statuses(adopted) == std::vector<std::string>(5, "reused"));
+    CHECK(Statuses(adopted) == std::vector<std::string>(6, "reused"));
     for (const auto& name : kStages) {
         CHECK_THAT(Report(adopted, name).reason, ContainsSubstring("adopted"));
         CHECK(Report(adopted, name).fingerprint == Report(base, name).fingerprint);  // the same parameters -> the same fingerprint as the original run
@@ -294,19 +299,19 @@ TEST_CASE("Passes made before fingerprints are adopted on the first run; another
     CHECK(nr.created.size() == 20);
     CHECK(nr.paramsCanonical["intensity"] == 1);
     CHECK(PlanProcess(o).runCount == 0);
-    CHECK(ListPassVersions(o.passesRoot).size() == 7);  // adoption creates no history
+    CHECK(ListPassVersions(o.passesRoot).size() == 8);  // adoption creates no history
 
     // another source: every stage runs again, the old versions are kept aside
     spec.frames = 4;
     o.input = WriteClip(dir / "clip2.mkv", spec);
     const ProcessPlan plan2 = PlanProcess(o);
-    CHECK(Actions(plan2) == std::vector<std::string>(5, "run"));
+    CHECK(Actions(plan2) == std::vector<std::string>(6, "run"));
     for (const auto& s : plan2.stages) {
         CHECK(s.kind == "source_changed");
         CHECK(s.retire);
     }
     const ProcessResult other = RunProcess(o);
-    CHECK(Statuses(other) == std::vector<std::string>(5, "ran"));
+    CHECK(Statuses(other) == std::vector<std::string>(6, "ran"));
     CHECK(!Report(other, "depth").retired.empty());
     CHECK(ListPassVersions(o.passesRoot, "depth_dlss").size() == 2);
     CHECK(other.framesIn == 4);
@@ -327,27 +332,27 @@ TEST_CASE("Forced runs, incomplete passes completed in place, a disabled stage l
     SECTION("--no-skip-existing recomputes in place when the fingerprint is the same") {
         o.skipExisting = false;
         const ProcessPlan plan = PlanProcess(o);
-        CHECK(Actions(plan) == std::vector<std::string>(5, "run"));
+        CHECK(Actions(plan) == std::vector<std::string>(6, "run"));
         CHECK(Decision(plan, "depth").kind == "forced");
         CHECK(!Decision(plan, "depth").retire);
         const ProcessResult r = RunProcess(o);
-        CHECK(Statuses(r) == std::vector<std::string>(5, "ran"));
+        CHECK(Statuses(r) == std::vector<std::string>(6, "ran"));
         CHECK(Report(r, "nr").retired.empty());
-        CHECK(ListPassVersions(o.passesRoot).size() == 7);
+        CHECK(ListPassVersions(o.passesRoot).size() == 8);
         CHECK(!std::filesystem::exists(o.passesRoot / "color_nr.v"));
     }
     SECTION("more frames of the same source: the passes are incomplete and completed in place") {
         o.frames = 5;
         const ProcessPlan plan = PlanProcess(o);
-        CHECK(Actions(plan) == std::vector<std::string>(5, "run"));
+        CHECK(Actions(plan) == std::vector<std::string>(6, "run"));
         CHECK(Decision(plan, "depth").kind == "incomplete");
         CHECK_THAT(Decision(plan, "depth").detail, ContainsSubstring("3 of 5 frames"));
         CHECK(!Decision(plan, "depth").retire);
         CHECK(Decision(plan, "depth").fingerprint == Report(base, "depth").fingerprint);  // the frame count is not part of the fingerprint
         const ProcessResult r = RunProcess(o);
-        CHECK(Statuses(r) == std::vector<std::string>(5, "ran"));
+        CHECK(Statuses(r) == std::vector<std::string>(6, "ran"));
         CHECK(r.framesIn == 5);
-        CHECK(ListPassVersions(o.passesRoot).size() == 7);
+        CHECK(ListPassVersions(o.passesRoot).size() == 8);
         CHECK(PlanProcess(o).runCount == 0);
     }
     SECTION("nr ngx on WARP is disabled: the retired version stays in the history, fg follows color_sr") {
@@ -379,7 +384,7 @@ TEST_CASE("Schema defaults are the same run; --force recomputes one stage in pla
     const auto clip = WriteClip(dir / "clip.mkv", spec);
     ProcessOptions o = Options(dir, clip);
     const ProcessResult base = RunProcess(o);
-    CHECK(Statuses(base) == std::vector<std::string>(5, "ran"));
+    CHECK(Statuses(base) == std::vector<std::string>(6, "ran"));
     const Manifest nr = Manifest::Load(o.passesRoot / "color_nr");
     CHECK(nr.stageParams["ms_per_frame"].get<double>() > 0);  // recorded for the estimates
     CHECK(nr.stageParams["ms_per_frame"].get<double>() >= nr.stageParams["ms_per_frame_gpu"].get<double>());  // the wall time beside the stage's (D8)
@@ -400,7 +405,7 @@ TEST_CASE("Schema defaults are the same run; --force recomputes one stage in pla
     CHECK(!Decision(plan, "nr").retire);
     CHECK(Decision(plan, "fg").action == "reuse");
     const ProcessResult forced = RunProcess(o);
-    CHECK(Statuses(forced) == std::vector<std::string>{"reused", "reused", "reused", "ran", "reused"});
+    CHECK(Statuses(forced) == std::vector<std::string>{"reused", "reused", "reused", "reused", "ran", "reused"});
     CHECK(Report(forced, "nr").retired.empty());
     CHECK(ListPassVersions(o.passesRoot, "color_nr").size() == 1);
     o.forceStages = {"bogus"};
@@ -427,7 +432,7 @@ TEST_CASE("Schema defaults are the same run; --force recomputes one stage in pla
 }
 
 // Audit pass-mv-yup (TASK-0038): PassReader negates v of a y-up motion-vector pass, so toggling mv.y_up of an external
-// (legacy, unfingerprinted) mv_dlss changes what upscale / nr / fg read - the plan must recompute them, and the run agree.
+// (legacy, unfingerprinted) mv_dlss changes what nr / fg (and a DLSS upscale) read - the plan must recompute them, and the run agree.
 TEST_CASE("Regression (pass-mv-yup): toggling mv.y_up of a legacy mv_dlss recomputes the stages that read it", "[integration][process][versions][mv][y_up]") {
     ClipSpec spec;
     spec.frames = 3;
@@ -450,31 +455,36 @@ TEST_CASE("Regression (pass-mv-yup): toggling mv.y_up of a legacy mv_dlss recomp
         if (s.name == "flow") s.enabled = false;
     RunProcess(o);
     REQUIRE(PlanProcess(o).runCount == 0);
-    const std::string legacy = Manifest::Load(o.passesRoot / "color_sr").inputs.at("mv_dlss");
+    const std::string legacy = Manifest::Load(o.passesRoot / "color_nr").inputs.at("mv_dlss");
     CHECK(legacy.rfind("legacy:", 0) == 0);
+    CHECK(Manifest::Load(o.passesRoot / "color_sr").inputs.count("mv_dlss") == 0);  // nis reads no vectors (PR-13)
 
     Manifest m = Manifest::Load(mvDir);
     m.mv.yUp = true;
     m.Save(mvDir);
     const ProcessPlan plan = PlanProcess(o);
-    const StageDecision& up = Decision(plan, "upscale");
-    CHECK(up.action == "run");  // before the fix the pseudo-fingerprint ignored y_up: "reuse" with flipped vectors
-    CHECK(up.kind == "input_changed");
-    CHECK(up.inputs.at("mv_dlss") == legacy + ":y_up");
-    CHECK(Decision(plan, "nr").action == "run");
+    const StageDecision& nr = Decision(plan, "nr");
+    CHECK(nr.action == "run");  // before the fix the pseudo-fingerprint ignored y_up: "reuse" with flipped vectors
+    CHECK(nr.kind == "input_changed");
+    CHECK(nr.inputs.at("mv_dlss") == legacy + ":y_up");
+    CHECK(Decision(plan, "upscale").action == "reuse");  // nis: the vectors are no input of its colour (PR-13)
     CHECK(Decision(plan, "fg").action == "run");
-    // nr and fg read mv_dlss themselves, not only through color_sr / color_nr (review of TASK-0038, yup-4)
-    CHECK(Decision(plan, "nr").inputs.at("mv_dlss") == legacy + ":y_up");
+    // fg reads mv_dlss itself, not only through color_nr (review of TASK-0038, yup-4)
     CHECK(Decision(plan, "fg").inputs.at("mv_dlss") == legacy + ":y_up");
 
     const ProcessResult r = RunProcess(o);
-    CHECK(Report(r, "upscale").status == "ran");
-    CHECK(Manifest::Load(o.passesRoot / "color_sr").inputs.at("mv_dlss") == legacy + ":y_up");
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").inputs.at("mv_dlss") == legacy + ":y_up");
     CHECK(PlanProcess(o).runCount == 0);  // the plan and the run agree
 
     m.mv.yUp = false;
     m.Save(mvDir);
-    CHECK(Decision(PlanProcess(o), "upscale").action == "restore");  // the version made without the flag comes back
+    CHECK(Decision(PlanProcess(o), "nr").action == "restore");  // the version made without the flag comes back
+    // a DLSS upscale reads the vectors too: the flag reaches its inputs (the plan alone: no DLL on WARP)
+    m.mv.yUp = true;
+    m.Save(mvDir);
+    ApplyParamSpec(o.stages, "upscale.backend=dlss");
+    CHECK(Decision(PlanProcess(o), "upscale").inputs.at("mv_dlss") == legacy + ":y_up");
 }
 
 // TASK-0045: process loads the NVIDIA DLL from DLSSVID_NVIDIA_DLL_DIR / <exe>/nvidia / <exe>, a dll_dir in the stage's

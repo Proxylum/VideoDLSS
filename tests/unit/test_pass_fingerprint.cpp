@@ -197,16 +197,43 @@ TEST_CASE("Stage pass tables and timestamps", "[unit][fingerprint]") {
     CHECK(StageForPass("depth_raw") == "depth");
     CHECK(StageForPass("mask_face").empty());
     CHECK(StageInputCandidates("depth").empty());
-    CHECK(StageInputCandidates("flow") == std::vector<std::vector<std::string>>{{"depth_raw"}});
+    CHECK(StageInputCandidates("flow") == std::vector<std::vector<std::string>>{{"depth_raw"}, {"scenes"}});  // + the list (PR-13)
     CHECK(StageInputCandidates("fg").front() == std::vector<std::string>{"color_nr", "color_sr"});
-    CHECK(StageInputCandidates("nr").size() == 7);
-    // TASK-0045: nr with the guides off reads no depth / mv - they are no inputs of its fingerprint
+    CHECK(StageInputCandidates("nr").size() == 8);  // + the scene list (PR-13)
+    CHECK(StageInputCandidates("nr").back() == std::vector<std::string>{"scenes"});
+    // TASK-0045: nr with the guides off reads no depth / mv - they are no inputs of its fingerprint; nor the list without the filter
     CHECK(StageInputCandidates("nr", {{"guides", false}}) == std::vector<std::vector<std::string>>{{"color_sr"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}});
-    CHECK(StageInputCandidates("nr", {{"guides", true}}).size() == 7);
-    // PR-7: intensity 0 reads only the colour - the model, its guides and the masks are not used
+    CHECK(StageInputCandidates("nr", {{"guides", false}, {"temporal", 0.4}}).size() == 6);  // the filter keeps a history: the list
+    CHECK(StageInputCandidates("nr", {{"guides", true}}).size() == 8);
+    // PR-7: intensity 0 reads only the colour - the model, its guides, the masks and the list are not used
     CHECK(StageInputCandidates("nr", {{"intensity", 0.0}}) == std::vector<std::vector<std::string>>{{"color_sr"}});
-    CHECK(StageInputCandidates("nr", {{"intensity", 1.0}}).size() == 7);
-    CHECK(StageInputCandidates("fg", {{"guides", false}}).size() == 3);  // nr's key only
+    CHECK(StageInputCandidates("nr", {{"intensity", 1.0}}).size() == 8);
+    // PR-13: the one gate of the list
+    CHECK(StageReadsSceneCuts("nr", nlohmann::json::object()));
+    CHECK_FALSE(StageReadsSceneCuts("nr", {{"intensity", 0.0}}));
+    CHECK_FALSE(StageReadsSceneCuts("nr", {{"guides", false}, {"temporal", 0.0}}));
+    CHECK(StageReadsSceneCuts("nr", {{"guides", false}, {"temporal", 0.2}}));
+    CHECK(StageReadsSceneCuts("flow", nlohmann::json::object()));
+    CHECK_FALSE(StageReadsSceneCuts("depth", nlohmann::json::object()));
+    CHECK_FALSE(StageReadsSceneCuts("scenes", nlohmann::json::object()));
+    CHECK(StageInputCandidates("fg", {{"guides", false}}).size() == 4);  // nr's key only; + the list (PR-13)
+    CHECK(StageInputCandidates("fg").back() == std::vector<std::string>{"scenes"});
+    CHECK(StageInputCandidates("fg", {{"multiplier", 1}}).size() == 3);  // x1 makes no frame between two real ones
+    CHECK(StageReadsSceneCuts("fg", {{"multiplier", 3}}));
+    CHECK_FALSE(StageReadsSceneCuts("fg", {{"multiplier", 1}}));
+    // PR-13: upscale reads depth and vectors with DLSS alone; the list with DLSS and the worker, which keep a history
+    CHECK(StageInputCandidates("upscale") == std::vector<std::vector<std::string>>{{"depth_dlss"}, {"mv_dlss"}, {"scenes"}});
+    CHECK(StageInputCandidates("upscale", {{"backend", "dlss"}}).size() == 3);
+    CHECK(StageInputCandidates("upscale", {{"backend", "worker"}}) == std::vector<std::vector<std::string>>{{"scenes"}});
+    for (const char* b : {"nis", "bicubic", "trt", "worker"}) {
+        INFO(b);
+        if (std::string(b) != "worker") CHECK(StageInputCandidates("upscale", {{"backend", b}}).empty());
+        CHECK(!UpscaleReadsGuides({{"backend", b}}));
+        CHECK(StageReadsSceneCuts("upscale", {{"backend", b}}) == (std::string(b) == "worker"));
+    }
+    CHECK(StageReadsSceneCuts("upscale", nlohmann::json::object()));  // dlss
+    CHECK(UpscaleReadsGuides(nlohmann::json::object()));  // the schema default: dlss
+    CHECK(StageInputCandidates("scenes").empty());
 
     CHECK(CompactTimestamp("2026-09-22T14:09:31Z") == "20260922-140931");
     CHECK(CompactTimestamp("yesterday").empty());

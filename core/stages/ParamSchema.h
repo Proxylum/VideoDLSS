@@ -79,7 +79,7 @@ struct ParamSpec {
 };
 
 struct StageSchema {
-    std::string stage;     // depth | flow | upscale | nr | fg
+    std::string stage;     // scenes | depth | flow | upscale | nr | fg
     std::string title;     // «Глубина»
     std::string subtitle;  // «guide для DLSS, NR и FG»
     std::vector<ParamSpec> params;
@@ -97,6 +97,18 @@ nlohmann::json NormalizeStageParams(const std::string& stage, const nlohmann::js
 // Problems with the parameters (wrong type, out of range, not a choice), after NormalizeStageParams; unknown keys pass
 // (backends take extra keys).
 std::vector<std::string> ValidateStageParams(const std::string& stage, const nlohmann::json& params);
+// A key that left a stage's schema for another stage (PR-13: nr.scene_cut -> scenes.threshold), in its snake or kebab spelling:
+// ValidateStageParams and ReadStageParamsFile name it instead of passing it on (unknown keys are kept for the backends, and this one
+// would be hashed without an effect); the card says where it went.
+struct MovedParam {
+    const char* stage;
+    const char* key;
+    const char* to;     // "scenes.threshold"
+    const char* label;  // the card label it had
+};
+const MovedParam* FindMovedParam(const std::string& stage, const std::string& key);
+std::string MovedParamProblem(const MovedParam& m);  // "nr.scene_cut moved to scenes.threshold (PR-13): use --param scenes.threshold=..."
+
 // The parameters normalised, with the schema defaults filled in for absent keys (unknown keys kept): what a run means.
 // ProcessRunner hands exactly these to the stage and to its fingerprint (TASK-0043: the stages got the raw parameters, so
 // a default that differed between the schema and the stage - nr.exposure - ran differently from what was hashed).

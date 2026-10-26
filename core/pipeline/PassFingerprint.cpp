@@ -11,6 +11,7 @@
 
 #include "ml/ModelRegistry.h"
 #include "passes/Manifest.h"
+#include "passes/ScenesPass.h"
 #include "stages/depth/DepthModels.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "stages/flow/TrtFlowEstimator.h"
@@ -164,7 +165,7 @@ std::vector<std::string> AddedToolRevisions(const std::string& oldApp, const std
 ToolInfo ToolForStage(const std::string& stage, const nlohmann::json& p) {
     ToolInfo t;
     t.app = PassToolVersionFor(stage, p);  // not DLSSVID_VERSION: a release does not invalidate the passes (CHANGELOG 0.2.0)
-    const char* def = stage == "depth" ? "da3" : stage == "flow" ? "ofa" : stage == "upscale" ? "dlss" : stage == "nr" ? "ngx" : stage == "fg" ? "dlssg" : "";
+    const char* def = stage == "scenes" ? "luma" : stage == "depth" ? "da3" : stage == "flow" ? "ofa" : stage == "upscale" ? "dlss" : stage == "nr" ? "ngx" : stage == "fg" ? "dlssg" : "";
     t.backend = Str(p, "backend", def);
     const std::string model = Str(p, "model", "");
     // the DLL the stage loads: its default lookup (DLSSVID_NVIDIA_DLL_DIR, <exe>/nvidia, <exe>). params.dll_dir is read by
@@ -222,16 +223,19 @@ PassFingerprint ComputeFingerprint(const std::string& stage, const std::string& 
 }
 
 std::vector<std::string> StageOutputPasses(const std::string& stage, const nlohmann::json& params) {
+    if (stage == "scenes") return {"scenes"};
     if (stage == "depth") return Flag(params, "no_dlss") ? std::vector<std::string>{"depth_raw"} : std::vector<std::string>{"depth_raw", "depth_dlss"};
     if (stage == "flow") return Flag(params, "no_dlss") ? std::vector<std::string>{"mv_raw"} : std::vector<std::string>{"mv_raw", "mv_dlss"};
     if (stage == "upscale") return {"color_sr"};
     if (stage == "nr") return {"color_nr"};
     if (stage == "fg") return {"color_fg"};
-    Throw("process: unknown stage '" + stage + "' (depth | flow | upscale | nr | fg)");
+    Throw("process: unknown stage '" + stage + "' " + PipelineStageNamesText());
 }
 
 const std::vector<std::string>& StageFamilyPasses(const std::string& stage) {
-    static const std::vector<std::string> depth{"depth_raw", "depth_dlss"}, flow{"mv_raw", "mv_dlss"}, upscale{"color_sr"}, nr{"color_nr"}, fg{"color_fg"}, none;
+    static const std::vector<std::string> scenes{"scenes"}, depth{"depth_raw", "depth_dlss"}, flow{"mv_raw", "mv_dlss"}, upscale{"color_sr"}, nr{"color_nr"},
+        fg{"color_fg"}, none;
+    if (stage == "scenes") return scenes;
     if (stage == "depth") return depth;
     if (stage == "flow") return flow;
     if (stage == "upscale") return upscale;
@@ -240,23 +244,67 @@ const std::vector<std::string>& StageFamilyPasses(const std::string& stage) {
     return none;
 }
 
+const std::vector<std::string>& PipelineStageNames() {
+    static const std::vector<std::string> names{"scenes", "depth", "flow", "upscale", "nr", "fg"};  // scenes first: a property of the source
+    return names;
+}
+
+std::string PipelineStageNamesText() {
+    std::string s;
+    for (const auto& n : PipelineStageNames()) s += (s.empty() ? "(" : " | ") + n;
+    return s + ")";
+}
+
+bool StageReadsSceneCuts(const std::string& stage, const nlohmann::json& p) {
+    // nr: a history to reset - the model's (guides on: it keeps one with mv) or the flicker filter's; the bypass has neither (NrStage::Init)
+    if (stage == "flow") return true;  // zero vectors at a cut (PR-13)
+    if (stage == "fg") {  // x2..x4 makes frames between two real ones: none across a cut; x1 makes none
+        const nlohmann::json m = p.is_object() && p.contains("multiplier") ? p["multiplier"] : nlohmann::json(2);
+        return !m.is_number() || m.get<double>() >= 2.0;
+    }
+    if (stage == "upscale") {  // a history: DLSS SR's (reset) and the worker's windows (broken at a cut); nis, bicubic, trt keep none
+        const std::string b = Str(p, "backend", "dlss");
+        return b == "dlss" || b == "worker";
+    }
+    if (stage == "nr") {
+        const bool guidesOff = p.is_object() && p.contains("guides") && p["guides"].is_boolean() && !p["guides"].get<bool>();
+        const double temporal = p.is_object() && p.contains("temporal") && p["temporal"].is_number() ? p["temporal"].get<double>() : 0.0;
+        return !NrBypassParams(p) && (!guidesOff || temporal > 0.0);
+    }
+    return false;  // depth keeps its own segment breaks (DepthPostProcess); scenes is the list
+}
+
+bool UpscaleReadsGuides(const nlohmann::json& p) { return Str(p, "backend", "dlss") == "dlss"; }
+
 std::string StageForPass(const std::string& pass) {
-    for (const char* stage : {"depth", "flow", "upscale", "nr", "fg"})
+    for (const std::string& stage : PipelineStageNames())
         for (const auto& p : StageFamilyPasses(stage))
             if (p == pass) return stage;
     return {};
 }
 
 std::vector<std::vector<std::string>> StageInputCandidates(const std::string& stage, const nlohmann::json& params) {
-    if (stage == "flow") return {{"depth_raw"}};
-    if (stage == "upscale") return {{"depth_dlss"}, {"mv_dlss"}};
+    if (stage == "flow") return {{"depth_raw"}, {kScenesPass}};
+    if (stage == "upscale") {
+        std::vector<std::vector<std::string>> groups;
+        if (UpscaleReadsGuides(params)) groups = {{"depth_dlss"}, {"mv_dlss"}};
+        if (StageReadsSceneCuts(stage, params)) groups.push_back({kScenesPass});
+        return groups;
+    }
     if (stage == "nr") {
         if (NrBypassParams(params)) return {{"color_sr"}};  // intensity 0: the model and its guides and masks are not used (PR-7)
-        if (params.is_object() && params.contains("guides") && params["guides"].is_boolean() && !params["guides"].get<bool>())
-            return {{"color_sr"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}};
-        return {{"color_sr"}, {"depth_dlss"}, {"mv_dlss"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}};
+        std::vector<std::vector<std::string>> groups{{"color_sr"}};
+        if (!(params.is_object() && params.contains("guides") && params["guides"].is_boolean() && !params["guides"].get<bool>()))
+            groups.insert(groups.end(), {{"depth_dlss"}, {"mv_dlss"}});
+        groups.insert(groups.end(), {{"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}});
+        if (StageReadsSceneCuts(stage, params)) groups.push_back({kScenesPass});  // the list's id (PR-13): none while it is empty
+        return groups;
     }
-    if (stage == "fg") return {{"color_nr", "color_sr"}, {"depth_dlss"}, {"mv_dlss"}};
+    if (stage == "fg") {
+        std::vector<std::vector<std::string>> groups{{"color_nr", "color_sr"}, {"depth_dlss"}, {"mv_dlss"}};
+        if (StageReadsSceneCuts(stage, params)) groups.push_back({kScenesPass});
+        return groups;
+    }
     return {};
 }
 

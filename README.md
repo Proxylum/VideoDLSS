@@ -11,7 +11,7 @@ and versions); release procedure in [docs/release.md](docs/release.md). Stage 8 
 [00-skeleton](docs/plans/00-skeleton.md), [01-passes](docs/plans/01-passes.md), [02-depth](docs/plans/02-depth.md),
 [03-motion-vectors](docs/plans/03-motion-vectors.md), [04-viewport](docs/plans/04-viewport.md),
 [05-upscale](docs/plans/05-upscale.md), [06-nr](docs/plans/06-nr.md), [07-fg](docs/plans/07-fg.md)). `dlssvid process` runs the
-whole pipeline over the pass cache (depth → flow → upscale → nr → fg, complete passes are reused) and encodes the result
+whole pipeline over the pass cache (scenes → depth → flow → upscale → nr → fg, complete passes are reused) and encodes the result
 with the source audio; `dlssvid bench` prints ms/frame per stage; golden tests (`dlssvid_golden_tests`) check the pipeline
 against stored reference frames, also on an installed copy; the package is built with CPack ([docs/release.md](docs/release.md)),
 CI runs on a self-hosted RTX runner ([docs/ci.md](docs/ci.md)). Stage 7: `dlssvid fg` doubles (x2..x4) the frame rate into
@@ -287,8 +287,7 @@ build\release\bin\dlssvid process --passthrough -i input.mp4 -o output.mkv --cod
 dlssvid export  -i input.mp4 -o passes\color --range 0-299            :: color_source as EXR half + manifest.json
 dlssvid export  -i input.mp4 -o passes\comfy --preset comfyui           :: PNG16 (colour) / NPZ (depth, mv)
 dlssvid export  --from-dir passes\depth_raw -o passes\depth_npz --format npz
-dlssvid export  -i input.mp4 -o passes
-uke --preset nuke --depth-dir passes\depth_raw --mv-dir passes\mv_raw
+dlssvid export  -i input.mp4 -o passes\nuke --preset nuke --depth-dir passes\depth_raw --mv-dir passes\mv_raw
 dlssvid import  -i passes\depth_raw --expect-size 1920x1080 --expect-frames 300
 dlssvid convert -i passes\depth_raw -o passes\depth_dlss --to depth_dlss --near 0.1 --far 1000
 dlssvid convert -i passes\mv_raw -o passes\mv_dlss --to mv_dlss --target 3840x2160 --depth-dir passes\depth_raw
@@ -323,6 +322,20 @@ dlssvid render --project p.json --frame 42 --layers source,depth_raw:viridis:0.5
 dlssvid render --project p.json --frame 42 --source mv_raw --display mv_arrows --zoom 2 --center-x 960 --center-y 540 -o arrows.png
 dlssvid render -i input.mp4 --passes passes --bench 60                         :: scrubbing benchmark (cold / warm / random jumps)
 dlssvid render --project p.json --frame 10 --source depth_raw --save-state -o x.png   :: write the state back into the project
+```
+
+Scene cuts (PR-13): one pass over the source's luma on the CPU (~2-3 ms a 1080p frame, decoding included) into
+`passes\scenes` - the cut list and every frame's score, no frames. `process` runs it first; flow writes zero vectors at a cut,
+DLSS SR and the RealBasicVSR worker start their history again, NR resets the model and the flicker filter, FG holds the last
+frame of a shot instead of blending two. Another threshold is applied to the stored scores without decoding; the stages below
+are recomputed only when the list changes.
+
+```bat
+dlssvid scenes -i input.mp4 -o passes                            :: the list at 0.24: the cuts with their time, the highest scores just below
+dlssvid scenes -i input.mp4 -o passes --threshold 0.3            :: over the stored scores, no decoding; the old list stays as a version
+dlssvid scenes -i input.mp4 -o passes --threshold 0              :: off: no stage resets at cuts
+dlssvid process -i input.mp4 -o out.mp4 --param scenes.threshold=0.3 --plan   :: what changes below (the plan names the stages)
+dlssvid flow    -i input.mp4 -o passes --no-scenes               :: without the list (default: <-o>\scenes when present; --scenes-dir <folder>)
 ```
 
 Upscale (stage 5): `color_sr` at x1.5 / x2 / x3 (output capped at 3840x2160), depth/MV guides from pass folders or
@@ -445,7 +458,10 @@ card per stage with a form built from the stage schema (backend list, scale / mu
 groups, the less used ones under a collapsed «Ещё настройки» that names what was changed, ↺ per row and «Сбросить» for
 the card, changed values in accent; the advanced keys in the JSON editor of the engineer mode) and what the plan does
 with it («переиспользуется», «пересчёт: Интенсивность 1 → 1.4», «будет посчитано», a warning when NR / FG would run
-without depth and vectors), the encoder
+without depth and vectors, and for the stages that read the scene list what the cuts do to them). The first card,
+«Склейки» (PR-13), holds the threshold (0.24, 0 = off), «Найдено N склеек» with up to eight chips of their time (a click
+shows the cut frame, Alt+click the one before it), the highest scores just below the threshold, and what a new threshold
+changes («без декодирования · станет 9 склеек (было 12)», the stages it recomputes); then the encoder
 card (stored in the project: the codec — H.264 / HEVC / AV1 NVENC, ProRes, FFV1 — the bit depth and chroma, «Авто» = the
 source's within the codec, and the bitrate, «Авто» — chosen from the result's size, rate and codec, see
 `core/io/EncodeDefaults` — or a preset in Mbit/s or a custom value, with the rough file size; the result's extension
@@ -459,8 +475,7 @@ always gets 1), passes (1..4: each pass is a model of its own that reworks the l
 0.5 GB at 1440p and 0.9 GB at 4K; the plan notes 3 and 4 as markedly synthetic), local tone and structure, the flicker filter,
 the automatic skin mask, the skin structure (enabled with the mask; «отдельно» off = as the local structure) and the
 strength on skin (shown when the plan has face / skin masks), and under «Ещё настройки» the flicker
-filter's threshold (with the filter on), the scene-cut reset (a hard cut in the source starts the model's and the filter's
-history again; 0.24 by default, 0 = off), the guides, the tonemap / input transfer / exposure in EV and the model
+filter's threshold (with the filter on), the guides, the tonemap / input transfer / exposure in EV and the model
 resolution with the transfer strength and the ratio limit (at a resolution ≠ 1). A changed value whose row its
 condition hides is named on «Ещё настройки» as «не действует». The look follows the mockups of `docs/ux-guidelines.md`
 (`app/Theme`: dark palette, control sizes and paddings, the accent for the one primary action).

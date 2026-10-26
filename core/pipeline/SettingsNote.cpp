@@ -95,10 +95,6 @@ nlohmann::json Nr(const Manifest& m) {
             reduced = p["work_size"][0].get<uint32_t>() != m.width || p["work_size"][1].get<uint32_t>() != m.height;
         if (reduced) Pick(p, s, {"transfer", "max_ratio"});
     }
-    if (p.contains("scene_cut_count")) {  // the detector ran (PR-6)
-        Pick(p, s, {"scene_cut_threshold"});
-        s["cuts"] = p["scene_cut_count"];
-    }
     if (p.contains("tonemap") && p["tonemap"].is_object()) {
         const nlohmann::json& t = p["tonemap"];
         if (t.value("curve", std::string("passthrough")) != "passthrough") s["tonemap"] = t["curve"];
@@ -111,6 +107,16 @@ nlohmann::json Nr(const Manifest& m) {
             if (v.is_string()) masks += (masks.empty() ? "" : ",") + v.get<std::string>();
         s["masks"] = masks;
     }
+    return s;
+}
+
+// The scene-cut list a pass was made with (PR-13): its threshold and the cuts the stage applied; none without the label
+std::optional<nlohmann::json> Scenes(const Manifest& m) {
+    const nlohmann::json& p = m.stageParams;
+    if (!p.is_object() || !p.contains("scene_cuts_id") || !p["scene_cuts_id"].is_string()) return std::nullopt;
+    nlohmann::json s = {{"backend", "luma"}};
+    if (p.contains("scene_cut_threshold")) s["threshold"] = p["scene_cut_threshold"];
+    if (p.contains("scene_cut_count")) s["cuts"] = p["scene_cut_count"];
     return s;
 }
 
@@ -142,6 +148,8 @@ nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::s
     while (m) {
         const std::string name = stage(pass);
         stages[name] = mark(name == "fg" ? Fg(*m) : name == "nr" ? Nr(*m) : Upscale(*m), *m);
+        if (!stages.contains("scenes"))  // the first label met from the encoded pass back: the list the result was made with
+            if (const auto sc = Scenes(*m)) stages["scenes"] = *sc;
         std::string src = m->stageParams.value("color_source", std::string());
         if (name == "fg") {
             // pass:<folder> | slot:<pass> | video; "pass" alone (before PR-11) or "pass:" of a folder given with a trailing separator:
@@ -167,9 +175,10 @@ std::string SettingsNoteText(const nlohmann::json& settings) {
     const nlohmann::json& stages = settings.contains("stages") ? settings["stages"] : nlohmann::json::object();
     // the order a reader expects (spec §2g); a key not listed follows, alphabetically
     const std::vector<std::pair<const char*, std::vector<std::string>>> order = {
+        {"scenes", {"threshold", "cuts"}},
         {"upscale", {"scale", "quality", "model", "fallback"}},
-        {"nr", {"bypass", "style", "intensity", "passes", "local_tone", "local_structure", "skin_structure", "auto_mask", "guides", "scene_cut_threshold", "cuts",
-                "temporal", "temporal_threshold", "model_scale", "transfer", "max_ratio", "tonemap", "input_transfer", "exposure", "masks"}},
+        {"nr", {"bypass", "style", "intensity", "passes", "local_tone", "local_structure", "skin_structure", "auto_mask", "guides", "temporal",
+                "temporal_threshold", "model_scale", "transfer", "max_ratio", "tonemap", "input_transfer", "exposure", "masks"}},
         {"fg", {"multiplier", "model"}}};
     for (const auto& [name, keys] : order) {
         if (!stages.contains(name)) continue;
@@ -182,7 +191,6 @@ std::string SettingsNoteText(const nlohmann::json& settings) {
             if (!s.contains(k)) continue;
             const nlohmann::json& v = s[k];
             if (k == "scale" || k == "multiplier") seg += " x" + Num(v);
-            else if (k == "scene_cut_threshold") seg += " scene_cut=" + Num(v);
             else if (k == "bypass") seg += " (no model)";
             else if (k == "missing") seg += " (that version is not on disk)";
             else seg += " " + k + "=" + Num(v);

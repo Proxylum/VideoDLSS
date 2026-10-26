@@ -171,8 +171,17 @@ NR, апскейла и FG только рядом с таймером стад�
 (всегда 1; поле — признак пасса PR-7: пасс NR без него с `intensity ≠ 1` снят до PR-7 и отбрасывается). При `intensity 0`
 модель не вызывается: `bypass: true`, `passes: 0`, `model_intensity` нет. `stage_params.vram_mib_per_pass` — видеопамять фичи
 каждого прохода (рост `CurrentUsage` процесса по DXGI на её `CreateFeature`, МиБ; PR-5; у stub — 0, фичи у него нет); без
-замера (DXGI не отдал память) поля нет. `scene_cut_threshold` — порог сброса на склейках (PR-6); `scene_cuts` (кадры, не
-больше 1000) и `scene_cut_count` — если детектор работал (есть история модели или фильтра), иначе их нет.
+замера (DXGI не отдал память) поля нет.
+
+**Склейки (PR-13).** Пасс `scenes` — пасс данных: `channels: []`, кадров нет, `frame_range` — проанализированные кадры
+исходника, размер и fps — исходника. `stage_params`: `threshold`, `off` (порог 0), `scene_cuts` (кадры, каждый начинает
+план; отсортированы, без 0), `scene_cut_count`, `cuts_id` (`cuts:` + sha256 JSON списка; пустой список — `""`), `near`
+(до 5 пар `[кадр, оценка]` чуть ниже порога), `analysis` (`algorithm` `luma-mad.640`, `max_width`, `ms_per_frame`,
+`source_format`, `reached_end`, `frames`, `scores_file` `scores.npy`, `scores_count`, `scores_sha256`), у пересчёта по
+оценкам — `rederived: true`. `scores.npy` — оценка каждого кадра к предыдущему (N×1 F32, канал `score`, кадр 0 — 0). Стадия,
+прочитавшая список, пишет метку: `scene_cuts_id` (id списка), `scene_cut_threshold`, `scene_cut_count` и `scene_cuts` —
+склейки, применённые в её кадрах (не больше 1000); FG ещё `duplicated` — кадры, повторённые вместо интерполяции; оконный
+апскейл — `window_breaks`. Без списка этих ключей нет. Во `inputs` такой стадии — `"scenes": "<cuts_id>"`.
 
 У импортированного пасса (маски `mask_*`, внешняя глубина) отпечатка нет. Для стадий, которые его читают, он
 означает только «источник и число кадров», поэтому замена содержимого с тем же числом кадров не пересчитывает их.
@@ -206,8 +215,9 @@ F…L: их называет `frame_range`, а `stage_params.range = {first, las
 ### 6.1. Заметка о настройках в результате (PR-11)
 
 Результат `dlssvid process` несёт в метаданных контейнера, что его сделало:
-- `comment` (все контейнеры; mkv, mp4, mov): `VideoDLSS <версия> | upscale: dlss x2 quality=… | nr: ngx style=natural
-  intensity=1.2 passes=1 … scene_cut=0.24 cuts=3 … | fg: dlssg x2` — одна ASCII-строка до 1 КБ, только стадии цепочки
+- `comment` (все контейнеры; mkv, mp4, mov): `VideoDLSS <версия> | scenes: luma threshold=0.24 cuts=3 | upscale: dlss x2
+  quality=… | nr: ngx style=natural intensity=1.2 passes=1 … | fg: dlssg x2` — одна ASCII-строка до 1 КБ, только стадии цепочки
+  (сегмент `scenes` — по первой метке списка, встреченной от кодируемого пасса назад; без неё сегмента нет)
   кодируемого пасса, значения из их `stage_params`; усыновлённый пасс — `(adopted)`, обход модели NR — `(no model)`;
 - `DLSSVID_SETTINGS` (только Matroska): `{"app": "VideoDLSS <версия>", "stages": {"upscale": {…}, "nr": {…}, "fg": {…}}}`.
 

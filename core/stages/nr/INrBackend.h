@@ -71,7 +71,7 @@ struct NrInputs {
     uint32_t depthWidth = 0, depthHeight = 0;
     ID3D12Resource* mv = nullptr;     // RG32F backward vectors in px (mv_dlss), optional
     uint32_t mvWidth = 0, mvHeight = 0;
-    bool reset = false;               // first frame / scene cut (NrStageOptions::sceneCut, PR-6): drop the model's history
+    bool reset = false;               // first frame / a cut of the clip's scene list (NrStageOptions::sceneCuts, PR-13): drop the model's history
     int64_t frameIndex = 0;
 };
 

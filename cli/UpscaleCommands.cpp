@@ -1,5 +1,7 @@
 #include "UpscaleCommands.h"
 
+#include "ScenesArg.h"
+
 #include <chrono>
 #include <cstdio>
 #include <fstream>
@@ -11,6 +13,7 @@
 #include "io/VideoDecoder.h"
 #include "passes/ImageMetrics.h"
 #include "passes/PassSequence.h"
+#include "pipeline/PassFingerprint.h"
 #include "stages/upscale/UpscaleStage.h"
 #include "util/Error.h"
 #include "util/Log.h"
@@ -64,6 +67,9 @@ int CmdUpscale(const UpscaleCommands::UpscaleArgs& a) {
     o.videoCodec = a.codec;
     o.sourceFile = std::filesystem::path(a.input).filename().string();
     o.sourceHash = "sha256:" + Sha256File(a.input);
+    // PR-13: the clip's scene-cut list, <output>/scenes unless told otherwise - for DLSS SR and the worker, which keep a history
+    o.sceneCuts = ResolveScenes(a.scenesDir, a.noScenes, false, a.output, o.sourceHash, StageReadsSceneCuts("upscale", {{"backend", a.backend}}), "upscale",
+                                a.frames > 0 ? a.frames : 0);
     const int64_t total = a.frames > 0 ? a.frames : info.frameCount;
     o.onFrame = [](int64_t frame, double ms) {
         if (frame % 10 == 0) std::fprintf(stderr, "  frame %lld %.1f ms\n", static_cast<long long>(frame), ms);
@@ -196,6 +202,10 @@ void UpscaleCommands::Register(CLI::App& app) {
     upscale_->add_option("--target", ua_.target, "explicit output size WxH (instead of --scale)");
     upscale_->add_option("--depth-dir", ua_.depthDir, "depth_dlss pass folder (dlss)");
     upscale_->add_option("--mv-dir", ua_.mvDir, "mv_dlss pass folder (dlss)");
+    upscale_->add_option("--scenes-dir,--scenes_dir", ua_.scenesDir,
+                         "dlss / worker: the clip's scene-cut list (the pass of `dlssvid scenes`; default: <output>/scenes when present): "
+                         "the history starts again at its cuts");
+    upscale_->add_flag("--no-scenes,--no_scenes", ua_.noScenes, "dlss / worker: no scene-cut list");
     upscale_->add_option("--sharpness", ua_.sharpness, "nis sharpness 0..1")->default_val(0.5f);
     upscale_->add_option("--preset", ua_.preset, "dlss render preset: default | J | K | L | M")->default_val("default");
     upscale_->add_flag("--no-scaling,--artifact-reduction-only,--artifact_reduction_only", ua_.artifactReductionOnly,

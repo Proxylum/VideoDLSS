@@ -62,6 +62,8 @@ add_library(dlssvid_core STATIC
   pipeline/PassVersions.h pipeline/PassVersions.cpp
   pipeline/Estimates.h pipeline/Estimates.cpp
   pipeline/SettingsNote.h pipeline/SettingsNote.cpp
+  pipeline/ScenesPlan.h pipeline/ScenesPlan.cpp
+  stages/scenes/ScenesStage.h stages/scenes/ScenesStage.cpp
   stages/ParamSchema.h stages/ParamSchema.cpp
   gpu/D3D12Device.h gpu/D3D12Device.cpp
   gpu/GpuFrameCache.h gpu/GpuFrameCache.cpp
@@ -85,6 +87,7 @@ add_library(dlssvid_core STATIC
   convert/YuvConvert.h convert/YuvConvert.cpp
   convert/Warp.h convert/Warp.cpp
   convert/SceneCut.h convert/SceneCut.cpp
+  passes/ScenesPass.h passes/ScenesPass.cpp
   gpu/GpuFrame.h
   stages/flow/IFlowEstimator.h
   stages/flow/StubFlowEstimator.h stages/flow/StubFlowEstimator.cpp

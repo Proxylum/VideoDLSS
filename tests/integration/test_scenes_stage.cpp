@@ -1,0 +1,898 @@
+// PR-13 (spec §2d «Общий список склеек»): the stage scenes - one analysis of the source's luma, the list and every frame's score
+// in a data pass; a new threshold over the stored scores without decoding; threshold 0 is off. In RunProcess it runs first; the
+// stages below do not read the list yet, so their passes do not change with it.
+
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <nlohmann/json.hpp>
+#include <sstream>
+
+#include "TestClips.h"
+#include "convert/ColorConvert.h"
+#include "convert/SceneCut.h"
+#include "gpu/D3D12Device.h"
+#include "io/VideoDecoder.h"
+#include "passes/ScenesPass.h"
+#include "pipeline/PassVersions.h"
+#include "pipeline/ProcessRunner.h"
+#include "pipeline/ScenesPlan.h"
+#include "stages/nr/NrStage.h"
+#include "stages/scenes/ScenesStage.h"
+#include "util/Sha256.h"
+#include "util/Subprocess.h"
+
+using namespace dlssvid;
+using namespace dlssvid::test;
+using Catch::Matchers::ContainsSubstring;
+
+namespace {
+
+std::filesystem::path Dir(const char* name) {
+    const auto d = TempDir() / "scenes" / name;
+    std::filesystem::remove_all(d);
+    std::filesystem::create_directories(d);
+    return d;
+}
+
+constexpr uint32_t kW = 64, kH = 32;
+constexpr int64_t kCutAt = 3;
+
+// scene A brightens 4 levels a frame (score ≈ 0.02), a hard cut at frame 3 to scene B, the gradient inverted (≈ 0.5): as in test_nr_stage
+std::filesystem::path CutClip(const std::filesystem::path& dir, int frames = 6) {
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = kW;
+    spec.height = kH;
+    return WriteClipWith(dir / "clip.mkv", spec, [](int64_t i) {
+        CpuFrame f = SyntheticFrame(i, kW, kH);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < kH; ++r)
+            for (uint32_t c = 0; c < kW; ++c) y[r * kW + c] = static_cast<uint8_t>(i < kCutAt ? 40 + c + 4 * i : 220 - c);
+        return f;
+    });
+}
+
+// The clips of the equivalence with PR-6: its cut at 3 in 8 and in 10 bit (the low bits a static ramp), and a flash - a bright
+// frame 3 over a slow scene, two scores above the threshold
+std::filesystem::path EquivalenceClip(const std::filesystem::path& dir, const std::string& kind) {
+    ClipSpec spec;
+    spec.frames = 7;
+    spec.width = kW;
+    spec.height = kH;
+    if (kind == "10bit") spec.pixFmt = "yuv420p10le";
+    const FrameDesc desc = FrameDescFor(spec);
+    return WriteClipWith(dir / (kind + ".mkv"), spec, [&](int64_t i) {
+        CpuFrame f = SyntheticFrame(i, desc);
+        for (uint32_t r = 0; r < kH; ++r)
+            for (uint32_t c = 0; c < kW; ++c) {
+                const int y = kind == "flash" ? (i == 3 ? 235 : 40 + static_cast<int>(c) + 2 * static_cast<int>(i))
+                                              : (i < kCutAt ? 40 + static_cast<int>(c) + 4 * static_cast<int>(i) : 220 - static_cast<int>(c));
+                if (desc.HighBitDepth()) f.Plane16(0)[r * kW + c] = static_cast<uint16_t>((y << 2) | ((r + c) & 3));
+                else f.Plane(0)[r * kW + c] = static_cast<uint8_t>(y);
+            }
+        return f;
+    });
+}
+
+ScenesStageOptions Options(const std::filesystem::path& root, const std::filesystem::path& clip, double threshold = 0.24) {
+    VideoDecoder probe(clip);
+    ScenesStageOptions o;
+    o.threshold = threshold;
+    o.outputDir = root;
+    o.sourceFile = clip.filename().string();
+    o.sourceHash = "sha256:" + Sha256File(clip);
+    o.sourceFormat = probe.Info().decoded.Name();
+    return o;
+}
+
+ProcessOptions StubProcess(const std::filesystem::path& dir, const std::filesystem::path& clip) {
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = DefaultProcessStages();
+    for (const char* spec : {"depth.backend=stub", "flow.backend=stub", "upscale.backend=nis", "upscale.scale=2", "nr.backend=stub", "fg.backend=blend", "fg.multiplier=2"})
+        ApplyParamSpec(o.stages, spec);
+    o.codec = "ffv1";
+    o.warp = true;
+    return o;
+}
+
+const StageDecision& Decision(const ProcessPlan& p, const std::string& name) {
+    for (const auto& s : p.stages)
+        if (s.name == name) return s;
+    throw std::runtime_error("no decision for " + name);
+}
+
+const ProcessStageReport& Report(const ProcessResult& r, const std::string& name) {
+    for (const auto& s : r.stages)
+        if (s.name == name) return s;
+    throw std::runtime_error("no report for " + name);
+}
+
+struct CliResult {
+    uint32_t code = 0;
+    std::string out;
+};
+
+CliResult RunCli(std::vector<std::string> args) {
+    args.insert(args.begin(), DLSSVID_CLI_PATH);
+    CliResult r;
+    r.code = Subprocess::Run(args, &r.out);
+    return r;
+}
+
+nlohmann::json ReadJson(const std::filesystem::path& p) {
+    nlohmann::json j;
+    std::ifstream(p) >> j;
+    return j;
+}
+
+}  // namespace
+
+TEST_CASE("AnalyseScenes finds the hard cut and stores every frame's score beside the list", "[integration][scenes]") {
+    const auto dir = Dir("analyse");
+    const auto clip = CutClip(dir);
+    const auto root = dir / "passes";
+    const ScenesStageOptions o = Options(root, clip);
+    VideoDecoder decoder(clip);
+    std::vector<int64_t> calls;
+    const ScenesRunResult r = AnalyseScenes(decoder, o, -1, [&](int64_t n) { calls.push_back(n); });
+    CHECK(calls == std::vector<int64_t>{1, 2, 3, 4, 5, 6});
+    CHECK(r.list.cuts == std::vector<int64_t>{kCutAt});
+    CHECK(r.list.id == SceneCutsId({kCutAt}));
+    CHECK(r.list.frames == 6);
+    CHECK(r.list.reachedEnd);
+    CHECK(!r.list.off);
+    CHECK(!r.rederived);
+    CHECK(r.msPerFrame > 0.0);
+    CHECK(r.outDir == root / kScenesPass);
+
+    const Manifest m = Manifest::Load(r.outDir);
+    CHECK(m.IsDataPass());
+    CHECK(m.frameCount == 6);
+    CHECK(m.firstFrame == 0);
+    CHECK(m.width == kW);
+    CHECK(m.height == kH);
+    CHECK(m.sourceHash == o.sourceHash);
+    CHECK(m.stageParams["threshold"] == 0.24);
+    CHECK(m.stageParams["off"] == false);
+    CHECK(m.stageParams["scene_cuts"] == nlohmann::json::array({kCutAt}));
+    CHECK(m.stageParams["scene_cut_count"] == 1);
+    CHECK(m.stageParams["cuts_id"] == r.list.id);
+    CHECK(!m.stageParams.contains("rederived"));
+    const nlohmann::json& a = m.stageParams["analysis"];
+    CHECK(a["algorithm"] == kScenesAlgorithm);
+    CHECK(a["max_width"] == 640);
+    CHECK(a["reached_end"] == true);
+    CHECK(a["frames"] == 6);
+    CHECK(a["source_format"] == o.sourceFormat);
+    CHECK(a["scores_file"] == kScenesScoresFile);
+    CHECK(a["scores_count"] == 6);
+
+    const auto scores = ReadSceneScores(r.outDir, m);
+    REQUIRE(scores);
+    REQUIRE(scores->scores.size() == 6);
+    CHECK(scores->scores[0] == 0.f);  // frame 0 has no frame before it
+    CHECK(scores->scores[1] < 0.05f);
+    CHECK(scores->scores[2] < 0.05f);
+    CHECK(scores->scores[3] > 0.24f);
+    CHECK(scores->scores[4] < 0.05f);
+    const auto l = ReadSceneList(r.outDir, o.sourceHash);
+    REQUIRE(l);
+    CHECK(l->cuts == r.list.cuts);
+    CHECK(l->reachedEnd);
+
+    CHECK(PassComplete(r.outDir, 6, o.sourceHash));
+    CHECK(!PassComplete(r.outDir, 7, o.sourceHash));
+    CHECK(PassComplete(r.outDir, 0, o.sourceHash));  // the length unknown: the analysis reached the end of the source
+    CHECK(!PassComplete(r.outDir, 6, "sha256:other"));
+    CHECK(ScoresUsable(m, o.sourceHash, o.sourceFormat, 6));
+    CHECK(ScoresUsable(m, o.sourceHash, o.sourceFormat, 0));
+    CHECK(!ScoresUsable(m, o.sourceHash, o.sourceFormat, 7));
+    CHECK(!ScoresUsable(m, o.sourceHash, "yuv444p", 6));  // another decoded layout: other scores
+    CHECK(!ScoresUsable(m, "sha256:other", o.sourceFormat, 6));
+    Manifest otherAlgorithm = m;
+    otherAlgorithm.stageParams["analysis"]["algorithm"] = "luma-mad.320";
+    CHECK(!ScoresUsable(otherAlgorithm, o.sourceHash, o.sourceFormat, 6));
+    const auto found = FindSceneScores(root, o.sourceHash, o.sourceFormat, 6);
+    REQUIRE(found);
+    CHECK(found->version.empty());
+    CHECK(found->scores.scores == scores->scores);
+
+    // the synthetic clip of the other tests has no cut at the default threshold: their passes and the golden references stay as they were
+    ClipSpec plain;
+    plain.frames = 6;
+    plain.width = 96;
+    plain.height = 54;
+    const auto plainClip = WriteClip(dir / "plain.mkv", plain);
+    VideoDecoder plainDecoder(plainClip);
+    const ScenesRunResult p = AnalyseScenes(plainDecoder, Options(dir / "plain", plainClip), -1);
+    CHECK(p.list.cuts.empty());
+    CHECK(p.list.id.empty());
+}
+
+TEST_CASE("AnalyseScenes over the first frames only: the list is incomplete for the whole clip", "[integration][scenes]") {
+    const auto dir = Dir("frames");
+    const auto clip = CutClip(dir);
+    const auto root = dir / "passes";
+    const ScenesStageOptions o = Options(root, clip);
+    VideoDecoder decoder(clip);
+    const ScenesRunResult r = AnalyseScenes(decoder, o, 2);
+    CHECK(r.list.frames == 2);
+    CHECK(!r.list.reachedEnd);
+    CHECK(r.list.cuts.empty());  // the cut lies beyond the frames analysed
+    const Manifest m = Manifest::Load(r.outDir);
+    CHECK(m.frameCount == 2);
+    CHECK(m.lastFrame == 1);
+    CHECK(m.stageParams["analysis"]["reached_end"] == false);
+    CHECK(PassComplete(r.outDir, 2, o.sourceHash));
+    CHECK(!PassComplete(r.outDir, 6, o.sourceHash));
+    CHECK(!PassComplete(r.outDir, 0, o.sourceHash));  // the length unknown and the end not reached
+    CHECK(FindSceneScores(root, o.sourceHash, o.sourceFormat, 2));
+    CHECK(!FindSceneScores(root, o.sourceHash, o.sourceFormat, 6));
+    CHECK(!FindSceneScores(root, o.sourceHash, o.sourceFormat, 0));
+}
+
+TEST_CASE("RederiveScenes applies another threshold to the stored scores without the source; threshold 0 is off", "[integration][scenes]") {
+    const auto dir = Dir("rederive");
+    const auto clip = CutClip(dir);
+    const auto root = dir / "passes";
+    const ScenesStageOptions o = Options(root, clip);
+    {
+        VideoDecoder decoder(clip);
+        AnalyseScenes(decoder, o, -1);
+    }
+    auto src = FindSceneScores(root, o.sourceHash, o.sourceFormat, 6);
+    REQUIRE(src);
+    std::filesystem::remove(clip);  // no decoder can open it now
+
+    ScenesStageOptions o6 = o;
+    o6.threshold = 0.6;
+    const ScenesRunResult r6 = RederiveScenes(src->manifest, src->scores, o6);
+    CHECK(r6.rederived);
+    CHECK(r6.list.cuts.empty());
+    CHECK(r6.list.id.empty());
+    CHECK(r6.list.frames == 6);
+    CHECK(r6.list.reachedEnd);
+    CHECK(r6.msPerFrame == src->scores.analysis["ms_per_frame"].get<double>());  // the decoding the scores cost, for the estimates
+    REQUIRE(!r6.list.nearMisses.empty());
+    CHECK(r6.list.nearMisses.front().first == kCutAt);  // the cut is just below the new threshold: shown to check for a missed one
+    const Manifest m6 = Manifest::Load(r6.outDir);
+    CHECK(m6.stageParams["rederived"] == true);
+    CHECK(m6.stageParams["threshold"] == 0.6);
+    CHECK(m6.stageParams["scene_cut_count"] == 0);
+    CHECK(m6.stageParams["analysis"]["ms_per_frame"] == src->scores.analysis["ms_per_frame"]);
+    CHECK(m6.width == kW);
+    const auto kept = ReadSceneScores(r6.outDir, m6);
+    REQUIRE(kept);
+    CHECK(kept->scores == src->scores.scores);  // the scores travel with every list made of them
+
+    // the way back to 0.24 over the same scores: the list of the analysis, bit for bit
+    src = FindSceneScores(root, o.sourceHash, o.sourceFormat, 6);
+    REQUIRE(src);
+    const ScenesRunResult back = RederiveScenes(src->manifest, src->scores, o);
+    CHECK(back.list.cuts == std::vector<int64_t>{kCutAt});
+    CHECK(back.list.id == SceneCutsId({kCutAt}));
+
+    // threshold 0 without scores: an «off» pass, no analysis
+    ScenesStageOptions off = o;
+    off.threshold = 0.0;
+    off.outputDir = dir / "off";
+    const ScenesRunResult r0 = WriteOffScenes(off, kW, kH, Rational{24, 1}, 6);
+    CHECK(r0.list.off);
+    CHECK(r0.list.cuts.empty());
+    CHECK(!std::filesystem::exists(r0.outDir / kScenesScoresFile));
+    const auto l0 = ReadSceneList(r0.outDir, o.sourceHash);
+    REQUIRE(l0);
+    CHECK(l0->off);
+    CHECK(l0->frames == 6);
+    CHECK(l0->id.empty());
+    CHECK(PassComplete(r0.outDir, 100, o.sourceHash));  // off stands for any length
+    CHECK(!ReadSceneScores(r0.outDir, Manifest::Load(r0.outDir)));
+    CHECK(!FindSceneScores(dir / "off", o.sourceHash, o.sourceFormat, 6));
+}
+
+TEST_CASE("RunProcess: scenes runs first; a new threshold goes over the stored scores, 0 is off, the way back restores", "[integration][process][scenes]") {
+    const auto dir = Dir("process");
+    const auto clip = CutClip(dir);
+    ProcessOptions o = StubProcess(dir, clip);
+    o.keepVersions = 0;  // every list stays in the history: the way back restores one
+
+    const ProcessPlan plan0 = PlanProcess(o);
+    REQUIRE(plan0.stages.front().name == "scenes");
+    const StageDecision& s0 = plan0.stages.front();
+    CHECK(s0.action == "run");
+    CHECK(s0.kind == "missing");
+    CHECK(!s0.sceneCuts.known);
+    CHECK(s0.sceneCuts.id == kScenesPendingId);
+    CHECK(s0.info == "список склеек посчитается при обработке");
+    CHECK(plan0.ToJson()["stages"][0]["scene_cuts"]["known"] == false);
+    CHECK(plan0.runCount == 6);
+
+    std::vector<std::string> seen;
+    o.progress = [&](const std::string& stage, int64_t, int64_t) {
+        if (seen.empty() || seen.back() != stage) seen.push_back(stage);
+    };
+    const ProcessResult r0 = RunProcess(o);
+    o.progress = {};
+    CHECK(!seen.empty());
+    CHECK(seen.front() == "scenes");
+    CHECK(Report(r0, "scenes").status == "ran");
+    CHECK(Report(r0, "scenes").fingerprint == s0.fingerprint);
+    const auto list0 = ReadSceneList(o.passesRoot / kScenesPass, "");
+    REQUIRE(list0);
+    CHECK(list0->cuts == std::vector<int64_t>{kCutAt});
+    CHECK(Manifest::Load(o.passesRoot / kScenesPass).fingerprint == s0.fingerprint);
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").inputs.at("scenes") == list0->id);  // nr reads the list (PR-13)
+    CHECK(SceneLabelOf(Manifest::Load(o.passesRoot / "color_nr")) == list0->id);
+    for (const auto& e : std::filesystem::recursive_directory_iterator(o.passesRoot)) {  // a planned id never reaches a manifest
+        if (e.path().filename() != Manifest::kFileName) continue;
+        std::ifstream f(e.path());
+        std::stringstream text;
+        text << f.rdbuf();
+        CHECK(text.str().find("pending:") == std::string::npos);
+    }
+
+    // a rerun: the list is known in the plan
+    const ProcessPlan plan1 = PlanProcess(o);
+    const StageDecision& s1 = Decision(plan1, "scenes");
+    CHECK(s1.action == "reuse");
+    CHECK(s1.sceneCuts.known);
+    CHECK(s1.sceneCuts.count == 1);
+    CHECK(s1.sceneCuts.cuts == std::vector<int64_t>{kCutAt});
+    CHECK(s1.sceneCuts.id == list0->id);
+    CHECK(s1.info == "склеек: 1");
+    CHECK(plan1.runCount == 0);
+
+    // 0.24 -> 0.3: the same list, over the stored scores
+    ApplyParamSpec(o.stages, "scenes.threshold=0.3");
+    const ProcessPlan plan2 = PlanProcess(o);
+    const StageDecision& s2 = Decision(plan2, "scenes");
+    CHECK(s2.action == "run");
+    CHECK(s2.kind == "params_changed");
+    CHECK(s2.sceneCuts.rederive);
+    CHECK(s2.sceneCuts.known);
+    CHECK(s2.sceneCuts.count == 1);
+    CHECK(s2.sceneCuts.before == 1);
+    CHECK(s2.sceneCuts.id == list0->id);
+    CHECK_THAT(s2.detail, ContainsSubstring("no decoding"));
+    CHECK(plan2.runCount == 1);
+    CHECK(plan2.ToJson()["stages"][0]["scene_cuts"]["rederive"] == true);
+    const ProcessResult r2 = RunProcess(o);
+    CHECK(Report(r2, "scenes").status == "ran");
+    for (const char* name : {"depth", "flow", "upscale", "nr", "fg"}) CHECK(Report(r2, name).status == "reused");
+    const Manifest m2 = Manifest::Load(o.passesRoot / kScenesPass);
+    CHECK(m2.stageParams["rederived"] == true);
+    CHECK(m2.stageParams["threshold"] == 0.3);
+    CHECK(m2.fingerprint == s2.fingerprint);
+    CHECK(ListPassVersions(o.passesRoot, kScenesPass).size() == 2);  // the 0.24 list waits in the history
+
+    // 0.6: no cut left; the cut is among the near misses
+    ApplyParamSpec(o.stages, "scenes.threshold=0.6");
+    const ProcessPlan plan3 = PlanProcess(o);
+    const StageDecision& s3 = Decision(plan3, "scenes");
+    CHECK(s3.sceneCuts.rederive);
+    CHECK(s3.sceneCuts.count == 0);
+    CHECK(s3.sceneCuts.before == 1);
+    CHECK(s3.sceneCuts.id.empty());
+    CHECK(s3.info == "склеек не найдено");
+    RunProcess(o);
+    const auto list3 = ReadSceneList(o.passesRoot / kScenesPass, "");
+    REQUIRE(list3);
+    CHECK(list3->cuts.empty());
+    REQUIRE(!list3->nearMisses.empty());
+    CHECK(list3->nearMisses.front().first == kCutAt);
+
+    // 0: off; the scores stay for the way back
+    ApplyParamSpec(o.stages, "scenes.threshold=0");
+    const ProcessPlan plan4 = PlanProcess(o);
+    const StageDecision& s4 = Decision(plan4, "scenes");
+    CHECK(s4.sceneCuts.off);
+    CHECK(s4.sceneCuts.rederive);
+    CHECK(s4.info == "порог 0: без сбросов на склейках");
+    RunProcess(o);
+    const auto list4 = ReadSceneList(o.passesRoot / kScenesPass, "");
+    REQUIRE(list4);
+    CHECK(list4->off);
+    CHECK(list4->cuts.empty());
+    CHECK(std::filesystem::exists(o.passesRoot / kScenesPass / kScenesScoresFile));
+
+    // back to 0.24: the version of the first run comes back, nothing is analysed
+    ApplyParamSpec(o.stages, "scenes.threshold=0.24");
+    const ProcessPlan plan5 = PlanProcess(o);
+    const StageDecision& s5 = Decision(plan5, "scenes");
+    CHECK(s5.action == "restore");
+    CHECK(s5.fingerprint == s0.fingerprint);
+    CHECK(s5.sceneCuts.known);
+    CHECK(s5.sceneCuts.count == 1);
+    CHECK(s5.sceneCuts.id == list0->id);
+    const ProcessResult r5 = RunProcess(o);
+    CHECK(!Report(r5, "scenes").restored.empty());
+    CHECK(ReadSceneList(o.passesRoot / kScenesPass, "")->cuts == std::vector<int64_t>{kCutAt});
+
+    // --force scenes: analysed again from the source, not over the stored scores
+    o.forceStages = {"scenes"};
+    const ProcessPlan plan6 = PlanProcess(o);
+    CHECK(Decision(plan6, "scenes").kind == "forced");
+    CHECK(!Decision(plan6, "scenes").sceneCuts.rederive);
+    CHECK(!Decision(plan6, "scenes").sceneCuts.known);
+    RunProcess(o);
+    CHECK(!Manifest::Load(o.passesRoot / kScenesPass).stageParams.contains("rederived"));
+    CHECK(ReadSceneList(o.passesRoot / kScenesPass, "")->cuts == std::vector<int64_t>{kCutAt});
+}
+
+TEST_CASE("dlssvid scenes: the list on the console and in JSON; a second threshold over the stored scores, the first list kept", "[integration][cli][scenes]") {
+    const auto dir = Dir("cli");
+    const auto clip = CutClip(dir);
+    const auto root = dir / "passes";
+    const CliResult a = RunCli({"scenes", "-i", clip.string(), "-o", root.string(), "--json", (dir / "a.json").string()});
+    INFO(a.out);
+    REQUIRE(a.code == 0);
+    CHECK(a.out.find("cut       3") != std::string::npos);
+    CHECK(a.out.find("1 cut(s)") != std::string::npos);
+    const nlohmann::json ja = ReadJson(dir / "a.json");
+    CHECK(ja["cuts"] == nlohmann::json::array({kCutAt}));
+    CHECK(ja["count"] == 1);
+    CHECK(ja["rederived"] == false);
+    CHECK(ja["reached_end"] == true);
+    CHECK(ja["id"] == SceneCutsId({kCutAt}));
+
+    const CliResult b = RunCli({"scenes", "-i", clip.string(), "-o", root.string(), "--threshold", "0.6", "--json", (dir / "b.json").string()});
+    INFO(b.out);
+    REQUIRE(b.code == 0);
+    CHECK(b.out.find("stored scores, no decoding") != std::string::npos);
+    CHECK(b.out.find("near      3") != std::string::npos);
+    const nlohmann::json jb = ReadJson(dir / "b.json");
+    CHECK(jb["rederived"] == true);
+    CHECK(jb["count"] == 0);
+    CHECK(jb["id"] == "");
+    CHECK(ListPassVersions(root, kScenesPass).size() == 2);  // the 0.24 list went to the history
+
+    const CliResult c = RunCli({"scenes", "-i", clip.string(), "-o", root.string(), "--reanalyze", "--json", (dir / "c.json").string()});
+    REQUIRE(c.code == 0);
+    CHECK(ReadJson(dir / "c.json")["rederived"] == false);
+    CHECK(ReadJson(dir / "c.json")["count"] == 1);
+
+    const CliResult bad = RunCli({"scenes", "-i", clip.string(), "-o", root.string(), "--threshold", "2"});
+    CHECK(bad.code != 0);
+    CHECK(bad.out.find("scenes.threshold") != std::string::npos);
+}
+
+// PR-13 (regression): at 0.24 the list of the stage scenes is the one NR's own detector of PR-6 reset its history at - the module
+// it called, as it called it (every decoded source frame, Next(frame, 0.24f)). No score lies within 1e-4 of the threshold, so the
+// stored float32 scores and the detector's double agree on every frame.
+TEST_CASE("Regression: the scene list at 0.24 is the one NR's detector of PR-6 found (8 bit, 10 bit, a flash)", "[integration][scenes][regression]") {
+    const auto dir = Dir("equivalence");
+    D3D12Device dev({true, false});
+    const std::vector<std::pair<std::string, std::vector<int64_t>>> clips{{"cut", {kCutAt}}, {"10bit", {kCutAt}}, {"flash", {3, 4}}};
+    for (const auto& [kind, expected] : clips) {
+        INFO(kind);
+        const auto clip = EquivalenceClip(dir, kind);
+        const ScenesStageOptions o = Options(dir / kind, clip);
+        VideoDecoder decoder(clip);
+        const ScenesRunResult r = AnalyseScenes(decoder, o, -1);
+        const auto scores = ReadSceneScores(r.outDir, Manifest::Load(r.outDir));
+        REQUIRE(scores);
+        REQUIRE(scores->scores.size() == 7);
+        for (const float v : scores->scores) CHECK(std::fabs(static_cast<double>(v) - 0.24) > 1e-4);
+        CHECK(r.list.cuts == expected);
+
+        std::vector<int64_t> pr6;
+        {
+            VideoDecoder d(clip);
+            SceneCutDetector det(ColorInfoFromStream(d.Info()));
+            CpuFrame f;
+            while (d.NextFrame(f))
+                if (det.Next(f, 0.24f)) pr6.push_back(f.index);
+        }
+        CHECK(r.list.cuts == pr6);
+
+        NrStageOptions no;  // the stage resets at exactly these frames now (its own detector gave the same, ab44a61)
+        no.backend = "stub";
+        no.outputDir = dir / kind / "nr";
+        no.temporal = 0.5f;
+        no.sceneCuts = r.list;
+        VideoDecoder dn(clip);
+        CHECK(RunNr(dn, dev, no).stats.sceneCuts == r.list.cuts);
+    }
+}
+
+// PR-13 (regression), the rule of the spec: an empty list is no input - on a clip without cuts every pass below is the one a run without
+// the stage makes, fingerprint for fingerprint. A broken list on disk with the stage off: the stages that read it are warned and run
+// without it.
+TEST_CASE("Regression: on a clip without cuts the stages below have the fingerprints of a run without scenes", "[integration][process][scenes][regression]") {
+    const auto dir = Dir("no_cuts");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    std::filesystem::create_directories(dir / "with");
+    std::filesystem::create_directories(dir / "without");
+    const ProcessOptions with = StubProcess(dir / "with", clip);
+    ProcessOptions without = StubProcess(dir / "without", clip);
+    for (auto& st : without.stages)
+        if (st.name == "scenes") st.enabled = false;
+    const ProcessResult a = RunProcess(with), b = RunProcess(without);
+    CHECK(Report(a, "scenes").status == "ran");
+    REQUIRE(ReadSceneList(with.passesRoot / kScenesPass, ""));
+    CHECK(ReadSceneList(with.passesRoot / kScenesPass, "")->cuts.empty());
+    for (const char* name : {"depth", "flow", "upscale", "nr", "fg"}) {
+        INFO(name);
+        CHECK(Report(a, name).fingerprint == Report(b, name).fingerprint);
+    }
+    for (const char* pass : {"mv_dlss", "color_sr", "color_nr", "color_fg"}) {
+        INFO(pass);
+        CHECK(Manifest::Load(with.passesRoot / pass).inputs.count("scenes") == 0);
+        CHECK(SceneLabelOf(Manifest::Load(with.passesRoot / pass)).empty());
+    }
+    CHECK(PlanProcess(with).runCount == 0);
+
+    std::filesystem::create_directories(without.passesRoot / kScenesPass);
+    std::ofstream(without.passesRoot / kScenesPass / Manifest::kFileName) << "{ broken";
+    const ProcessPlan plan = PlanProcess(without);
+    const StageDecision& nr = Decision(plan, "nr");
+    CHECK(nr.action == "reuse");
+    REQUIRE(!nr.warnings.empty());
+    CHECK_THAT(nr.warnings.front(), ContainsSubstring("the scene list is not used"));
+    CHECK(Decision(plan, "upscale").warnings.empty());  // nis reads no list
+}
+
+// PR-13: the stages that read the list follow it, and the plan says what the run does - a list with other cuts recomputes flow and nr
+// (input_changed «scenes») and fg above them, nis keeps its colour; the way back restores every one of them; threshold 0 takes the
+// versions made without a list. Before the first analysis the plan cannot know: the readers are «pending», and on a clip without cuts
+// the run reuses them.
+TEST_CASE("RunProcess: the stages that read the list follow it; the plan says so", "[integration][process][scenes]") {
+    const auto dir = Dir("consumers");
+    const auto clip = CutClip(dir);
+    ProcessOptions o = StubProcess(dir, clip);
+    o.keepVersions = 0;
+    RunProcess(o);
+    const std::string id = ReadSceneList(o.passesRoot / kScenesPass, "")->id;
+    for (const char* pass : {"mv_raw", "mv_dlss", "color_nr", "color_fg"}) {
+        INFO(pass);
+        CHECK(Manifest::Load(o.passesRoot / pass).inputs.at("scenes") == id);
+        CHECK(SceneLabelOf(Manifest::Load(o.passesRoot / pass)) == id);
+    }
+    for (const char* pass : {"depth_dlss", "color_sr"}) {  // depth keeps its own breaks, nis no history
+        INFO(pass);
+        CHECK(Manifest::Load(o.passesRoot / pass).inputs.count("scenes") == 0);
+        CHECK(SceneLabelOf(Manifest::Load(o.passesRoot / pass)).empty());
+    }
+    CHECK(Manifest::Load(o.passesRoot / "mv_raw").stageParams["scene_cuts"] == nlohmann::json::array({kCutAt}));
+
+    auto actions = [](const ProcessPlan& p) {
+        std::map<std::string, std::string> a;
+        for (const auto& d : p.stages) a[d.name] = d.action;
+        return a;
+    };
+    auto agrees = [&](const ProcessPlan& p, const ProcessResult& r) {  // what the plan said is what the run did
+        for (const auto& d : p.stages) {
+            INFO(d.name << ": " << d.action << " " << d.kind);
+            CHECK(Report(r, d.name).status == (d.action == "run" ? "ran" : "reused"));
+            CHECK(Report(r, d.name).fingerprint == d.fingerprint);
+        }
+    };
+    // 0.24 -> 0.6: no cut left - flow and nr have another input, fg follows; depth and the nis upscale stay
+    ApplyParamSpec(o.stages, "scenes.threshold=0.6");
+    const ProcessPlan p6 = PlanProcess(o);
+    CHECK(Decision(p6, "flow").kind == "input_changed");
+    CHECK(Decision(p6, "flow").diff["inputs"] == nlohmann::json::array({"scenes"}));
+    CHECK_FALSE(Decision(p6, "flow").pending);  // the list is known (rederive): the plan is exact
+    CHECK(actions(p6) == std::map<std::string, std::string>{{"scenes", "run"}, {"depth", "reuse"}, {"flow", "run"}, {"upscale", "reuse"}, {"nr", "run"}, {"fg", "run"}});
+    agrees(p6, RunProcess(o));
+    CHECK(Manifest::Load(o.passesRoot / "mv_dlss").inputs.count("scenes") == 0);  // an empty list is no input
+    CHECK(PlanProcess(o).runCount == 0);
+    // threshold 0: no list either - the passes of 0.6 are those of no list: reused
+    ApplyParamSpec(o.stages, "scenes.threshold=0");
+    const ProcessPlan p0 = PlanProcess(o);
+    CHECK(actions(p0) == std::map<std::string, std::string>{{"scenes", "run"}, {"depth", "reuse"}, {"flow", "reuse"}, {"upscale", "reuse"}, {"nr", "reuse"}, {"fg", "reuse"}});
+    agrees(p0, RunProcess(o));
+    // back to 0.24: every version comes back, nothing is computed
+    ApplyParamSpec(o.stages, "scenes.threshold=0.24");
+    const ProcessPlan back = PlanProcess(o);
+    CHECK(back.runCount == 0);
+    for (const char* name : {"scenes", "flow", "nr", "fg"}) CHECK(Decision(back, name).action == "restore");
+    agrees(back, RunProcess(o));
+    CHECK(Manifest::Load(o.passesRoot / "mv_dlss").inputs.at("scenes") == id);
+
+    // the first analysis over passes made without the stage: the readers are pending in the plan; no cut - the run reuses them
+    const auto plainDir = Dir("consumers_first");
+    ClipSpec plain;
+    plain.frames = 4;
+    plain.width = 48;
+    plain.height = 32;
+    ProcessOptions f = StubProcess(plainDir, WriteClip(plainDir / "clip.mkv", plain));
+    for (auto& st : f.stages)
+        if (st.name == "scenes") st.enabled = false;
+    RunProcess(f);
+    for (auto& st : f.stages) st.enabled = true;
+    const ProcessPlan first = PlanProcess(f);
+    CHECK_FALSE(Decision(first, "scenes").sceneCuts.known);
+    for (const char* name : {"flow", "nr"}) {
+        INFO(name);
+        CHECK(Decision(first, name).action == "run");
+        CHECK(Decision(first, name).pending);
+        CHECK(Decision(first, name).pendingRule == "no_cut");  // made without a list: reused if none is found
+    }
+    CHECK(Decision(first, "upscale").action == "reuse");
+    const ProcessResult fr = RunProcess(f);
+    CHECK(Report(fr, "scenes").status == "ran");
+    for (const char* name : {"depth", "flow", "upscale", "nr", "fg"}) CHECK(Report(fr, name).status == "reused");
+}
+
+// PR-13 (regression): a standalone flow pass (no fingerprint) is adopted only with the label of the list the stage reads now - both
+// passes of the family; made without it under a list with cuts it is recomputed and kept in the history
+TEST_CASE("RunProcess adopts a standalone flow pass only with the current scene list", "[integration][process][scenes][regression]") {
+    const auto dir = Dir("flow_label");
+    ProcessOptions o = StubProcess(dir, CutClip(dir));
+    RunProcess(o);
+    auto standalone = [&](bool keepLabel) {
+        for (const char* pass : {"mv_raw", "mv_dlss"}) {
+            Manifest m = Manifest::Load(o.passesRoot / pass);
+            m.fingerprint.clear();
+            m.tool = nlohmann::json::object();
+            m.inputs.clear();
+            if (!keepLabel)
+                for (const char* k : {"scene_cuts_id", "scene_cut_threshold", "scene_cuts", "scene_cut_count"}) m.stageParams.erase(k);
+            m.Save(o.passesRoot / pass);
+        }
+    };
+    standalone(true);
+    const ProcessResult adopted = RunProcess(o);
+    CHECK(Report(adopted, "flow").status == "reused");
+    CHECK_THAT(Report(adopted, "flow").reason, ContainsSubstring("adopted"));
+    standalone(false);
+    const ProcessPlan plan = PlanProcess(o);
+    CHECK(Decision(plan, "flow").action == "run");
+    CHECK_THAT(Decision(plan, "flow").detail, ContainsSubstring("made without the scene list"));
+    CHECK(Decision(plan, "flow").retire);
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "flow").status == "ran");
+    CHECK(!Report(r, "flow").retired.empty());
+    CHECK(SceneLabelOf(Manifest::Load(o.passesRoot / "mv_dlss")) == ReadSceneList(o.passesRoot / kScenesPass, "")->id);
+}
+
+// PR-13 (regression): fg reads the list in its own process too (audit fg-2) - the runner hands it the list it planned with, by its id;
+// the child refuses another one before its first frame, and the stage fails alone (the result comes from color_nr)
+TEST_CASE("RunProcess: fg in its own process holds a frame at the cut; a child given another list fails before its first frame", "[integration][process][scenes][fg][isolation]") {
+    const auto dir = Dir("fg_isolated");
+    const auto clip = CutClip(dir);
+    ProcessOptions o = StubProcess(dir, clip);
+    o.fgExecutable = DLSSVID_CLI_PATH;
+    const ProcessResult r = RunProcess(o);
+    const ProcessStageReport& fg = Report(r, "fg");
+    REQUIRE(fg.status == "ran");
+    CHECK(fg.details["isolated"] == true);
+    CHECK(fg.details["duplicated"] == 1);  // x2: real 2 held before the cut at 3
+    const std::string id = ReadSceneList(o.passesRoot / kScenesPass, "")->id;
+    const Manifest m = Manifest::Load(o.passesRoot / "color_fg");
+    CHECK(m.inputs.at("scenes") == id);
+    CHECK(SceneLabelOf(m) == id);
+    CHECK(m.stageParams["duplicated"] == 1);
+    CHECK(PlanProcess(o).runCount == 0);
+
+    // the child itself, with an id the list on disk does not have
+    std::vector<std::string> args{DLSSVID_CLI_PATH, "fg", "--as-stage", "-i", clip.string(), "-o", (dir / "child").string(), "--no-auto",
+                                  "--params-json", R"({"backend":"blend","multiplier":2})", "--warp", "--scenes-dir", (o.passesRoot / "scenes").string(),
+                                  "--scene-cuts-id", "cuts:0000"};
+    std::string out;
+    CHECK(Subprocess::Run(args, &out) != 0);
+    CHECK(out.find("changed") != std::string::npos);
+    CHECK_FALSE(Manifest::Exists(dir / "child" / "color_fg"));
+}
+
+// Review of PR-13: the plan before the analysis says when a stage is reused after all, and only for a stage that waits for the list
+// alone - one that reruns anyway (an incomplete pass) shows that reason; a re-analysis (--force scenes) of stages made with the list
+// promises a reuse when the same cuts are found, and keeps it
+TEST_CASE("PlanProcess: pending only for the stages that wait for the list alone, with the rule of their reuse", "[integration][process][scenes][regression]") {
+    const auto dir = Dir("pending_rule");
+    const auto clip = CutClip(dir);
+    ProcessOptions o = StubProcess(dir, clip);
+    RunProcess(o);
+    o.forceStages = {"scenes"};  // decoded again: the list is not known to the plan
+    const ProcessPlan forced = PlanProcess(o);
+    CHECK_FALSE(Decision(forced, "scenes").sceneCuts.known);
+    for (const char* name : {"flow", "nr", "fg"}) {
+        INFO(name);
+        CHECK(Decision(forced, name).pending);
+        CHECK(Decision(forced, name).pendingRule == "same_list");  // made with {3}: reused if {3} comes out again
+    }
+    CHECK(Decision(forced, "upscale").action == "reuse");  // nis reads no list
+    const ProcessResult r = RunProcess(o);
+    for (const char* name : {"flow", "upscale", "nr", "fg"}) CHECK(Report(r, name).status == "reused");
+    o.forceStages.clear();
+
+    // a short run first (frames 0..2: no cut, 3 scores), then the whole clip: the list is pending, the readers rerun anyway -
+    // their passes are incomplete, and the plan says so
+    const auto dir2 = Dir("pending_incomplete");
+    ProcessOptions s = StubProcess(dir2, CutClip(dir2));
+    s.frames = 3;
+    RunProcess(s);
+    s.frames = 6;  // the length given: with an unknown one (mkv) a pass of 3 frames stands for the clip (PassComplete)
+    const ProcessPlan whole = PlanProcess(s);
+    CHECK_FALSE(Decision(whole, "scenes").sceneCuts.known);
+    for (const char* name : {"flow", "nr", "fg"}) {  // fg: built on nr, incomplete itself - decided with what nr would be
+        INFO(name);
+        CHECK(Decision(whole, name).action == "run");
+        CHECK_FALSE(Decision(whole, name).pending);
+        CHECK(Decision(whole, name).kind == "incomplete");
+    }
+}
+
+TEST_CASE("RunProcess: a forced run at threshold 0 keeps the stored scores; a list of another type is no list, not an exception", "[integration][process][scenes][regression]") {
+    const auto dir = Dir("forced_off");
+    const auto clip = CutClip(dir);
+    ProcessOptions o = StubProcess(dir, clip);
+    o.keepVersions = 1;  // no history to fall back on
+    RunProcess(o);
+    ApplyParamSpec(o.stages, "scenes.threshold=0");
+    RunProcess(o);
+    o.forceStages = {"scenes"};
+    const ProcessPlan forced = PlanProcess(o);
+    CHECK(Decision(forced, "scenes").sceneCuts.rederive);  // threshold 0 over the scores: nothing to decode
+    RunProcess(o);
+    o.forceStages.clear();
+    CHECK(std::filesystem::exists(o.passesRoot / kScenesPass / kScenesScoresFile));
+    ApplyParamSpec(o.stages, "scenes.threshold=0.24");
+    const ProcessPlan back = PlanProcess(o);
+    CHECK(Decision(back, "scenes").sceneCuts.rederive);  // before: pending, the whole source decoded again
+    CHECK(Decision(back, "scenes").sceneCuts.count == 1);
+
+    // a field of another type in the list on disk: the plan warns the readers and runs (the stage off)
+    RunProcess(o);
+    Manifest m = Manifest::Load(o.passesRoot / kScenesPass);
+    m.stageParams["threshold"] = "0.24";
+    m.Save(o.passesRoot / kScenesPass);
+    for (auto& st : o.stages)
+        if (st.name == "scenes") st.enabled = false;
+    ProcessPlan off;
+    REQUIRE_NOTHROW(off = PlanProcess(o));
+    REQUIRE(!Decision(off, "flow").warnings.empty());
+    CHECK_THAT(Decision(off, "flow").warnings.front(), ContainsSubstring("another type"));
+    for (auto& st : o.stages) st.enabled = true;
+    const ProcessPlan on = PlanProcess(o);  // the stage on: analysed again in place
+    CHECK(Decision(on, "scenes").action == "run");
+}
+
+TEST_CASE("PlanProcess: a partial list with the length unknown is named; the density counts the cuts inside the run", "[integration][process][scenes][regression]") {
+    // a cut every two frames: 19 in 40
+    const auto dir = Dir("density");
+    ClipSpec spec;
+    spec.frames = 40;
+    spec.width = kW;
+    spec.height = kH;
+    const auto clip = WriteClipWith(dir / "clip.mkv", spec, [](int64_t i) {
+        CpuFrame f = SyntheticFrame(i, kW, kH);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < kH; ++r)
+            for (uint32_t c = 0; c < kW; ++c) y[r * kW + c] = static_cast<uint8_t>((i / 2) % 2 == 0 ? 40 + c : 220 - c);
+        return f;
+    });
+    ProcessOptions o = StubProcess(dir, clip);
+    for (auto& st : o.stages) st.enabled = st.name == "scenes";
+    RunProcess(o);
+    const ProcessPlan whole = PlanProcess(o);
+    REQUIRE(Decision(whole, "scenes").sceneCuts.count == 19);
+    CHECK_FALSE(Decision(whole, "scenes").warnings.empty());  // 19 cuts in 40 frames: a low threshold
+    o.frames = 12;  // a short preview of the analysed clip: 5 cuts in it
+    const ProcessPlan part = PlanProcess(o);
+    CHECK(Decision(part, "scenes").action == "reuse");
+    CHECK(Decision(part, "scenes").warnings.empty());  // before: «19 cuts in 12 frames»
+    CHECK_THAT(Decision(part, "scenes").info, ContainsSubstring("5)"));
+
+    // a list of the first frames only, the clip's length unknown (mkv), the stage off: the readers are told
+    const auto dir2 = Dir("partial_unknown");
+    const auto clip2 = CutClip(dir2);
+    {
+        VideoDecoder decoder(clip2);
+        AnalyseScenes(decoder, Options(dir2 / "passes", clip2), 5);
+    }
+    ProcessOptions p = StubProcess(dir2, clip2);
+    for (auto& st : p.stages)
+        if (st.name == "scenes") st.enabled = false;
+    const ProcessPlan plan = PlanProcess(p);
+    REQUIRE(plan.frames == -1);
+    REQUIRE(!Decision(plan, "flow").warnings.empty());
+    CHECK_THAT(Decision(plan, "flow").warnings.front(), ContainsSubstring("known for frames 0..4 only"));
+}
+
+TEST_CASE("RunProcess warns when a stage decoded another number of frames than the scene list", "[integration][process][scenes][regression]") {
+    const auto dir = Dir("frame_count");
+    ProcessOptions o = StubProcess(dir, CutClip(dir));
+    RunProcess(o);
+    Manifest m = Manifest::Load(o.passesRoot / kScenesPass);  // as if the analysis had decoded one frame more than flow
+    m.frameCount = 7;
+    m.lastFrame = 6;
+    m.Save(o.passesRoot / kScenesPass);
+    o.forceStages = {"flow"};
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "flow").status == "ran");
+    REQUIRE(!r.warnings.empty());
+    CHECK(std::any_of(r.warnings.begin(), r.warnings.end(), [](const std::string& w) { return w.find("flow: decoded 6 frames, the scene list has 7") != std::string::npos; }));
+}
+
+// Review of PR-13, round 2: the case DecidePending plans is one list for every stage - a stage made with another list than the stages
+// above were planned with reruns whatever comes out; a stage restored from the history is rewritten (a standalone pass built on it
+// reruns). Neither is pending. The plan's marks say the rule.
+TEST_CASE("PlanProcess: pending under one list for all stages; a restored stage above is rewritten", "[integration][process][scenes][regression]") {
+    {  // flow made without a list, nr and fg with {3} over it (flow was off); then the list is analysed again
+        const auto dir = Dir("pending_mixed");
+        const auto clip = CutClip(dir);
+        ProcessOptions o = StubProcess(dir, clip);
+        for (auto& st : o.stages)
+            if (st.name == "scenes") st.enabled = false;
+        RunProcess(o);  // no list anywhere
+        for (auto& st : o.stages) st.enabled = st.name != "flow";
+        RunProcess(o);  // the list {3}: nr and fg made with it over flow's vectors without it
+        REQUIRE(Manifest::Load(o.passesRoot / "color_nr").inputs.at("scenes") == SceneCutsId({kCutAt}));
+        REQUIRE(Manifest::Load(o.passesRoot / "mv_dlss").inputs.count("scenes") == 0);
+        for (auto& st : o.stages) st.enabled = true;
+        o.forceStages = {"scenes"};
+        const ProcessPlan plan = PlanProcess(o);
+        CHECK(Decision(plan, "flow").pending);
+        CHECK(Decision(plan, "flow").pendingRule == "no_cut");
+        for (const char* name : {"nr", "fg"}) {  // {3}: flow reruns and their vectors change; none: their list changes
+            INFO(name);
+            CHECK(Decision(plan, name).action == "run");
+            CHECK_FALSE(Decision(plan, name).pending);
+        }
+        const ProcessResult r = RunProcess(o);
+        for (const char* name : {"flow", "nr", "fg"}) CHECK(Report(r, name).status == "ran");
+    }
+    {  // flow comes back from the history, a standalone nr pass (with the label) was made over the flow replaced
+        const auto dir = Dir("pending_restore");
+        ProcessOptions o = StubProcess(dir, CutClip(dir));
+        o.keepVersions = 0;
+        ApplyParamSpec(o.stages, "depth.z_far=400");
+        RunProcess(o);
+        ApplyParamSpec(o.stages, "depth.z_far=500");
+        RunProcess(o);
+        ApplyParamSpec(o.stages, "depth.z_far=400");
+        Manifest nr = Manifest::Load(o.passesRoot / "color_nr");  // as a standalone `dlssvid nr` leaves it: no fingerprint, the label
+        nr.fingerprint.clear();
+        nr.tool = nlohmann::json::object();
+        nr.inputs.clear();
+        nr.Save(o.passesRoot / "color_nr");
+        REQUIRE(SceneLabelOf(Manifest::Load(o.passesRoot / "color_nr")) == SceneCutsId({kCutAt}));
+        o.forceStages = {"scenes"};
+        const ProcessPlan plan = PlanProcess(o);
+        CHECK(Decision(plan, "flow").pending);  // restored if the same cuts are found
+        CHECK(Decision(plan, "flow").pendingRule == "same_list");
+        CHECK_FALSE(Decision(plan, "nr").pending);  // built on the flow that is replaced: reruns whatever the list
+        CHECK(Decision(plan, "nr").action == "run");
+        const ProcessResult r = RunProcess(o);
+        CHECK(!Report(r, "flow").restored.empty());
+        CHECK(Report(r, "nr").status == "ran");
+    }
+}
+
+TEST_CASE("dlssvid process --plan names the rule of a pending stage", "[integration][cli][process][scenes]") {
+    const auto dir = Dir("cli_pending");
+    const auto clip = CutClip(dir);
+    const auto root = dir / "passes";
+    const std::vector<std::string> common{"process", "-i", clip.string(), "-o", (dir / "r.mkv").string(), "--passes", root.string(), "--warp", "--codec", "ffv1",
+                                          "--param", "depth.backend=stub", "--param", "flow.backend=stub", "--param", "upscale.backend=nis",
+                                          "--param", "nr.backend=stub", "--param", "fg.backend=blend"};
+    auto with = [&](std::vector<std::string> extra) {
+        std::vector<std::string> a = common;
+        a.insert(a.end(), extra.begin(), extra.end());
+        return RunCli(a);
+    };
+    REQUIRE(with({"--stages", "depth,flow,upscale,nr,fg"}).code == 0);  // made without a list
+    const CliResult first = with({"--plan"});
+    CHECK(first.out.find("(pending: reused if no cut is found)") != std::string::npos);
+    CHECK(first.out.find("the stages below are reused if the list comes out as the one they were made with") != std::string::npos);
+    REQUIRE(with({}).code == 0);  // with the list {3}
+    const CliResult forced = with({"--plan", "--force", "scenes"});
+    INFO(forced.out);
+    CHECK(forced.out.find("(pending: reused if the same cuts are found)") != std::string::npos);
+    CHECK(forced.out.find("(pending: the scene list is analysed first)") != std::string::npos);
+}

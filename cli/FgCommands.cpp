@@ -1,5 +1,7 @@
 #include "FgCommands.h"
 
+#include "ScenesArg.h"
+
 #include <windows.h>
 
 #include <chrono>
@@ -10,7 +12,9 @@
 #include "gpu/D3D12Device.h"
 #include "io/VideoDecoder.h"
 #include "passes/Manifest.h"
+#include "passes/ScenesPass.h"
 #include "pipeline/FgProcess.h"
+#include "pipeline/PassFingerprint.h"
 #include "stages/fg/FgStage.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "util/Error.h"
@@ -97,6 +101,8 @@ nlohmann::json Summary(const FgRunResult& r, double sec) {
             {"stats",
              {{"frames", r.stats.frames},
               {"generated", r.stats.generated},
+              {"duplicated", r.stats.duplicated},  // held at a cut of the scene list (PR-13)
+              {"scene_cut_count", r.stats.sceneCutCount},
               {"frames_out", FgFrameCount(r.stats.frames, r.stats.multiplier)},
               {"multiplier", r.stats.multiplier},
               {"ms_per_frame_backend", r.stats.MeanMs()},
@@ -130,6 +136,8 @@ int CmdFgAsStage(const FgCommands::FgArgs& a) {
     o.crashAfter = a.crashAfter;
     o.sourceFile = std::filesystem::path(a.input).filename().string();
     o.sourceHash = a.sourceHash.rfind("sha256:", 0) == 0 ? a.sourceHash : "sha256:" + Sha256File(a.input);
+    // PR-13: the list the runner planned with, exactly that one - another on disk now fails the stage before its first frame
+    if (!a.sceneCutsId.empty()) o.sceneCuts = ReadSceneListExpect(a.scenesDir, a.sceneCutsId, o.sourceHash);
     D3D12Device device({a.warp, false});
     const auto t0 = std::chrono::steady_clock::now();
     // the result goes out as soon as color_fg is written - before the backend is released, where a driver fault ends
@@ -197,6 +205,9 @@ int CmdFg(const FgCommands::FgArgs& a) {
     o.crashAfter = a.crashAfter;
     o.sourceFile = std::filesystem::path(a.input).filename().string();
     o.sourceHash = "sha256:" + Sha256File(a.input);
+    // PR-13: the clip's scene-cut list, <output>/scenes unless told otherwise - x2..x4 interpolates, never across a cut
+    o.sceneCuts = ResolveScenes(a.scenesDir, a.noScenes, a.noAuto, a.output, o.sourceHash, StageReadsSceneCuts("fg", {{"multiplier", a.multiplier}}), "fg",
+                                a.frames > 0 ? a.frames : 0);
     const int64_t total = a.frames > 0 ? a.frames : info.frameCount;
     o.onFrame = [](int64_t frame, double ms) {
         if (frame % 10 == 0) std::fprintf(stderr, "  frame %lld %.1f ms\n", static_cast<long long>(frame), ms);
@@ -220,6 +231,8 @@ int CmdFg(const FgCommands::FgArgs& a) {
     std::printf("frames:      %lld in -> %lld out (%lld generated)\nms/frame:    %.1f (backend %.1f)\n", static_cast<long long>(r.stats.frames),
                 static_cast<long long>(FgFrameCount(r.stats.frames, r.stats.multiplier)), static_cast<long long>(r.stats.generated), r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0,
                 r.stats.MeanMs());
+    if (r.stats.sceneCutCount > 0)
+        std::printf("scene cuts:  %lld (%lld frames held instead of interpolated)\n", static_cast<long long>(r.stats.sceneCutCount), static_cast<long long>(r.stats.duplicated));
     if (!a.video.empty()) std::printf("video:       %s\n", a.video.c_str());
     if (!a.json.empty()) std::ofstream(a.json) << Summary(r, sec).dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
     return 0;
@@ -235,6 +248,11 @@ void FgCommands::Register(CLI::App& app) {
     fg_->add_option("--depth-dir,--depth_dir", fa_.depthDir, "depth_dlss pass folder (guide, dlssg)");
     fg_->add_option("--mv-dir,--mv_dir", fa_.mvDir, "mv_dlss pass folder (guide, dlssg)");
     fg_->add_flag("--no-auto,--no_auto", fa_.noAuto, "do not pick pass folders under --output automatically");
+    fg_->add_option("--scenes-dir,--scenes_dir", fa_.scenesDir,
+                    "the clip's scene-cut list (the pass of `dlssvid scenes`; default: <output>/scenes when present): no interpolation across "
+                    "its cuts - the last frame of a shot is held");
+    fg_->add_flag("--no-scenes,--no_scenes", fa_.noScenes, "no scene-cut list: interpolation across cuts too");
+    fg_->add_option("--scene-cuts-id,--scene_cuts_id", fa_.sceneCutsId, "the id of the scene list the runner planned with (--as-stage)")->group("");
     fg_->add_option("--backend", fa_.backend, "dlssg (DLSS Frame Generation, RTX 40+) | rife (TensorRT baseline) | blend (naive)")->default_val("dlssg");
     fg_->add_option("--multiplier", fa_.multiplier, "output frames per input frame: 2 | 3 | 4 (dlssg > 2 needs Multi Frame Generation)")->default_val(2);
     fg_->add_option("--model", fa_.model, "rife: registry model rife49 | rife48 | rife47")->default_val("rife49");

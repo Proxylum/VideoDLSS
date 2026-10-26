@@ -6,6 +6,8 @@
 #include "FgCommands.h"
 #include "PassesCommands.h"
 #include "ProcessCommands.h"
+#include "ScenesArg.h"
+#include "ScenesCommands.h"
 #include "NrCommands.h"
 #include "UpscaleCommands.h"
 #include "ViewportCommands.h"
@@ -279,6 +281,8 @@ struct FlowArgs {
     std::string format = "exr";
     bool warp = false;
     std::string modelsDir;
+    std::string scenesDir;  // PR-13: the clip's scene-cut list (default: <output>/scenes when present)
+    bool noScenes = false;
 };
 
 int CmdFlow(const FlowArgs& a) {
@@ -305,6 +309,9 @@ int CmdFlow(const FlowArgs& a) {
     o.format = *fmt;
     o.sourceFile = std::filesystem::path(a.input).filename().string();
     o.sourceHash = "sha256:" + Sha256File(a.input);
+    // PR-13: the clip's scene-cut list, <output>/scenes unless told otherwise (depth and mv are not looked for: as before)
+    o.sceneCuts = cli::ResolveScenes(a.scenesDir, a.noScenes, false, a.output, o.sourceHash, StageReadsSceneCuts("flow", nlohmann::json::object()), "flow",
+                                     a.frames > 0 ? a.frames : 0);
     const int64_t total = a.frames > 0 ? a.frames : info.frameCount;
     o.onFrame = [](int64_t frame, double psnr) {
         if (frame % 10 == 0) std::fprintf(stderr, "  frame %lld warp PSNR %.2f dB\n", static_cast<long long>(frame), psnr);
@@ -321,6 +328,11 @@ int CmdFlow(const FlowArgs& a) {
     std::printf("frames:      %lld\npairs:       %lld\nmean |v|:    %.2f px\nwarp PSNR:   %.2f dB (min %.2f)\nms/frame:    %.1f\n", static_cast<long long>(r.stats.frames),
                 static_cast<long long>(r.stats.pairs), r.stats.meanMagnitude, r.stats.MeanWarpPsnr(), r.stats.psnrCount ? r.stats.minWarpPsnr : 0.0,
                 r.stats.frames ? 1000.0 * sec / r.stats.frames : 0.0);
+    if (!o.sceneCuts.id.empty()) {
+        std::string cuts;
+        for (const int64_t c : r.stats.sceneCuts) cuts += (cuts.empty() ? " at " : ", ") + std::to_string(c);
+        std::printf("scene cuts:  %lld%s (zero vectors)\n", static_cast<long long>(r.stats.cutPairs), cuts.c_str());
+    }
     return 0;
 }
 
@@ -504,6 +516,8 @@ void StampPass(const std::filesystem::path& dir, Manifest m) {
 }
 
 int CmdImport(const ImportArgs& a) {
+    if (Manifest::Exists(a.dir) && Manifest::Load(a.dir).IsDataPass())  // PR-13: scenes - a list, not frames to check or convert
+        Throw("import: " + a.dir + " is a data pass (scenes) with no frames: make it with dlssvid scenes");
     PassReader r = OpenReader(a.dir, a.pass, a.convention, a.size);
     ApplyYUp(r, a.yUp);  // before PrintManifest / --write-manifest: the flag describes the files
     if (a.zNear > 0.f) r.Man().depth.zNear = a.zNear;
@@ -693,6 +707,8 @@ int main(int argc, char** argv) {
     processCommands.Register(app);
     cli::PassesCommands passesCommands;  // passes list | use | gc (stage 9)
     passesCommands.Register(app);
+    cli::ScenesCommands scenesCommands;  // scenes: the clip's scene-cut list (PR-13)
+    scenesCommands.Register(app);
 
     ExportArgs ea;
     auto* exp = app.add_subcommand("export", "export a pass as a file sequence + manifest.json");
@@ -779,6 +795,9 @@ int main(int argc, char** argv) {
     flow->add_option("--format", fa.format, "exr | tiff | npz | raw")->default_val("exr");
     flow->add_flag("--warp", fa.warp, "use the WARP software adapter");
     flow->add_option("--models-dir,--models_dir", fa.modelsDir, "folder with registry.json (default: auto)");
+    flow->add_option("--scenes-dir,--scenes_dir", fa.scenesDir,
+                     "the clip's scene-cut list (the pass of `dlssvid scenes`; default: <output>/scenes when present): zero vectors at its cuts");
+    flow->add_flag("--no-scenes,--no_scenes", fa.noScenes, "no scene-cut list: vectors across cuts too");
 
     cli::ViewportCommands viewportCommands;  // project init|show, render (stage 4)
     viewportCommands.Register(app);
@@ -806,6 +825,7 @@ int main(int argc, char** argv) {
         if (info->parsed()) return CmdInfo(infoInput, infoWarp);
         if (const int rc = processCommands.Dispatch(); rc >= 0) return rc;
         if (const int rc = passesCommands.Dispatch(); rc >= 0) return rc;
+        if (const int rc = scenesCommands.Dispatch(); rc >= 0) return rc;
         if (exp->parsed()) return CmdExport(ea);
         if (imp->parsed()) return CmdImport(ia);
         if (conv->parsed()) return CmdConvert(ca);

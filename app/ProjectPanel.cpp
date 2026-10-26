@@ -18,12 +18,14 @@
 #include <map>
 
 #include "AppModel.h"
+#include "SceneCutsView.h"
 #include "SourceNames.h"
 #include "StageCard.h"
 #include "Theme.h"
 #include "TaskQueue.h"
 #include "io/EncodeDefaults.h"
 #include "io/OutputFormat.h"
+#include "passes/ScenesPass.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "stages/ParamSchema.h"
@@ -169,8 +171,9 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     stagesHead->addWidget(Title(tr("Стадии"), content));
     stagesHead->addWidget(Muted(tr("порядок выполнения сверху вниз · готовые пассы переиспользуются"), content), 1);
     layout->addLayout(stagesHead);
-    for (const char* stage : {"depth", "flow", "upscale", "nr", "fg"}) {
+    for (const std::string& stage : PipelineStageNames()) {  // the run order, one table (PR-13)
         auto* card = new StageCard(model_, stage, content);
+        if (stage == kScenesPass) card->setExtra(new SceneCutsView(model_, card));  // the list: chips to check it (PR-13)
         connect(card, &StageCard::runRequested, this, &ProjectPanel::runStage);
         connect(card, &StageCard::patchDllRequested, this, &ProjectPanel::patchDll);
         layout->addWidget(card);
@@ -503,14 +506,16 @@ void ProjectPanel::refreshVersions() {
         ah->setContentsMargins(0, 0, 0, 0);
         ah->setSpacing(4);
         const std::string name = v.current ? v.pass : v.pass + "@" + v.id;
-        auto* compare = new QPushButton(tr("Сравнить"), actions);
-        SetRole(compare, "small");
-        compare->setToolTip(tr("Показать эту версию на стороне «после» шторки"));
-        connect(compare, &QPushButton::clicked, this, [this, name] {
-            if (model_.compareView() != AppModel::CompareView::BeforeAfter) model_.setCompareView(AppModel::CompareView::BeforeAfter);
-            model_.showSource(name);
-        });
-        ah->addWidget(compare);
+        if (v.pass != kScenesPass) {  // the list of cuts has no frames to show (a data pass, PR-13)
+            auto* compare = new QPushButton(tr("Сравнить"), actions);
+            SetRole(compare, "small");
+            compare->setToolTip(tr("Показать эту версию на стороне «после» шторки"));
+            connect(compare, &QPushButton::clicked, this, [this, name] {
+                if (model_.compareView() != AppModel::CompareView::BeforeAfter) model_.setCompareView(AppModel::CompareView::BeforeAfter);
+                model_.showSource(name);
+            });
+            ah->addWidget(compare);
+        }
         if (!v.current) {
             const std::string pass = v.pass, id = v.id;
             auto* use = new QPushButton(tr("Вернуть"), actions);

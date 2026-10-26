@@ -22,6 +22,7 @@
 #include "io/VideoDecoder.h"
 #include "passes/ImageMetrics.h"
 #include "passes/PassSequence.h"
+#include "passes/ScenesPass.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "util/Subprocess.h"
 
@@ -125,6 +126,16 @@ TEST_CASE("Golden: the deterministic pipeline on WARP matches the stored referen
         if (it.value().contains("height")) CHECK(rd.Man().height == it.value()["height"].get<uint32_t>());
         if (it.value().contains("fps")) CHECK(rd.Man().fps.ToDouble() == it.value()["fps"].get<double>());
     }
+    // the scene-cut list (PR-13): a data pass, no frames to read; the synthetic clip has no cut
+    {
+        std::string why;
+        const auto scenes = ReadSceneList(dir / "passes" / kScenesPass, "", &why);
+        INFO("scenes: " << why);
+        REQUIRE(scenes);
+        CHECK(scenes->frames == e["scenes"]["frames"].get<int64_t>());
+        CHECK(scenes->cuts == e["scenes"]["cuts"].get<std::vector<int64_t>>());
+        CHECK(scenes->reachedEnd);
+    }
     // result video
     const auto frames = DecodeAll(dir / "result.mkv");
     CHECK(static_cast<int64_t>(frames.size()) == e["result"]["frames"].get<int64_t>());
@@ -205,7 +216,9 @@ TEST_CASE("Golden: the real backends produce a result on an NVIDIA GPU", "[golde
         if (st["name"] == "depth" || st["name"] == "flow" || st["name"] == "upscale") CHECK(st["status"] == "ran");
     }
     const auto frames = DecodeAll(dir / "result.mkv");
-    const bool fgRan = report["stages"][4]["status"] == "ran";
+    bool fgRan = false;
+    for (const auto& st : report["stages"])
+        if (st["name"] == "fg") fgRan = st["status"] == "ran";
     CHECK(static_cast<int64_t>(frames.size()) == (fgRan ? FgFrameCount(spec.frames, 2) : spec.frames));
     VideoDecoder vd(dir / "result.mkv");
     CHECK(vd.Info().width == spec.width * 2);

@@ -17,13 +17,14 @@
 #include "stages/fg/FgStage.h"
 #include "stages/flow/FlowStage.h"
 #include "stages/nr/NrStage.h"
+#include "stages/scenes/ScenesStage.h"
 #include "stages/upscale/UpscaleStage.h"
 
 using namespace dlssvid;
 
 TEST_CASE("Every stage has a schema whose defaults mirror the stages and the project", "[unit][schema]") {
-    REQUIRE(StageSchemas().size() == 5);
-    for (const char* s : {"depth", "flow", "upscale", "nr", "fg"}) {
+    REQUIRE(StageSchemas().size() == 6);
+    for (const char* s : {"scenes", "depth", "flow", "upscale", "nr", "fg"}) {
         REQUIRE(FindStageSchema(s) != nullptr);
         CHECK(!FindStageSchema(s)->title.empty());
         CHECK(FindStageSchema(s)->Find("backend") != nullptr);
@@ -39,6 +40,11 @@ TEST_CASE("Every stage has a schema whose defaults mirror the stages and the pro
             CHECK(spec->def == v);
         }
     }
+    CHECK(FindStageSchema("scenes")->Find("threshold")->def == ScenesStageOptions{}.threshold);  // PR-13
+    CHECK(FindStageSchema("scenes")->Find("backend")->def == ScenesStageOptions{}.backend);
+    CHECK(FindStageSchema("scenes")->Find("backend")->advanced);
+    CHECK(ParamValueLabel(*FindStageSchema("scenes")->Find("threshold"), 0.0) == "выкл");
+    CHECK(StageSchemas().front().stage == "scenes");  // the cards follow the run order
     CHECK(FindStageSchema("nr")->Find("intensity")->def == NrStageOptions{}.intensity);
     CHECK(FindStageSchema("nr")->Find("passes")->def == NrStageOptions{}.passes);
     CHECK(FindStageSchema("nr")->Find("style")->def == NrStageOptions{}.style);
@@ -106,6 +112,9 @@ TEST_CASE("ReadStageParamsFile: one object of schema keys, aliases normalised, u
     throws(file("broken.json", "{\"intensity\": "), "not valid JSON");
     throws(file("preset.json", R"({"format":"dlssvid-preset","stages":{}})"), "preset");
     throws(file("big.json", "{\"intensity\": 1, \"pad\": \"" + std::string(1 << 20, 'x') + "\"}"), "1 MiB");
+    // PR-13 (regression): the scene-cut threshold moved to the stage scenes - named, not dropped in silence
+    throws(file("moved.json", R"({"intensity":1,"scene_cut":0.3})"), "nr.scene_cut moved to scenes.threshold");
+    throws(file("moved_kebab.json", R"({"scene-cut":0})"), "scenes.threshold");
 }
 
 // TASK-0046: the NR card shows every setting (before: the intensity alone, the rest in the engineer JSON) - the basic
@@ -116,8 +125,7 @@ TEST_CASE("NR form: groups, levels, conditions of the rows", "[unit][schema][nr]
     std::vector<std::string> basic, more, engineer;
     for (const auto& p : nr->params) (p.advanced ? engineer : p.more ? more : basic).push_back(p.key);
     CHECK(basic == std::vector<std::string>{"style", "intensity", "passes", "local_tone", "local_structure", "temporal", "auto_mask", "skin_structure", "skin_blend"});
-    CHECK(more == std::vector<std::string>{"temporal_threshold", "scene_cut", "guides", "tonemap", "input_transfer", "exposure", "model_scale", "transfer",
-                                           "max_ratio"});
+    CHECK(more == std::vector<std::string>{"temporal_threshold", "guides", "tonemap", "input_transfer", "exposure", "model_scale", "transfer", "max_ratio"});
     CHECK(engineer == std::vector<std::string>{"backend", "format"});
     for (const auto& p : nr->params) {
         INFO(p.key);
@@ -196,7 +204,6 @@ TEST_CASE("NR: the options from the schema's defaults are the stage's defaults, 
     CHECK(o.useGuides == def.useGuides);
     CHECK(o.temporal == def.temporal);
     CHECK(o.temporalThreshold == def.temporalThreshold);
-    CHECK(o.sceneCut == def.sceneCut);
     CHECK(o.skinBlend == def.skinBlend);
     CHECK(o.tonemap.curve == def.tonemap.curve);
     CHECK(o.tonemap.inputTransfer == def.tonemap.inputTransfer);
@@ -216,7 +223,7 @@ TEST_CASE("NR: the options from the schema's defaults are the stage's defaults, 
         ApplyNrParams(one, b);
         const auto key = [](const NrStageOptions& x) {
             return nlohmann::json{x.backend, x.intensity, x.style, x.localTone, x.localStructure, x.skinStructure, x.autoMask, x.passes, x.modelScale,
-                                  x.transfer, x.maxRatio, x.useGuides, x.temporal, x.temporalThreshold, x.sceneCut, x.skinBlend, x.tonemap.curve,
+                                  x.transfer, x.maxRatio, x.useGuides, x.temporal, x.temporalThreshold, x.skinBlend, x.tonemap.curve,
                                   x.tonemap.inputTransfer, x.tonemap.exposureEv};
         };
         INFO("nr." << spec.key);
@@ -243,9 +250,9 @@ TEST_CASE("NormalizeStageParams: aliases take the schema's key; validation and t
         INFO(kebab);
         CHECK(NormalizeStageParams("nr", {{kebab, s.def}}) == nlohmann::json{{s.key, s.def}});
     }
-    CHECK(EffectiveStageParams("nr", {{"scene-cut", 0.0}})["scene_cut"] == 0.0);
-    CHECK_FALSE(EffectiveStageParams("nr", {{"scene-cut", 0.0}}).contains("scene-cut"));
-    CHECK_FALSE(ValidateStageParams("nr", {{"scene-cut", 2.0}}).empty());
+    CHECK(EffectiveStageParams("nr", {{"temporal-threshold", 0.0}})["temporal_threshold"] == 0.0);
+    CHECK_FALSE(EffectiveStageParams("nr", {{"temporal-threshold", 0.0}}).contains("temporal-threshold"));
+    CHECK_FALSE(ValidateStageParams("nr", {{"temporal-threshold", 2.0}}).empty());
     CHECK_FALSE(EffectiveStageParams("nr", {{"model-scale", 0.5}}).contains("model-scale"));
     CHECK_FALSE(ValidateStageParams("nr", {{"local-tone", 5.0}}).empty());  // out of range under its alias too
     CHECK_FALSE(ValidateStageParams("nr", {{"no-guides", "yes"}}).empty());  // a non-boolean inverse: guides of the wrong type
@@ -302,12 +309,21 @@ TEST_CASE("ValidateStageParams catches types, ranges and choices; unknown keys p
     CHECK(ValidateStageParams("nr", {{"passes", 1.5}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"passes", 2}}).empty());
     CHECK(ValidateStageParams("nr", {{"passes", 4}}).empty());  // PR-5: 1..4
-    CHECK(ValidateStageParams("nr", {{"scene_cut", 0.0}}).empty());  // PR-6: 0 = off .. 1
-    CHECK(ValidateStageParams("nr", {{"scene_cut", 1.5}}).size() == 1);
-    CHECK(FindStageSchema("nr")->Find("scene_cut")->def == 0.24);
-    CHECK(FindStageSchema("nr")->Find("scene_cut")->more);
-    CHECK(ParamValueLabel(*FindStageSchema("nr")->Find("scene_cut"), 0.0) == "выкл");
-    CHECK(static_cast<double>(NrStageOptions{}.sceneCut) == Catch::Approx(0.24));
+    // PR-13 (regression): nr.scene_cut moved to scenes.threshold - an error that says where, in either spelling (before: an unknown key
+    // of the backend, kept, hashed and ignored)
+    CHECK(FindStageSchema("nr")->Find("scene_cut") == nullptr);
+    for (const char* key : {"scene_cut", "scene-cut"}) {
+        INFO(key);
+        const auto problems = ValidateStageParams("nr", {{key, 0.3}});
+        REQUIRE(problems.size() == 1);
+        CHECK(problems[0].find("nr.scene_cut moved to scenes.threshold") != std::string::npos);
+        REQUIRE(FindMovedParam("nr", key));
+        CHECK(std::string(FindMovedParam("nr", key)->to) == "scenes.threshold");
+    }
+    CHECK(FindMovedParam("fg", "scene_cut") == nullptr);
+    CHECK(FindMovedParam("nr", "temporal") == nullptr);
+    CHECK(ValidateStageParams("scenes", {{"threshold", 0.0}}).empty());  // 0 = off .. 1
+    CHECK(ValidateStageParams("scenes", {{"threshold", 1.5}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"passes", 5}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"passes", 0}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"guides", "yes"}}).size() == 1);

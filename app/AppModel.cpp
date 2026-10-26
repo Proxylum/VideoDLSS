@@ -8,6 +8,7 @@
 #include <cmath>
 
 #include "SourceNames.h"
+#include "passes/ScenesPass.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "stages/ParamSchema.h"
@@ -296,6 +297,12 @@ void AppModel::setFrame(int64_t timelineFrame) { setTime(static_cast<double>(tim
 void AppModel::stepFrame(int delta) {
     const std::string base = baseSource();
     setTime(store_->TimeOfFrame(base, store_->FrameAt(base, time()) + delta));
+}
+
+void AppModel::seekToSourceFrame(int64_t frame) {
+    // the frame's own time, as stepFrame: FrameAt rounds time × fps, so a half frame more would show the next one
+    const double fps = sourceInfo_.fps > 0 ? sourceInfo_.fps : 24.0;
+    setTime(static_cast<double>(std::max<int64_t>(frame, 0)) / fps);
 }
 
 void AppModel::setTimelineFps(Rational fps) {
@@ -613,7 +620,8 @@ QString AppModel::planBlocker() const {
 }
 
 void AppModel::setStageEnabled(const std::string& stage, bool on) {
-    if (StageEntry* e = stageEntry(stage); e && e->enabled != on) {
+    const bool had = stageEntry(stage) != nullptr;  // a v3 file without the entry: inserted (PR-13) - a change whatever its default
+    if (StageEntry* e = project_.EnsureStage(stage); e && (!had || e->enabled != on)) {
         e->enabled = on;
         markDirty();
         emit projectChanged();
@@ -622,9 +630,11 @@ void AppModel::setStageEnabled(const std::string& stage, bool on) {
 }
 
 void AppModel::setStageParam(const std::string& stage, const std::string& key, const nlohmann::json& value) {
-    StageEntry* e = stageEntry(stage);
+    const bool had = stageEntry(stage) != nullptr;
+    StageEntry* e = project_.EnsureStage(stage);
     if (!e) return;
-    if (e->params.contains(key) && e->params[key] == value) return;
+    if (!had) e->enabled = false;  // the card shows a stage the file lacks as off: an edit keeps it so (PR-13)
+    if (had && e->params.contains(key) && e->params[key] == value) return;
     // another backend: a model from the old backend's list goes (VDA Large -> DA3 leaves no VDA model in the project)
     if (key == "backend" && value.is_string()) e->params = ParamsForBackendChange(stage, e->params, value.get<std::string>());
     e->params[key] = value;
@@ -634,8 +644,11 @@ void AppModel::setStageParam(const std::string& stage, const std::string& key, c
 }
 
 void AppModel::setStageParams(const std::string& stage, const nlohmann::json& params) {
-    StageEntry* e = stageEntry(stage);
-    if (!e || !params.is_object() || e->params == params) return;
+    if (!params.is_object()) return;
+    const bool had = stageEntry(stage) != nullptr;
+    StageEntry* e = project_.EnsureStage(stage);
+    if (!e || (had && e->params == params)) return;
+    if (!had) e->enabled = false;
     e->params = params;
     markDirty();
     emit projectChanged();
@@ -730,6 +743,12 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     if (!entry || !entry->enabled) {
         st.state = tr("выключена");
         st.tone = "off";
+        if (stage == kScenesPass) {  // PR-13: a list on disk is read all the same (the cache's convention); threshold 0 turns it off
+            const auto& disk = plan_.scenesOnDisk;
+            if (disk && !disk->off && disk->count > 0)
+                st.sub = tr("действует список с диска: %1 · без сброса — порог 0").arg(Plural(static_cast<int>(disk->count), tr("склейка"), tr("склейки"), tr("склеек")));
+            else st.sub = tr("стадии не сбрасывают историю на склейках");
+        }
         return st;
     }
     const StageDecision* d = nullptr;
@@ -747,6 +766,7 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     const QString eta = est ? FormatDuration(est->seconds) : QString();
     std::string created;
     if (const ViewportSource* src = store_->FindSource(primary); src && src->manifest) created = src->manifest->created;
+    if (created.empty()) created = d->currentCreated;  // a pass without frames (scenes) is no viewport source
     const StageSchema* schema = FindStageSchema(stage);
     if (d->action == "reuse") {
         st.state = d->kind == "legacy" ? tr("переиспользуется (без отпечатка)") : tr("переиспользуется");
@@ -769,6 +789,10 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
             if (d->diff.contains("params"))
                 for (const auto& [key, pair] : d->diff["params"].items()) {
                     const ParamSpec* spec = schema ? schema->Find(key) : nullptr;
+                    if (!spec && FindMovedParam(stage, key)) {  // PR-13: nr.scene_cut is the threshold of the stage scenes now
+                        parts << tr("сброс на склейках перенесён в «Склейки»");
+                        continue;
+                    }
                     const QString label = spec ? QString::fromStdString(spec->label) : QString::fromStdString(key);
                     const nlohmann::json o = pair.is_array() && pair.size() > 0 ? pair[0] : nlohmann::json(), n = pair.is_array() && pair.size() > 1 ? pair[1] : nlohmann::json();
                     // labels of the backend each value belongs to (depth.model: «Small» of VDA, a raw id of DA3)
@@ -788,6 +812,25 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
                     parts << QString("%1 %2 → %3").arg(label, was, now);
                 }
             st.state = tr("пересчёт: %1").arg(parts.isEmpty() ? QString::fromStdString(d->detail) : parts.join(", "));
+        } else if (d->kind == "input_changed" && d->pending) {  // PR-13: the list is analysed first; the run may reuse the pass
+            st.state = d->pendingRule == "no_cut"      ? tr("пересчёт, если найдутся склейки")
+                       : d->pendingRule == "same_list" ? tr("пересчёт, если склейки изменятся")
+                                                       : tr("пересчёт, если пересчитается стадия выше");
+            st.sub = tr("список склеек посчитается первым");
+        } else if (d->kind == "input_changed" && d->diff.contains("inputs") && d->diff["inputs"] == nlohmann::json::array({kScenesPass})) {
+            st.state = tr("пересчёт: изменились склейки");
+            const ViewportSource* src = store_->FindSource(primary);
+            const int64_t was = src && src->manifest ? src->manifest->stageParams.value("scene_cut_count", int64_t{0}) : 0;
+            QString now = "0";
+            bool inPlan = false;
+            for (const auto& s : plan_.stages)
+                if (s.name == kScenesPass) {
+                    inPlan = true;
+                    now = s.sceneCuts.known ? QString::number(s.sceneCuts.count) : QString("?");  // not analysed yet: not known
+                }
+            if (!inPlan && plan_.scenesOnDisk) now = QString::number(plan_.scenesOnDisk->count);  // the stage off: the list on disk
+            if (!d->inputs.count(kScenesPass)) now = "0";
+            st.sub = QString("%1 → %2").arg(was).arg(now);
         } else if (d->kind == "input_changed") {
             st.state = tr("пересчёт: изменился вход");
             QStringList names;
@@ -821,7 +864,40 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
         if (d->retire) sub << tr("v%1 останется на диске").arg(d->current ? history + 1 : 1);
         st.sub = sub.join(" · ");
     }
-    if (schema && !schema->guides.empty() && (stage == "nr" || stage == "fg" || stage == "upscale")) {
+    if (stage == kScenesPass) {  // PR-13: the card of the list - how many cuts, and what a new threshold costs
+        const SceneCutsPlan& sc = d->sceneCuts;
+        const QString n = Plural(static_cast<int>(sc.count), tr("склейка"), tr("склейки"), tr("склеек"));
+        if (sc.known && sc.off) {
+            st.state = tr("выкл: без сброса");
+        } else if (d->action != "run") {
+            if (sc.known) st.sub += (st.sub.isEmpty() ? "" : " · ") + n;
+        } else if (sc.rederive) {
+            QStringList parts{tr("без декодирования"), sc.before >= 0 && sc.before != sc.count ? tr("станет %1 (было %2)").arg(n).arg(sc.before) : n};
+            if (d->retire) parts << tr("v%1 останется на диске").arg(d->current ? history + 1 : 1);
+            st.sub = parts.join(" · ");
+        } else {
+            st.sub += (st.sub.isEmpty() ? "" : " · ") + tr("один проход декодирования исходника");
+        }
+    } else if (StageReadsSceneCuts(stage, d->params)) {  // PR-13: what the cuts do to a stage that reads them
+        const auto it = d->inputs.find(kScenesPass);
+        int64_t count = 0;
+        for (const auto& s : plan_.stages)
+            if (s.name == kScenesPass && s.sceneCuts.known) count = s.sceneCuts.count;
+        if (it != d->inputs.end() && count == 0 && plan_.scenesOnDisk) count = plan_.scenesOnDisk->count;  // the stage off: the list on disk
+        if (d->pending || (it != d->inputs.end() && it->second == kScenesPendingId)) {
+            st.scenes = tr("склейки найдутся перед этой стадией");
+        } else if (it != d->inputs.end() && count > 0) {
+            const std::string backend = StageBackend(stage, d->params);
+            const QString what = stage == "flow"                         ? tr("векторы на них нулевые")
+                                 : stage == "upscale" && backend == "worker" ? tr("окна RealBasicVSR через них не переходят")
+                                 : stage == "upscale"                     ? tr("история DLSS начинается заново")
+                                 : stage == "nr"                          ? tr("история модели и подавления мерцания сбрасывается")
+                                                                          : tr("вместо промежуточных кадров повтор последнего кадра сцены");
+            st.scenes = tr("склейки: %1 — %2").arg(count).arg(what);
+        }
+    }
+    // upscale: only DLSS reads the guides (PR-13) - nis, bicubic, trt and worker without them is no loss
+    if (schema && !schema->guides.empty() && (stage == "nr" || stage == "fg" || (stage == "upscale" && UpscaleReadsGuides(d->params)))) {
         bool any = false;
         for (const auto& g : schema->guides) any = any || d->inputs.count(g) > 0;
         const bool guidesOff = stage == "nr" && d->params.contains("guides") && d->params["guides"].is_boolean() && !d->params["guides"].get<bool>();
@@ -836,7 +912,8 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     if (!d->error.empty()) warn << QString::fromStdString(d->error);
     for (const auto& w : d->warnings) warn << QString::fromStdString(w);
     st.warning = warn.join("\n");
-    if (st.runs && !d->info.empty()) st.sub = st.sub.isEmpty() ? QString::fromStdString(d->info) : st.sub + " · " + QString::fromStdString(d->info);
+    // the advice of the stage; the list's card says it its own way (above)
+    if (st.runs && !d->info.empty() && stage != kScenesPass) st.sub = st.sub.isEmpty() ? QString::fromStdString(d->info) : st.sub + " · " + QString::fromStdString(d->info);
     return st;
 }
 
@@ -980,7 +1057,8 @@ struct StageWord {
     const char* name;
     const char* done;
 };
-constexpr StageWord kStageWords[] = {{"depth", "глубина", "посчитана"},
+constexpr StageWord kStageWords[] = {{"scenes", "склейки", "посчитаны"},
+                                     {"depth", "глубина", "посчитана"},
                                      {"flow", "векторы", "посчитаны"},
                                      {"upscale", "апскейл", "посчитан"},
                                      {"nr", "NR", "посчитан"},
@@ -1025,6 +1103,7 @@ std::vector<AppModel::Recent> AppModel::recents() const {
                 if (ready) r.result = QString::fromStdWString(p.resultVideo.wstring());
                 // stages with a pass on disk, in the project's order: «глубина и NR посчитаны», «2 из 5 стадий»
                 std::vector<std::string> computed;
+                if (Manifest::Exists(p.passesRoot / kScenesPass)) computed.push_back("scenes");  // a data pass: DiscoverPasses leaves it out
                 for (const auto& s : passes) {
                     const std::string stage = StageOfPass(s.name);
                     if (!stage.empty() && std::find(computed.begin(), computed.end(), stage) == computed.end()) computed.push_back(stage);

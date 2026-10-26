@@ -27,19 +27,21 @@ TEST_CASE("Project::Create fills defaults next to the video", "[viewport][projec
     CHECK(p.sourceVideo == d / "clip.mp4");
     CHECK(p.passesRoot == d / "clip_passes");
     CHECK(p.resultVideo.empty());
-    REQUIRE(p.stages.size() == 5);
-    CHECK(p.stages[0].name == "depth");
-    CHECK(p.stages[0].params["backend"] == "da3");
-    CHECK(p.stages[1].name == "flow");
-    CHECK(p.stages[2].name == "upscale");
-    CHECK(p.stages[2].params["backend"] == "dlss");
-    CHECK(p.stages[2].params["scale"] == 2);
-    CHECK(p.stages[3].name == "nr");
-    CHECK(p.stages[3].params["backend"] == "ngx");
-    CHECK(p.stages[3].params["passes"] == 1);
-    CHECK(p.stages[4].name == "fg");
-    CHECK(p.stages[4].params["backend"] == "dlssg");
-    CHECK(p.stages[4].params["multiplier"] == 2);
+    REQUIRE(p.stages.size() == 6);
+    CHECK(p.stages[0].name == "scenes");  // PR-13: the scene-cut list first
+    CHECK(p.stages[0].params["backend"] == "luma");
+    CHECK(p.stages[1].name == "depth");
+    CHECK(p.stages[1].params["backend"] == "da3");
+    CHECK(p.stages[2].name == "flow");
+    CHECK(p.stages[3].name == "upscale");
+    CHECK(p.stages[3].params["backend"] == "dlss");
+    CHECK(p.stages[3].params["scale"] == 2);
+    CHECK(p.stages[4].name == "nr");
+    CHECK(p.stages[4].params["backend"] == "ngx");
+    CHECK(p.stages[4].params["passes"] == 1);
+    CHECK(p.stages[5].name == "fg");
+    CHECK(p.stages[5].params["backend"] == "dlssg");
+    CHECK(p.stages[5].params["multiplier"] == 2);
     CHECK(p.viewport == ViewportState{});
     const Project q = Project::Create(d / "clip.mp4", d / "elsewhere");
     CHECK(q.passesRoot == d / "elsewhere");
@@ -98,9 +100,10 @@ TEST_CASE("Project v1 -> v2: nr.exposure x becomes log2(x), x <= 0 is dropped, s
     auto nrOf = [&](const nlohmann::json& params) {
         const nlohmann::json j = {{"schema_version", 1}, {"stages", nlohmann::json::array({{{"name", "nr"}, {"params", params}}, {{"name", "fg"}, {"params", {{"exposure", 0}}}}})}};
         const Project p = Project::FromJson(j, d);
-        REQUIRE(p.stages.size() == 2);
-        CHECK(p.stages[1].params == nlohmann::json{{"exposure", 0}});  // only nr is migrated
-        return p.stages[0].params;
+        REQUIRE(p.stages.size() == 3);  // v1 -> v3: scenes first (PR-13)
+        CHECK(p.stages[0].name == "scenes");
+        CHECK(p.stages[2].params == nlohmann::json{{"exposure", 0}});  // only nr is migrated
+        return p.stages[1].params;
     };
     CHECK(nrOf({{"exposure", 2.0}, {"intensity", 1.2}}) == nlohmann::json{{"exposure", 1.0}, {"intensity", 1.2}});
     CHECK(nrOf({{"exposure", 0.5}}) == nlohmann::json{{"exposure", -1.0}});
@@ -114,11 +117,42 @@ TEST_CASE("Project v1 -> v2: nr.exposure x becomes log2(x), x <= 0 is dropped, s
     CHECK(nrOf({{"skin_structure", 0.4}}) == nlohmann::json{{"skin_structure", 0.4}});
     CHECK(nrOf({{"skin-structure", -0.5}}) == nlohmann::json{{"skin-structure", -1.0}});  // the alias the stage reads too (TASK-0046)
     CHECK(ValidateStageParams("nr", nrOf({{"skin-structure", -0.5}})).empty());
-    // a version-2 file is taken as it is; a newer one is refused
+    // a version-2 file keeps its parameters, only the stage scenes is added in front (PR-13); a newer one is refused
     const nlohmann::json v2 = {{"schema_version", 2}, {"stages", nlohmann::json::array({{{"name", "nr"}, {"params", {{"exposure", 0.0}}}}})}};
-    CHECK(Project::FromJson(v2, d).stages[0].params == nlohmann::json{{"exposure", 0.0}});
+    REQUIRE(Project::FromJson(v2, d).stages.size() == 2);
+    CHECK(Project::FromJson(v2, d).stages[0].name == "scenes");
+    CHECK(Project::FromJson(v2, d).stages[1].params == nlohmann::json{{"exposure", 0.0}});
     CHECK_THROWS(Project::FromJson(nlohmann::json{{"schema_version", kProjectSchemaVersion + 1}}, d));
     CHECK_THROWS(Project::FromJson(nlohmann::json{{"schema_version", 0}}, d));
+}
+
+// PR-13: nr.scene_cut of PR-6 is the threshold of the stage scenes now - moved with its value (0 «выкл» included), the key gone from nr;
+// without it the schema's default. A v1 file has no such key.
+TEST_CASE("Project v2 -> v3: nr.scene_cut moves to scenes.threshold, 0 included; without it the default", "[viewport][project][regression]") {
+    const auto d = Dir("v3");
+    auto load = [&](const nlohmann::json& nrParams, int version = 2) {
+        const nlohmann::json j = {{"schema_version", version},
+                                  {"stages", nlohmann::json::array({{{"name", "nr"}, {"params", nrParams}}, {{"name", "fg"}, {"params", {{"multiplier", 2}}}}})}};
+        return Project::FromJson(j, d);
+    };
+    const Project moved = load({{"intensity", 1.2}, {"scene_cut", 0.3}});
+    REQUIRE(moved.stages.size() == 3);
+    CHECK(moved.stages[0].name == "scenes");
+    CHECK(moved.stages[0].enabled);
+    CHECK(moved.stages[0].params == nlohmann::json{{"backend", "luma"}, {"threshold", 0.3}});
+    CHECK(moved.stages[1].params == nlohmann::json{{"intensity", 1.2}});  // the key is gone from nr
+    CHECK(load({{"scene_cut", 0.0}}).stages[0].params["threshold"] == 0.0);  // «выкл» stays off
+    CHECK(load({{"scene-cut", 0.5}}).stages[0].params["threshold"] == 0.5);  // the kebab spelling too
+    CHECK_FALSE(load({{"scene-cut", 0.5}}).stages[1].params.contains("scene-cut"));
+    CHECK(load({{"scene_cut", 0.3}, {"scene-cut", 0.5}}).stages[0].params["threshold"] == 0.3);  // the snake one wins
+    CHECK_FALSE(load({{"intensity", 1.0}}).stages[0].params.contains("threshold"));  // the default (0.24)
+    CHECK_FALSE(load({{"intensity", 1.0}}, 1).stages[0].params.contains("threshold"));
+    CHECK(ValidateStageParams("nr", moved.stages[1].params).empty());
+    // a v3 file is taken as it is: a scene_cut there is the error of ValidateStageParams, not moved in silence
+    const Project v3 = load({{"scene_cut", 0.3}}, 3);
+    REQUIRE(v3.stages.size() == 2);
+    CHECK(v3.stages[0].params.contains("scene_cut"));
+    CHECK_FALSE(ValidateStageParams("nr", v3.stages[0].params).empty());
 }
 
 TEST_CASE("Project::Sources lists the passes found under the root", "[viewport][project]") {
@@ -137,14 +171,31 @@ TEST_CASE("Project::Sources lists the passes found under the root", "[viewport][
 
 TEST_CASE("Project stage entries survive JSON with unknown fields", "[viewport][project]") {
     const auto d = Dir("json");
-    nlohmann::json j = {{"schema_version", 1}, {"source", "a.mp4"}, {"stages", nlohmann::json::array({{{"name", "depth"}, {"params", {{"backend", "vda"}}}, {"extra", 1}}})}};
-    const Project p = Project::FromJson(j, d);
+    nlohmann::json j = {{"schema_version", 3}, {"source", "a.mp4"}, {"stages", nlohmann::json::array({{{"name", "depth"}, {"params", {{"backend", "vda"}}}, {"extra", 1}}})}};
+    Project p = Project::FromJson(j, d);
     CHECK(p.sourceVideo == (d / "a.mp4").lexically_normal());
     CHECK(p.passesRoot.empty());
-    REQUIRE(p.stages.size() == 1);
+    REQUIRE(p.stages.size() == 1);  // a v3 file is taken as it is: nothing is filled in on load
     CHECK(p.stages[0].enabled);
     CHECK(p.stages[0].params["backend"] == "vda");
     CHECK(p.viewport.mode == ViewMode::Single);
+    // PR-13: a change to a stage the file lacks inserts it at its place in the run order (the card's edit is not lost)
+    StageEntry* scenes = p.EnsureStage("scenes");
+    REQUIRE(scenes);
+    CHECK(scenes->params["backend"] == "luma");
+    REQUIRE(p.stages.size() == 2);
+    CHECK(p.stages[0].name == "scenes");
+    CHECK(p.EnsureStage("fg")->name == "fg");
+    CHECK(p.stages.back().name == "fg");
+    CHECK(p.EnsureStage("scenes") == &p.stages[0]);  // there now: the same entry
+    CHECK(p.EnsureStage("bogus") == nullptr);
+    // a v2 file: the stage scenes is added first (PR-13)
+    j["schema_version"] = 2;
+    const Project v2 = Project::FromJson(j, d);
+    REQUIRE(v2.stages.size() == 2);
+    CHECK(v2.stages[0].name == "scenes");
+    CHECK(v2.stages[1].name == "depth");
+    CHECK(Project::FromJson(j, d).ToJson(d)["schema_version"] == 3);
 }
 
 TEST_CASE("Project caches the source hash by size and time and keeps the encoder settings", "[viewport][project]") {

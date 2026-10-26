@@ -50,6 +50,13 @@ nlohmann::json ReadJson(const std::filesystem::path& p) {
     return j;
 }
 
+// a stage of a plan or run report by name: the indices move when a stage is added (PR-13: scenes first)
+const nlohmann::json& StageJson(const nlohmann::json& report, const std::string& name) {
+    for (const auto& s : report["stages"])
+        if (s["name"] == name) return s;
+    throw std::runtime_error("no stage " + name);
+}
+
 }  // namespace
 
 TEST_CASE("dlssvid process --project runs the saved stages and encodes the result with audio", "[integration][cli][process]") {
@@ -78,7 +85,7 @@ TEST_CASE("dlssvid process --project runs the saved stages and encodes the resul
     const nlohmann::json j = ReadJson(json);
     CHECK(j["frames_out"] == 7);
     CHECK(j["audio"] == true);
-    CHECK(j["stages"].size() == 6);
+    CHECK(j["stages"].size() == 7);  // scenes .. fg + encode
     CHECK(std::filesystem::exists(dir / "passes" / "color_fg" / Manifest::kFileName));
     // PR-11: the result says what made it - the comment in every container, the JSON in Matroska; dlssvid info prints both
     {
@@ -101,8 +108,8 @@ TEST_CASE("dlssvid process --project runs the saved stages and encodes the resul
     const CliResult again = RunCli({"process", "--project", (dir / "clip.dlssvid.json").string(), "--warp", "--codec", "ffv1", "--json", json.string()});
     CHECK(again.code == 0);
     const nlohmann::json j2 = ReadJson(json);
-    CHECK(j2["stages"][0]["status"] == "reused");
-    CHECK(j2["stages"][4]["status"] == "reused");
+    CHECK(StageJson(j2, "depth")["status"] == "reused");
+    CHECK(StageJson(j2, "fg")["status"] == "reused");
     // explicit parameters override the project (x3 needs a fresh color_fg: --no-skip-existing)
     const CliResult x3 = RunCli({"process", "--project", (dir / "clip.dlssvid.json").string(), "-o", (dir / "x3.mkv").string(), "--multiplier", "3", "--warp", "--codec", "ffv1",
                                  "--no-skip-existing", "--frames", "3"});
@@ -175,7 +182,7 @@ TEST_CASE("dlssvid process --project with another -i hashes that video and keeps
     const CliResult moved = RunCli({"process", "--project", projectFile.string(), "-i", (dir / "moved.mkv").string(), "--warp", "--codec", "ffv1",
                                     "-o", (dir / "moved_result.mkv").string(), "--json", json.string()});
     CHECK(moved.code == 0);
-    CHECK(ReadJson(json)["stages"][3]["status"] == "reused");  // nr
+    CHECK(StageJson(ReadJson(json), "nr")["status"] == "reused");
 }
 
 // TASK-0045: an imported mask has no fingerprint, it stands for its source and length - a mask re-imported with other
@@ -266,21 +273,15 @@ TEST_CASE("dlssvid process --passthrough and dlssvid bench", "[integration][cli]
     CHECK(b.out.find("ms/frame") != std::string::npos);
     const nlohmann::json j = ReadJson(json);
     CHECK(j["frames_in"] == 3);
-    CHECK(j["stages"].size() == 6);
-    CHECK(j["stages"][5]["name"] == "encode");
+    CHECK(j["stages"].size() == 7);
+    CHECK(j["stages"].back()["name"] == "encode");
     CHECK(j.contains("gpu"));
-    CHECK(j["stages"][2]["ms_per_frame"].get<double>() >= 0.0);
+    CHECK(StageJson(j, "upscale")["ms_per_frame"].get<double>() >= 0.0);
 }
 
 // Audit fg-2 (TASK-0038): FG runs in its own process; a real death of that process (TerminateProcess 0xC0000005, as a
 // driver fault would end it) fails only the stage - the result is encoded from color_nr.
 namespace {
-const nlohmann::json& StageJson(const nlohmann::json& report, const std::string& name) {
-    for (const auto& s : report["stages"])
-        if (s["name"] == name) return s;
-    throw std::runtime_error("no stage " + name);
-}
-
 std::vector<std::string> StubProcessArgs(const std::filesystem::path& clip, const std::filesystem::path& out, const std::filesystem::path& passes) {
     return {"process", "-i", clip.string(), "-o", out.string(), "--passes", passes.string(), "--warp", "--codec", "ffv1", "--param", "depth.backend=stub",
             "--param", "flow.backend=stub", "--param", "upscale.backend=nis", "--param", "nr.backend=stub", "--param", "fg.backend=blend"};

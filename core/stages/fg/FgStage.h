@@ -11,6 +11,7 @@
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
+#include "passes/ScenesPass.h"
 #include "pipeline/IStage.h"
 #include "stages/fg/IFrameGenerator.h"
 
@@ -43,6 +44,10 @@ struct FgStageOptions {
     Rational fps;
     std::string sourceFile, sourceHash;
     std::function<void(int64_t frame, double ms)> onFrame;
+    // PR-13: the clip's cuts (stage scenes); empty: no reset but the first frame. Between the last frame of a shot and the cut frame
+    // no interpolation: that last frame is held (multiplier - 1 copies), the cut stays at the time of the real cut frame, and the
+    // backend starts the new shot's history (reset, prev == cur)
+    SceneList sceneCuts;
 };
 
 class FgStage final : public IStage {
@@ -59,6 +64,9 @@ public:
     struct Stats {
         int64_t frames = 0;     // real frames seen
         int64_t generated = 0;  // frames produced by the backend
+        int64_t duplicated = 0;  // frames held instead at a cut (PR-13): generated + duplicated == (frames - 1) * (multiplier - 1)
+        int64_t sceneCutCount = 0;
+        std::vector<int64_t> sceneCuts;  // the cut frames (the first kMaxSceneCuts)
         double msSum = 0.0;     // backend time per real frame
         double MeanMs() const { return frames ? msSum / static_cast<double>(frames) : 0.0; }
         uint32_t width = 0, height = 0;

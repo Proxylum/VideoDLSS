@@ -63,7 +63,6 @@ void ApplyNrParams(const nlohmann::json& p, NrStageOptions& o) {
     get("max_ratio", "max-ratio", o.maxRatio);
     get("temporal", nullptr, o.temporal);
     get("temporal_threshold", "temporal-threshold", o.temporalThreshold);
-    get("scene_cut", "scene-cut", o.sceneCut);
     get("skin_blend", "skin-blend", o.skinBlend);
     get("tonemap", nullptr, o.tonemap.curve);
     get("exposure", nullptr, o.tonemap.exposureEv);  // stops (TASK-0043)
@@ -88,7 +87,6 @@ nlohmann::json NrParamsFromOptions(const NrStageOptions& o) {
             {"max_ratio", o.maxRatio},
             {"temporal", o.temporal},
             {"temporal_threshold", o.temporalThreshold},
-            {"scene_cut", o.sceneCut},
             {"skin_blend", o.skinBlend},
             {"local_tone", o.localTone},
             {"local_structure", o.localStructure},
@@ -156,11 +154,10 @@ void NrStage::Init(const StageConfig& config, D3D12Device& device) {
     }
     bypass_ = options_.intensity == 0.f;  // PR-7: the edit strength 0 is the frame itself - the model, its guides and masks are not needed
     stats_.bypass = bypass_;
-    // PR-6 (spec §2d): a cut matters only to a history - the model's (guides: with mv it keeps one) or the flicker filter's; the bypass
-    // has neither. The detector reads the decoded source frame, whatever colour the stage reads
-    sceneCuts_.reset();
-    stats_.sceneCutActive = options_.sceneCut > 0.f && !bypass_ && (options_.useGuides || options_.temporal > 0.f);
-    if (stats_.sceneCutActive) sceneCuts_.emplace(options_.color);
+    // PR-13 (spec §2d): a cut matters only to a history - the model's (guides: with mv it keeps one) or the flicker filter's; the bypass
+    // has neither. The gate of StageReadsSceneCuts("nr"): the runner and the CLI give no list when it is closed
+    stats_.sceneCutActive = !options_.sceneCuts.id.empty() && !bypass_ && (options_.useGuides || options_.temporal > 0.f);
+    if (!options_.sceneCuts.id.empty() && !stats_.sceneCutActive) Log()->info("nr: scene cuts not used: no history (bypass, or guides off and temporal 0)");
     stats_.sceneCuts.clear();
     stats_.sceneCutCount = 0;
     if (!options_.colorDir.empty()) {
@@ -409,17 +406,14 @@ void NrStage::Process(FrameContext& ctx) {
         colorTex = input_.Get();
     }
 
-    // ---- scene cut (PR-6): every pass starts its history again, the flicker filter does not blend across the cut ----
-    bool cut = false;
-    if (sceneCuts_) {
-        double score = 0.0;
-        cut = sceneCuts_->Next(frame, options_.sceneCut, &score);
-        if (cut) {
-            Log()->info("nr: scene cut at frame {} (score {:.2f})", frame.index, score);
-            if (stats_.sceneCuts.size() < kMaxSceneCuts) stats_.sceneCuts.push_back(frame.index);
-            ++stats_.sceneCutCount;
-            hasPrev_ = false;
-        }
+    // ---- scene cut (the clip's list, PR-13): every pass starts its history again, the flicker filter does not blend across the cut.
+    // Absolute indices: with --start F --warmup K the cuts in the warm-up count too; one at F - K is the first frame anyway ----
+    const bool cut = stats_.sceneCutActive && !first_ && options_.sceneCuts.IsCut(frame.index);
+    if (cut) {
+        Log()->info("nr: scene cut at frame {}", frame.index);
+        if (stats_.sceneCuts.size() < kMaxSceneCuts) stats_.sceneCuts.push_back(frame.index);
+        ++stats_.sceneCutCount;
+        hasPrev_ = false;
     }
 
     // ---- guides: pass folders go through the cache slot so later stages see them too ----
@@ -551,11 +545,7 @@ void NrStage::Finish() {
         // a part of the clip (dlssvid nr --start): named for the A/B script and the settings note; process never takes it for
         // the clip's pass (PassComplete: it does not start at frame 0)
         if (options_.writeFrom > 0) m.stageParams["range"] = {{"first", stats_.firstWritten}, {"last", stats_.lastWritten}, {"warmup", stats_.warmup}};
-        m.stageParams["scene_cut_threshold"] = options_.sceneCut;  // PR-6: the cuts the history was reset at (none listed: not checked)
-        if (stats_.sceneCutActive) {
-            m.stageParams["scene_cuts"] = stats_.sceneCuts;
-            m.stageParams["scene_cut_count"] = stats_.sceneCutCount;
-        }
+        if (stats_.sceneCutActive) StampSceneCuts(m.stageParams, options_.sceneCuts, stats_.sceneCuts, stats_.sceneCutCount);  // the label (PR-13)
         writer_->Finish();
     }
     if (encoder_) encoder_->Close();

@@ -6,6 +6,8 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <filesystem>
+#include <functional>
+#include <map>
 
 #include "TestClips.h"
 #include "passes/PassSequence.h"
@@ -45,7 +47,8 @@ const ProcessStageReport& Report(const ProcessResult& r, const std::string& name
 
 TEST_CASE("ApplyParamSpec parses stage.key=value into typed JSON", "[integration][process]") {
     std::vector<ProcessStage> s = DefaultProcessStages();
-    REQUIRE(s.size() == 5);
+    REQUIRE(s.size() == 6);  // PR-13: scenes first
+    CHECK(s.front().name == "scenes");
     ApplyParamSpec(s, "nr.intensity=1.5");
     ApplyParamSpec(s, "fg.multiplier=3");
     ApplyParamSpec(s, "upscale.backend=nis");
@@ -63,7 +66,7 @@ TEST_CASE("ApplyParamSpec parses stage.key=value into typed JSON", "[integration
     CHECK_THROWS(ApplyParamSpec(s, "nr=1"));
     CHECK_THROWS(ApplyParamSpec(s, "bogus.key=1"));
     CHECK_THROWS(ApplyParamSpec(s, "nr.=1"));
-    CHECK(ProcessStageOrder() == std::vector<std::string>{"depth", "flow", "upscale", "nr", "fg"});
+    CHECK(ProcessStageOrder() == std::vector<std::string>{"scenes", "depth", "flow", "upscale", "nr", "fg"});
     CHECK(!PassComplete(TempDir() / "process" / "nowhere", 1));
 }
 
@@ -87,8 +90,8 @@ TEST_CASE("RunProcess: stub stages on WARP produce a result with doubled frames 
         if (seen.empty() || seen.back() != stage) seen.push_back(stage);
     };
     const ProcessResult r = RunProcess(o);
-    REQUIRE(r.stages.size() == 6);
-    for (const char* name : {"depth", "flow", "upscale", "nr", "fg"}) CHECK(Report(r, name).status == "ran");
+    REQUIRE(r.stages.size() == 7);
+    for (const char* name : {"scenes", "depth", "flow", "upscale", "nr", "fg"}) CHECK(Report(r, name).status == "ran");
     CHECK(Report(r, "encode").status == "ran");
     CHECK(Report(r, "fg").frames == 5);
     CHECK(r.finalPass == dir / "passes" / "color_fg");
@@ -96,7 +99,7 @@ TEST_CASE("RunProcess: stub stages on WARP produce a result with doubled frames 
     CHECK(r.framesOut == FgFrameCount(5, 2));
     CHECK(r.outputFps.ToDouble() == Approx(48.0));
     CHECK(r.audio);
-    CHECK(seen == std::vector<std::string>{"depth", "flow", "upscale", "nr", "fg", "encode"});
+    CHECK(seen == std::vector<std::string>{"scenes", "depth", "flow", "upscale", "nr", "fg", "encode"});
     REQUIRE(std::filesystem::exists(o.output));
     CHECK(DecodeAll(o.output).size() == 9);
     const StreamSummary sum = Summarize(o.output);
@@ -107,7 +110,7 @@ TEST_CASE("RunProcess: stub stages on WARP produce a result with doubled frames 
     CHECK(sr.Man().width == 128);
     CHECK(sr.Man().frameCount == 5);
     const nlohmann::json j = r.ToJson();
-    CHECK(j["stages"].size() == 6);
+    CHECK(j["stages"].size() == 7);
     CHECK(j["frames_out"] == 9);
 
     // rerun: every stage's pass is complete -> reused, only the encode runs
@@ -194,7 +197,6 @@ TEST_CASE("RunProcess: an nr pass from before PR-7 with intensity != 1 is discar
         m.tool["app"] = std::string(kPassToolVersion);  // what the builds before stamped: no +nr.gain, so another fingerprint
         m.fingerprint = keepFingerprint ? "sha256:" + std::string(64, '0') : std::string();
         if (!keepFingerprint) m.tool = nlohmann::json::object();  // a standalone `dlssvid nr` pass, adopted as legacy
-        m.stageParams.erase("scene_cut_threshold");  // nor a key of PR-6 (review of PR-6, round 2: that check kept it as a version)
         m.Save(nrDir);
     };
     stampOld(true);
@@ -269,15 +271,24 @@ TEST_CASE("PlanProcess notes nr passes 3 and 4", "[integration][process]") {
     CHECK(info({"nr.passes=4", "nr.intensity=0"}).empty());
 }
 
-// PR-6 (review): a standalone nr pass of before PR-6 has no fingerprint and no scene_cut_threshold - its history crossed every cut.
-// Adopted as legacy it was stamped with scene_cut 0.24; recomputed now (the old one kept as a version). At scene_cut 0 it is that run.
-TEST_CASE("RunProcess: an nr pass without a fingerprint from before PR-6 is not adopted under a scene-cut reset", "[integration][process][regression]") {
+// PR-13 (regression, replaces the PR-6 check): a pass without a fingerprint (a standalone command, a build before PR-13) is adopted
+// only when it was made with the list the stage reads now - its label. Without one, with another one, or reset by NR's own detector of
+// PR-6, it is another picture: recomputed, the old one kept in the history. With no cut in the list a pass of before PR-13 is the same run.
+TEST_CASE("RunProcess adopts a pass without a fingerprint only when it was made with the current scene list", "[integration][process][regression]") {
+    const uint32_t w = 48, h = 32;
+    const int cutAt = 2;
     ClipSpec spec;
-    spec.frames = 2;
-    spec.width = 48;
-    spec.height = 32;
-    const auto dir = Dir("old_scene_cut");
-    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    spec.frames = 4;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("scene_label");
+    const auto clip = WriteClipWith(dir / "clip.mkv", spec, [&](int64_t i) {  // a hard cut at frame 2
+        CpuFrame f = SyntheticFrame(i, w, h);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < h; ++r)
+            for (uint32_t c = 0; c < w; ++c) y[r * w + c] = static_cast<uint8_t>(i < cutAt ? 40 + c + 4 * i : 220 - c);
+        return f;
+    });
     ProcessOptions o;
     o.input = clip;
     o.output = dir / "result.mkv";
@@ -287,25 +298,83 @@ TEST_CASE("RunProcess: an nr pass without a fingerprint from before PR-6 is not 
     o.warp = true;
     RunProcess(o);
     const auto nrDir = o.passesRoot / "color_nr";
-    REQUIRE(Manifest::Load(nrDir).stageParams.contains("scene_cut_threshold"));  // what this build writes
-    auto stampOld = [&](bool before) {
-        Manifest m = Manifest::Load(nrDir);
-        m.fingerprint.clear();  // a standalone `dlssvid nr` pass
+    const std::string id = Manifest::Load(nrDir).stageParams.value("scene_cuts_id", std::string());
+    REQUIRE(id.rfind("cuts:", 0) == 0);  // what this build writes: the list's label
+    CHECK(Manifest::Load(nrDir).inputs.at("scenes") == id);
+    CHECK(Manifest::Load(nrDir).stageParams["scene_cuts"] == nlohmann::json::array({cutAt}));
+    const Manifest made = Manifest::Load(nrDir);
+    auto standalone = [&](const std::function<void(nlohmann::json&)>& label) {  // the pass as a standalone `dlssvid nr` leaves it
+        Manifest m = made;
+        m.fingerprint.clear();
         m.tool = nlohmann::json::object();
-        if (before) m.stageParams.erase("scene_cut_threshold");
+        m.inputs.clear();
+        label(m.stageParams);
         m.Save(nrDir);
     };
-    stampOld(false);
-    CHECK(Report(RunProcess(o), "nr").status == "reused");  // a standalone pass of this build: adopted
-    stampOld(true);
-    const ProcessResult r = RunProcess(o);
-    CHECK(Report(r, "nr").status == "ran");
-    CHECK_THAT(Report(r, "nr").reason, Catch::Matchers::ContainsSubstring("PR-6"));
-    stampOld(true);
-    ProcessOptions off = o;
-    off.stages = StubStages(2);
-    ApplyParamSpec(off.stages, "nr.scene_cut=0");
-    CHECK(Report(RunProcess(off), "nr").status == "reused");  // scene_cut 0: the run it is
+    auto nrOf = [](const ProcessResult& r) -> const ProcessStageReport& {
+        for (const auto& s : r.stages)
+            if (s.name == "nr") return s;
+        throw std::runtime_error("no nr");
+    };
+    standalone([](nlohmann::json&) {});
+    CHECK(nrOf(RunProcess(o)).status == "reused");  // the same list: adopted
+    standalone([](nlohmann::json& p) {
+        for (const char* k : {"scene_cuts_id", "scene_cut_threshold", "scene_cuts", "scene_cut_count"}) p.erase(k);
+    });
+    const size_t before = ListPassVersions(o.passesRoot, "color_nr").size();
+    ProcessResult r = RunProcess(o);
+    CHECK(nrOf(r).status == "ran");
+    CHECK_THAT(nrOf(r).reason, Catch::Matchers::ContainsSubstring("made without the scene list"));
+    CHECK(!nrOf(r).retired.empty());  // a real picture of the run without resets: kept
+    CHECK(ListPassVersions(o.passesRoot, "color_nr").size() == before + 1);
+    standalone([](nlohmann::json& p) { p.erase("scene_cuts_id"); });  // reset by its own detector (PR-6): scene_cut_count 1, no label
+    r = RunProcess(o);
+    CHECK(nrOf(r).status == "ran");
+    CHECK_THAT(nrOf(r).reason, Catch::Matchers::ContainsSubstring("PR-6"));
+    // a rederive of scenes in the same plan with the same list (0.24 -> 0.3): a standalone pass with the label is still adopted - a
+    // rewritten list is not a changed input
+    standalone([](nlohmann::json&) {});
+    ApplyParamSpec(o.stages, "scenes.threshold=0.3");
+    const ProcessPlan plan = PlanProcess(o);
+    std::string planned;
+    for (const auto& d : plan.stages) {
+        if (d.name == "scenes") CHECK(d.sceneCuts.rederive);
+        if (d.name == "nr") {
+            CHECK(d.action == "reuse");
+            planned = d.fingerprint;
+        }
+    }
+    r = RunProcess(o);
+    CHECK(nrOf(r).status == "reused");
+    CHECK(Manifest::Load(nrDir).fingerprint == planned);
+    // no cut in the list (0.6): a pass without a label is the same run - adopted
+    ApplyParamSpec(o.stages, "scenes.threshold=0.6");
+    RunProcess(o);
+    standalone([](nlohmann::json& p) {
+        for (const char* k : {"scene_cuts_id", "scene_cut_threshold", "scene_cuts", "scene_cut_count"}) p.erase(k);
+    });
+    CHECK(nrOf(RunProcess(o)).status == "reused");
+    CHECK_FALSE(Manifest::Load(nrDir).inputs.count("scenes"));
+}
+
+// PR-13 (regression): nr.scene_cut moved to scenes.threshold - a run with it is refused before anything runs, with where it went
+TEST_CASE("RunProcess refuses nr.scene_cut and names scenes.threshold", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("moved_key");
+    ProcessOptions o;
+    o.input = WriteClip(dir / "clip.mkv", spec);
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    o.codec = "ffv1";
+    o.warp = true;
+    ApplyParamSpec(o.stages, "nr.scene_cut=0.3");
+    CHECK_THROWS_WITH(PlanProcess(o), Catch::Matchers::ContainsSubstring("nr.scene_cut moved to scenes.threshold"));
+    CHECK_THROWS_WITH(RunProcess(o), Catch::Matchers::ContainsSubstring("scenes.threshold"));
+    CHECK_FALSE(std::filesystem::exists(o.passesRoot / "color_nr"));
 }
 
 // TASK-0047: with the source's frame count unknown (mkv) PassComplete looked at the last frame only, so a color_nr of a part
@@ -575,6 +644,51 @@ TEST_CASE("RunProcess: an nr pass with the guides off is not recomputed when the
     CHECK(Report(r, "nr").status == "reused");  // before: input_changed
 }
 
+// PR-13 (regression): upscale reads depth_dlss / mv_dlss with DLSS alone. With nis a new depth and new vectors keep color_sr; nr and
+// fg, which read them, are recomputed. Before, every upscale backend listed them as inputs and was recomputed for nothing.
+TEST_CASE("RunProcess: an upscale without guides is not recomputed by a new depth and new vectors", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("upscale_inputs");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);  // upscale nis
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    CHECK(Manifest::Load(o.passesRoot / "color_sr").inputs.empty());
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").inputs.count("mv_dlss") == 1);
+    const std::string sr = Manifest::Load(o.passesRoot / "color_sr").fingerprint;
+
+    ApplyParamSpec(o.stages, "depth.z_far=500");  // a new depth, so new vectors (flow reads depth_raw)
+    const ProcessPlan plan = PlanProcess(o);
+    std::map<std::string, std::string> actions;
+    for (const auto& d : plan.stages) actions[d.name] = d.action;
+    CHECK(actions["depth"] == "run");
+    CHECK(actions["flow"] == "run");
+    CHECK(actions["upscale"] == "reuse");
+    CHECK(actions["nr"] == "run");
+    CHECK(actions["fg"] == "run");
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "upscale").status == "reused");
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK(Report(r, "fg").status == "ran");
+    CHECK(Manifest::Load(o.passesRoot / "color_sr").fingerprint == sr);
+
+    // DLSS reads them: in the plan (no DLL on WARP: the plan alone)
+    ApplyParamSpec(o.stages, "upscale.backend=dlss");
+    for (const auto& d : PlanProcess(o).stages)
+        if (d.name == "upscale") {
+            CHECK(d.inputs.count("depth_dlss") == 1);
+            CHECK(d.inputs.count("mv_dlss") == 1);
+        }
+}
+
 TEST_CASE("RunProcess: --frames, passthrough, an unavailable nr stage and a run without colour stages", "[integration][process]") {
     ClipSpec spec;
     spec.frames = 6;
@@ -686,7 +800,8 @@ TEST_CASE("RunProcess: an fg stage that throws mid-run is failed with disableUna
         CHECK(fg.details["isolated"] == isolated);
         CHECK(r.finalPass == o.passesRoot / "color_nr");
         CHECK(r.framesOut == 3);
-        CHECK(r.warnings.size() == 1);
+        REQUIRE(r.warnings.size() == 2);  // the failure, and the list of the first run covers frames 0..2 only (PR-13)
+        CHECK(std::any_of(r.warnings.begin(), r.warnings.end(), [](const std::string& w) { return w.find("known for frames 0..2 only") != std::string::npos; }));
         CHECK(Report(r, "encode").status == "ran");
         CHECK(!std::filesystem::exists(o.passesRoot / "color_fg"));    // the half-written pass of this run is removed,
         CHECK(!std::filesystem::exists(o.passesRoot / "color_fg.v"));  // not kept as a version

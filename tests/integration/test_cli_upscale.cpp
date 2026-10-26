@@ -15,6 +15,7 @@
 #include "ml/TrtLoader.h"
 #endif
 #include "passes/PassSequence.h"
+#include "passes/ScenesPass.h"
 
 using namespace dlssvid;
 using namespace dlssvid::test;
@@ -115,4 +116,34 @@ TEST_CASE("CLI upscale --backend worker runs the worker's stub with a window", "
     const auto clip = WriteClip(dir / "clip.mkv", spec);
     REQUIRE(Run("upscale --backend worker --model stub --window 2 --overlap 1 --scale 2 -i " + Q(clip) + " -o " + Q(dir / "out")) == 0);
     CHECK(std::filesystem::exists(dir / "out" / "color_sr" / "manifest.json"));
+}
+
+// PR-13: dlssvid upscale takes the clip's scene list for the backends that keep a history - dlss (on WARP it falls back to nis: the list
+// stays, the label with it, as the fingerprint of the backend asked for counts it) - and not for nis, which keeps none
+TEST_CASE("dlssvid upscale reads the scene list for DLSS SR, not for nis", "[integration][cli][upscale][scenes]") {
+    const uint32_t w = 40, h = 24;
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = TempDir() / "cli_upscale_scenes";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const auto clip = WriteClipWith(dir / "clip.mkv", spec, [&](int64_t i) {  // a hard cut at frame 2
+        CpuFrame f = SyntheticFrame(i, w, h);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < h; ++r)
+            for (uint32_t c = 0; c < w; ++c) y[r * w + c] = static_cast<uint8_t>(i < 2 ? 40 + c + 4 * i : 220 - c);
+        return f;
+    });
+    const auto out = dir / "passes";
+    REQUIRE(Run("scenes -i " + Q(clip) + " -o " + Q(out)) == 0);
+    REQUIRE(Run("upscale --backend nis --warp -i " + Q(clip) + " -o " + Q(out)) == 0);
+    CHECK_FALSE(Manifest::Load(out / "color_sr").stageParams.contains("scene_cuts_id"));
+    REQUIRE(Run("upscale --backend dlss --warp -i " + Q(clip) + " -o " + Q(out)) == 0);  // WARP: no DLSS, nis in its place
+    const Manifest m = Manifest::Load(out / "color_sr");
+    CHECK(m.stageParams["fallback"] == true);
+    CHECK(m.stageParams["scene_cuts_id"] == SceneCutsId({2}));
+    REQUIRE(Run("upscale --backend dlss --warp --no-scenes -i " + Q(clip) + " -o " + Q(out)) == 0);
+    CHECK_FALSE(Manifest::Load(out / "color_sr").stageParams.contains("scene_cuts_id"));
 }

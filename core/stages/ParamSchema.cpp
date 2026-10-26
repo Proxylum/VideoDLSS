@@ -136,6 +136,23 @@ std::vector<ParamChoice> Formats(bool png) {
 
 std::vector<StageSchema> Build() {
     std::vector<StageSchema> out;
+    {  // PR-13 (spec §2d): the clip's scene-cut list, read by the temporal stages
+        StageSchema s;
+        s.stage = "scenes";
+        s.title = "Склейки";
+        s.subtitle = "где стадии начинают историю заново · проход по яркости исходника";
+        s.params = {
+            In(Display(Number("threshold", "Порог склейки", ParamType::Float, 0.24, 0.0, 1.0, 0.01, ParamWidget::Spin,
+                              "Средняя разница яркости соседних кадров (0…1), выше которой начинается новый план. На склейке векторы движения "
+                              "нулевые, DLSS SR и улучшение начинают историю заново, генерация кадров повторяет последний кадр плана вместо "
+                              "смешивания двух сцен. 0.24 ловит резкие склейки; яркая вспышка может дать лишний сброс. Смена порога пересчитывает "
+                              "стадии ниже, только если меняется список. 0 — выкл: стадии работают без сбросов."),
+                       "выкл"),
+               "Обнаружение"),
+            Enum("backend", "Метод", "luma", {{"luma", "яркость исходника", "средняя разница яркости соседних кадров"}}, ParamWidget::Select, "", true),
+        };
+        out.push_back(std::move(s));
+    }
     {
         StageSchema s;
         s.stage = "depth";
@@ -287,12 +304,6 @@ std::vector<StageSchema> Build() {
                              "При какой разнице цвета смешивание с прошлым кадром отменяется: ниже порог — меньше шлейфов, но слабее подавление."),
                       "temporal", Op::Gt, 0.0),
                "Временная стабильность", true),
-            In(Display(Number("scene_cut", "Сброс на склейках", ParamType::Float, 0.24, 0.0, 1.0, 0.01, ParamWidget::Spin,
-                              "Когда соседние кадры резко различаются по яркости (склейка), история модели и подавления мерцания начинается "
-                              "заново: прошлая сцена не протекает в новую. Выше порог — реже срабатывает; 0.24 ловит резкие склейки, яркая "
-                              "вспышка может дать лишний сброс. Действует с глубиной и векторами или с подавлением мерцания."),
-                       "выкл"),
-               "Временная стабильность", true),
             In(Flag("guides", "Глубина и векторы", true,
                     "Подавать модели глубину и векторы движения. Без них каждый кадр обрабатывается отдельно: «дыхания» нет, но на движении "
                     "ниже согласованность во времени.",
@@ -424,6 +435,19 @@ nlohmann::json NormalizeStageParams(const std::string& stage, const nlohmann::js
     return out;
 }
 
+const MovedParam* FindMovedParam(const std::string& stage, const std::string& key) {
+    static const MovedParam moved[] = {{"nr", "scene_cut", "scenes.threshold", "Сброс на склейках"}};  // PR-13: the clip's list
+    std::string snake = key;
+    std::replace(snake.begin(), snake.end(), '-', '_');
+    for (const MovedParam& m : moved)
+        if (stage == m.stage && snake == m.key) return &m;
+    return nullptr;
+}
+
+std::string MovedParamProblem(const MovedParam& m) {
+    return std::string(m.stage) + "." + m.key + " moved to " + m.to + " (PR-13): use --param " + m.to + "=... or the project's stage scenes";
+}
+
 nlohmann::json ReadStageParamsFile(const std::string& stage, const std::filesystem::path& path, std::vector<std::string>* dropped) {
     const std::string where = path.string() + ": ";
     std::error_code ec;
@@ -447,6 +471,7 @@ nlohmann::json ReadStageParamsFile(const std::string& stage, const std::filesyst
             ++it;
             continue;
         }
+        if (const MovedParam* m = FindMovedParam(stage, it.key())) Throw(where + MovedParamProblem(*m));  // not dropped in silence
         if (dropped) dropped->push_back(it.key());
         it = j.erase(it);
     }
@@ -468,7 +493,10 @@ std::vector<std::string> ValidateStageParams(const std::string& stage, const nlo
     }
     for (const auto& [key, v] : params.items()) {
         const ParamSpec* spec = schema->Find(key);
-        if (!spec) continue;  // backends take extra keys
+        if (!spec) {
+            if (const MovedParam* m = FindMovedParam(stage, key)) problems.push_back(MovedParamProblem(*m));  // else hashed and ignored
+            continue;  // backends take extra keys
+        }
         const std::string where = stage + "." + key;
         switch (spec->type) {
             case ParamType::Bool:

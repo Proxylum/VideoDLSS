@@ -20,6 +20,7 @@
     "color_nr": { "frames": 6, "width": 192, "height": 108 },
     "color_fg": { "frames": 11, "width": 192, "height": 108, "fps": 48.0 }
   },
+  "scenes": { "frames": 6, "cuts": [] },
   "result": { "frames": 11, "fps": 48.0, "audio": true },
   "reference_frames": [
     ["color_sr", 3],

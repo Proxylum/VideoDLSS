@@ -72,7 +72,8 @@ TEST_CASE("FgProcessArgs builds the child command line: pass dirs, parameters as
     const std::string params = After(a, "--params-json");
     CHECK(std::all_of(params.begin(), params.end(), [](char c) { return static_cast<unsigned char>(c) < 0x80; }));  // ASCII JSON
     CHECK(nlohmann::json::parse(params) == spec.params);
-    for (const char* hook : {"--frames", "--warp", "--disable-unavailable", "--source-hash", "--crash-after", "--crash-on-exit", "--stall"})
+    for (const char* hook : {"--frames", "--warp", "--disable-unavailable", "--source-hash", "--crash-after", "--crash-on-exit", "--stall", "--scenes-dir",
+                             "--scene-cuts-id"})
         CHECK_FALSE(Has(a, hook));
 
     spec.frames = 12;
@@ -83,7 +84,11 @@ TEST_CASE("FgProcessArgs builds the child command line: pass dirs, parameters as
     spec.crashOnExit = true;
     spec.stall = true;
     spec.verbose = true;
+    spec.scenesDir = spec.passesRoot / "scenes";  // PR-13: the list the runner planned with, by its id
+    spec.sceneCutsId = "cuts:0123";
     a = FgProcessArgs(spec);
+    CHECK(After(a, "--scenes-dir") == U8(spec.scenesDir));
+    CHECK(After(a, "--scene-cuts-id") == "cuts:0123");
     CHECK(After(a, "--frames") == "12");
     CHECK(After(a, "--source-hash") == "sha256:ab");
     CHECK(After(a, "--crash-after") == "0");

@@ -99,8 +99,7 @@ TEST_CASE("dlssvid nr --backend stub --warp writes color_nr and a JSON summary",
     // TASK-0044: the standalone run checks every value against the schema (before: `--intensity 5` went to NGX); styles 3..6
     // are refused too since PR-2 E7 (TASK-0052)
     for (const std::vector<std::string>& bad : std::vector<std::vector<std::string>>{
-             {"--intensity", "5"}, {"--passes", "5"}, {"--passes", "0"}, {"--exposure", "20"}, {"--style", "7"}, {"--style", "4"}, {"--local-tone", "3"},
-             {"--scene-cut", "2"}}) {
+             {"--intensity", "5"}, {"--passes", "5"}, {"--passes", "0"}, {"--exposure", "20"}, {"--style", "7"}, {"--style", "4"}, {"--local-tone", "3"}}) {
         std::vector<std::string> args{"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "bad").string(), "--frames", "1"};
         args.insert(args.end(), bad.begin(), bad.end());
         const CliResult b = RunCli(args);
@@ -593,4 +592,64 @@ TEST_CASE("dlssvid nr --check prints the device, init and create times and the f
     const CliResult still = RunCli({"nr", "--check", "--warp", "--backend", "stub", "--no-guides", "--no-depth-guide"});
     CHECK(still.code != 0);
     CHECK(still.out.find("--no-guides") != std::string::npos);
+}
+
+// PR-13: dlssvid nr reads the clip's scene list - <output>/scenes found by itself, --scenes-dir given, none with --no-scenes / --no-auto;
+// one of another source is an error when given and is skipped when found; --scene-cut is gone (the threshold is the list's)
+TEST_CASE("dlssvid nr resets at the cuts of the clip's scene list", "[integration][cli][nr][scenes]") {
+    const uint32_t w = 48, h = 32;
+    const int cutAt = 3;
+    ClipSpec spec;
+    spec.frames = 6;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("scenes");
+    const auto clip = WriteClipWith(dir / "clip.mkv", spec, [&](int64_t i) {
+        CpuFrame f = SyntheticFrame(i, w, h);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < h; ++r)
+            for (uint32_t c = 0; c < w; ++c) y[r * w + c] = static_cast<uint8_t>(i < cutAt ? 40 + c + 4 * i : 220 - c);
+        return f;
+    });
+    const auto root = dir / "passes";
+    REQUIRE(RunCli({"scenes", "-i", clip.string(), "-o", root.string()}).code == 0);
+    const std::string id = Manifest::Load(root / "scenes").stageParams["cuts_id"];
+    REQUIRE(id.rfind("cuts:", 0) == 0);
+    auto run = [&](const char* name, const std::vector<std::string>& extra, const std::filesystem::path& out) {
+        std::vector<std::string> args{"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", out.string(), "--temporal", "0.5", "--json", (dir / (std::string(name) + ".json")).string()};
+        args.insert(args.end(), extra.begin(), extra.end());
+        const CliResult r = RunCli(args);
+        INFO(name << ": " << r.out);
+        REQUIRE(r.code == 0);
+        return ReadJson(dir / (std::string(name) + ".json"))["stats"];
+    };
+    const nlohmann::json found = run("auto", {}, root);
+    CHECK(found["scenes_used"] == true);
+    CHECK(found["scene_cuts_id"] == id);
+    CHECK(found["scene_cuts"] == nlohmann::json::array({cutAt}));
+    CHECK(found["scene_cut_count"] == 1);
+    CHECK(Manifest::Load(root / "color_nr").stageParams["scene_cuts_id"] == id);
+    const nlohmann::json none = run("no_scenes", {"--no-scenes"}, root);
+    CHECK(none["scenes_used"] == false);
+    CHECK(none["scene_cuts"].is_null());
+    CHECK_FALSE(Manifest::Load(root / "color_nr").stageParams.contains("scene_cuts_id"));
+    CHECK(run("no_auto", {"--no-auto"}, root)["scenes_used"] == false);
+    CHECK(run("given", {"--no-auto", "--scenes-dir", (root / "scenes").string()}, root)["scenes_used"] == true);
+    CHECK(run("bypass", {"--intensity", "0"}, root)["scenes_used"] == false);  // no history to reset: the list is not read
+    // the list of another source: an error when given, skipped when found under -o
+    ClipSpec other = spec;
+    other.frames = 4;
+    const auto otherClip = WriteClip(dir / "other.mkv", other);
+    const auto otherRoot = dir / "other_passes";
+    REQUIRE(RunCli({"scenes", "-i", otherClip.string(), "-o", otherRoot.string()}).code == 0);
+    const CliResult foreign = RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", root.string(), "--scenes-dir", (otherRoot / "scenes").string()});
+    CHECK(foreign.code != 0);
+    CHECK(foreign.out.find("of another source") != std::string::npos);
+    CHECK(run("foreign_auto", {}, otherRoot)["scenes_used"] == false);
+    // the option of PR-6 is gone; the help names the list's
+    CHECK(RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", root.string(), "--scene-cut", "0.3"}).code != 0);
+    const CliResult help = RunCli({"nr", "--help"});
+    CHECK(help.out.find("--scenes-dir") != std::string::npos);
+    CHECK(help.out.find("--no-scenes") != std::string::npos);
+    CHECK(help.out.find("--scene-cut") == std::string::npos);
 }
