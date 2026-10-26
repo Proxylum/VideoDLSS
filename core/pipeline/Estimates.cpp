@@ -47,12 +47,21 @@ constexpr double kNrFeatureCreateMs = 200.0;
 bool HasNumber(const nlohmann::json& j, const char* key) { return j.is_object() && j.contains(key) && j[key].is_number(); }
 
 // The wall time a `process` run recorded (StampPass), never a stage's own timer (D8, see RecordedMsPerFrame)
+// The stage's own timer, written by the stage beside the wall time `process` writes: nr and upscale time the GPU, fg its backend. A
+// record of these stages without it is that timer written as ms_per_frame (nr before TASK-0049, upscale and fg before TASK-0051).
+const char* StageTimerKey(const std::string& stage) {
+    if (stage == "nr" || stage == "upscale") return "ms_per_frame_gpu";
+    if (stage == "fg") return "ms_per_frame_backend";
+    return nullptr;
+}
+
 std::optional<double> WallMsPerFrame(const Manifest& m, const std::string& stage) {
     const nlohmann::json& sp = m.stageParams;
     if (!HasNumber(sp, "ms_per_frame")) return std::nullopt;
     const double ms = sp["ms_per_frame"].get<double>();
-    const bool gpu = HasNumber(sp, "ms_per_frame_gpu");
-    if (ms <= 0 || (stage == "nr" && !gpu) || (gpu && ms < sp["ms_per_frame_gpu"].get<double>())) return std::nullopt;
+    const char* timer = StageTimerKey(stage);
+    const bool own = timer && HasNumber(sp, timer);
+    if (ms <= 0 || (timer && !own) || (own && ms < sp[timer].get<double>())) return std::nullopt;
     return ms;
 }
 

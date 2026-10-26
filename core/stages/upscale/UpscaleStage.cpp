@@ -325,7 +325,9 @@ void UpscaleStage::Finish() {
     if (upscaler_ && upscaler_->ProcessesOnCpu() && upscaler_->WindowSize() > 1) RunCpuWindow(true);
     if (writer_) {
         Manifest& m = const_cast<Manifest&>(writer_->Man());
-        m.stageParams["ms_per_frame"] = stats_.MeanMs();
+        // the stage's own GPU time (submit + wait); the wall time is process's to write (StampPass): a standalone or adopted pass kept the
+        // stage timer under ms_per_frame and the estimates took it for the run's (TASK-0051, D8 of nr)
+        m.stageParams["ms_per_frame_gpu"] = stats_.MeanMs();
         m.stageParams["depth_used"] = stats_.depthUsed;
         m.stageParams["mv_used"] = stats_.mvUsed;
         writer_->Finish();

@@ -17,8 +17,9 @@ namespace dlssvid {
 // to the run's passes and model resolution, D8).
 // `model`: the depth model (VDA Small / Base / Large differ several times, TASK-0039).
 double BaselineMsPerFrame(const std::string& stage, const std::string& backend, double sourceMegapixels, const std::string& model = "");
-// Wall ms/frame the current pass of a stage recorded (manifest stage_params.ms_per_frame, the wall time `process` writes; upscale and
-// fg still write their own stage timer there in a standalone pass - TASK-0051), if any.
+// Wall ms/frame the current pass of a stage recorded (manifest stage_params.ms_per_frame, the wall time `process` writes), if any.
+// nr, upscale and fg write their own timer beside it (ms_per_frame_gpu, ms_per_frame_gpu, ms_per_frame_backend); a record of these
+// stages counts only beside that timer (TASK-0051).
 // `tool` (StageDecision::tool): a pass made by another backend or model than the one asked for is not used - after a switch to
 // VDA Large the time of Small would be shown (TASK-0039); only the fields present and non-empty in `tool` are compared.
 // D8: a GPU-only time is not a wall time. An nr record counts only beside the stage's ms_per_frame_gpu: before TASK-0049 NrStage
