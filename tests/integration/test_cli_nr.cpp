@@ -470,6 +470,74 @@ TEST_CASE("dlssvid nr --params-file; explicit flags override the file", "[integr
     refused(R"({"backend":"stub","preset":3})", {"--check"}, "preset");  // PR-2 E7: not a setting any more
 }
 
+// PR-9: a dlssvid-preset in --params-file - a card preset's nr settings (its engineer keys dropped with a warning: backend and format
+// come from the options), a pipeline preset's nr entry (with its backend and format); refused whole with a value out of range, a newer
+// schema or no nr settings
+TEST_CASE("dlssvid nr --params-file takes a dlssvid-preset: engineer and unknown keys dropped with a warning, flags win, a value out of range and a newer schema refused",
+          "[integration][cli][nr][presets]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("params_preset");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    auto file = [&](const char* name, const nlohmann::json& j) {
+        const auto p = dir / name;
+        std::ofstream(p, std::ios::binary) << j.dump();
+        return p.string();
+    };
+    auto preset = [](const char* scope, const nlohmann::json& stages, int schema = 1) {
+        return nlohmann::json{{"format", "dlssvid-preset"}, {"schema", schema}, {"scope", scope}, {"name", "Soft"}, {"stages", stages}};
+    };
+    auto run = [&](const char* name, std::vector<std::string> extra) {
+        std::vector<std::string> args{"nr", "--warp", "-i", clip.string(), "-o", (dir / name).string(), "--frames", "1", "--json", (dir / (std::string(name) + ".json")).string()};
+        args.insert(args.end(), extra.begin(), extra.end());
+        return RunCli(args);
+    };
+    nlohmann::json cardStages = nlohmann::json::object();
+    cardStages["nr"] = {{"params", {{"intensity", 0.5}, {"local_tone", 0.3}, {"temporal", 0.4}, {"format", "png"}, {"foo", 1}}}};
+    const std::string card = file("card.json", preset("stage", cardStages));
+    {
+        const CliResult r = run("card_run", {"--backend", "stub", "--params-file", card, "--temporal", "0.2"});
+        INFO(r.out);
+        REQUIRE(r.code == 0);
+        CHECK(r.out.find("nr.format is an engineer key") != std::string::npos);
+        CHECK(r.out.find("nr.foo is not a setting of this dlssvid") != std::string::npos);
+        const Manifest m = Manifest::Load(dir / "card_run" / "color_nr");
+        CHECK(m.format == FileFormat::Exr);  // the preset's png is not taken: --format's default
+        const nlohmann::json p = ReadJson(dir / "card_run.json")["params"];
+        CHECK(p["intensity"] == 0.5);
+        CHECK(p["local_tone"] == 0.3);
+        CHECK(p["temporal"] == 0.2);  // the flag wins
+    }
+    {
+        nlohmann::json stages = nlohmann::json::object();
+        stages["depth"] = {{"enabled", true}, {"params", {{"backend", "vda"}}}};
+        stages["nr"] = {{"enabled", true}, {"params", {{"intensity", 0.6}, {"backend", "stub"}, {"format", "png"}}}};
+        const CliResult r = run("pipe_run", {"--params-file", file("pipe.json", preset("pipeline", stages))});
+        INFO(r.out);
+        REQUIRE(r.code == 0);
+        CHECK(r.out.find("only its nr settings are used here") != std::string::npos);
+        const Manifest m = Manifest::Load(dir / "pipe_run" / "color_nr");
+        CHECK(m.format == FileFormat::Png);  // a pipeline entry holds the pass format and the backend
+        CHECK(m.stageParams["backend"] == "stub");
+        CHECK(ReadJson(dir / "pipe_run.json")["params"]["intensity"] == 0.6);
+    }
+    auto refused = [&](const char* name, const nlohmann::json& j, const char* says) {
+        const CliResult r = run("bad", {"--backend", "stub", "--params-file", file(name, j)});
+        INFO(name << ": " << r.out);
+        CHECK(r.code != 0);
+        CHECK(r.out.find(says) != std::string::npos);
+    };
+    nlohmann::json five = nlohmann::json::object();
+    five["nr"] = {{"params", {{"intensity", 5}}}};
+    refused("five.json", preset("stage", five), "nr.intensity must be within");
+    refused("newer.json", preset("stage", cardStages, 2), "newer");
+    nlohmann::json depth = nlohmann::json::object();
+    depth["depth"] = {{"params", {{"backend", "vda"}}}};
+    refused("depth.json", preset("stage", depth), "has no settings for nr");
+}
+
 // TASK-0048 (spec §2e): the A/B switches of the standalone run - the mv scale, zero guides at CreateFeature, no depth guide -
 // reported in the summary and the JSON, written into the pass (stage_params.ab); contradictions refused before the GPU starts.
 TEST_CASE("dlssvid nr A/B switches on the stub: --mv-scale, --create-with-mv, --no-depth-guide; contradictions refused", "[integration][cli][nr][ab]") {

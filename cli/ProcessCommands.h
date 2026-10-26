@@ -18,6 +18,7 @@ public:
         std::string input, output, passes, project;
         std::string stages;                // comma list: enable only these (order is canonical)
         std::vector<std::string> params;   // stage.key=value
+        std::vector<std::string> paramFiles;  // PR-9: stage=<file.json> (a settings object or a preset) or <preset.json>
         std::string depthBackend, flowBackend, upscaleBackend, nrBackend, fgBackend;
         double scale = 0.0;
         int multiplier = 0;
@@ -48,10 +49,12 @@ public:
         std::string input, passes, output;
         std::string stages;
         std::vector<std::string> params;
+        std::vector<std::string> paramFiles;
         int64_t frames = 30;
         bool warp = false;
         bool keep = false;
         std::string codec = "h264_nvenc";
+        bool codecGiven = false;  // --codec on the command line (else a pipeline preset's encoder)
         std::string json;
     };
 

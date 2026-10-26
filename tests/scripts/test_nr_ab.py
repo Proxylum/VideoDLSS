@@ -139,11 +139,36 @@ class Helpers(unittest.TestCase):
 
     def test_base_params_from_preset(self):
         p = self.root / "preset.json"
-        p.write_text(json.dumps({"format": "dlssvid-preset", "stages": {"nr": {"params": {"intensity": 1.5}}}}), encoding="utf-8")
-        self.assertEqual(nr_ab.load_base_params(p), {"intensity": 1.5})
+
+        def preset(**kw):
+            j = {"format": "dlssvid-preset", "schema": 1, "scope": "stage", "name": "Мягкий", "stages": {"nr": {"params": {"intensity": 1.5}}}}
+            j.update(kw)
+            p.write_text(json.dumps(j), encoding="utf-8")
+            return p
+
+        self.assertEqual(nr_ab.load_base_params(preset()), {"intensity": 1.5})
         p.write_text(json.dumps({"local-tone": 0.5}), encoding="utf-8")
         self.assertEqual(nr_ab.load_base_params(p), {"local_tone": 0.5})
         self.assertEqual(nr_ab.load_base_params(None), {})
+        # PR-9: the preset's rules - a newer schema, an unknown scope, no nr settings are refused
+        for bad in ({"schema": 2}, {"schema": "1"}, {"scope": "all"}, {"stages": {"depth": {"params": {}}}}):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                nr_ab.load_base_params(preset(**bad))
+        # a pipeline preset gives its nr entry; its engineer keys are nr_ab's options
+        pipe = preset(scope="pipeline", stages={"depth": {"enabled": True, "params": {"backend": "vda"}},
+                                                "nr": {"enabled": True, "params": {"intensity": 0.7, "backend": "stub", "format": "png"}}})
+        self.assertEqual(nr_ab.load_base_params(pipe), {"intensity": 0.7})
+        # a key this dlssvid does not know, and the moved scene_cut, are dropped from a preset with a warning; the rest is taken
+        keys = {"intensity", "local_tone"}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = nr_ab.load_base_params(preset(stages={"nr": {"params": {"intensity": 1.2, "foo": 1, "scene-cut": 0.3}}}), keys)
+        self.assertEqual(got, {"intensity": 1.2})
+        self.assertIn("'foo' not an nr setting", err.getvalue())
+        self.assertIn("'scene_cut' moved to scenes.threshold", err.getvalue())
+        # a bare object keeps an unknown key: the check of the merged settings refuses it before anything runs
+        p.write_text(json.dumps({"intensity": 1.0, "foo": 1}), encoding="utf-8")
+        self.assertEqual(nr_ab.load_base_params(p, keys), {"intensity": 1.0, "foo": 1})
 
     def test_known_keys_from_help(self):
         help_text = "  --local-tone,--local_tone FLOAT [1]\n  --no-guides,--no_guides,--guides\n  --params-file,--params_file TEXT\n"

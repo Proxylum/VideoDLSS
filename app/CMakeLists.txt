@@ -6,6 +6,10 @@ qt_add_library(dlssvid_app STATIC
   PlaybackClock.h PlaybackClock.cpp
   SourceNames.h SourceNames.cpp
   CompareBar.h CompareBar.cpp
+  ParamText.h ParamText.cpp
+  PresetStore.h PresetStore.cpp
+  PresetDialogs.h PresetDialogs.cpp
+  PresetMenu.h PresetMenu.cpp
   StageCard.h StageCard.cpp
   SceneCutsView.h SceneCutsView.cpp
   StartPage.h StartPage.cpp

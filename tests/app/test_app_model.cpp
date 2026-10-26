@@ -15,7 +15,12 @@
 #include <QComboBox>
 #include <QDir>
 #include <QPushButton>
+#include <QLineEdit>
+#include <QMenu>
 #include <QScrollArea>
+#include <QShortcut>
+#include <QTextDocument>
+#include <QTimer>
 #include <QScrollBar>
 #include <QSignalSpy>
 #include <QSlider>
@@ -47,6 +52,9 @@
 #include "AppModel.h"
 #include "SourceNames.h"
 #include "PlaybackClock.h"
+#include "ParamText.h"
+#include "PresetMenu.h"
+#include "PresetStore.h"
 #include "ProcessingPanel.h"
 #include "ProjectPanel.h"
 #include "RecentPreviews.h"
@@ -100,6 +108,8 @@ QApplication& App() {
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, QString::fromStdWString((std::filesystem::path(DLSSVID_TEST_TMP) / "app" / "settings").wstring()));
     QCoreApplication::setOrganizationName("dlssvid-tests");
     QCoreApplication::setApplicationName(QString("dlssvid-tests-%1").arg(QCoreApplication::applicationPid()));
+    // the presets of the tests, not the user's AppData (PR-9): a folder per test process
+    PresetStore::SetDir(QString::fromStdWString((std::filesystem::path(DLSSVID_TEST_TMP) / "app" / ("presets-" + std::to_string(QCoreApplication::applicationPid()))).wstring()));
     return app;
 }
 
@@ -131,6 +141,93 @@ void Pump(const std::function<bool()>& done, int ms) {
 }
 
 QString Q(const std::filesystem::path& p) { return QString::fromStdWString(p.wstring()); }
+
+// PR-9: the presets of this test process start empty, without a new-projects mark
+void ClearPresets() {
+    std::filesystem::remove_all(PresetStore::Path(PresetStore::Dir()));
+    QSettings().remove("presets/newProject");
+}
+
+std::filesystem::path PresetSlotFile(PresetSlot slot, const std::string& target) { return PresetStore::Library().SlotPath(slot, target); }
+
+QString WritePreset(const std::filesystem::path& file, const nlohmann::json& j) {
+    std::filesystem::create_directories(file.parent_path());
+    std::ofstream(file, std::ios::binary) << j.dump(2);
+    return Q(file);
+}
+
+nlohmann::json CardPresetJson(const char* name, const nlohmann::json& params, const char* stage = "nr") {
+    nlohmann::json stages = nlohmann::json::object();
+    stages[stage] = {{"params", params}};
+    return {{"format", "dlssvid-preset"}, {"schema", 1}, {"scope", "stage"}, {"name", name}, {"stages", stages}};
+}
+
+// a project of the stub methods without its video (the plan says «видео не найдено» at once)
+void StubProjectFile(const std::filesystem::path& file, const std::filesystem::path& video) {
+    Project p = Project::Create(video, file.parent_path() / "passes");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.params["backend"] = "blend";
+    }
+    p.resultVideo = file.parent_path() / "clip_result.mp4";
+    p.Save(file);
+}
+
+QString LastMessage(const QSignalSpy& spy) { return spy.isEmpty() ? QString() : spy.last().at(0).toString(); }
+
+// the next widget Tab reaches from `w` inside `root`
+QWidget* NextTab(QWidget* w, QWidget* root) {
+    for (QWidget* n = w->nextInFocusChain(); n && n != w; n = n->nextInFocusChain())
+        if ((n->focusPolicy() & Qt::TabFocus) && n->isVisibleTo(root) && n->isEnabled()) return n;
+    return nullptr;
+}
+
+QAction* ActionStarting(QMenu* menu, const QString& text) {
+    for (QAction* a : menu->actions())
+        if (a->text().startsWith(text)) return a;
+    return nullptr;
+}
+
+// dialogs that answer as told and count what was asked
+struct StubDialogs {
+    int confirms = 0, warnings = 0, infos = 0;
+    bool answer = false;
+    std::optional<PresetSaveDialog::Setup> lastSetup;
+    std::optional<PresetSaveDialog::Answer> saveAnswer;
+    QString open, save;
+    PresetDialogs::Clash clash = PresetDialogs::Clash::Cancel;
+    QString clashName, clashCopy;
+    QStringList texts;
+    PresetDialogs Make() {
+        PresetDialogs d;
+        d.saveName = [this](QWidget*, const PresetSaveDialog::Setup& s) {
+            lastSetup = s;
+            return saveAnswer;
+        };
+        d.openFile = [this](QWidget*, const QString&, const QString&, const QString&) { return open; };
+        d.saveFile = [this](QWidget*, const QString&, const QString&, const QString&) { return save; };
+        d.confirm = [this](QWidget*, const QString&, const QString& text, const QString&) {
+            ++confirms;
+            texts << text;
+            return answer;
+        };
+        d.clash = [this](QWidget*, const QString& name, const QString& copy) {
+            clashName = name;
+            clashCopy = copy;
+            return clash;
+        };
+        d.warn = [this](QWidget*, const QString&, const QString& text) {
+            ++warnings;
+            texts << text;
+        };
+        d.inform = [this](QWidget*, const QString&, const QString& text) {
+            ++infos;
+            texts << text;
+        };
+        return d;
+    }
+};
 
 }  // namespace
 
@@ -478,6 +575,26 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     CHECK(model.outcome().stagesToRun == 1);  // only the encode
     CHECK(model.outcome().reused.size() == 6);
     CHECK(model.sourceHashStatus() == QString::fromUtf8("совпадает с пассами"));
+
+    // PR-9: a preset of the current settings changes nothing - the pass stays reused; one with another intensity shows the recompute
+    // right after it is applied, without the sliders' timer
+    {
+        ClearPresets();
+        const auto same = model.saveStagePreset("nr", QString::fromUtf8("Как есть"));
+        REQUIRE(same.ok);
+        CHECK(model.applyStagePreset("nr", same.file).message.contains(QString::fromUtf8("уже совпадают")));
+        CHECK(model.cardState("nr").state == QString::fromUtf8("переиспользуется"));
+        model.setStageParam("nr", "intensity", 0.7);
+        const auto soft = model.saveStagePreset("nr", QString::fromUtf8("Мягче"));
+        REQUIRE(soft.ok);
+        model.setStageParam("nr", "intensity", 1.0);
+        model.refreshPlan();
+        CHECK(model.cardState("nr").state == QString::fromUtf8("переиспользуется"));
+        REQUIRE(model.applyStagePreset("nr", soft.file).ok);
+        CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: Интенсивность 1 → 0.7"));
+        REQUIRE(model.applyStagePreset("nr", Q(PresetSlotFile(PresetSlot::BeforeApply, "nr"))).ok);  // back: reused again
+        CHECK(model.cardState("nr").state == QString::fromUtf8("переиспользуется"));
+    }
 
     // PR-7 (review): an nr pass of before PR-7 with intensity != 1 is recomputed and discarded - the card names the revision, not
     // the guides dropped at 0, and promises no version on disk
@@ -1317,6 +1434,14 @@ TEST_CASE("StageCard NR: groups, the collapsed more block, conditions, reset and
     CHECK_FALSE(after.contains("intensity"));
     CHECK_FALSE(after.contains("exposure"));
     CHECK_FALSE(after.contains("auto_mask"));
+    // PR-9 (spec :761): the settings before the reset are in «Перед сбросом» - the card's keys, not the backend or the pass format
+    const auto slot = PresetStore::Library().Slot(PresetSlot::BeforeReset, "nr");
+    REQUIRE(slot);
+    CHECK(slot->load.ok());
+    CHECK(slot->load.preset.stages.at("nr").params["intensity"] == 1.4);
+    CHECK_FALSE(slot->load.preset.stages.at("nr").params.contains("backend"));
+    CHECK_FALSE(slot->load.preset.stages.at("nr").params.contains("format"));
+    CHECK(slot->load.preset.name == "Перед сбросом · missing");
     QSettings().remove("card/nr/more");
 }
 
@@ -1884,6 +2009,20 @@ TEST_CASE("StageCard NR screenshots for a merge request", "[.shots]") {
         std::printf("saved %s\n", file.toStdString().c_str());
     };
     shot("nr_default", false);
+    {  // PR-9: the open preset menu
+        model.setStageParam("nr", "intensity", 0.8);
+        model.saveStagePreset("nr", QString::fromUtf8("Мягкий портрет"), {}, true);
+        model.setStageParam("nr", "intensity", 1.0);
+        dlssvid::StageCard card(model, "nr");
+        card.refresh();
+        PresetMenu* menu = card.presetMenu();
+        menu->setAttribute(Qt::WA_DontShowOnScreen);
+        emit menu->aboutToShow();
+        menu->adjustSize();
+        const QString file = out + "/nr_preset_menu_" + scale + ".png";
+        REQUIRE(menu->grab().save(file));
+        std::printf("saved %s\n", file.toStdString().c_str());
+    }
     model.setStageParam("nr", "intensity", 1.4);
     model.setStageParam("nr", "local_tone", 1.5);
     model.setStageParam("nr", "exposure", 1.0);
@@ -2082,4 +2221,1117 @@ TEST_CASE("AppModel: the same list names the stages made with another one; the l
     CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: изменились склейки"));
     CHECK(model.cardState("nr").sub.contains(QString::fromUtf8("0 → 1")));  // before: «0 → 0», the stage off had no count
     CHECK(model.cardState("nr").scenes == QString::fromUtf8("склейки: 1 — история модели и подавления мерцания сбрасывается"));
+}
+
+// ---- presets (PR-9) -----------------------------------------------------------------------------------------------------------------
+
+TEST_CASE("Presets: save, list, apply keeps format; before-apply saved, applying it swaps back; an equal preset changes nothing", "[app][presets]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_apply");
+    StubProjectFile(d / "proj.dlssvid.json", d / "clip.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    // the project's engineer and unknown keys - the preset must not lose them (the project's defaults have no format)
+    model.setStageParams("nr", {{"backend", "stub"}, {"format", "png"}, {"extra_key", 1}, {"intensity", 0.7}, {"local_structure", 0.6}});
+    const auto saved = model.saveStagePreset("nr", QString::fromUtf8("Мягкий"));
+    REQUIRE(saved.ok);
+    CHECK(saved.notes.join(" ").contains(QString::fromUtf8("Формат пасса")));  // named: it stays the project's
+    const auto listing = PresetStore::List("nr");
+    REQUIRE(listing.items.size() == 1);
+    CHECK(listing.items[0].name == QString::fromUtf8("Мягкий"));
+    CHECK(listing.items[0].file == saved.file);
+    CHECK(model.saveStagePreset("nr", QString::fromUtf8("мягкий")).exists);  // the case is ignored: «Заменить?»
+
+    model.setStageParams("nr", {{"backend", "stub"}, {"format", "png"}, {"extra_key", 1}, {"intensity", 1.4}});
+    QSignalSpy plans(&model, &AppModel::planChanged);
+    const auto applied = model.applyStagePreset("nr", saved.file);
+    REQUIRE(applied.ok);
+    CHECK(plans.count() == 1);  // the plan at once, one
+    const nlohmann::json p = model.stageEntry("nr")->params;
+    CHECK(p["format"] == "png");
+    CHECK(p["backend"] == "stub");
+    CHECK(p["extra_key"] == 1);
+    CHECK(p["intensity"] == 0.7);
+    CHECK(p["local_structure"] == 0.6);
+    CHECK_FALSE(p.contains("passes"));  // sparse: the preset's defaults are not written
+    const QString change = QString::fromUtf8("Интенсивность %1 → %2").arg(QLocale().toString(1.4, 'f', 2), QLocale().toString(0.7, 'f', 2));
+    INFO(applied.message.toStdString());
+    CHECK(applied.message.contains(change));
+    CHECK(applied.message.contains(QString::fromUtf8("прежние — в «Перед применением»")));
+    // the slot holds what was there; applying it swaps the states
+    const auto slot = PresetSlotFile(PresetSlot::BeforeApply, "nr");
+    REQUIRE(std::filesystem::exists(slot));
+    REQUIRE(model.applyStagePreset("nr", Q(slot)).ok);
+    CHECK(model.stageEntry("nr")->params["intensity"] == 1.4);
+    CHECK(model.stageEntry("nr")->params["format"] == "png");
+    REQUIRE(model.applyStagePreset("nr", Q(slot)).ok);
+    CHECK(model.stageEntry("nr")->params["intensity"] == 0.7);
+    // an equal preset: nothing - not dirty, no signal, the slot untouched
+    REQUIRE(model.saveProjectAs(Q(d / "saved.dlssvid.json")));
+    CHECK_FALSE(model.dirty());
+    const auto size = std::filesystem::file_size(slot);
+    const auto time = std::filesystem::last_write_time(slot);
+    QSignalSpy dirty(&model, &AppModel::dirtyChanged), project(&model, &AppModel::projectChanged), plan(&model, &AppModel::planChanged);
+    const auto same = model.applyStagePreset("nr", saved.file);
+    CHECK(same.ok);
+    CHECK(same.message.contains(QString::fromUtf8("уже совпадают с «Мягкий»")));
+    CHECK_FALSE(model.dirty());
+    CHECK(dirty.count() == 0);
+    CHECK(project.count() == 0);
+    CHECK(plan.count() == 0);
+    CHECK(std::filesystem::file_size(slot) == size);
+    CHECK(std::filesystem::last_write_time(slot) == time);
+}
+
+TEST_CASE("Presets: a refused preset changes nothing and says why in Russian; a failed backup changes nothing until asked", "[app][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_refused");
+    StubProjectFile(d / "proj.dlssvid.json", d / "clip.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    const nlohmann::json before = model.stageEntry("nr")->params;
+    const auto bad = model.applyStagePreset("nr", WritePreset(d / "bad.json", CardPresetJson("Плохой", {{"intensity", 5}, {"passes", 9}})));
+    CHECK_FALSE(bad.ok);
+    CHECK_FALSE(bad.backupFailed);
+    INFO(bad.problems.join(" | ").toStdString());
+    CHECK(bad.problems.contains(QString::fromUtf8("Интенсивность: 5 — допустимо %1–%2").arg(QLocale().toString(0.0, 'g', 9), QLocale().toString(2.0, 'g', 9))));
+    CHECK(bad.problems.size() == 2);  // every value at once
+    CHECK(model.stageEntry("nr")->params == before);
+    CHECK(model.applyStagePreset("nr", WritePreset(d / "depth.json", CardPresetJson("Глубина", {{"backend", "vda"}}, "depth"))).problems.contains(
+        QString::fromUtf8("В пресете нет настроек «Улучшения».")));
+    nlohmann::json newer = CardPresetJson("Новый", {{"intensity", 1}});
+    newer["schema"] = 2;
+    CHECK(model.applyStagePreset("nr", WritePreset(d / "newer.json", newer)).problems.join(" ").contains(QString::fromUtf8("более новой версией")));
+    // the slot cannot be written (the folder is inside a file): nothing changes until asked
+    const QString dir = PresetStore::Dir();
+    std::ofstream(d / "blocker", std::ios::binary) << "x";
+    PresetStore::SetDir(Q(d / "blocker" / "presets"));
+    const QString good = WritePreset(d / "good.json", CardPresetJson("Хороший", {{"intensity", 0.5}}));
+    const auto failed = model.applyStagePreset("nr", good);
+    CHECK_FALSE(failed.ok);
+    CHECK(failed.backupFailed);
+    CHECK(failed.problems.join(" ").contains(QString::fromUtf8("Не удалось сохранить «Перед применением»")));
+    CHECK(model.stageEntry("nr")->params == before);
+    const auto forced = model.applyStagePreset("nr", good, true);
+    CHECK(forced.ok);
+    CHECK(model.stageEntry("nr")->params["intensity"] == 0.5);
+    CHECK_FALSE(forced.message.contains(QString::fromUtf8("Перед применением")));
+    // the reset too
+    const auto reset = model.resetStageCard("nr");
+    CHECK(reset.backupFailed);
+    CHECK(model.stageEntry("nr")->params["intensity"] == 0.5);
+    CHECK(model.resetStageCard("nr", true).ok);
+    CHECK_FALSE(model.stageEntry("nr")->params.contains("intensity"));
+    PresetStore::SetDir(dir);
+}
+
+TEST_CASE("Presets: new projects take the marked preset; a project file next to the video wins; a missing mark is cleared and a broken one falls back, with a message",
+          "[app][presets]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_new");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setStageParam("nr", "intensity", 0.6);
+    const auto soft = model.saveStagePreset("nr", QString::fromUtf8("Мягкий"), {}, true);
+    REQUIRE(soft.ok);
+    CHECK(PresetStore::NewProjectPreset() == QFileInfo(soft.file).fileName());
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 32;
+    spec.height = 16;
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    QSignalSpy messages(&model, &AppModel::message);
+    model.openVideo(Q(clip));
+    CHECK(model.stageEntry("nr")->params["intensity"] == 0.6);
+    CHECK(model.dirty());
+    CHECK(LastMessage(messages).contains(QString::fromUtf8("«Улучшение» — из пресета «Мягкий» (для новых проектов)")));
+    CHECK_FALSE(std::filesystem::exists(PresetSlotFile(PresetSlot::BeforeApply, "nr")));  // seeding writes no slot
+    // a project file next to the video wins
+    REQUIRE(model.saveProject());
+    model.setStageParam("nr", "intensity", 1.3);
+    REQUIRE(model.saveProject());
+    model.openVideo(Q(clip));
+    CHECK(model.stageEntry("nr")->params["intensity"] == 1.3);
+    // a mark on a file that is gone: cleared, the built-in defaults
+    PresetStore::SetNewProjectPreset("nothing.json");
+    const auto other = WriteClip(d / "other.mkv", spec);
+    model.openVideo(Q(other));
+    CHECK(LastMessage(messages).contains(QString::fromUtf8("не найден — отметка снята")));
+    CHECK(PresetStore::NewProjectPreset().isEmpty());
+    CHECK(model.stageEntry("nr")->params == Project::DefaultStages()[4].params);
+    // a broken one: the built-in defaults, the mark stays
+    nlohmann::json newer = CardPresetJson("Новый", {{"intensity", 1}});
+    newer["schema"] = 2;
+    WritePreset(PresetStore::Path(PresetStore::Dir()) / "newer.json", newer);
+    PresetStore::SetNewProjectPreset("newer.json");
+    const auto third = WriteClip(d / "third.mkv", spec);
+    model.openVideo(Q(third));
+    CHECK(LastMessage(messages).contains(QString::fromUtf8("не применён")));
+    CHECK(PresetStore::NewProjectPreset() == "newer.json");
+    // a value out of range: the problem names its stage
+    WritePreset(PresetStore::Path(PresetStore::Dir()) / "strong.json", CardPresetJson("Сильный", {{"intensity", 5}}));
+    PresetStore::SetNewProjectPreset("strong.json");
+    model.openVideo(Q(WriteClip(d / "fourth.mkv", spec)));
+    CHECK(LastMessage(messages).contains(QString::fromUtf8("не применён: Улучшение: Интенсивность: 5 — допустимо")));
+    CHECK(model.stageEntry("nr")->params == Project::DefaultStages()[4].params);
+    QSettings().remove("presets/newProject");
+}
+
+TEST_CASE("Presets for new projects: one mark - a pipeline preset seeds every stage, enabled and the encoder, an NR preset only NR; marking in one menu moves the mark",
+          "[app][presets]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_new_pipeline");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setStageEnabled("fg", false);
+    model.setStageParam("scenes", "threshold", 0.3);
+    model.setStageParam("nr", "intensity", 0.6);
+    model.setEncode("hevc_nvenc", {{"b", "50M"}}, {10, "auto"});
+    const auto anime = model.savePipelinePreset(QString::fromUtf8("Аниме"), {}, true);
+    REQUIRE(anime.ok);
+    CHECK(PresetStore::NewProjectPreset() == QFileInfo(anime.file).fileName());
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 32;
+    spec.height = 16;
+    QSignalSpy messages(&model, &AppModel::message);
+    model.openVideo(Q(WriteClip(d / "clip.mkv", spec)));
+    CHECK(LastMessage(messages).contains(QString::fromUtf8("настройки обработки — из «Аниме» (для новых проектов)")));
+    {  // seeded before reloadSources: the first plan is made with those settings
+        const auto& stages = model.plan().stages;
+        CHECK(std::none_of(stages.begin(), stages.end(), [](const StageDecision& s) { return s.name == "fg"; }));  // off in the preset
+        const auto nr = std::find_if(stages.begin(), stages.end(), [](const StageDecision& s) { return s.name == "nr"; });
+        REQUIRE(nr != stages.end());
+        CHECK(nr->params["intensity"] == 0.6);
+    }
+    CHECK_FALSE(model.stageEntry("fg")->enabled);
+    CHECK(model.stageEntry("scenes")->params["threshold"] == 0.3);
+    CHECK(model.stageEntry("nr")->params["intensity"] == 0.6);
+    CHECK(model.stageEntry("depth")->params["backend"] == "stub");
+    CHECK(model.project().codec == "hevc_nvenc");
+    CHECK(model.project().outputFormat.bitDepth == 10);
+    CHECK(model.project().codecOptions.at("b") == "50M");
+    CHECK(model.project().resultVideo.empty());  // a new project's result: next to the video by the plan
+    CHECK(model.dirty());
+    // an NR preset marked in its menu: the one mark moves to it, and a new project takes NR only
+    model.setStageParam("nr", "intensity", 0.4);
+    const auto soft = model.saveStagePreset("nr", QString::fromUtf8("Мягкий"), {}, true);
+    REQUIRE(soft.ok);
+    CHECK(PresetStore::NewProjectPreset() == QFileInfo(soft.file).fileName());
+    model.openVideo(Q(WriteClip(d / "other.mkv", spec)));
+    CHECK(model.stageEntry("nr")->params["intensity"] == 0.4);
+    CHECK(model.stageEntry("fg")->enabled);  // NR only
+    CHECK(model.project().codec == "h264_nvenc");
+    QSettings().remove("presets/newProject");
+}
+
+TEST_CASE("PresetStore: the folder is the test's; import refuses a preset without nr and renames on a clash; delete clears the new-projects mark", "[app][presets]") {
+    App();
+    ClearPresets();
+    CHECK(PresetStore::Path(PresetStore::Dir()).u8string().find(u8"test-tmp") != std::u8string::npos);  // never the user's AppData
+    const auto d = Dir("presets_store");
+    const QString depth = WritePreset(d / "depth.json", CardPresetJson("Глубина", {{"backend", "vda"}}, "depth"));
+    CHECK(PresetStore::Import("nr", depth).problems.contains(QString::fromUtf8("В пресете нет настроек «Улучшения».")));
+    const QString soft = WritePreset(d / "soft.json", CardPresetJson("Мягкий", {{"intensity", 0.7}, {"format", "png"}}));
+    const auto first = PresetStore::Import("nr", soft);
+    REQUIRE(first.ok);
+    CHECK(first.notes.join(" ").contains(QString::fromUtf8("Формат пасса")));  // the engineer key dropped, said
+    CHECK(PresetStore::List("nr").items.size() == 1);
+    const auto clash = PresetStore::Import("nr", soft);
+    CHECK(clash.exists);
+    CHECK(clash.file == first.file);
+    const auto copy = PresetStore::Import("nr", soft, {}, true);
+    REQUIRE(copy.ok);
+    CHECK(copy.name == QString::fromUtf8("Мягкий (2)"));
+    CHECK(PresetStore::Import("nr", soft, first.file).ok);  // replace
+    CHECK(PresetStore::List("nr").items.size() == 2);
+    // review of PR-9: the clash names the copy it will save, «(2)» being taken
+    const auto clash3 = PresetStore::Import("nr", soft);
+    REQUIRE(clash3.exists);
+    CHECK(clash3.copyName == QString::fromUtf8("Мягкий (3)"));
+    // a name of 120 code points (a long video's «Улучшение · …») gets its suffix: the name is cut before it, not with it
+    const std::string longName = PresetNameFor("Улучшение", PresetStore::Path(Q(d / (std::string(200, 'x') + ".mp4"))));
+    const QString longFile = WritePreset(d / "long.json", CardPresetJson(longName.c_str(), {{"intensity", 0.9}}));
+    REQUIRE(PresetStore::Import("nr", longFile).ok);
+    const auto copy2 = PresetStore::Import("nr", longFile, {}, true);
+    const auto copy3 = PresetStore::Import("nr", longFile, {}, true);
+    REQUIRE(copy2.ok);
+    REQUIRE(copy3.ok);
+    CHECK(copy2.name.endsWith(" (2)"));
+    CHECK(copy3.name.endsWith(" (3)"));
+    CHECK(copy2.name.size() <= 120);
+    // a card preset's switch in its entry: the card's text, not the pipeline's
+    nlohmann::json withSwitch = CardPresetJson("Со включением", {{"intensity", 0.6}});
+    withSwitch["stages"]["nr"]["enabled"] = false;
+    const auto switched = PresetStore::Import("nr", WritePreset(d / "switch.json", withSwitch));
+    REQUIRE(switched.ok);
+    CHECK(switched.notes.contains(QString::fromUtf8("включение и кодирование в пресете карточки не хранятся — пропущено")));
+    // a card preset with two stages: the real reason, not «Это пресет карточки «»»
+    nlohmann::json two = CardPresetJson("Две", {{"intensity", 0.6}});
+    two["stages"]["depth"] = {{"params", {{"backend", "vda"}}}};
+    const auto twoStages = PresetStore::Import(kPipelineTarget, WritePreset(d / "two.json", two));
+    CHECK(twoStages.problems.contains(QString::fromUtf8("В пресете карточки должна быть ровно одна стадия.")));
+    CHECK(PresetStore::List("nr").items.size() == 6);
+    // a card preset is no pipeline preset; a pipeline preset gives its nr to the card
+    CHECK(PresetStore::Import(kPipelineTarget, soft).problems.join(" ").contains(QString::fromUtf8("Это пресет карточки «Улучшение»")));
+    nlohmann::json pipe = {{"format", "dlssvid-preset"}, {"schema", 1}, {"scope", "pipeline"}, {"name", "Аниме"}, {"stages", nlohmann::json::object()}};
+    pipe["stages"]["nr"] = {{"enabled", true}, {"params", {{"intensity", 0.6}, {"backend", "stub"}, {"foo", 1}, {"scene_cut", 0.3}}}};
+    pipe["stages"]["depth"] = {{"enabled", true}, {"params", {{"backend", "vda"}}}};
+    const QString pipeFile = WritePreset(d / "pipe.json", pipe);
+    const auto fromPipe = PresetStore::Import("nr", pipeFile);
+    REQUIRE(fromPipe.ok);
+    CHECK(fromPipe.message == QString::fromUtf8("Из пресета обработки «Аниме» взяты настройки «Улучшения»."));
+    INFO(fromPipe.notes.join(" | ").toStdString());
+    CHECK(fromPipe.notes.contains(QString::fromUtf8("нет в этой версии: «foo»")));  // the entry's own keys keep their notes
+    CHECK(fromPipe.notes.contains(QString::fromUtf8("Сброс на склейках теперь в карточке «Склейки»")));
+    const PresetLoad card = LoadPreset(PresetStore::Path(fromPipe.file));
+    REQUIRE(card.ok());
+    CHECK(card.preset.scope == PresetScope::Stage);
+    CHECK(card.preset.stages.at("nr").params == nlohmann::json{{"intensity", 0.6}});  // the backend is the card's engineer key
+    const auto whole = PresetStore::Import(kPipelineTarget, pipeFile);
+    REQUIRE(whole.ok);
+    CHECK_FALSE(whole.notes.join(" ").contains(QString::fromUtf8("оставлен")));  // the stages it lacks are no skip of the import
+    CHECK(PresetStore::List(kPipelineTarget).items.size() == 1);
+    CHECK(PresetStore::List("nr").items.size() == 7);  // the pipeline preset is not in the card's menu
+    // a slot's name changes in front
+    const auto slotNamed = PresetStore::Import("nr", WritePreset(d / "slot.json", CardPresetJson("Перед применением · clip", {{"intensity", 0.9}})));
+    REQUIRE(slotNamed.ok);
+    CHECK(slotNamed.name == QString::fromUtf8("Импорт — Перед применением · clip"));
+    // export: checked and written in the canonical form
+    const auto exported = PresetStore::Export(first.file, Q(d / "out" / "soft.json"));
+    REQUIRE(exported.ok);
+    CHECK(LoadPreset(d / "out" / "soft.json").ok());
+    // delete: permanent; the mark on it goes
+    PresetStore::SetNewProjectPreset(first.file);
+    const auto removed = PresetStore::Remove(first.file);
+    REQUIRE(removed.ok);
+    CHECK(removed.message.contains(QString::fromUtf8("встроенными умолчаниями")));
+    CHECK(PresetStore::NewProjectPreset().isEmpty());
+    CHECK_FALSE(std::filesystem::exists(PresetStore::Path(first.file)));
+    // an unreadable file is listed with its reason in Russian, in both menus
+    WritePreset(PresetStore::Path(PresetStore::Dir()) / "broken.json", nlohmann::json::array());
+    const auto listing = PresetStore::List("nr");
+    REQUIRE(listing.refused.size() == 1);
+    CHECK(listing.refused[0].error == QString::fromUtf8("Файл повреждён: это не JSON-объект."));
+    CHECK(PresetStore::List(kPipelineTarget).refused.size() == 1);
+}
+
+TEST_CASE("Pipeline presets: save, apply every card and the encoder at once with one plan; before-apply saved and applying it swaps back; an equal preset changes nothing",
+          "[app][presets]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_pipeline");
+    StubProjectFile(d / "proj.dlssvid.json", d / "clip.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setStageEnabled("fg", false);
+    model.setStageParam("scenes", "threshold", 0.3);
+    model.setStageParam("nr", "intensity", 0.6);
+    model.setEncode("prores_ks", {}, {10, "422"});
+    const auto anime = model.savePipelinePreset(QString::fromUtf8("Аниме"));
+    REQUIRE(anime.ok);
+    REQUIRE(PresetStore::List(kPipelineTarget).items.size() == 1);
+    CHECK(PresetStore::List("nr").items.empty());
+    // back to other settings
+    model.setStageEnabled("fg", true);
+    model.setStageParam("scenes", "threshold", 0.24);
+    model.setStageParam("nr", "intensity", 1.4);
+    model.setEncode("h264_nvenc", {}, {});
+    CHECK(model.project().resultVideo.filename() == "clip_result.mp4");
+    QSignalSpy project(&model, &AppModel::projectChanged), plans(&model, &AppModel::planChanged), messages(&model, &AppModel::message);
+    const auto applied = model.applyPipelinePreset(anime.file);
+    REQUIRE(applied.ok);
+    CHECK(project.count() == 1);
+    CHECK(plans.count() == 1);
+    QTest::qWait(300);
+    CHECK(plans.count() == 1);  // no timer left behind
+    CHECK(messages.count() == 1);  // the summary only: no «Результат: …» of its own
+    INFO(applied.message.toStdString());
+    CHECK(applied.message.startsWith(QString::fromUtf8("Пресет обработки «Аниме» применён: ")));
+    CHECK(applied.message.contains(QString::fromUtf8(" · результат: clip_result.mov")));
+    CHECK(applied.message.contains(QString::fromUtf8("Генерация кадров выключена")));
+    CHECK(applied.message.contains(QString::fromUtf8("прежние — в «Перед применением»")));
+    CHECK_FALSE(model.stageEntry("fg")->enabled);
+    CHECK(model.stageEntry("scenes")->params["threshold"] == 0.3);
+    CHECK(model.stageEntry("nr")->params["intensity"] == 0.6);
+    CHECK(model.project().codec == "prores_ks");
+    CHECK(model.project().outputFormat == OutputFormatRequest{10, "422"});
+    CHECK(model.project().resultVideo.filename() == "clip_result.mov");
+    // the slot, then back and forth
+    const auto slot = PresetSlotFile(PresetSlot::BeforeApply, kPipelineTarget);
+    REQUIRE(std::filesystem::exists(slot));
+    REQUIRE(model.applyPipelinePreset(Q(slot)).ok);
+    CHECK(model.stageEntry("fg")->enabled);
+    CHECK(model.project().codec == "h264_nvenc");
+    CHECK(model.stageEntry("nr")->params["intensity"] == 1.4);
+    REQUIRE(model.applyPipelinePreset(Q(slot)).ok);
+    CHECK(model.project().codec == "prores_ks");
+    // equal: nothing
+    REQUIRE(model.saveProjectAs(Q(d / "saved.dlssvid.json")));
+    const auto size = std::filesystem::file_size(slot);
+    const auto time = std::filesystem::last_write_time(slot);
+    QSignalSpy dirty(&model, &AppModel::dirtyChanged), project2(&model, &AppModel::projectChanged), plans2(&model, &AppModel::planChanged);
+    const auto same = model.applyPipelinePreset(anime.file);
+    CHECK(same.ok);
+    CHECK(same.message.contains(QString::fromUtf8("Настройки обработки уже совпадают с «Аниме»")));
+    CHECK_FALSE(model.dirty());
+    CHECK(dirty.count() == 0);
+    CHECK(project2.count() == 0);
+    CHECK(plans2.count() == 0);
+    CHECK(std::filesystem::file_size(slot) == size);
+    CHECK(std::filesystem::last_write_time(slot) == time);
+    // the preview of the menu: what a preset would change, nothing written
+    const PresetLoad back = LoadPreset(slot, {}, PresetRead::Slot);
+    const PipelineDiff preview = model.previewPipelinePreset(back.preset);
+    CHECK_FALSE(preview.empty());
+    CHECK(model.project().codec == "prores_ks");
+}
+
+TEST_CASE("Pipeline presets: a refused preset or a card preset changes nothing and says why in Russian; a failed backup changes nothing until asked; a project with an error is not saved",
+          "[app][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_pipeline_refused");
+    StubProjectFile(d / "proj.dlssvid.json", d / "clip.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    const Project before = model.project();
+    const auto good = model.savePipelinePreset(QString::fromUtf8("Хороший"));
+    REQUIRE(good.ok);
+    nlohmann::json h264 = nlohmann::json::parse(std::ifstream(PresetStore::Path(good.file), std::ios::binary));
+    h264["encode"]["bit_depth"] = 10;
+    const auto refused = model.applyPipelinePreset(WritePreset(d / "h264.json", h264));
+    CHECK_FALSE(refused.ok);
+    INFO(refused.problems.join(" | ").toStdString());
+    CHECK(refused.problems.contains(QString::fromUtf8("Разрядность: 10 бит — H.264 NVENC кодирует только 8 бит")));
+    CHECK(model.project().ToJson({}) == before.ToJson({}));
+    CHECK(model.applyPipelinePreset(WritePreset(d / "card.json", CardPresetJson("Карточка", {{"intensity", 0.5}}))).problems.join(" ").contains(
+        QString::fromUtf8("Это пресет карточки «Улучшение»")));
+    nlohmann::json two = CardPresetJson("Две", {{"intensity", 0.5}});
+    two["stages"]["depth"] = {{"params", {{"backend", "vda"}}}};
+    const auto twoStages = model.applyPipelinePreset(WritePreset(d / "two.json", two));
+    CHECK(twoStages.problems.contains(QString::fromUtf8("В пресете карточки должна быть ровно одна стадия.")));
+    // a failed backup: nothing until asked
+    model.setStageParam("nr", "intensity", 1.4);
+    const QString dir = PresetStore::Dir();
+    std::ofstream(d / "blocker", std::ios::binary) << "x";
+    PresetStore::SetDir(Q(d / "blocker" / "presets"));
+    const auto failed = model.applyPipelinePreset(good.file);
+    CHECK(failed.backupFailed);
+    CHECK(model.stageEntry("nr")->params["intensity"] == 1.4);
+    CHECK(model.applyPipelinePreset(good.file, true).ok);
+    CHECK_FALSE(model.stageEntry("nr")->params.contains("intensity"));  // the preset's 1.0 is the default: sparse
+    PresetStore::SetDir(dir);
+    // the project's errors: a switched-off stage with a value out of range, an encoder the card cannot hold - not saved as a preset
+    model.setStageEnabled("nr", false);
+    model.setStageParams("nr", {{"backend", "stub"}, {"intensity", 5}});
+    const auto badSave = model.savePipelinePreset(QString::fromUtf8("С ошибкой"));
+    CHECK_FALSE(badSave.ok);
+    CHECK(badSave.problems.join(" | ").contains(QString::fromUtf8("Улучшение: Интенсивность: 5 — допустимо")));
+    model.setEncode("libx264", {});
+    model.setEncode("h264_nvenc", {}, {10, "auto"});
+    // ... but they do not keep the slot from being written: applying a preset goes without a question
+    model.setEncode("libx264", {});
+    const auto overErrors = model.applyPipelinePreset(good.file);
+    CHECK(overErrors.ok);
+    CHECK_FALSE(overErrors.backupFailed);
+    CHECK(model.project().codec == "h264_nvenc");
+    const auto back = model.applyPipelinePreset(Q(PresetSlotFile(PresetSlot::BeforeApply, kPipelineTarget)));
+    REQUIRE(back.ok);
+    CHECK(model.project().codec == "libx264");
+    CHECK(model.stageEntry("nr")->params["intensity"] == 5);
+    CHECK(back.message.contains(QString::fromUtf8("в слоте были и ошибки")));
+    // a bitrate the card cannot hold
+    model.setEncode("hevc_nvenc", {{"b", "12.5M"}}, {});
+    model.setStageParams("nr", {{"backend", "stub"}});
+    const auto bitrate = model.savePipelinePreset(QString::fromUtf8("Битрейт"));
+    CHECK_FALSE(bitrate.ok);
+    CHECK(bitrate.problems.join(" ").contains(QString::fromUtf8("Битрейт: %1 Мбит/с — карточка принимает целые 1–400 Мбит/с").arg(QLocale().toString(12.5, 'g', 6))));
+    model.setEncode("hevc_nvenc", {{"b", "50M"}}, {});
+    const auto ok = model.savePipelinePreset(QString::fromUtf8("Битрейт"));
+    CHECK(ok.ok);
+}
+
+TEST_CASE("StageCard: the preset menu sits in the NR card header only, after the stage switch in the Tab order; items show the diff, the match and the new-projects mark; a click applies",
+          "[app][card][presets]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("card_presets");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setStageParam("nr", "intensity", 0.7);
+    REQUIRE(model.saveStagePreset("nr", "A & B", {}, true).ok);
+    model.setStageParam("nr", "intensity", 1.0);
+    dlssvid::StageCard nr(model, "nr");
+    nr.refresh();
+    dlssvid::StageCard depth(model, "depth");
+    depth.refresh();
+    CHECK_FALSE(depth.presetMenu());
+    CHECK(depth.findChildren<PresetButton*>().isEmpty());
+    REQUIRE(nr.presetMenu());
+    PresetButton* button = nr.findChild<PresetButton*>();
+    REQUIRE(button);
+    CHECK(button->accessibleName() == QString::fromUtf8("Пресеты «Улучшения»"));
+    CHECK(button->isEnabled());
+    CHECK(button->focusPolicy() & Qt::TabFocus);
+    QCheckBox* stageSwitch = nullptr;
+    for (QCheckBox* c : nr.findChildren<QCheckBox*>())
+        if (c->toolTip() == QString::fromUtf8("Стадия участвует в обработке")) stageSwitch = c;
+    REQUIRE(stageSwitch);
+    CHECK(NextTab(stageSwitch, &nr) == button);  // the switch, then «Пресет», then «Сбросить», then the form
+    model.setStageParam("nr", "intensity", 1.2);
+    nr.refresh();
+    QPushButton* reset = nullptr;
+    for (QPushButton* b : nr.findChildren<QPushButton*>())
+        if (b->text() == QString::fromUtf8("Сбросить")) reset = b;
+    REQUIRE(reset);
+    CHECK(NextTab(button, &nr) == reset);
+    CHECK(reset->accessibleName() == QString::fromUtf8("Сбросить «Улучшение»"));
+    // the menu: built on aboutToShow, the name escaped, the mark in words, the difference in the tooltip
+    PresetMenu* menu = nr.presetMenu();
+    emit menu->aboutToShow();
+    QAction* item = ActionStarting(menu, QString::fromUtf8("A && B · для новых проектов"));
+    REQUIRE(item);
+    CHECK(item->isCheckable());
+    CHECK_FALSE(item->isChecked());
+    const QString change = QString::fromUtf8("Интенсивность %1 → %2").arg(QLocale().toString(1.2, 'f', 2), QLocale().toString(0.7, 'f', 2));
+    INFO(item->toolTip().toStdString());
+    CHECK(item->toolTip().startsWith(QString::fromUtf8("Изменит: ") + change));
+    CHECK(item->toolTip().endsWith(QString::fromUtf8("Файл: A & B.json")));  // two presets of one name tell apart
+    CHECK(item->statusTip().startsWith(QString::fromUtf8("Изменит: ")));
+    REQUIRE(ActionStarting(menu, QString::fromUtf8("&Сохранить текущие…")));  // the mnemonics of the menu are its own
+    CHECK(ActionStarting(menu, QString::fromUtf8("&Импорт…")));
+    item->trigger();
+    CHECK(model.stageEntry("nr")->params["intensity"] == 0.7);
+    emit menu->aboutToShow();
+    item = ActionStarting(menu, QString::fromUtf8("A && B"));
+    REQUIRE(item);
+    CHECK(item->isChecked());  // matches now
+    CHECK(item->toolTip().startsWith(QString::fromUtf8("Совпадает с текущими настройками")));
+    // the slot of that application, after a separator
+    CHECK(ActionStarting(menu, QString::fromUtf8("Перед применением · missing")));
+    // «Для новых проектов ▸»: the built-in defaults and the presets, one checked
+    QMenu* mark = nullptr;
+    for (QAction* a : menu->actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) mark = a->menu();
+    REQUIRE(mark);
+    REQUIRE(mark->actions().size() == 2);
+    CHECK_FALSE(mark->actions()[0]->isChecked());
+    CHECK(mark->actions()[1]->isChecked());
+    mark->actions()[0]->trigger();
+    CHECK(PresetStore::NewProjectPreset().isEmpty());
+    // review of PR-9: every opening rebuilds the menu - the old submenus go (clear() kept them)
+    emit menu->aboutToShow();
+    emit menu->aboutToShow();
+    CHECK(menu->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly).size() == 3);
+    // a mark on a file that is gone: cleared, «Встроенные умолчания» checked
+    // a mark on a file that is gone: said in the submenu, kept for the next new project to clear with its message
+    PresetStore::SetNewProjectPreset("gone.json");
+    emit menu->aboutToShow();
+    for (QAction* a : menu->actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) mark = a->menu();
+    CHECK_FALSE(mark->actions()[0]->isChecked());
+    CHECK(mark->actions().last()->text().startsWith(QString::fromUtf8("gone.json — не найден")));
+    CHECK(mark->actions().last()->isChecked());
+    CHECK(PresetStore::NewProjectPreset() == "gone.json");
+    // a refused preset of the other kind is no mark of it: the pipeline menu says the file cannot be read (review of PR-9)
+    nlohmann::json bad = CardPresetJson("Плохой", {{"intensity", 5}});
+    WritePreset(PresetStore::Path(PresetStore::Dir()) / "bad.json", bad);
+    PresetStore::SetNewProjectPreset("bad.json");
+    PresetMenu pipelineMenu(model, kPipelineTarget);
+    emit pipelineMenu.aboutToShow();
+    QMenu* pipelineMark = nullptr;
+    for (QAction* a : pipelineMenu.actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) pipelineMark = a->menu();
+    REQUIRE(pipelineMark);
+    CHECK(pipelineMark->actions().last()->text().startsWith(QString::fromUtf8("bad.json — не читается")));
+    StubDialogs saveStub;
+    pipelineMenu.setDialogs(saveStub.Make());
+    pipelineMenu.saveCurrent();  // no answer: nothing saved
+    REQUIRE(saveStub.lastSetup);
+    CHECK(saveStub.lastSetup->markNote.isEmpty());
+    // a mark on a file no menu reads: a line says so, nothing else checked
+    nlohmann::json newer = CardPresetJson("Новый", {{"intensity", 1}});
+    newer["schema"] = 2;
+    WritePreset(PresetStore::Path(PresetStore::Dir()) / "newer.json", newer);
+    PresetStore::SetNewProjectPreset("newer.json");
+    emit menu->aboutToShow();
+    for (QAction* a : menu->actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) mark = a->menu();
+    CHECK_FALSE(mark->actions()[0]->isChecked());
+    CHECK(mark->actions().last()->text().startsWith(QString::fromUtf8("newer.json — не читается")));
+    CHECK(mark->actions().last()->isChecked());
+    QSettings().remove("presets/newProject");
+    // a stage switched off still takes a preset
+    model.setStageEnabled("nr", false);
+    nr.refresh();
+    CHECK(button->isEnabled());
+}
+
+TEST_CASE("StageCard: card reset saves the before-reset preset first and asks when it cannot; cards without presets reset as before", "[app][card][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("card_reset_presets");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    dlssvid::StageCard nr(model, "nr");
+    StubDialogs dialogs;
+    nr.setDialogs(dialogs.Make());
+    auto resetButton = [](QWidget& card) {
+        QPushButton* reset = nullptr;
+        for (QPushButton* b : card.findChildren<QPushButton*>())
+            if (b->text() == QString::fromUtf8("Сбросить")) reset = b;
+        return reset;
+    };
+    // the slot cannot be written: asked once per click; «Отмена» keeps the settings, «Сбросить» resets
+    const QString dir = PresetStore::Dir();
+    std::ofstream(d / "blocker", std::ios::binary) << "x";
+    PresetStore::SetDir(Q(d / "blocker" / "presets"));
+    model.setStageParam("nr", "intensity", 1.4);
+    nr.refresh();
+    REQUIRE(resetButton(nr));
+    dialogs.answer = false;
+    resetButton(nr)->click();
+    CHECK(dialogs.confirms == 1);
+    CHECK(dialogs.texts.last().contains(QString::fromUtf8("Сбросить без автосохранения?")));
+    CHECK(model.stageEntry("nr")->params["intensity"] == 1.4);
+    dialogs.answer = true;
+    resetButton(nr)->click();
+    CHECK(dialogs.confirms == 2);
+    CHECK_FALSE(model.stageEntry("nr")->params.contains("intensity"));
+    PresetStore::SetDir(dir);
+    // an error in the current settings (from the JSON) does not keep the slot from being written: it is a snapshot
+    model.setStageParams("nr", {{"backend", "ngx"}, {"intensity", 5}});
+    nr.refresh();
+    resetButton(nr)->click();
+    CHECK(dialogs.confirms == 2);
+    const auto slot = PresetStore::Library().Slot(PresetSlot::BeforeReset, "nr");
+    REQUIRE(slot);
+    CHECK(slot->load.ok());
+    CHECK(slot->load.preset.stages.at("nr").params["intensity"] == 5);
+    CHECK_FALSE(model.stageEntry("nr")->params.contains("intensity"));
+    // a card without presets: no slot, no question
+    dlssvid::StageCard depth(model, "depth");
+    depth.setDialogs(dialogs.Make());
+    model.setStageParams("depth", {{"backend", "da3"}, {"stabilize", "none"}});
+    depth.refresh();
+    REQUIRE(resetButton(depth));
+    resetButton(depth)->click();
+    CHECK(model.stageEntry("depth")->params == nlohmann::json{{"backend", "da3"}});
+    CHECK_FALSE(std::filesystem::exists(PresetSlotFile(PresetSlot::BeforeReset, "depth")));
+    CHECK(dialogs.confirms == 2);
+}
+
+// Space is the window's playback (MainWindow: a QShortcut on the window) and QAbstractButton does not claim ShortcutOverride: without
+// PresetButton the key would start playback instead of opening the menu. The control check proves the shortcut is live in this window.
+TEST_CASE("StageCard: Space on the NR preset button opens the menu, not playback", "[app][card][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("card_presets_space");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    QWidget window;
+    auto* v = new QVBoxLayout(&window);
+    auto* card = new dlssvid::StageCard(model, "nr", &window);
+    auto* plain = new QPushButton("plain", &window);
+    v->addWidget(card);
+    v->addWidget(plain);
+    auto* space = new QShortcut(QKeySequence(Qt::Key_Space), &window);
+    QObject::connect(space, &QShortcut::activated, &model, [&] { model.setPlaying(!model.playing()); });
+    int processRequests = 0;
+    auto* process = new QShortcut(QKeySequence("Ctrl+Return"), &window);
+    QObject::connect(process, &QShortcut::activated, &window, [&] { ++processRequests; });
+    card->refresh();
+    window.show();
+    window.activateWindow();
+    REQUIRE(QTest::qWaitForWindowActive(&window));
+    // the control: on a plain button Space reaches the window's shortcut
+    plain->setFocus();
+    QTest::keyClick(plain, Qt::Key_Space);
+    REQUIRE(model.playing());
+    model.setPlaying(false);
+    PresetButton* button = card->findChild<PresetButton*>();
+    REQUIRE(button);
+    QMenu* menu = button->menu();
+    REQUIRE(menu);
+    int shown = 0;
+    QObject::connect(menu, &QMenu::aboutToShow, menu, [&] {
+        ++shown;
+        QTimer::singleShot(0, menu, &QMenu::close);
+    });
+    button->setFocus();
+    QTest::keyClick(button, Qt::Key_Return, Qt::ControlModifier);  // «Обработать» stays the window's (before a menu takes the activation)
+    CHECK(processRequests == 1);
+    CHECK(shown == 0);
+    QTest::keyClick(button, Qt::Key_Space);
+    CHECK(shown == 1);
+    CHECK_FALSE(model.playing());
+    QTest::keyClick(button, Qt::Key_Return);
+    CHECK(shown == 2);
+    QTest::keyClick(button, Qt::Key_Down, Qt::AltModifier);
+    CHECK(shown == 3);
+    QTest::keyClick(button, Qt::Key_Down);
+    CHECK(shown == 3);
+    model.setPlaying(false);
+}
+
+TEST_CASE("PresetSaveDialog: a bad name disables Save, an existing name turns it into Replace; it names the mark it replaces and what the preset leaves out",
+          "[app][presets]") {
+    App();
+    ClearPresets();
+    PresetSaveDialog::Setup setup;
+    setup.title = QString::fromUtf8("Сохранить настройки «Улучшения»");
+    setup.markNote = QString::fromUtf8("Сейчас для новых проектов: все настройки обработки из «Y» — будет заменено");
+    setup.leftOut = QString::fromUtf8("Не войдут в пресет: Формат пасса PNG 16 бит (инженерная настройка) — их переносит только файл проекта");
+    setup.problem = [](const QString& n) { return n.isEmpty() ? QString::fromUtf8("пусто") : QString(); };
+    setup.exists = [](const QString& n) { return n == QString::fromUtf8("Мягкий"); };
+    PresetSaveDialog dialog(setup);
+    CHECK_FALSE(dialog.saveButton()->isEnabled());
+    CHECK(dialog.nameNote()->text() == QString::fromUtf8("пусто"));
+    dialog.nameEdit()->setText(QString::fromUtf8("Новый"));
+    CHECK(dialog.saveButton()->isEnabled());
+    CHECK(dialog.saveButton()->text() == QString::fromUtf8("Сохранить"));
+    dialog.nameEdit()->setText(QString::fromUtf8("Мягкий"));
+    CHECK(dialog.saveButton()->text() == QString::fromUtf8("Заменить"));
+    CHECK(dialog.nameNote()->text() == QString::fromUtf8("Пресет «Мягкий» уже есть — будет заменён"));
+    CHECK(dialog.nameEdit()->maxLength() == 120);
+    CHECK_FALSE(dialog.markNote()->isVisibleTo(&dialog));  // only with «Применять к новым проектам»
+    dialog.newProjects()->setChecked(true);
+    CHECK(dialog.markNote()->isVisibleTo(&dialog));
+    CHECK(dialog.leftOut()->isVisibleTo(&dialog));
+    CHECK(dialog.answer().forNewProjects);
+    CHECK(dialog.answer().name == QString::fromUtf8("Мягкий"));
+    setup.leftOut.clear();
+    PresetSaveDialog bare(setup);
+    CHECK_FALSE(bare.leftOut()->isVisibleTo(&bare));
+    // the NR menu fills it: the pipeline preset's mark it would move, the pass format the preset leaves out
+    const auto d = Dir("save_dialog");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    REQUIRE(model.savePipelinePreset("Y", {}, true).ok);
+    model.setStageParam("nr", "format", "png");
+    PresetMenu menu(model, "nr");
+    StubDialogs dialogs;
+    menu.setDialogs(dialogs.Make());
+    dialogs.saveAnswer = PresetSaveDialog::Answer{QString::fromUtf8("Мягкий"), true};
+    menu.saveCurrent();
+    REQUIRE(dialogs.lastSetup);
+    CHECK(dialogs.lastSetup->title == QString::fromUtf8("Сохранить настройки «Улучшения»"));
+    CHECK(dialogs.lastSetup->markNote == QString::fromUtf8("Сейчас для новых проектов: все настройки обработки из «Y» — будет заменено"));
+    CHECK(dialogs.lastSetup->leftOut.contains(QString::fromUtf8("Формат пасса")));
+    CHECK(dialogs.lastSetup->problem(QString::fromUtf8("Перед сбросом · clip")).contains(QString::fromUtf8("автосохранения")));
+    CHECK(dialogs.lastSetup->exists(QString::fromUtf8("мягкий")));  // saved by this very call
+    CHECK(PresetStore::List("nr").items.size() == 1);
+    CHECK(PresetStore::NewProjectPreset() == QFileInfo(PresetStore::List("nr").items[0].file).fileName());  // the one mark moved
+    model.setStageParam("nr", "format", "exr");
+    dialogs.lastSetup.reset();
+    menu.saveCurrent();
+    CHECK_FALSE(dialogs.lastSetup->leftOut.contains(QString::fromUtf8("Формат пасса")));  // at its default: nothing to name
+    CHECK(dialogs.lastSetup->leftOut.contains(QString::fromUtf8("Бэкенд stub")));       // the stub method of this project is
+    CHECK(dialogs.lastSetup->markNote.isEmpty());  // the mark is on this menu's kind now
+    CHECK(PresetStore::List("nr").items.size() == 1);  // the same name: replaced
+}
+
+namespace {
+PresetButton* PipelineButton(QWidget* panel) {
+    for (PresetButton* b : panel->findChildren<PresetButton*>())
+        if (b->accessibleName() == QString::fromUtf8("Пресеты обработки")) return b;
+    return nullptr;
+}
+}  // namespace
+
+TEST_CASE("ProjectPanel: the pipeline preset button sits in the Stages header after Process in the Tab order; Space opens its menu instead of playback; items preview the diff per stage",
+          "[app][panel][presets][regression]") {
+    App();
+    ClearPresets();
+    {  // no project: the button waits
+        AppModel empty(true);
+        TaskQueue queue;
+        ProjectPanel panel(empty, queue);
+        panel.refresh();
+        REQUIRE(PipelineButton(&panel));
+        CHECK_FALSE(PipelineButton(&panel)->isEnabled());
+    }
+    const auto d = Dir("panel_presets");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setStageParam("scenes", "threshold", 0.3);
+    model.setStageEnabled("fg", false);
+    model.setEncode("hevc_nvenc", {{"b", "50M"}}, {10, "auto"});
+    REQUIRE(model.savePipelinePreset(QString::fromUtf8("Аниме")).ok);
+    model.setStageParam("scenes", "threshold", 0.24);
+    model.setStageEnabled("fg", true);
+    model.setEncode("h264_nvenc", {}, {});
+    TaskQueue queue;
+    QWidget window;
+    auto* v = new QVBoxLayout(&window);
+    auto* panel = new ProjectPanel(model, queue, &window);
+    auto* plain = new QPushButton("plain", &window);
+    v->addWidget(panel);
+    v->addWidget(plain);
+    auto* space = new QShortcut(QKeySequence(Qt::Key_Space), &window);
+    QObject::connect(space, &QShortcut::activated, &model, [&] { model.setPlaying(!model.playing()); });
+    panel->refresh();
+    PresetButton* button = PipelineButton(panel);
+    REQUIRE(button);
+    CHECK(button->isEnabled());
+    CHECK(button->text() == QString::fromUtf8("Пресет &обработки"));  // Alt+О
+    QPushButton* process = nullptr;
+    for (QPushButton* b : panel->findChildren<QPushButton*>())
+        if (b->text().startsWith(QString::fromUtf8("Обработать"))) process = b;
+    REQUIRE(process);
+    process->setEnabled(true);  // the plan has no video here: the order is what counts
+    CHECK(NextTab(process, panel) == button);
+    QWidget* after = NextTab(button, panel);
+    REQUIRE(after);
+    CHECK(after->toolTip() == QString::fromUtf8("Стадия участвует в обработке"));  // the switch of the first card
+    window.show();
+    window.activateWindow();
+    REQUIRE(QTest::qWaitForWindowActive(&window));
+    plain->setFocus();
+    QTest::keyClick(plain, Qt::Key_Space);
+    REQUIRE(model.playing());  // the control: the window's Space is live
+    model.setPlaying(false);
+    QMenu* menu = button->menu();
+    REQUIRE(menu);
+    int shown = 0;
+    QObject::connect(menu, &QMenu::aboutToShow, menu, [&] {
+        ++shown;
+        QTimer::singleShot(0, menu, &QMenu::close);
+    });
+    button->setFocus();
+    QTest::keyClick(button, Qt::Key_Space);
+    CHECK(shown == 1);
+    CHECK_FALSE(model.playing());
+    // the preview per stage
+    emit menu->aboutToShow();
+    QAction* item = ActionStarting(menu, QString::fromUtf8("Аниме"));
+    REQUIRE(item);
+    CHECK_FALSE(item->isChecked());
+    const QString tip = item->toolTip();
+    INFO(tip.toStdString());
+    CHECK(tip.startsWith(QString::fromUtf8("Изменит:\n")));
+    CHECK(tip.contains(QString::fromUtf8("  Склейки: Порог склейки %1 → %2").arg(QLocale().toString(0.24, 'f', 2), QLocale().toString(0.3, 'f', 2))));
+    CHECK(tip.contains(QString::fromUtf8("  Генерация кадров: выключится")));
+    CHECK(tip.contains(QString::fromUtf8("  Кодирование: Кодек H.264 NVENC → HEVC NVENC; Разрядность Авто → 10 бит; Битрейт Авто → 50 Мбит/с")));
+    CHECK(tip.contains(QString::fromUtf8("Без изменений: Глубина, Векторы движения, Апскейл, Улучшение")));
+    CHECK(item->statusTip() == QString::fromUtf8("Изменит: Склейки, Генерация кадров, Кодирование"));
+    StubDialogs quiet;
+    panel->pipelinePresetMenu()->setDialogs(quiet.Make());
+    item->trigger();
+    CHECK(quiet.warnings == 0);  // the summary goes to the status bar and the log: no dialog
+    CHECK(quiet.infos == 0);
+    CHECK(quiet.confirms == 0);
+    CHECK_FALSE(model.stageEntry("fg")->enabled);
+    CHECK(model.project().codec == "hevc_nvenc");
+    emit menu->aboutToShow();
+    item = ActionStarting(menu, QString::fromUtf8("Аниме"));
+    REQUIRE(item);
+    CHECK(item->isChecked());
+    CHECK(ActionStarting(menu, QString::fromUtf8("Перед применением · missing")));
+    // the save dialog of this menu names the NR mark it would move
+    model.setStageParam("nr", "intensity", 0.8);
+    REQUIRE(model.saveStagePreset("nr", QString::fromUtf8("Мягкий"), {}, true).ok);
+    StubDialogs dialogs;
+    panel->pipelinePresetMenu()->setDialogs(dialogs.Make());
+    panel->pipelinePresetMenu()->saveCurrent();
+    REQUIRE(dialogs.lastSetup);
+    CHECK(dialogs.lastSetup->title == QString::fromUtf8("Сохранить настройки обработки"));
+    CHECK(dialogs.lastSetup->markNote == QString::fromUtf8("Сейчас для новых проектов: «Улучшение» из «Мягкий» — будет заменено"));
+    emit panel->pipelinePresetMenu()->aboutToShow();
+    QMenu* mark = nullptr;
+    for (QAction* a : panel->pipelinePresetMenu()->actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) mark = a->menu();
+    REQUIRE(mark);
+    QAction* other = mark->actions().last();
+    CHECK(other->text() == QString::fromUtf8("«Улучшение» из «Мягкий»"));
+    CHECK(other->isChecked());
+    CHECK_FALSE(other->isEnabled());
+    CHECK_FALSE(mark->actions()[0]->isChecked());  // «Встроенные умолчания»: the mark is elsewhere
+    QSettings().remove("presets/newProject");
+    model.setPlaying(false);
+}
+
+TEST_CASE("ProjectPanel: a codec outside the list is its own item of the encode card; choosing one of the list changes the project's codec", "[app][panel][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("panel_codec");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setEncode("libx264", {});
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    QComboBox* codec = nullptr;
+    for (QComboBox* c : panel.findChildren<QComboBox*>())
+        if (c->count() > 0 && c->itemData(0).toString() == "h264_nvenc") codec = c;
+    REQUIRE(codec);
+    CHECK(codec->count() == 6);
+    CHECK(codec->currentText() == QString::fromUtf8("libx264 (из файла проекта)"));
+    const auto refused = model.savePipelinePreset(QString::fromUtf8("Не выйдет"));
+    CHECK_FALSE(refused.ok);
+    CHECK(refused.problems.join(" ").contains(QString::fromUtf8("Кодек: «libx264» — нет в списке")));
+    codec->setCurrentIndex(0);  // H.264 NVENC: before, the index stayed 0 and nothing changed
+    CHECK(model.project().codec == "h264_nvenc");
+    panel.refresh();
+    CHECK(codec->count() == 5);
+    CHECK(codec->currentIndex() == 0);
+    CHECK(model.savePipelinePreset(QString::fromUtf8("Теперь")).ok);
+}
+
+// The stages' header with «Пресет обработки» and its open menu (as the NR card's shots: set DLSSVID_SHOTS_DIR, [.shots])
+TEST_CASE("ProjectPanel pipeline preset screenshots for a merge request", "[.shots]") {
+    App();
+    const QString out = qEnvironmentVariable("DLSSVID_SHOTS_DIR");
+    if (out.isEmpty()) SKIP("DLSSVID_SHOTS_DIR is not set");
+    dlssvid::ApplyTheme(App());
+    ClearPresets();
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto d = Dir("panel_shots");
+    Project p = Project::Create(WriteClip(d / "clip.mkv", spec), d / "passes");
+    p.Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setStageParam("nr", "intensity", 0.8);
+    model.setStageEnabled("fg", false);
+    model.savePipelinePreset(QString::fromUtf8("Аниме 4K"), {}, true);
+    model.setStageParam("nr", "intensity", 1.0);
+    model.setStageEnabled("fg", true);
+    TaskQueue queue;
+    const QString scale = QString::number(qEnvironmentVariable("QT_SCALE_FACTOR", "1").toDouble() * 100);
+    ProjectPanel panel(model, queue);
+    panel.setAttribute(Qt::WA_DontShowOnScreen);
+    panel.resize(1100, 900);
+    panel.show();
+    panel.refresh();
+    QApplication::processEvents();
+    PresetButton* button = PipelineButton(&panel);
+    REQUIRE(button);
+    const QPoint at = button->mapTo(&panel, QPoint(0, 0));
+    const QString head = out + "/stages_header_" + scale + ".png";
+    REQUIRE(panel.grab(QRect(0, at.y() - 12, panel.width(), button->height() + 24)).save(head));
+    std::printf("saved %s\n", head.toStdString().c_str());
+    PresetMenu* menu = panel.pipelinePresetMenu();
+    menu->setAttribute(Qt::WA_DontShowOnScreen);
+    emit menu->aboutToShow();
+    menu->adjustSize();
+    const QString file = out + "/pipeline_preset_menu_" + scale + ".png";
+    REQUIRE(menu->grab().save(file));
+    std::printf("saved %s\n", file.toStdString().c_str());
+    QSettings().remove("presets/newProject");
+}
+
+// Review of PR-9: an empty text value (flow.target "" = the default) read as nothing before the arrow
+TEST_CASE("ParamText: a change of a text key from or to its empty default reads as the default", "[app][presets][regression]") {
+    App();
+    const QString t = ChangeText("flow", ParamChange{"target", "", "1920x1080", "ofa", "ofa"});
+    INFO(t.toStdString());
+    CHECK(t == QString::fromUtf8("Целевое разрешение mv_dlss (WxH) по умолчанию → 1920x1080"));
+    CHECK(ChangeText("flow", ParamChange{"target", "1920x1080", "", "ofa", "ofa"}).endsWith(QString::fromUtf8("→ по умолчанию")));
+}
+
+// Review of PR-9: the menus' import, export and delete through their dialogs - the copy the clash names, replace, cancel, a pipeline
+// preset into the NR card, the current settings exported with what they leave out, a permanent delete
+TEST_CASE("PresetMenu: import, export and delete through the dialogs", "[app][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("menu_actions");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    QSignalSpy messages(&model, &AppModel::message);
+    PresetMenu nr(model, "nr");
+    StubDialogs dialogs;
+    nr.setDialogs(dialogs.Make());
+    const QString soft = WritePreset(d / "soft.json", CardPresetJson("Мягкий", {{"intensity", 0.7}}));
+    dialogs.open = soft;
+    nr.importFile();
+    REQUIRE(PresetStore::List("nr").items.size() == 1);
+    dialogs.clash = PresetDialogs::Clash::Copy;
+    nr.importFile();
+    CHECK(dialogs.clashName == QString::fromUtf8("Мягкий"));
+    CHECK(dialogs.clashCopy == QString::fromUtf8("Мягкий (2)"));
+    nr.importFile();
+    CHECK(dialogs.clashCopy == QString::fromUtf8("Мягкий (3)"));  // the button names what is saved
+    auto names = [] {
+        QStringList n;
+        for (const auto& i : PresetStore::List("nr").items) n << i.name;
+        return n;
+    };
+    CHECK(names() == QStringList{QString::fromUtf8("Мягкий"), QString::fromUtf8("Мягкий (2)"), QString::fromUtf8("Мягкий (3)")});
+    auto stored = [] {
+        for (const auto& i : PresetStore::List("nr").items)
+            if (i.name == QString::fromUtf8("Мягкий")) return LoadPreset(PresetStore::Path(i.file)).preset.stages.at("nr").params.at("intensity").get<double>();
+        return -1.0;
+    };
+    WritePreset(d / "soft.json", CardPresetJson("Мягкий", {{"intensity", 0.4}}));
+    dialogs.clash = PresetDialogs::Clash::Replace;
+    nr.importFile();
+    CHECK(names().size() == 3);
+    CHECK(stored() == Approx(0.4));  // replaced
+    CHECK(LastMessage(messages) == QString::fromUtf8("Пресет «Мягкий» импортирован"));
+    WritePreset(d / "soft.json", CardPresetJson("Мягкий", {{"intensity", 0.3}}));
+    dialogs.clash = PresetDialogs::Clash::Cancel;
+    nr.importFile();
+    CHECK(names().size() == 3);
+    CHECK(stored() == Approx(0.4));  // cancelled: untouched
+    CHECK(dialogs.warnings == 0);
+    // a pipeline preset into the card: its nr settings, said in a dialog
+    nlohmann::json pipe = {{"format", "dlssvid-preset"}, {"schema", 1}, {"scope", "pipeline"}, {"name", "Аниме"}, {"stages", nlohmann::json::object()}};
+    pipe["stages"]["nr"] = {{"enabled", true}, {"params", {{"intensity", 0.6}}}};
+    dialogs.open = WritePreset(d / "pipe.json", pipe);
+    nr.importFile();
+    CHECK(dialogs.infos == 1);
+    CHECK(dialogs.texts.last().startsWith(QString::fromUtf8("Из пресета обработки «Аниме» взяты настройки «Улучшения».")));
+    // the current settings exported: a valid preset of their kind; what it lacks is said
+    model.setStageParam("nr", "format", "png");
+    dialogs.save = Q(d / "out" / "nr.json");
+    nr.exportFile({});
+    const PresetLoad card = LoadPreset(d / "out" / "nr.json");
+    REQUIRE(card.ok());
+    CHECK(card.preset.scope == PresetScope::Stage);
+    CHECK(LastMessage(messages).contains(QString::fromUtf8("Не войдут в пресет")));
+    PresetMenu all(model, kPipelineTarget);
+    all.setDialogs(dialogs.Make());
+    model.setEncode("hevc_nvenc", {{"b", "50M"}}, {});
+    dialogs.save = Q(d / "out" / "all.json");
+    all.exportFile({});
+    const PresetLoad whole = LoadPreset(d / "out" / "all.json");
+    REQUIRE(whole.ok());
+    CHECK(whole.preset.scope == PresetScope::Pipeline);
+    CHECK(whole.preset.stages.size() == 6);
+    REQUIRE(whole.preset.encode);
+    CHECK(whole.preset.encode->codec == "hevc_nvenc");
+    CHECK(dialogs.warnings == 0);
+    // delete: asked, permanent, the mark on it goes
+    const auto listed = PresetStore::List("nr").items;
+    const QString victim = listed[0].file;
+    PresetStore::SetNewProjectPreset(victim);
+    dialogs.answer = false;
+    nr.removeFile(victim, listed[0].name);
+    CHECK(std::filesystem::exists(PresetStore::Path(victim)));
+    dialogs.answer = true;
+    nr.removeFile(victim, listed[0].name);
+    CHECK(dialogs.texts.last().contains(QFileInfo(victim).fileName()));  // the file named in the question
+    CHECK_FALSE(std::filesystem::exists(PresetStore::Path(victim)));
+    CHECK(PresetStore::NewProjectPreset().isEmpty());
+}
+
+// Review of PR-9: the Russian texts of a few file problems say what the file holds and what it should
+TEST_CASE("PresetStore texts: a whole number, a chroma given as a number or in the card's spelling, a list key without a list", "[app][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_texts");
+    const auto fractional = PresetStore::Import("nr", WritePreset(d / "passes.json", CardPresetJson("Проходы", {{"passes", 2.5}})));
+    INFO(fractional.problems.join(" | ").toStdString());
+    CHECK(fractional.problems.join(" ").contains(QString::fromUtf8("Проходы: нужно целое число")));
+    nlohmann::json pipe = {{"format", "dlssvid-preset"}, {"schema", 1}, {"scope", "pipeline"}, {"name", "Цвет"}, {"stages", nlohmann::json::object()}};
+    pipe["stages"]["nr"] = {{"enabled", true}, {"params", {{"intensity", 0.6}}}};
+    for (const nlohmann::json& chroma : {nlohmann::json(420), nlohmann::json("4:2:0")}) {
+        INFO(chroma.dump());
+        pipe["encode"] = {{"codec", "h264_nvenc"}, {"chroma", chroma}};
+        const auto r = PresetStore::Import(kPipelineTarget, WritePreset(d / "chroma.json", pipe));
+        INFO(r.problems.join(" | ").toStdString());
+        CHECK(r.problems.join(" ").contains(QString::fromUtf8("в файле допустимо строкой \"auto\", \"420\", \"422\" или \"444\"")));
+        CHECK_FALSE(r.problems.join(" ").contains(QString::fromUtf8("кодирует")));
+    }
+    PresetIssue listless;
+    listless.kind = PresetIssueKind::ForeignKey;
+    listless.stage = "depth";
+    listless.key = "model";
+    listless.to = "da3";
+    listless.kept = true;
+    CHECK(PresetStore::IssueText(listless).contains(QString::fromUtf8("нет списка — пресет её не задаёт, оставлено значение проекта")));
+    listless.kept = false;  // the preset's switch of the method dropped the project's value
+    CHECK(PresetStore::IssueText(listless).contains(QString::fromUtf8("работает значение метода по умолчанию")));
+    listless.key = "window";
+    CHECK(PresetStore::IssueText(listless).contains(QString::fromUtf8("не относится к методу")));
+}
+
+// Review of PR-9: in the GUI too a card preset's name is taken per stage - an NR «Мягкий» next to a depth one is saved and imported
+// as a new file, the depth preset untouched (before: «Заменить» overwrote it)
+TEST_CASE("Presets: the NR menu never replaces a card preset of another stage with the same name", "[app][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_other_stage");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    const auto depthFile = PresetStore::Path(PresetStore::Dir()) / "depth-soft.json";
+    WritePreset(depthFile, CardPresetJson("Мягкий", {{"backend", "vda"}}, "depth"));
+    auto bytes = [](const std::filesystem::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const std::string depthBytes = bytes(depthFile);
+    CHECK_FALSE(PresetStore::FindByName(QString::fromUtf8("Мягкий"), PresetScope::Stage, "nr"));
+    CHECK(PresetStore::FindByName(QString::fromUtf8("Мягкий"), PresetScope::Stage, "depth"));
+    PresetMenu menu(model, "nr");
+    StubDialogs dialogs;
+    menu.setDialogs(dialogs.Make());
+    menu.saveCurrent();  // cancelled: the dialog's setup only
+    REQUIRE(dialogs.lastSetup);
+    CHECK_FALSE(dialogs.lastSetup->exists(QString::fromUtf8("Мягкий")));  // no «Заменить» over the depth preset
+    dialogs.saveAnswer = PresetSaveDialog::Answer{QString::fromUtf8("Мягкий"), false};
+    menu.saveCurrent();
+    const auto listed = PresetStore::List("nr").items;
+    REQUIRE(listed.size() == 1);
+    CHECK(PresetStore::Path(listed[0].file) != depthFile);
+    CHECK(bytes(depthFile) == depthBytes);
+    const auto again = model.saveStagePreset("nr", QString::fromUtf8("Мягкий"));
+    CHECK(again.exists);
+    CHECK(again.file == listed[0].file);  // the clash is with the NR preset
+    // an import of an NR «Мягкий» clashes with the NR one only
+    const auto imported = PresetStore::Import("nr", WritePreset(d / "soft.json", CardPresetJson("Мягкий", {{"intensity", 0.5}})));
+    CHECK(imported.exists);
+    CHECK(imported.file == listed[0].file);
+    CHECK(bytes(depthFile) == depthBytes);
+    // a card preset of a card without a menu, where a pipeline preset is expected: the command line, not a menu that does not exist
+    const auto refused = model.applyPipelinePreset(Q(depthFile));
+    CHECK(refused.problems.join(" ").contains(QString::fromUtf8("--param-file depth=")));
+    CHECK_FALSE(refused.problems.join(" ").contains(QString::fromUtf8("Пресет ▾")));
+    // a name with a no-break space at its end: the clash is found before the core would refuse the save
+    const auto nbsp = PresetStore::Import("nr", WritePreset(d / "nbsp.json", CardPresetJson("Ночь\xC2\xA0", {{"intensity", 0.4}})));
+    REQUIRE(nbsp.ok);
+    const auto nbspAgain = PresetStore::Import("nr", WritePreset(d / "nbsp.json", CardPresetJson("Ночь\xC2\xA0", {{"intensity", 0.4}})));
+    CHECK(nbspAgain.exists);
+    CHECK(nbspAgain.problems.isEmpty());
+}
+
+// Review of PR-9: the tooltip of the other kind's mark is explicit rich text - «A & B» reads as written, not «A &amp; B»
+TEST_CASE("PresetMenu: the other kind's mark names a preset with & as written", "[app][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_mark_tip");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    REQUIRE(model.savePipelinePreset("A & B", {}, true).ok);
+    PresetMenu menu(model, "nr");
+    emit menu.aboutToShow();
+    QMenu* mark = nullptr;
+    for (QAction* a : menu.actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) mark = a->menu();
+    REQUIRE(mark);
+    QAction* other = mark->actions().last();
+    CHECK(other->text() == QString::fromUtf8("Пресет обработки «A && B»"));
+    QTextDocument doc;
+    doc.setHtml(other->toolTip());
+    CHECK(doc.toPlainText().contains(QString::fromUtf8("из «A & B»")));
+    QSettings().remove("presets/newProject");
 }

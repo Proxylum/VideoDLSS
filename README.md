@@ -365,6 +365,7 @@ dlssvid nr -i input.mp4 -o passes --no-guides --video nr.mp4                    
 dlssvid nr -i input.mp4 -o passes --backend stub --warp                               :: deterministic stand-in (tests, any GPU)
 dlssvid nr -i input.mp4 -o ab\a --no-auto --color-dir passes\color_sr --depth-dir passes\depth_dlss --mv-dir passes\mv_dlss --masks-dir passes --start 240 --frames 12 --warmup 6   :: frames 240..251 only; 234..239 build the model's history
 dlssvid nr -i input.mp4 -o ab\b ... --params-file tuned.json --intensity 1.4             :: the project's nr keys from a file; options on the command line win, even at their default
+dlssvid nr -i input.mp4 -o ab\b ... --params-file "Мягкий портрет.json"                  :: a preset of the GUI (dlssvid-preset): its nr settings, checked when read
 dlssvid nr -i input.mp4 -o ab\c ... --mv-scale auto --create-with-mv --no-depth-guide   :: A/B switches (not project settings): MV units, zero MVs at CreateFeature, no depth
 python scripts\nr_ab.py --clip input.mp4 --passes passes --experiment E1 --start 48       :: NR A/B (docs/benchmarks.md): one range per variant + compare -> markdown tables; --list, --dry-run
 ```
@@ -372,7 +373,10 @@ python scripts\nr_ab.py --clip input.mp4 --passes passes --experiment E1 --start
 `--start` counts frames as the pass folders and the viewport do, from 0; the seek assumes a constant frame rate (VFR is
 not detected yet). A part of the clip carries `stage_params.range`, `process` never takes it for the clip's pass, and a
 range is not written over a `color_nr` that `process` made. `--params-file` takes one JSON object of the project's keys
-(`stages.nr.params`); a key the schema does not have is refused, so a typo cannot pass unnoticed. The A/B switches
+(`stages.nr.params`); a key the schema does not have is refused, so a typo cannot pass unnoticed. It also takes a
+`dlssvid-preset` file (PR-9, `docs/conventions.md` «Пресеты»): a card preset of «Улучшение» gives its settings — its
+engineer keys `backend` and `format` come from the options — and a pipeline preset gives its nr entry; a preset with a value
+out of range, of a newer schema or without nr settings is refused whole. The A/B switches
 (`--mv-scale`, `--create-with-mv`, `--no-depth-guide`) are options of the standalone run only, never settings: a pass written
 with them carries `stage_params.ab`, and `process` never adopts or reuses it. `--intensity` is the edit strength after the
 model (`out = in + s * (model - in)`); at 0 the model is not called, and the A/B switches of its guides are refused.
@@ -403,6 +407,9 @@ stage `failed`, encodes the result from `color_nr` and prints a `warning:` line;
 dlssvid process -i input.mp4 -o result.mp4                                            :: depth -> flow -> upscale x2 -> nr -> fg x2 -> encode (+ audio)
 dlssvid process --project clip.dlssvid.json                                           :: the stages and parameters the GUI saved (button «Обработать → result»)
 dlssvid process --project tuned.dlssvid.json -i other.mp4                            :: those settings for another video: its own hash, passes and result next to it
+dlssvid process -i clip.mp4 --param-file anime.json                                   :: a pipeline preset of the GUI: every stage on/off with its settings, and the encoder
+dlssvid process -i clip.mp4 --param-file anime.json --param-file nr=soft.json --param nr.intensity=0.9 --codec ffv1   :: the layers below
+dlssvid process --project clip.dlssvid.json --param-file nr=tuned.json --plan          :: one stage's settings: a JSON object of its keys (merged) or a preset (its form keys)
 dlssvid process -i input.mp4 -o result.mp4 --stages upscale,fg --scale 1.5 --multiplier 2 --param fg.backend=rife
 dlssvid process -i input.mp4 -o result.mp4 --no-skip-existing --disable-unavailable   :: recompute everything; skip nr / fg without a DLL (or a crashed fg)
 dlssvid process --project clip.dlssvid.json --plan [--json plan.json]                 :: what would run or be reused and why (fingerprints, versions) — nothing is processed
@@ -419,6 +426,23 @@ dlssvid process -i input10.mov -o out.mp4 --codec hevc_nvenc --chroma 444       
 dlssvid process -i input10.mov -o out.mov --codec prores_ks                           :: ProRes 422 HQ (4444 for a 4:4:4 source): 10-bit, .mov
 dlssvid process -i input10.mov -o out.mkv --codec ffv1 --bit-depth 12                 :: lossless at a chosen depth
 ```
+
+**Settings from files (`--param-file`, PR-9; also `bench`).** `--param-file <stage>=<file.json>` takes one stage's
+settings: a JSON object of its keys (as `stages.<stage>.params` of a project, merged over them; a key the schema does not
+have is refused) or a `dlssvid-preset` of either kind, whose settings of that stage replace the form's keys (a card preset keeps
+the stage's engineer keys; a pipeline preset's entry also replaces its tuning keys — backend, pass format and the other fine
+settings of the algorithm — and only the keys of the machine stay). `--param-file <file.json>` without `stage=` takes a preset only: a pipeline preset (the GUI's «Пресет
+обработки») sets the stages it names — on or off, with their settings and the engineer keys of the algorithm — and the
+encoder (codec, bit depth, chroma, bitrate) as a project would; a card preset goes to its stage. The layers, each over the
+one before: the project (or the built-in defaults) < one pipeline preset, wherever it stands < `--stages` < the stage files
+and card presets, in command-line order < `--depth-backend` … `--fg-backend`, `--scale`, `--multiplier` < `--param`; the
+encoder: the project < the pipeline preset < `--codec` / `--bit-depth` / `--chroma` / `--codec-opt` (which replaces all the
+options, the preset's bitrate too). A stage file switches its stage on, as `--param` does, also one `--stages` leaves out;
+`--stages` wins over a pipeline preset's switches. The project's result takes the container of the codec that encodes it
+(`--project` with a ProRes preset writes `.mov`, then `--codec h264_nvenc` writes `.mp4`); `process --codec` over a preset's bit
+depth or chroma it cannot encode fails the run at the encode, after the stages (`--plan` does not check the pair) — give
+`--bit-depth auto --chroma auto` with it; `bench` (no such options) takes auto itself when `--codec` replaces the preset's codec. `--plan` prints the
+encoder the run would use (`encode:` line, `encode` in `--json`); the project file is never changed.
 
 **Bit depth and chroma.** The decoder keeps a source's own layout — 8, 10, 12 or 16 bits, 4:2:0 / 4:2:2 / 4:4:4 (HEVC
 Main 10 and Rext, AV1 10-bit, ProRes, FFV1, DNxHR …), with NVDEC and software decoding bit-exact to each other — and
@@ -439,6 +463,21 @@ steps, no 8-bit staircase (measured, `docs/benchmarks.md`; the `[precision]` tes
 | `prores_ks` | 10 | 4:2:2, 4:4:4 | .mov | 422 HQ / 4444, the rate comes from the profile (no bitrate option) |
 | `ffv1` | 8, 10, 12, 16 | 4:2:0, 4:2:2, 4:4:4 | .mkv | lossless |
 
+**Presets (PR-9).** The NR card has «Пресет ▾» under its title: named presets of its settings (the form's keys; the
+backend and the pass format stay the card's), «Сохранить текущие…», «Импорт…», «Экспорт ▸», «Удалить ▸», «Для новых
+проектов ▸», «Открыть папку пресетов»; a preset's tooltip says what it would change («Изменит: Интенсивность 1,00 → 0,70»)
+and the one that matches the current settings is checked. «Пресет обработки ▾» at the right of the «Стадии» header does
+the same for the whole processing at once: every stage on or off with its settings and the engineer keys of the algorithm
+(NIS sharpness, the DLSS preset, the RIFE model, the pass format …), and the encoder card (codec, bit depth, chroma,
+bitrate); its tooltip lists the change per stage. Paths and the sizes for the GPU's memory (`models_dir`, `python`,
+`max_res`, `input_size`, `tile`, `fp32`), the settings note and the encoder options other than the bitrate stay the
+project's — the save dialog names the ones that are set («Не войдут в пресет: …»). Before a preset is applied or a card
+is reset, the settings go into «Перед применением» / «Перед сбросом» (one step back, for every project of this machine);
+a preset with a value out of range is refused whole with the reason in Russian. One preset — of either kind — can be
+marked for new projects: a video opened without a project file next to it gets those settings. The files live in
+`%APPDATA%\dlssvid\dlssvid\presets` (`docs/conventions.md` §8); the CLI reads them with `--param-file` and
+`nr --params-file`.
+
 GUI keys: `1`…`9` source, `Ctrl+1/2/3` single / overlay / grid, wheel = zoom to cursor (25–800 %), middle drag = pan,
 `F` fit, `Ctrl+0` 1:1, `W` wipe (left drag moves it), click a 2x2 cell = expand, `Space` play, `,`/`.` step,
 `L` loop playback, `Ctrl+Shift+S` PNG screenshot with cell labels, `Ctrl+S` save project. The timeline runs in seconds (stage 9): a 24 fps
@@ -456,7 +495,7 @@ The project panel (stage 9) shows the source (frame, sound, passes, hash and whe
 (the result's size and rate, the time and disk of what will run, one button «Обработать · N стадий», `Ctrl+Enter`), one
 card per stage with a form built from the stage schema (backend list, scale / multiplier toggles, sliders; the rows in
 groups, the less used ones under a collapsed «Ещё настройки» that names what was changed, ↺ per row and «Сбросить» for
-the card, changed values in accent; the advanced keys in the JSON editor of the engineer mode) and what the plan does
+the card under its title, changed values in accent; the advanced keys in the JSON editor of the engineer mode) and what the plan does
 with it («переиспользуется», «пересчёт: Интенсивность 1 → 1.4», «будет посчитано», a warning when NR / FG would run
 without depth and vectors, and for the stages that read the scene list what the cuts do to them). The first card,
 «Склейки» (PR-13), holds the threshold (0.24, 0 = off), «Найдено N склеек» with up to eight chips of their time (a click

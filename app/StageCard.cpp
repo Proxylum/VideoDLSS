@@ -22,8 +22,11 @@
 #include <set>
 
 #include "AppModel.h"
+#include "ParamText.h"
+#include "PresetMenu.h"
 #include "Theme.h"
 #include "stages/ParamSchema.h"
+#include "stages/StagePreset.h"
 
 namespace dlssvid {
 
@@ -57,20 +60,6 @@ int ChoiceIndex(const ParamSpec& spec, const nlohmann::json& value) {
         }
     }
     return -1;
-}
-
-// The keys «Сбросить» removes: the form's rows, not the backend - the method is switched back by its own ↺ (TASK-0046)
-bool CardResets(const ParamSpec& spec) { return !spec.advanced && spec.key != "backend"; }
-
-// A value as the card's fields show it (the locale's decimal separator, the field's decimals, the suffix), for the
-// summary of «Ещё настройки» and the ↺ text; the special values and the lists keep their words (ParamValueLabel)
-QString CardValueLabel(const ParamSpec& spec, const nlohmann::json& v, const std::string& backend) {
-    if (v.is_number() && spec.choices.empty() && spec.formChoices.empty()) {
-        const double d = v.get<double>();
-        const bool special = (spec.sentinel && d == *spec.sentinel && !spec.sentinelLabel.empty()) || (!spec.zeroLabel.empty() && d == spec.min);
-        if (!special) return QLocale().toString(d, 'f', spec.type == ParamType::Int ? 0 : ParamDecimals(spec)) + QString::fromStdString(spec.suffix);
-    }
-    return QString::fromStdString(ParamValueLabel(spec, v, backend));
 }
 
 // A double click on a slider resets its row (spec §1.1: the mouse's extra way; ↺ and the label's menu are the others)
@@ -121,6 +110,37 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     head->setSpacing(2);
     head->addWidget(title_);
     head->addWidget(subtitle_);
+    // PR-9: «Пресет ▾» (the cards with presets) and «Сбросить» under the title, before the form in the Tab order
+    dialogs_ = PresetDialogs::Default();
+    const QString name = schema_ ? QString::fromStdString(schema_->title) : QString::fromStdString(stage);
+    auto* tools = new QHBoxLayout();
+    tools->setContentsMargins(0, 4, 0, 0);
+    tools->setSpacing(6);
+    if (schema_ && schema_->cardPresets) {
+        presets_ = new PresetButton(tr("Пресет"), this);
+        SetRole(presets_, "small");
+        presets_->setProperty("menu", "1");
+        presetMenu_ = new PresetMenu(model_, stage, presets_);
+        presets_->setMenu(presetMenu_);
+        presets_->setAccessibleName(tr("Пресеты «%1»").arg(StageNameGenitive(stage)));
+        presets_->setToolTip(tr("Пресеты настроек «%1»: применить, сохранить текущие, импорт и экспорт. Перед применением и сбросом прежние "
+                                "настройки сохраняются сами. Space — открыть")
+                                 .arg(StageNameGenitive(stage)));
+        tools->addWidget(presets_);
+    }
+    resetCard_ = new QPushButton(tr("Сбросить"), this);
+    SetRole(resetCard_, "small");
+    resetCard_->setAccessibleName(tr("Сбросить «%1»").arg(name));
+    resetCard_->setToolTip(schema_ && schema_->cardPresets
+                               ? tr("Вернуть настройки к умолчаниям (бэкенд и инженерные ключи остаются; прежние — в «Перед сбросом»)")
+                               : tr("Вернуть настройки стадии к умолчаниям (бэкенд и инженерные ключи остаются)"));
+    QSizePolicy keep = resetCard_->sizePolicy();
+    keep.setRetainSizeWhenHidden(true);  // the header and the form do not jump when it hides
+    resetCard_->setSizePolicy(keep);
+    connect(resetCard_, &QPushButton::clicked, this, [this] { resetCard(); });
+    tools->addWidget(resetCard_);
+    tools->addStretch(1);
+    head->addLayout(tools);
     grid->addWidget(enabled_, 0, 0, Qt::AlignTop);
     grid->addLayout(head, 0, 1, Qt::AlignTop);
 
@@ -143,7 +163,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     auto addRows = [this](QFormLayout* f, bool more) {
         std::string group;
         for (const ParamSpec& spec : schema_->params) {
-            if (spec.advanced || spec.more != more) continue;
+            if (LevelOf(spec) != (more ? ParamLevel::More : ParamLevel::Basic)) continue;
             if (!spec.group.empty() && spec.group != group) {
                 group = spec.group;
                 auto* header = new QLabel(QString::fromStdString(group), f->parentWidget());
@@ -205,7 +225,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     if (schema_) {
         addRows(basic, false);
         bool anyMore = false;
-        for (const ParamSpec& spec : schema_->params) anyMore = anyMore || (!spec.advanced && spec.more);
+        for (const ParamSpec& spec : schema_->params) anyMore = anyMore || LevelOf(spec) == ParamLevel::More;
         if (anyMore) {
             moreToggle_ = new QToolButton(form_);
             moreToggle_->setCheckable(true);
@@ -270,11 +290,6 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     force_ = new QCheckBox(tr("пересчитать"), this);
     force_->setToolTip(tr("Посчитать заново, даже если пасс совпадает по отпечатку"));
     side->addWidget(force_);
-    resetCard_ = new QPushButton(tr("Сбросить"), this);
-    SetRole(resetCard_, "small");
-    resetCard_->setToolTip(tr("Вернуть настройки стадии к умолчаниям (бэкенд и инженерные ключи остаются)"));
-    side->addWidget(resetCard_, 0, Qt::AlignLeft);
-    connect(resetCard_, &QPushButton::clicked, this, [this] { resetCard(); });
     grid->addLayout(side, 0, 3, 2, 1, Qt::AlignTop);
     grid->setColumnStretch(2, 1);
     grid->setColumnMinimumWidth(3, 190);
@@ -593,19 +608,16 @@ void StageCard::resetParam(const std::string& key) {
 
 void StageCard::resetCard() {
     if (!model_.stageEntry(stage_) || !schema_) return;
-    // the form's keys go; the backend and the keys of the JSON editor (format, ...) stay - setStageParams replaces the
-    // whole object, so they are carried over (TASK-0046). Folded first: an alias of a form key goes with it.
-    nlohmann::json params = nlohmann::json::object();
-    const nlohmann::json current = stageParams();  // named: items() of a temporary dangles in the range-for (C++20)
-    const std::string backend = currentBackend();
-    for (const auto& [key, value] : current.items()) {
-        const ParamSpec* spec = schema_->Find(key);
-        // a list key without a list for this backend (depth.model under DA3, from the JSON) has no row: the card neither
-        // shows nor counts it, so it stays like a key of the JSON editor
-        const bool noRow = spec && !spec->formChoices.empty() && !FormChoicesFor(*spec, backend);
-        if (!spec || !CardResets(*spec) || noRow) params[key] = value;
-    }
-    model_.setStageParams(stage_, params);
+    // the form's keys go, the backend and the engineer keys stay (TASK-0046); a card with presets saves «Перед сбросом» first (PR-9):
+    // when that cannot be written, nothing changes until the person says so
+    const AppModel::PresetResult r = model_.resetStageCard(stage_);
+    if (r.backupFailed && dialogs_.confirm(window(), tr("Настройки не сброшены"), r.problems.join("\n") + "\n" + tr("Сбросить без автосохранения?"), tr("Сбросить")))
+        model_.resetStageCard(stage_, true);
+}
+
+void StageCard::setDialogs(PresetDialogs dialogs) {
+    dialogs_ = dialogs;
+    if (presetMenu_) presetMenu_->setDialogs(std::move(dialogs));
 }
 
 bool StageCard::changed(const ParamSpec& spec) const {
@@ -660,7 +672,7 @@ void StageCard::refresh() {
         if (def.isEmpty()) def = tr("по умолчанию");
         row.reset->setToolTip(tr("Сбросить: %1").arg(def));
         row.resetAction->setText(row.reset->toolTip());
-        anyChanged = anyChanged || (differs && CardResets(spec));  // as resetCard: the backend's ↺ is its own
+        anyChanged = anyChanged || (differs && CardResetKey(spec));  // as resetCard: the backend's ↺ is its own
         const QString item = QString("%1 %2").arg(QString::fromStdString(spec.label).toLower(),
                                                   CardValueLabel(spec, folded.contains(spec.key) ? folded[spec.key] : spec.def, backend));
         if (differs && !visible) hiddenChanged << item;
@@ -681,6 +693,7 @@ void StageCard::refresh() {
         moreSummary_->setToolTip(full.join("\n"));
     }
     resetCard_->setVisible(anyChanged);
+    if (presets_) presets_->setEnabled(model_.hasProject());  // also while the stage is off: a preset changes the settings, not the switch
     const AppModel::StageCardState st = model_.cardState(stage_);
     state_->setText(st.state);
     SetRole(state_, kToneRole[ToneIndex(st.tone)]);

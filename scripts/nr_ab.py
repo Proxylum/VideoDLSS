@@ -175,13 +175,37 @@ def run_params(base: dict, fixed: dict, variant: dict) -> dict:
     return {k: v for k, v in merge_params(base, fixed, variant).items() if k not in RUN_KEYS}
 
 
-def load_base_params(path: Optional[Path]) -> dict:
-    """A JSON object of nr keys, or a dlssvid-preset (spec §2h, PR-9) - its stages.nr.params."""
+PRESET_SCHEMA = 1  # the dlssvid-preset schema this script reads (core/stages/StagePreset.h kPresetSchemaVersion)
+
+
+def load_base_params(path: Optional[Path], keys: Optional[set] = None) -> dict:
+    """A JSON object of nr keys, or a dlssvid-preset (PR-9): a card preset's or a pipeline preset's stages.nr.params. The params.json of a
+    variant is a bare object, so the preset's rules are applied here, as dlssvid does when it reads a preset: keys nr_ab gives as options
+    (RUN_KEYS), the moved scene_cut and keys outside `keys` (the settings of this dlssvid) are dropped with a warning instead of failing the
+    run; a bare object keeps its keys - the check of the merged settings refuses an unknown one."""
     if not path:
         return {}
     j = json.loads(Path(path).read_text(encoding="utf-8"))
     if isinstance(j, dict) and j.get("format") == "dlssvid-preset":
-        j = j.get("stages", {}).get("nr", {}).get("params", {})
+        schema = j.get("schema")
+        if not isinstance(schema, int) or isinstance(schema, bool) or schema < 1:
+            raise RuntimeError(f"{path}: preset schema must be a whole number from 1")
+        if schema > PRESET_SCHEMA:
+            raise RuntimeError(f"{path}: preset schema {schema} is newer than this nr_ab reads ({PRESET_SCHEMA}) - update dlssvid")
+        if j.get("scope") not in ("stage", "pipeline"):
+            raise RuntimeError(f"{path}: preset scope must be stage | pipeline")
+        nr = (j.get("stages") or {}).get("nr")
+        if not isinstance(nr, dict) or not isinstance(nr.get("params"), dict):
+            raise RuntimeError(f"{path}: the preset '{j.get('name', '')}' has no settings for nr")
+        out = {}
+        for k, v in normalize_params(nr["params"]).items():
+            why = ("given by nr_ab as an option" if k in RUN_KEYS else "moved to scenes.threshold" if k == "scene_cut"
+                   else "not an nr setting of this dlssvid" if keys is not None and k not in keys else "")
+            if why:
+                print(f"nr_ab: preset '{j.get('name', '')}': '{k}' {why} - dropped", file=sys.stderr)
+                continue
+            out[k] = v
+        return out
     if not isinstance(j, dict):
         raise RuntimeError(f"{path}: not a JSON object of nr settings")
     return normalize_params(j)
@@ -1350,7 +1374,7 @@ def main(argv=None) -> int:
         exps.append(e)
     if not exps:
         raise RuntimeError("nothing to run: give --experiment or --variants (--list)")
-    base_params = load_base_params(Path(a.params) if a.params else None)
+    base_params = load_base_params(Path(a.params) if a.params else None, keys)
     if a.project and a.project_params:
         proj = json.loads(Path(a.project).read_text(encoding="utf-8"))
         if proj.get("schema_version", 1) < 2:

@@ -19,7 +19,9 @@
 #include "PlaybackClock.h"
 #include "gpu/D3D12Device.h"
 #include "pipeline/Estimates.h"
+#include "stages/StagePreset.h"
 #include "viewport/FrameStore.h"
+#include "viewport/PipelinePreset.h"
 #include "viewport/Project.h"
 #include "viewport/ViewportState.h"
 
@@ -142,6 +144,31 @@ public:
         QString modified;         // «сегодня 19:23»
         double runSeconds = 0.0;  // the run of this session that made it; 0 when none
     };
+    // ---- presets (PR-9): the NR card's «Пресет ▾» and the «Пресет обработки ▾» of the stages' header ----
+    // Applying and resetting save the state before them into the slot «Перед применением» / «Перед сбросом» first; when that cannot be
+    // written nothing changes and `backupFailed` asks for a repeat with withoutBackup. One projectChanged and one plan per action.
+    struct PresetResult {
+        bool ok = false;
+        bool backupFailed = false;  // the slot was not written: nothing changed
+        bool exists = false;        // save: the name is taken - again with `replacing` (the file in `file`)
+        QString name, message, file;
+        QStringList notes, problems;  // in Russian
+    };
+    // the card (stage: one with card presets, "nr")
+    PresetResult applyStagePreset(const std::string& stage, const QString& file, bool withoutBackup = false);
+    PresetResult saveStagePreset(const std::string& stage, const QString& name, const QString& replacing = {}, bool forNewProjects = false);
+    PresetResult resetStageCard(const std::string& stage, bool withoutBackup = false);  // «Сбросить» of every card; a slot for the ones with presets
+    PresetResult exportCurrentStagePreset(const std::string& stage, const QString& to);
+    // the whole processing: every stage's switch and settings and the encoder at once
+    PresetResult applyPipelinePreset(const QString& file, bool withoutBackup = false);
+    PresetResult savePipelinePreset(const QString& name, const QString& replacing = {}, bool forNewProjects = false);
+    PresetResult exportCurrentPipelinePreset(const QString& to);
+    // «Не войдут в пресет: …» of the current settings for the save dialog; "" when nothing is left out (target: a stage or kPipelineTarget)
+    QString presetLeftOut(const std::string& target) const;
+    // the menus' preview: what applying would change; nothing is written
+    std::vector<ParamChange> previewStagePreset(const std::string& stage, const Preset& preset) const;
+    PipelineDiff previewPipelinePreset(const Preset& preset) const;
+
     ResultInfo resultInfo() const;
     QString resultSummary() const;                      // «3840×1600 · 48 fps · 479 кадров · HEVC 10 бит 4:2:0 · со звуком · обновлён сегодня 19:23 · готов за 11:22»; empty without a result
     // «HEVC 10 бит 4:2:0», «ProRes 10 бит 4:2:2»: a codec name and a frame layout in the words of the GUI (empty codec: the layout alone).
@@ -227,6 +254,8 @@ signals:
     void proxiesChanged();
 
 private:
+    QString seedNewProject();  // openVideo of a video without a project: the preset marked for new projects; the message's tail
+    nlohmann::json stageParamsOf(const std::string& stage) const;  // the project's, {} for a stage it lacks
     void noteScrubReady();  // a scrub jump's frames are all on the GPU: one latency sample
     void onPlayTick();
     void schedulePlayTick();
