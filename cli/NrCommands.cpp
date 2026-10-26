@@ -10,7 +10,9 @@
 
 #include "gpu/D3D12Device.h"
 #include "io/VideoDecoder.h"
+#include "ScenesArg.h"
 #include "passes/Manifest.h"
+#include "pipeline/PassFingerprint.h"
 #include "stages/nr/INrBackend.h"
 #include "stages/nr/NrPatch.h"
 #include "stages/ParamSchema.h"
@@ -96,7 +98,6 @@ nlohmann::json ArgsAsParams(const NrCommands::NrArgs& a) {
     o.useGuides = !a.noGuides;
     o.temporal = a.temporal;
     o.temporalThreshold = a.temporalThreshold;
-    o.sceneCut = a.sceneCut;
     o.skinBlend = a.skinBlend;
     o.tonemap.curve = a.tonemap;
     o.tonemap.inputTransfer = a.inputTransfer;
@@ -392,6 +393,10 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     o.videoCodec = a.codec;
     o.sourceFile = std::filesystem::path(a.input).filename().string();
     o.sourceHash = "sha256:" + Sha256File(a.input);
+    // PR-13: the clip's scene-cut list, <output>/scenes unless told otherwise - only when NR keeps a history to reset
+    bool scenesUsed = false;
+    o.sceneCuts = ResolveScenes(a.scenesDir, a.noScenes, a.noAuto, a.output, o.sourceHash, StageReadsSceneCuts("nr", EffectiveStageParams("nr", params)), "nr",
+                                a.frames > 0 ? a.start + a.frames : 0, &scenesUsed);
     const NrRange range = PrepareRange(a, decoder, o);
     if (!range.Ranged() && !NrAbJson(o).empty()) GuardProcessedPass(o, "an A/B run");
     const int64_t total = range.maxFrames >= 0 ? range.maxFrames : info.frameCount > 0 ? info.frameCount - range.from : 0;
@@ -460,7 +465,9 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
                               {"mv_used", r.stats.mvUsed},
                               {"masks", r.stats.masks},
                               {"color_source", r.stats.colorSource},
-                              {"scene_cuts", r.stats.sceneCutActive ? nlohmann::json(r.stats.sceneCuts) : nlohmann::json(nullptr)},  // null: not checked
+                              {"scenes_used", scenesUsed},  // the clip's list read (an empty one too) for a history to reset (PR-13)
+                              {"scene_cuts_id", r.stats.sceneCutActive ? nlohmann::json(o.sceneCuts.id) : nlohmann::json(nullptr)},
+                              {"scene_cuts", scenesUsed ? nlohmann::json(r.stats.sceneCuts) : nlohmann::json(nullptr)},  // null: no list used
                               {"scene_cut_count", r.stats.sceneCutCount},
                               {"mv_scale", r.stats.mvScaleX > 0 ? nlohmann::json::array({r.stats.mvScaleX, r.stats.mvScaleY}) : nlohmann::json(nullptr)}}}};
         if (range.Ranged()) j["range"] = {{"first", r.stats.firstWritten}, {"last", r.stats.lastWritten}, {"warmup", r.stats.warmup}};
@@ -533,9 +540,10 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_flag("--no-depth-guide,--no_depth_guide", na_.noDepthGuide, "A/B: motion vectors to the model, depth not");
     nr_->add_option("--temporal", na_.temporal, "temporal filter weight 0..1 (0 = off): blend with the previous frame warped by mv_dlss")->default_val(0.f);
     nr_->add_option("--temporal-threshold,--temporal_threshold", na_.temporalThreshold, "colour difference that rejects the temporal blend")->default_val(0.1f);
-    nr_->add_option("--scene-cut,--scene_cut", na_.sceneCut,
-                    "scene-cut threshold 0..1 (0 = off): mean |dY| of the source's luma above it resets the model's history and the temporal filter")
-        ->default_val(0.24f);
+    nr_->add_option("--scenes-dir,--scenes_dir", na_.scenesDir,
+                    "the clip's scene-cut list (the pass of `dlssvid scenes`; default: <output>/scenes when present): the model's history and "
+                    "the temporal filter start again at its cuts");
+    nr_->add_flag("--no-scenes,--no_scenes", na_.noScenes, "no scene-cut list: the history runs across cuts");
     nr_->add_option("--skin-blend,--skin_blend", na_.skinBlend, "edit strength inside mask_face / mask_skin (0 = keep the input)")->default_val(1.f);
     nr_->add_option("--tonemap", na_.tonemap, "passthrough | aces | reinhard")->default_val("passthrough");
     nr_->add_option("--input-transfer,--input_transfer", na_.inputTransfer, "srgb | linear | pq | hlg")->default_val("srgb");

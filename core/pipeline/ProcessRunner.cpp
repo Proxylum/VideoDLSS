@@ -193,9 +193,19 @@ void RefreshFromDisk(PlanState& s, const RunContext& ctx) {
     }
 }
 
+// A stage that reruns only because a pass it reads is not known yet (PR-13: the scene list before its first analysis): the plan
+// says so, the run decides on what is on disk then and may reuse it
+void MarkPending(StageDecision& d, const PlanState& s) {
+    if (d.action != "run" || d.kind != "input_changed" || !d.diff.contains("inputs") || !d.diff["inputs"].is_array() || d.diff["inputs"].empty()) return;
+    for (const auto& in : d.diff["inputs"])
+        if (!in.is_string() || !s.pending.count(in.get<std::string>())) return;
+    d.pending = true;
+}
+
 // After a decision, what the passes look like: the stage's outputs carry the planned fingerprint.
 void Advance(PlanState& s, const StageDecision& d) {
     if (d.name == kScenesPass) {  // the stages below see the list's id, not the pass's fingerprint (PR-13)
+        s.scenesNote.clear();  // the list on disk before is not the one they read: this decision's is (a reuse is complete and readable)
         s.fp.erase(kScenesPass);
         if (!d.sceneCuts.id.empty()) s.fp[kScenesPass] = d.sceneCuts.id;  // "cuts:…" | "pending:scenes"; empty: no input
         if (!d.sceneCuts.known) s.pending.insert(kScenesPass);
@@ -323,6 +333,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             if (state.ran.count(cand) && cand != kScenesPass) inputsRan.push_back(cand);
             break;
         }
+    if (!state.scenesNote.empty() && StageReadsSceneCuts(name, p)) d.warnings.push_back(name + ": " + state.scenesNote);
     std::vector<std::string> inputsStale;  // inputs rerun in this plan because they were stale (PlanState::staleRan)
     for (const auto& [input, inputFp] : d.inputs)
         if (state.staleRan.count(input)) inputsStale.push_back(input);
@@ -419,6 +430,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         return d;
     }
     const std::string madeFrom = m.sourceFormat.empty() ? kLegacySourceFormat : m.sourceFormat;
+    const std::string sceneWant = d.inputs.count(kScenesPass) ? d.inputs.at(kScenesPass) : std::string();  // the list this run reads (PR-13)
     if (m.fingerprint.empty()) {  // made before fingerprints (or by a standalone `dlssvid <stage>`)
         if (!inputsRan.empty()) {
             d.diff["inputs"] = inputsRan;
@@ -445,12 +457,17 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         } else if (const char* broken = BrokenPassReason(name, m)) {
             run("tool_changed", broken, false);
             d.stale = true;
-        } else if (name == "nr" && p.value("scene_cut", 0.0) > 0.0 && m.stageParams.is_object() && !m.stageParams.contains("scene_cut_threshold") &&
-                   !m.stageParams.value("bypass", false)) {
-            // a standalone `dlssvid nr` from before PR-6: the model's and the filter's history ran across every cut - adopting it would
-            // stamp it with scene_cut (review of PR-6). A real picture of scene_cut 0: kept in the history. After the A/B and the
-            // broken checks: every broken legacy nr pass predates PR-6 and is discarded, not kept (review round 2)
-            run("tool_changed", "nr made before the scene-cut reset of PR-6", true);
+        } else if (name != kScenesPass && name != "depth" && SceneLabelOf(m) != sceneWant) {
+            // PR-13: a standalone pass made with another list than the one the stage reads now (none, another threshold, NR's own
+            // detector of PR-6) is another picture: kept in the history, not adopted under this fingerprint. Without a list a pass of
+            // before PR-13 is the same run. After the A/B and the broken checks: a broken pass is discarded, not kept
+            const std::string made = SceneLabelOf(m);
+            d.diff["inputs"] = nlohmann::json::array({kScenesPass});
+            run("input_changed", sceneWant == kScenesPendingId ? "the scene list is analysed first; reused if no cut is found"
+                                 : made == "pr6"              ? "nr made with its own scene-cut detector (PR-6)"
+                                 : made.empty()               ? "made without the scene list"
+                                                              : "made with another scene list",
+                true);
         } else if (!complete) {
             run("incomplete", incomplete, false);
         } else {
@@ -617,6 +634,14 @@ Prepared Prepare(const ProcessOptions& options) {
 // scenes (PR-13): the list this decision leaves - known for a reuse, a restore, threshold 0 and a run over stored scores (the
 // threshold applied to them, no decoding); pending when the source has to be decoded first. Returns the scores a run applies its
 // threshold to, read now: the current folder is retired before the run. A reuse of a list that does not read becomes a run.
+// The list DecideStage counted as the stage's input (PR-13): none, or exactly that one - another one on disk now throws (the list
+// changed under the run); the plan's placeholder never reaches a run (RefreshFromDisk reads the disk before every stage)
+SceneList CutsFor(const StageDecision& d, const RunContext& ctx) {
+    const auto it = d.inputs.find(kScenesPass);
+    if (it == d.inputs.end()) return {};
+    return ReadSceneListExpect(ctx.root / kScenesPass, it->second, ctx.sourceHash);
+}
+
 std::optional<ScenesSource> ProjectScenes(const RunContext& ctx, StageDecision& d) {
     if (d.name != kScenesPass) return std::nullopt;
     SceneCutsPlan& sc = d.sceneCuts;
@@ -926,6 +951,7 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
         const auto it = pr.wanted.find(name);
         if (it == pr.wanted.end()) continue;
         StageDecision d = DecideStage(pr.ctx, it->second, state);
+        MarkPending(d, state);
         ProjectScenes(pr.ctx, d);
         AdviseStage(pr.ctx, d);
         Advance(state, d);
@@ -1156,6 +1182,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 o.format = ParsePassFormat(Get<std::string>(p, "format", "exr"), true);
                 o.sourceFile = sourceFile;
                 o.sourceHash = sourceHash;
+                o.sceneCuts = CutsFor(d, ctx);
                 const NrRunResult r = RunNr(decoder, device, o, options.frames, progressFor(name), p);
                 if (r.stats.disabled) {
                     rep.status = "disabled";
@@ -1301,6 +1328,12 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             // the fg process timed itself: the estimates (Estimates.cpp) must not count its start-up per frame
             rep.msPerFrame = childMsPerFrame;
             rep.details["startup_seconds"] = std::max(0.0, rep.seconds - childSeconds);
+        }
+        if (rep.status.empty() && StageReadsSceneCuts(name, p)) {
+            // the pass carries the list it was made with; another one than planned would be stamped under a wrong fingerprint (PR-13)
+            const std::string want = d.inputs.count(kScenesPass) ? d.inputs.at(kScenesPass) : std::string();
+            if (const std::string made = SceneLabelOf(Manifest::Load(d.outDir)); made != want)
+                Throw("process: internal: " + name + " used the scene list '" + made + "', planned '" + want + "'");
         }
         if (rep.status.empty()) {
             rep.status = "ran";

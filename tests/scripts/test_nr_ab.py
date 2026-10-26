@@ -151,6 +151,17 @@ class Helpers(unittest.TestCase):
         self.assertTrue({"local_tone", "guides", "params_file"} <= keys)
         self.assertNotIn("scene_cut", keys)
 
+    def test_nr_command_scene_list(self):
+        # PR-13: the prepared list goes as --scenes-dir (the runs are --no-auto); a variant with inputs {"scenes": None} runs without it
+        inp = nr_ab.Inputs(Path("clip.mp4"), color=Path("sr"), depth=Path("d"), mv=Path("m"), scenes=Path("passes/scenes"))
+        cmd = nr_ab.nr_command("dlssvid", inp, nr_ab.Variant("cut024"), Path("out"), Path("p.json"), 0, 3, 0, "stub", "exr", True, [])
+        self.assertEqual(cmd[cmd.index("--scenes-dir") + 1], str(Path("passes/scenes")))
+        none = nr_ab.Variant("cut0", inputs={"scenes": None})
+        self.assertNotIn("--scenes-dir", nr_ab.nr_command("dlssvid", inp, none, Path("out"), Path("p.json"), 0, 3, 0, "stub", "exr", True, []))
+        self.assertEqual(nr_ab.missing_input(inp, none, 0, 2, True), "")  # without it by design, not a missing folder
+        self.assertIn("scenes", inp.describe())
+        self.assertIsNone(nr_ab.variant_dirs(inp, none)["scenes"])
+
     def test_nr_command_range_and_flags(self):
         inp = nr_ab.Inputs(Path("clip.mp4"), color=Path("sr"), depth=Path("d"), mv=Path("m"), mv_target=Path("mt"))
         v = nr_ab.Variant("x", flags=["--no-depth-guide"], inputs={"mv": "@mv_target"})
@@ -383,7 +394,12 @@ class Helpers(unittest.TestCase):
         self.assertEqual((cat["E8"].check, cat["E6f"].check, cat["E6f"].kind), ("runs", "features", "check"))
         self.assertEqual([v.name for v in cat["E11"].variants][-3:], ["am_follow", "am_s0", "am_s2"])
         self.assertTrue(all(v.params["auto_mask"] for v in cat["E11"].variants[-3:]))  # the control overrides the fixed auto_mask false
-        self.assertEqual(cat["E9"].requires, ("--scene-cut",))
+        self.assertEqual(cat["E9"].requires, ("--scenes-dir",))  # PR-13: the clip's list, not NR's own threshold
+        self.assertEqual(cat["E9"].needs, ("mv", "scenes"))
+        cut0, cut024 = cat["E9"].variants[0], cat["E9"].variants[1]
+        self.assertEqual(nr_ab.run_expect(cat["E9"], cut0), {"mv_used": True, "scenes_used": False})
+        self.assertEqual(nr_ab.run_expect(cat["E9"], cut024), {"mv_used": True, "scenes_used": True})
+        self.assertNotIn("scene_cut", json.dumps([v.params for v in cat["E9"].variants]))
         self.assertEqual((cat["E3"].frames, cat["E4"].frames), (30, 30))
 
     def test_verdicts(self):
@@ -426,7 +442,7 @@ class Helpers(unittest.TestCase):
         self.assertIn("31.5", e9["text"][0])
         self.assertEqual(len(e9["text"]), 1)
         self.assertIn("склеек на отрезке нет", nr_ab.verdict_e9(v(cut024={"nr": {"scene_cuts": [], "scene_cut_count": 0}}))["text"][0])
-        self.assertIn("детектор не работал", nr_ab.verdict_e9(v(cut024={"nr": {"scene_cuts": None, "scene_cut_count": 0}}))["text"][0])
+        self.assertIn("список склеек не прочитан", nr_ab.verdict_e9(v(cut024={"nr": {"scene_cuts": None, "scene_cut_count": 0}}))["text"][0])
         drift = nr_ab.verdict_e9(v(cut024={"nr": {"scene_cuts": [40], "scene_cut_count": 1}}, cut024_t04={"nr": {"scene_cuts": [], "scene_cut_count": 0}}))
         self.assertIn("регрессия", drift["text"][1])
         self.assertEqual(nr_ab.verdict_e9(v())["text"], [])
@@ -642,6 +658,9 @@ class Helpers(unittest.TestCase):
             self.assertTrue(nr_ab.prepare(a, "dlssvid", inp, self.root, 17, True))  # no stamp: made from what?
         self.assertIn(" process ", out.getvalue())
         (work[0] / "clip.json").write_text(json.dumps(nr_ab.file_identity(clips[0])), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(nr_ab.prepare(a, "dlssvid", inp, self.root, 17, True))  # prepared before PR-13: no scene list - made again
+        inp.scenes = manifest(passes / "scenes", 0, 20)
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertFalse(nr_ab.prepare(a, "dlssvid", inp, self.root, 17, True))
             self.assertTrue(nr_ab.prepare(a, "dlssvid", inp, self.root, 30, True))  # do not cover the range
@@ -670,7 +689,7 @@ class StubRun(unittest.TestCase):
                                                       {"name": "nodepth", "flags": ["--no-depth-guide"], "expect": {"depth_used": False, "mv_used": True}},
                                                       {"name": "mv", "flags": ["--mv-scale", "auto", "--create-with-mv"]}]}), encoding="utf-8")
         cls.out = cls.work / "out"
-        cls.result = cls.run_ab(["--variants", str(cls.smoke), "--experiment", "E2,E8,E6f", "--check-runs", "1", "--check-repeat", "5", "--check-features", "3",
+        cls.result = cls.run_ab(["--variants", str(cls.smoke), "--experiment", "E2,E8,E6f,E9", "--check-runs", "1", "--check-repeat", "5", "--check-features", "3",
                                  "--start", "4", "--frames", "3", "--warmup", "2", "--out", str(cls.out)])
 
     @classmethod
@@ -715,13 +734,19 @@ class StubRun(unittest.TestCase):
         self.assertEqual(res["E6f"]["size"], "192x128")
         self.assertTrue(res["smoke"]["meta"]["exe_sha256"])
         md = (self.out / "nr_ab.md").read_text(encoding="utf-8")
-        for s in ("### smoke", "| i05 |", "∞", "E2", "### E8", e8["meta"]["gpu"], "Вход NR: color_sr, depth_dlss, mv_dlss; маски: выкл."):
+        # PR-13: E9 over the list --prepare made (stage scenes): read by cut024, not by cut0
+        e9 = res["E9"]["variants"]
+        self.assertIs(e9["cut0"]["nr"]["scenes_used"], False)
+        self.assertIs(e9["cut024"]["nr"]["scenes_used"], True)
+        self.assertIs(e9["cut024_t04"]["nr"]["scenes_used"], True)
+        self.assertIsInstance(res["E9"]["verdict"]["count"], int)
+        for s in ("### smoke", "| i05 |", "∞", "E2", "### E8", e8["meta"]["gpu"], "Вход NR: color_sr, depth_dlss, mv_dlss, scenes; маски: выкл."):
             self.assertIn(s, md)
         self.assertEqual(list(self.out.rglob("color_nr")), [])  # cleaned up without --keep
         work = nr_ab.prepare_root(self.out, argparse.Namespace(prepare_backends="stub,stub,bicubic"), self.clip)
         self.assertEqual(json.loads((work / "clip.json").read_text(encoding="utf-8")), nr_ab.file_identity(self.clip))
         self.assertFalse((work / "prepare.mkv").exists())
-        for name in ("color_sr", "depth_dlss", "mv_dlss"):
+        for name in ("scenes", "color_sr", "depth_dlss", "mv_dlss"):
             self.assertTrue(nr_ab.covers(work / "passes" / name, 0, 6), name)
 
     def test_resume_reuses_only_the_same_run_and_only_adds(self):

@@ -11,6 +11,7 @@
 
 #include "ml/ModelRegistry.h"
 #include "passes/Manifest.h"
+#include "passes/ScenesPass.h"
 #include "stages/depth/DepthModels.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "stages/flow/TrtFlowEstimator.h"
@@ -255,9 +256,13 @@ std::string PipelineStageNamesText() {
 }
 
 bool StageReadsSceneCuts(const std::string& stage, const nlohmann::json& p) {
-    (void)stage;
-    (void)p;
-    return false;  // the consumers come one by one (PR-13: flow, upscale, nr, fg); depth keeps its own segment breaks
+    // nr: a history to reset - the model's (guides on: it keeps one with mv) or the flicker filter's; the bypass has neither (NrStage::Init)
+    if (stage == "nr") {
+        const bool guidesOff = p.is_object() && p.contains("guides") && p["guides"].is_boolean() && !p["guides"].get<bool>();
+        const double temporal = p.is_object() && p.contains("temporal") && p["temporal"].is_number() ? p["temporal"].get<double>() : 0.0;
+        return !NrBypassParams(p) && (!guidesOff || temporal > 0.0);
+    }
+    return false;  // the consumers come one by one (PR-13: flow, upscale, fg); depth keeps its own segment breaks
 }
 
 bool UpscaleReadsGuides(const nlohmann::json& p) { return Str(p, "backend", "dlss") == "dlss"; }
@@ -277,9 +282,12 @@ std::vector<std::vector<std::string>> StageInputCandidates(const std::string& st
     }
     if (stage == "nr") {
         if (NrBypassParams(params)) return {{"color_sr"}};  // intensity 0: the model and its guides and masks are not used (PR-7)
-        if (params.is_object() && params.contains("guides") && params["guides"].is_boolean() && !params["guides"].get<bool>())
-            return {{"color_sr"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}};
-        return {{"color_sr"}, {"depth_dlss"}, {"mv_dlss"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}};
+        std::vector<std::vector<std::string>> groups{{"color_sr"}};
+        if (!(params.is_object() && params.contains("guides") && params["guides"].is_boolean() && !params["guides"].get<bool>()))
+            groups.insert(groups.end(), {{"depth_dlss"}, {"mv_dlss"}});
+        groups.insert(groups.end(), {{"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}});
+        if (StageReadsSceneCuts(stage, params)) groups.push_back({kScenesPass});  // the list's id (PR-13): none while it is empty
+        return groups;
     }
     if (stage == "fg") return {{"color_nr", "color_sr"}, {"depth_dlss"}, {"mv_dlss"}};
     return {};

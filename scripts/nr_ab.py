@@ -57,8 +57,8 @@ NR_ARG_OK = {"--skip-driver-check": False, "--dll-dir": True, "--params-block": 
 # variants before ran - known_keys of --help minus these is what a params.json may hold
 NOT_SETTINGS = {"input", "output", "color_dir", "depth_dir", "mv_dir", "masks_dir", "no_auto", "auto", "video", "codec", "frames", "start", "warmup",
                 "params_file", "warp", "check", "check_size", "check_repeat", "check_features", "json", "help", "depth_guide"} | {o[2:].replace("-", "_") for o in (*AB_FLAGS, *NR_ARG_OK)}
-INPUT_KEYS = ("color", "depth", "mv")  # a variant's own folders: what nr_command passes as --color-dir / --depth-dir / --mv-dir
-EXPECT_KEYS = ("depth_used", "mv_used", "work_size", "passes", "mv_scale", "frames_written", "warmup_frames", "masks")  # stats read_nr keeps
+INPUT_KEYS = ("color", "depth", "mv", "scenes")  # a variant's own folders: --color-dir / --depth-dir / --mv-dir / --scenes-dir (None: without it)
+EXPECT_KEYS = ("depth_used", "mv_used", "scenes_used", "work_size", "passes", "mv_scale", "frames_written", "warmup_frames", "masks")  # stats read_nr keeps
 NR_DLLS = ("nvngx_dlssnr.dll", "nvngx.dll_dlssvid.dll")  # kNrDllName, kNrForwarderName (core/stages/nr/INrBackend.h)
 # a path in a dlssvid message (printed unquoted): the report keeps its last part ([hygiene]). A drive or UNC path may have spaces in its
 # folders (each ends with a separator); only the last part stops at a space, a POSIX path at the first one (prose like «unit / auto» stays)
@@ -92,7 +92,7 @@ class Experiment:
     groups: list = field(default_factory=list)    # pairwise PSNR inside each group (E7; the "pairs" metric)
     frames: int = 12                              # spec §4: 12 frames of a real clip; breathing (E3 / E4) on 30
     needs: tuple = ()                             # "depth", "mv": inputs the experiment cannot run without - every run must report them used
-    requires: tuple = ()                          # options `dlssvid nr --help` must list (E9: --scene-cut, PR-6)
+    requires: tuple = ()                          # options `dlssvid nr --help` must list (E9: --scenes-dir, PR-13)
     kind: str = "run"                             # run | check (`nr --check`: E8 its runs and re-creations, E6f features at once)
     check: str = ""                               # check kind: "runs" (E8) | "features" (E6f)
     unsupported: str = ""                         # why no build of PR-1d can run it (E8b)
@@ -129,9 +129,11 @@ EXPERIMENTS = [
     Experiment("E8", "Цена создания фичи (§2f)", [], kind="check", check="runs", metrics=("time",)),
     Experiment("E8b", "Смена настроек без пересоздания фичи (§2f)", [],
                unsupported="нужен режим смены tone/structure посреди прогона без пересоздания фичи — не входит в PR-1d"),
+    # PR-13: the list of the stage scenes (the prepared pass, threshold 0.24) instead of NR's own detector; cut0 runs without it
     Experiment("E9", "Сброс на склейках (§2d)",
-               [_v("cut0", params={"scene_cut": 0}), _v("cut024", params={"scene_cut": 0.24}), _v("cut024_t04", params={"scene_cut": 0.24, "temporal": 0.4})],
-               "cut0", MODEL, ("temporal", "base", "time"), needs=("mv",), requires=("--scene-cut",)),
+               [_v("cut0", inputs={"scenes": None}, expect={"scenes_used": False}), _v("cut024", expect={"scenes_used": True}),
+                _v("cut024_t04", params={"temporal": 0.4}, expect={"scenes_used": True})],
+               "cut0", MODEL, ("temporal", "base", "time"), needs=("mv", "scenes"), requires=("--scenes-dir",)),
     Experiment("E10", "Локальный тон и структура (§2a)",
                [_v("base"), _v("tone0", params={"local_tone": 0}), _v("structure0", params={"local_structure": 0})], "base", STILL, ("base", "edit", "time")),
     # the control with the auto mask (am_*): «no effect without it» means something only if the key acts with it on this clip
@@ -350,9 +352,10 @@ class Inputs:
     mv: Optional[Path] = None
     masks: Optional[Path] = None        # a passes root with mask_* passes (--masks)
     mv_target: Optional[Path] = None
+    scenes: Optional[Path] = None       # the clip's scene list (the pass of `dlssvid scenes`, PR-13)
 
     def describe(self) -> str:
-        return ", ".join(n for n, d in (("color_sr", self.color), ("depth_dlss", self.depth), ("mv_dlss", self.mv)) if d) or "видео"
+        return ", ".join(n for n, d in (("color_sr", self.color), ("depth_dlss", self.depth), ("mv_dlss", self.mv), ("scenes", self.scenes)) if d) or "видео"
 
 
 def frame_index(color: Optional[Path], frame: int) -> int:
@@ -362,18 +365,20 @@ def frame_index(color: Optional[Path], frame: int) -> int:
 
 
 def own_inputs(inp: Inputs, v: Variant) -> dict:
-    """The folders a variant reads instead of the run's (None: "@mv_target" without --mv-target-dir)."""
-    return {k: (inp.mv_target if d == "@mv_target" else Path(d)) for k, d in v.inputs.items()}
+    """The folders a variant reads instead of the run's (None: "@mv_target" without --mv-target-dir, or None given: without that input)."""
+    return {k: (inp.mv_target if d == "@mv_target" else Path(d) if d is not None else None) for k, d in v.inputs.items()}
 
 
 def variant_dirs(inp: Inputs, v: Variant) -> dict:
-    return {"color": inp.color, "depth": inp.depth, "mv": inp.mv, **own_inputs(inp, v)}
+    return {"color": inp.color, "depth": inp.depth, "mv": inp.mv, "scenes": inp.scenes, **own_inputs(inp, v)}
 
 
 def missing_input(inp: Inputs, v: Variant, first: int, last: int, dry: bool) -> str:
     """Why a variant cannot run: a folder it reads instead of the run's is not given or does not cover first..last ('' = it can). Without the
     check E3 C ran with no vectors at all (--no-auto) and its numbers entered the verdict."""
     for k, p in own_inputs(inp, v).items():
+        if p is None and v.inputs.get(k) is None:
+            continue  # the variant runs without it (E9 cut0: no scene list)
         if p is None:
             return "нет --mv-target-dir (mv_dlss размера модели из `dlssvid flow --target`)"
         if not dry and not covers(p, first, last):
@@ -387,7 +392,7 @@ def nr_command(cli, inp: Inputs, v: Variant, root: Path, params_file: Path, star
     cmd = [str(cli), "nr", "--backend", backend, "-i", str(inp.clip), "-o", str(root), "--no-auto",  # nothing under -o is picked up
            "--start", str(start), "--frames", str(frames), "--warmup", str(min(warmup, start)),  # no history before frame 0
            "--params-file", str(params_file), "--format", fmt, "--json", str(root / "nr.json")]
-    for opt, d in (("--color-dir", dirs["color"]), ("--depth-dir", dirs["depth"]), ("--mv-dir", dirs["mv"]), ("--masks-dir", inp.masks)):
+    for opt, d in (("--color-dir", dirs["color"]), ("--depth-dir", dirs["depth"]), ("--mv-dir", dirs["mv"]), ("--scenes-dir", dirs["scenes"]), ("--masks-dir", inp.masks)):
         if d:
             cmd += [opt, str(d)]
     return cmd + (["--warp"] if warp else []) + list(extra) + list(v.flags)
@@ -416,7 +421,8 @@ def read_nr(path: Path) -> dict:
     j = json.loads(Path(path).read_text(encoding="utf-8"))
     st, dg = j.get("stats", {}), j.get("diagnostics", {}) or {}
     out = {k: st.get(k) for k in ("ms_per_frame_gpu", "ms_per_frame_wall", "depth_used", "mv_used", "work_size", "passes", "mv_scale",
-                                  "frames_written", "warmup_frames", "masks", "bypass", "vram_mib_per_pass", "scene_cuts", "scene_cut_count")}
+                                  "frames_written", "warmup_frames", "masks", "bypass", "vram_mib_per_pass", "scenes_used", "scene_cuts_id", "scene_cuts",
+                                  "scene_cut_count")}
     out.update({k: dg.get(k) for k in ("init_ms", "create_ms", "gpu", "driver", "dll_sha256")})
     vram = dg.get("vram_feature_bytes")
     out["vram_mib"] = round(vram / 1048576.0, 1) if isinstance(vram, (int, float)) else None
@@ -432,7 +438,7 @@ def unmet(expect: dict, nr: dict) -> list:
 
 def run_expect(exp: Experiment, v: Variant) -> dict:
     """What a run must report: the guides the experiment needs were bound (E3 C without its vectors, E4 without any), then the variant's own."""
-    return {**{f"{n}_used": True for n in exp.needs if n in ("depth", "mv")}, **v.expect}
+    return {**{f"{n}_used": True for n in exp.needs if n in ("depth", "mv") and v.inputs.get(n, "") is not None}, **v.expect}
 
 
 def fmt_db(v) -> str:
@@ -449,7 +455,7 @@ def describe(v: Variant) -> str:
     """The settings column: names only - a variants file may give absolute input folders, the table goes into docs ([hygiene])."""
     parts = [f"{k}={json.dumps(val, ensure_ascii=False) if isinstance(val, str) else val}" for k, val in v.params.items()]
     parts += [" ".join(v.flags)] if v.flags else []
-    parts += [f"{k}: {'--mv-target-dir' if d == '@mv_target' else Path(d).name}" for k, d in v.inputs.items()]
+    parts += [f"{k}: {'--mv-target-dir' if d == '@mv_target' else 'нет' if d is None else Path(d).name}" for k, d in v.inputs.items()]
     return ", ".join(parts) or "—"
 
 
@@ -537,7 +543,8 @@ def run_signature(a, inp: Inputs, exp: Experiment, base_params: dict, build: dic
     else:
         still = exp.fixed.get("guides") is False
         common.update({"start": a.start, "frames": a.frames or exp.frames, "warmup": 0 if still else min(a.warmup, a.start), "format": a.format,
-                       "clip": file_identity(inp.clip), "inputs": {k: pass_identity(d) for k, d in (("color", inp.color), ("depth", inp.depth), ("mv", inp.mv))},
+                       "clip": file_identity(inp.clip),
+                       "inputs": {k: pass_identity(d) for k, d in (("color", inp.color), ("depth", inp.depth), ("mv", inp.mv), ("scenes", inp.scenes))},
                        "masks": masks_identity(inp.masks), "baseline": exp.baseline, "metrics": sorted(exp.metrics), "groups": exp.groups})
         variants = {v.name: {"params": run_params(base_params, exp.fixed, v.params), "flags": list(v.flags), "expect": run_expect(exp, v),
                              "inputs": {k: pass_identity(p) for k, p in own_inputs(inp, v).items()}, "optional": v.optional} for v in exp.variants}
@@ -761,13 +768,13 @@ def verdict_e6f(res):
 
 
 def verdict_e9(res):
-    """PR-6 (spec §2d): the cuts the detector found at 0.24 and what the reset changed - cut024 against cut0 (no reset) differs only
-    after a cut: the model's history; cut024_t04 adds the flicker filter's. No cut on the range: E9 measures nothing there."""
+    """PR-6, PR-13 (spec §2d): the cuts of the clip's list (stage scenes, 0.24) on the range and what the reset changed - cut024 against cut0
+    (no list) differs only after a cut: the model's history; cut024_t04 adds the flicker filter's. No cut on the range: E9 measures nothing."""
     cuts, n = _get(res, "cut024", "nr", "scene_cuts"), _get(res, "cut024", "nr", "scene_cut_count")
     db = _get(res, "cut024", "vs_base", "psnr_y_min")
     text = []
     if cuts is None and _get(res, "cut024", "nr") is not None:
-        text.append("детектор не работал: нет истории (guides выкл и temporal 0) или сборка до PR-6")
+        text.append("список склеек не прочитан: нет пасса scenes (--prepare его делает) или нет истории (guides выкл и temporal 0)")
     elif n == 0:
         text.append("склеек на отрезке нет (порог 0.24) — E9 на этом входе ничего не меряет")
     elif cuts:
@@ -775,7 +782,7 @@ def verdict_e9(res):
                     f"кадры после них против прогона без сброса — PSNR Y min {fmt_db(db)} дБ")
         t04 = _get(res, "cut024_t04", "nr", "scene_cut_count")
         if t04 is not None and t04 != n:
-            text.append(f"с фильтром мерцания найдено {t04} склеек, без него {n}: детектор не должен зависеть от temporal — регрессия")
+            text.append(f"с фильтром мерцания сброшено на {t04} склейках, без него на {n}: список не должен зависеть от temporal — регрессия")
     return {"cuts": cuts, "count": n, "psnr_y_min": db, "text": text}
 
 
@@ -885,19 +892,20 @@ def resolve_inputs(a, out: Path, cli: Path, dry: bool) -> Inputs:
         raise RuntimeError("--masks needs mask_* passes under --passes / the project's passes root (--prepare makes none)")
     given = [o for o, v in (("--passes", a.passes), ("--color-dir", a.color_dir), ("--depth-dir", a.depth_dir), ("--mv-dir", a.mv_dir)) if v]
     if a.prepare and given:  # --prepare reads the passes it makes: a folder given beside it would be dropped without a word
-        raise RuntimeError(f"--prepare makes color_sr / depth_dlss / mv_dlss itself: drop {', '.join(given)} or --prepare")
+        raise RuntimeError(f"--prepare makes scenes / color_sr / depth_dlss / mv_dlss itself: drop {', '.join(given)} or --prepare")
     if a.prepare:
         passes = prepare_root(out, a, clip) / "passes"
     pick = lambda name: (passes / name) if passes and (passes / name / "manifest.json").exists() else None
     inp = Inputs(clip, Path(a.color_dir) if a.color_dir else pick("color_sr"), Path(a.depth_dir) if a.depth_dir else pick("depth_dlss"),
-                 Path(a.mv_dir) if a.mv_dir else pick("mv_dlss"), (passes if a.masks else None), Path(a.mv_target_dir) if a.mv_target_dir else None)
+                 Path(a.mv_dir) if a.mv_dir else pick("mv_dlss"), (passes if a.masks else None), Path(a.mv_target_dir) if a.mv_target_dir else None,
+                 pick("scenes"))
     if a.prepare:  # the planned folders, also in a dry run
-        inp.color, inp.depth, inp.mv = passes / "color_sr", passes / "depth_dlss", passes / "mv_dlss"
+        inp.color, inp.depth, inp.mv, inp.scenes = passes / "color_sr", passes / "depth_dlss", passes / "mv_dlss", passes / "scenes"
     return inp
 
 
 def prepare(a, cli: Path, inp: Inputs, out: Path, last: int, dry: bool) -> bool:
-    """color_sr / depth_dlss / mv_dlss for frames 0..last with `dlssvid process` (it always encodes: the video is deleted after) - only when they
+    """scenes / color_sr / depth_dlss / mv_dlss for frames 0..last with `dlssvid process` (it always encodes: the video is deleted after) - only when they
     do not cover the range or were made from other content of the clip (re-encoded in place: its stamp differs). Rewriting them changes the
     inputs of every stored experiment, which their signatures see. True: the passes are (dry: would be) rewritten."""
     work = prepare_root(out, a, inp.clip)
@@ -906,10 +914,10 @@ def prepare(a, cli: Path, inp: Inputs, out: Path, last: int, dry: bool) -> bool:
         same = json.loads(stamp.read_text(encoding="utf-8")) == file_identity(inp.clip)
     except (OSError, ValueError):
         same = False
-    if same and all(covers(d, 0, last) for d in (inp.color, inp.depth, inp.mv)):
+    if same and all(covers(d, 0, last) for d in (inp.color, inp.depth, inp.mv, inp.scenes)):
         return False
     d, f, u = (a.prepare_backends.split(",") + ["", "", ""])[:3]
-    cmd = [cli, "process", "-i", inp.clip, "-o", work / "prepare.mkv", "--passes", work / "passes", "--stages", "depth,flow,upscale", "--depth-backend", d,
+    cmd = [cli, "process", "-i", inp.clip, "-o", work / "prepare.mkv", "--passes", work / "passes", "--stages", "scenes,depth,flow,upscale", "--depth-backend", d,
            "--flow-backend", f, "--upscale-backend", u, "--frames", str(last + 1), "--codec", "ffv1"] + (["--warp"] if a.warp else [])
     if not dry:
         stamp.unlink(missing_ok=True)  # written again only after a whole process
@@ -952,7 +960,8 @@ def run_experiment(a, cli: Path, inp: Inputs, exp: Experiment, base_params: dict
         dirs = variant_dirs(inp, v)
         why = missing_input(inp, v, start - warmup, last, dry)
         if not why and not dry:
-            short = [n for n in exp.needs if not covers(dirs[n], start - warmup, last)] + (["color"] if dirs["color"] and not covers(dirs["color"], start - warmup, last) else [])
+            short = [n for n in exp.needs if v.inputs.get(n, "") is not None and not covers(dirs[n], start - warmup, last)] + \
+                    (["color"] if dirs["color"] and not covers(dirs["color"], start - warmup, last) else [])
             why = f"{', '.join(short)}: нет кадров {start - warmup}..{last} (--passes / --<вход>-dir или --prepare)" if short else ""
         if why and (not v.optional or v.name == exp.baseline):
             raise RuntimeError(f"{exp.id}/{v.name}: {why}")
@@ -1136,7 +1145,7 @@ def experiment_meta(res: dict, version: str, build: dict, inp: Inputs, exp: Expe
         used = sorted({m for x in res.get("variants", {}).values() for m in ((x.get("nr") or {}).get("masks") or [])})
         d = variant_dirs(inp, next(v for v in exp.variants if v.name == exp.baseline))
         own = [v.name for v in exp.variants if v.inputs and v.name in res.get("variants", {})]
-        inputs = Inputs(inp.clip, d["color"], d["depth"], d["mv"]).describe() + (f"; свои входы у {', '.join(own)}" if own else "")
+        inputs = Inputs(inp.clip, d["color"], d["depth"], d["mv"], scenes=d["scenes"]).describe() + (f"; свои входы у {', '.join(own)}" if own else "")
         meta.update({"inputs": inputs, "masks": ", ".join(used)})
     return meta
 
@@ -1267,7 +1276,7 @@ def main(argv=None) -> int:
     ap.add_argument("--mv-target-dir", help="mv_dlss at the model's size (E3 variant C)")
     ap.add_argument("--masks", action="store_true", help="pass --masks-dir <passes root>, which must hold mask_* passes (off: protected pixels would "
                                                          "mask the differences)")
-    ap.add_argument("--prepare", action="store_true", help="make color_sr / depth_dlss / mv_dlss with dlssvid process first (when they do not "
+    ap.add_argument("--prepare", action="store_true", help="make scenes / color_sr / depth_dlss / mv_dlss with dlssvid process first (when they do not "
                                                            "cover the range; one folder per clip and backends)")
     ap.add_argument("--prepare-backends", default="da3,ofa,dlss", help="depth,flow,upscale backends of --prepare (any GPU: stub,stub,bicubic)")
     ap.add_argument("--experiment", action="append", default=[], help="E1..E11, comma separated or repeated; all")

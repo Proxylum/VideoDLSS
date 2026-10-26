@@ -126,6 +126,35 @@ TEST_CASE("Project v1 -> v2: nr.exposure x becomes log2(x), x <= 0 is dropped, s
     CHECK_THROWS(Project::FromJson(nlohmann::json{{"schema_version", 0}}, d));
 }
 
+// PR-13: nr.scene_cut of PR-6 is the threshold of the stage scenes now - moved with its value (0 «выкл» included), the key gone from nr;
+// without it the schema's default. A v1 file has no such key.
+TEST_CASE("Project v2 -> v3: nr.scene_cut moves to scenes.threshold, 0 included; without it the default", "[viewport][project][regression]") {
+    const auto d = Dir("v3");
+    auto load = [&](const nlohmann::json& nrParams, int version = 2) {
+        const nlohmann::json j = {{"schema_version", version},
+                                  {"stages", nlohmann::json::array({{{"name", "nr"}, {"params", nrParams}}, {{"name", "fg"}, {"params", {{"multiplier", 2}}}}})}};
+        return Project::FromJson(j, d);
+    };
+    const Project moved = load({{"intensity", 1.2}, {"scene_cut", 0.3}});
+    REQUIRE(moved.stages.size() == 3);
+    CHECK(moved.stages[0].name == "scenes");
+    CHECK(moved.stages[0].enabled);
+    CHECK(moved.stages[0].params == nlohmann::json{{"backend", "luma"}, {"threshold", 0.3}});
+    CHECK(moved.stages[1].params == nlohmann::json{{"intensity", 1.2}});  // the key is gone from nr
+    CHECK(load({{"scene_cut", 0.0}}).stages[0].params["threshold"] == 0.0);  // «выкл» stays off
+    CHECK(load({{"scene-cut", 0.5}}).stages[0].params["threshold"] == 0.5);  // the kebab spelling too
+    CHECK_FALSE(load({{"scene-cut", 0.5}}).stages[1].params.contains("scene-cut"));
+    CHECK(load({{"scene_cut", 0.3}, {"scene-cut", 0.5}}).stages[0].params["threshold"] == 0.3);  // the snake one wins
+    CHECK_FALSE(load({{"intensity", 1.0}}).stages[0].params.contains("threshold"));  // the default (0.24)
+    CHECK_FALSE(load({{"intensity", 1.0}}, 1).stages[0].params.contains("threshold"));
+    CHECK(ValidateStageParams("nr", moved.stages[1].params).empty());
+    // a v3 file is taken as it is: a scene_cut there is the error of ValidateStageParams, not moved in silence
+    const Project v3 = load({{"scene_cut", 0.3}}, 3);
+    REQUIRE(v3.stages.size() == 2);
+    CHECK(v3.stages[0].params.contains("scene_cut"));
+    CHECK_FALSE(ValidateStageParams("nr", v3.stages[0].params).empty());
+}
+
 TEST_CASE("Project::Sources lists the passes found under the root", "[viewport][project]") {
     const auto d = Dir("sources");
     {

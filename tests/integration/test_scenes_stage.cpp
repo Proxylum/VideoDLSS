@@ -328,7 +328,8 @@ TEST_CASE("RunProcess: scenes runs first; a new threshold goes over the stored s
     REQUIRE(list0);
     CHECK(list0->cuts == std::vector<int64_t>{kCutAt});
     CHECK(Manifest::Load(o.passesRoot / kScenesPass).fingerprint == s0.fingerprint);
-    CHECK(Manifest::Load(o.passesRoot / "color_nr").inputs.count("scenes") == 0);  // nobody reads the list yet
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").inputs.at("scenes") == list0->id);  // nr reads the list (PR-13)
+    CHECK(SceneLabelOf(Manifest::Load(o.passesRoot / "color_nr")) == list0->id);
     for (const auto& e : std::filesystem::recursive_directory_iterator(o.passesRoot)) {  // a planned id never reaches a manifest
         if (e.path().filename() != Manifest::kFileName) continue;
         std::ifstream f(e.path());
@@ -491,12 +492,53 @@ TEST_CASE("Regression: the scene list at 0.24 is the one NR's detector of PR-6 f
         }
         CHECK(r.list.cuts == pr6);
 
-        NrStageOptions no;  // the stage itself, before PR-13 moved the detector out of it
+        NrStageOptions no;  // the stage resets at exactly these frames now (its own detector gave the same, ab44a61)
         no.backend = "stub";
         no.outputDir = dir / kind / "nr";
         no.temporal = 0.5f;
-        no.sceneCut = 0.24f;
+        no.sceneCuts = r.list;
         VideoDecoder dn(clip);
         CHECK(RunNr(dn, dev, no).stats.sceneCuts == r.list.cuts);
     }
+}
+
+// PR-13 (regression), the rule of the spec: an empty list is no input - on a clip without cuts every pass below is the one a run without
+// the stage makes, fingerprint for fingerprint. A broken list on disk with the stage off: the stages that read it are warned and run
+// without it.
+TEST_CASE("Regression: on a clip without cuts the stages below have the fingerprints of a run without scenes", "[integration][process][scenes][regression]") {
+    const auto dir = Dir("no_cuts");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    std::filesystem::create_directories(dir / "with");
+    std::filesystem::create_directories(dir / "without");
+    const ProcessOptions with = StubProcess(dir / "with", clip);
+    ProcessOptions without = StubProcess(dir / "without", clip);
+    for (auto& st : without.stages)
+        if (st.name == "scenes") st.enabled = false;
+    const ProcessResult a = RunProcess(with), b = RunProcess(without);
+    CHECK(Report(a, "scenes").status == "ran");
+    REQUIRE(ReadSceneList(with.passesRoot / kScenesPass, ""));
+    CHECK(ReadSceneList(with.passesRoot / kScenesPass, "")->cuts.empty());
+    for (const char* name : {"depth", "flow", "upscale", "nr", "fg"}) {
+        INFO(name);
+        CHECK(Report(a, name).fingerprint == Report(b, name).fingerprint);
+    }
+    for (const char* pass : {"mv_dlss", "color_sr", "color_nr", "color_fg"}) {
+        INFO(pass);
+        CHECK(Manifest::Load(with.passesRoot / pass).inputs.count("scenes") == 0);
+        CHECK(SceneLabelOf(Manifest::Load(with.passesRoot / pass)).empty());
+    }
+    CHECK(PlanProcess(with).runCount == 0);
+
+    std::filesystem::create_directories(without.passesRoot / kScenesPass);
+    std::ofstream(without.passesRoot / kScenesPass / Manifest::kFileName) << "{ broken";
+    const ProcessPlan plan = PlanProcess(without);
+    const StageDecision& nr = Decision(plan, "nr");
+    CHECK(nr.action == "reuse");
+    REQUIRE(!nr.warnings.empty());
+    CHECK_THAT(nr.warnings.front(), ContainsSubstring("the scene list is not used"));
+    CHECK(Decision(plan, "upscale").warnings.empty());  // nis reads no list
 }

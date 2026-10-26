@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <optional>
 
 #include "pipeline/PassFingerprint.h"
 #include "util/Error.h"
@@ -50,10 +51,24 @@ void MigrateNrParamsV1(nlohmann::json& params) {
 
 // schema_version 2 -> 3 (PR-13): the stage scenes (the clip's scene-cut list) comes first
 void MigrateScenesV3(std::vector<StageEntry>& stages) {
-    for (const auto& s : stages)
-        if (s.name == "scenes") return;
-    stages.insert(stages.begin(), StageEntry{"scenes", true, {{"backend", "luma"}}});
-    Log()->info("project v2: the stage scenes added (PR-13)");
+    // nr.scene_cut of PR-6 is the threshold of the clip's list now: moved with its value, 0 («выкл») included; without it the default
+    std::optional<nlohmann::json> threshold;
+    for (auto& s : stages)
+        if (s.name == "nr" && s.params.is_object())
+            for (const char* key : {"scene_cut", "scene-cut"})  // the snake spelling wins, as NormalizeStageParams has it
+                if (s.params.contains(key)) {
+                    if (!threshold) threshold = s.params[key];
+                    s.params.erase(key);
+                }
+    for (auto& s : stages)
+        if (s.name == "scenes") {
+            if (threshold && s.params.is_object() && !s.params.contains("threshold")) s.params["threshold"] = *threshold;
+            return;
+        }
+    StageEntry scenes{"scenes", true, {{"backend", "luma"}}};
+    if (threshold) scenes.params["threshold"] = *threshold;
+    stages.insert(stages.begin(), scenes);
+    Log()->info("project v2: the stage scenes added (PR-13){}", threshold ? ", nr.scene_cut moved to scenes.threshold" : "");
 }
 }  // namespace
 

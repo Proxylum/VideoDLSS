@@ -87,7 +87,8 @@ TEST_CASE("dlssvid process --plan decides without running; passes list / use / g
     CHECK(run.code == 0);
     const nlohmann::json rj = ReadJson(dir / "run.json");
     CHECK(StageJson(rj, "nr")["status"] == "ran");
-    CHECK(StageJson(rj, "nr")["fingerprint"] == StageJson(pj, "nr")["fingerprint"]);
+    CHECK(StageJson(rj, "upscale")["fingerprint"] == StageJson(pj, "upscale")["fingerprint"]);
+    CHECK(StageJson(pj, "nr")["inputs"]["scenes"] == "pending:scenes");  // PR-13: nr's planned fingerprint waits for the list
     CHECK(StageJson(rj, "nr")["retired"] == "");
     CHECK(run.out.find("[") != std::string::npos);  // the short fingerprint in the report
 

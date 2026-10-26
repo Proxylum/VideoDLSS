@@ -157,6 +157,15 @@ void WriteScenesPass(const std::filesystem::path& dir, Manifest base, const Scen
     m.Save(dir);
 }
 
+void StampSceneCuts(nlohmann::json& stageParams, const SceneList& list, const std::vector<int64_t>& applied, int64_t appliedCount) {
+    if (list.id.empty()) return;
+    if (!stageParams.is_object()) stageParams = nlohmann::json::object();
+    stageParams["scene_cuts_id"] = list.id;
+    stageParams["scene_cut_threshold"] = list.threshold;
+    stageParams["scene_cut_count"] = appliedCount;
+    stageParams["scene_cuts"] = applied.size() > kMaxSceneCuts ? std::vector<int64_t>(applied.begin(), applied.begin() + kMaxSceneCuts) : applied;
+}
+
 std::string SceneLabelOf(const Manifest& consumer) {
     const nlohmann::json& sp = consumer.stageParams;
     if (!sp.is_object()) return {};

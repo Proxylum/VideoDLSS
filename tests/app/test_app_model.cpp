@@ -506,16 +506,26 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
         stampOld(0.0);
         CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: при силе 0 модель не вызывается"));
         CHECK(model.cardState("nr").warning.isEmpty());  // no guides read at 0: no «без глубины и векторов»
-        // PR-6 (review): a pass of before the key - «новая настройка», not «null → 0.24»
+        // PR-6 (review): a pass of before the key - «новая настройка», not «null → 0.1»
         {
             nlohmann::json j = nlohmann::json::parse(saved);
-            j["params_canonical"].erase("scene_cut");
+            j["params_canonical"].erase("temporal_threshold");
             j["fingerprint"] = "sha256:" + std::string(64, '1');
             std::ofstream(manifestPath, std::ios::binary) << j.dump(2);
             model.setStageParam("nr", "intensity", 1.0);
             model.reloadSources();
-            CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: Сброс на склейках: новая настройка, 0.24"));
+            CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: Порог подавления мерцания: новая настройка, 0.1"));
             CHECK_FALSE(model.cardState("nr").state.contains("null"));
+        }
+        // PR-13: an nr pass of PR-6 hashed its own threshold - the card says where it went, not «scene_cut 0.24 → null»
+        {
+            nlohmann::json j = nlohmann::json::parse(saved);
+            j["params_canonical"]["scene_cut"] = 0.24;
+            j["fingerprint"] = "sha256:" + std::string(64, '2');
+            std::ofstream(manifestPath, std::ios::binary) << j.dump(2);
+            model.setStageParam("nr", "intensity", 1.0);
+            model.reloadSources();
+            CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: сброс на склейках перенесён в «Склейки»"));
         }
         std::ofstream(manifestPath, std::ios::binary) << saved;
         model.setStageParam("nr", "intensity", 1.0);

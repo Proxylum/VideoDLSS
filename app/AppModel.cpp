@@ -771,6 +771,10 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
             if (d->diff.contains("params"))
                 for (const auto& [key, pair] : d->diff["params"].items()) {
                     const ParamSpec* spec = schema ? schema->Find(key) : nullptr;
+                    if (!spec && FindMovedParam(stage, key)) {  // PR-13: nr.scene_cut is the threshold of the stage scenes now
+                        parts << tr("сброс на склейках перенесён в «Склейки»");
+                        continue;
+                    }
                     const QString label = spec ? QString::fromStdString(spec->label) : QString::fromStdString(key);
                     const nlohmann::json o = pair.is_array() && pair.size() > 0 ? pair[0] : nlohmann::json(), n = pair.is_array() && pair.size() > 1 ? pair[1] : nlohmann::json();
                     // labels of the backend each value belongs to (depth.model: «Small» of VDA, a raw id of DA3)

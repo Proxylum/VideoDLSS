@@ -26,7 +26,8 @@ void Chain(const std::filesystem::path& root) {
     Save(root, "color_sr", PassKind::ColorSr, {{"backend", "dlss"}, {"scale", 2.0}, {"quality", "DLAA"}, {"dll_dir", "C:/Program Files/NVIDIA/dlss"}, {"fallback", false}});
     Save(root, "color_nr", PassKind::ColorNr,
          {{"backend", "ngx"}, {"style", 1}, {"intensity", 1.2}, {"passes", 1}, {"local_tone", 1.0}, {"local_structure", 1.0}, {"skin_structure", -1.0},
-          {"auto_mask", false}, {"guides", true}, {"scene_cut_threshold", 0.24}, {"scene_cut_count", 3}, {"scene_cuts", {40, 97, 130}}, {"temporal", 0.0},
+          {"auto_mask", false}, {"guides", true}, {"scene_cuts_id", "cuts:0123"}, {"scene_cut_threshold", 0.24}, {"scene_cut_count", 3}, {"scene_cuts", {40, 97, 130}},
+          {"temporal", 0.0},
           {"model_scale", 1.0}, {"color_source", "color_sr"}, {"diagnostics", {{"dll", "C:/dlss/nvngx_dlssnr.dll"}}},
           {"tonemap", {{"curve", "passthrough"}, {"input_transfer", "srgb"}, {"exposure_ev", 0.0}}}, {"masks", nlohmann::json::array()}});
     Save(root, "color_fg", PassKind::ColorFg, {{"backend", "dlssg"}, {"multiplier", 2}, {"color_source", "color_nr"}});
@@ -41,14 +42,17 @@ TEST_CASE("Settings note: one segment per stage that ran, values from stageParam
     Chain(root);
     const std::string note = BuildSettingsNote(root, "color_fg");
     CHECK(note == std::string("VideoDLSS ") + DLSSVID_VERSION +
-                      " | upscale: dlss x2 quality=DLAA | nr: ngx style=natural intensity=1.2 passes=1 local_tone=1 local_structure=1 skin_structure=follow"
-                      " auto_mask=off guides=on scene_cut=0.24 cuts=3 temporal=0 model_scale=1 | fg: dlssg x2");
+                      " | scenes: luma threshold=0.24 cuts=3 | upscale: dlss x2 quality=DLAA | nr: ngx style=natural intensity=1.2 passes=1 local_tone=1"
+                      " local_structure=1 skin_structure=follow auto_mask=off guides=on temporal=0 model_scale=1 | fg: dlssg x2");
     CHECK(note.find(":/") == std::string::npos);  // no C:/..., D:/...
     CHECK(note.find("nvngx") == std::string::npos);
     CHECK(note.size() <= kSettingsNoteMax);
     for (const char c : note) CHECK((c >= 32 && c <= 126));
     const nlohmann::json j = BuildSettingsJson(root, "color_fg");
-    CHECK(j["stages"]["nr"]["cuts"] == 3);
+    CHECK(j["stages"]["scenes"]["cuts"] == 3);  // PR-13: the list the result was made with, from the first label met (nr here)
+    CHECK(j["stages"]["scenes"]["threshold"] == 0.24);
+    CHECK_FALSE(j["stages"]["nr"].contains("cuts"));
+    CHECK_FALSE(j["stages"]["nr"].contains("scene_cut_threshold"));
     CHECK_FALSE(j["stages"]["upscale"].contains("dll_dir"));
     CHECK_FALSE(j.dump().find(":/") != std::string::npos);
 

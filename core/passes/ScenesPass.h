@@ -22,6 +22,7 @@ inline constexpr const char* kScenesPass = "scenes";
 inline constexpr const char* kScenesPendingId = "pending:scenes";  // a plan only: the list is analysed first; never on disk
 inline constexpr const char* kScenesAlgorithm = "luma-mad.640";      // SceneCutDetector, thumbs <= 640 wide: another one needs new scores
 inline constexpr const char* kScenesScoresFile = "scores.npy";
+inline constexpr size_t kMaxSceneCuts = 1000;  // a manifest names at most this many cut frames (stage_params.scene_cuts)
 
 struct SceneList {
     std::vector<int64_t> cuts;  // sorted, unique, absolute source frames that start a shot (never 0)
@@ -59,6 +60,10 @@ std::optional<SceneScores> ReadSceneScores(const std::filesystem::path& dir, con
 // Writes the pass: scores.npy first (when given), the manifest last - a folder without a manifest is no pass. `base` gives the size,
 // fps and source; its stage_params (backend, threshold) are kept and the list's fields set.
 void WriteScenesPass(const std::filesystem::path& dir, Manifest base, const SceneList& list, const SceneScores* scores);
+
+// What a stage that read the list writes into its stage_params (PR-13): scene_cuts_id (the label: the list's id), scene_cut_threshold,
+// scene_cut_count (the cuts it applied in its frames) and scene_cuts (the first kMaxSceneCuts of them). Without a list: none of them.
+void StampSceneCuts(nlohmann::json& stageParams, const SceneList& list, const std::vector<int64_t>& applied, int64_t appliedCount);
 
 // The list a consumer pass was made with (stage_params.scene_cuts_id); an nr pass of PR-6 reset by its own detector: "pr6"; else "".
 std::string SceneLabelOf(const Manifest& consumer);
