@@ -1156,7 +1156,7 @@ AppModel::PresetResult AppModel::saveStagePreset(const std::string& stage, const
         return r;
     }
     if (replacing.isEmpty())
-        if (const auto taken = PresetStore::FindByName(r.name, PresetScope::Stage)) {
+        if (const auto taken = PresetStore::FindByName(r.name, PresetScope::Stage, stage)) {
             r.exists = true;
             r.file = *taken;
             return r;
@@ -1416,7 +1416,7 @@ QString AppModel::seedNewProject() {
     const PresetLoad l = LoadPreset(path);
     const QString name = l.preset.name.empty() ? mark : QString::fromStdString(l.preset.name);
     if (!l.ok())  // newer, broken, a value out of range: the built-in defaults, the mark stays (a version may be rolled back)
-        return tr(" · пресет для новых проектов «%1» не применён: %2; взяты встроенные умолчания").arg(name, PresetStore::IssueTexts(l.issues, true).join("; "));
+        return tr(" · пресет для новых проектов «%1» не применён: %2; взяты встроенные умолчания").arg(name, PresetStore::IssueTexts(l.issues, true, true).join("; "));
     std::vector<PresetIssue> notes = l.issues;
     ApplyPipelinePreset(project_, l.preset, &notes);  // a card preset goes to its stage; no slot is written for a new project
     for (const auto& n : notes) Log()->info("new project: preset '{}': {}", l.preset.name, n.text);

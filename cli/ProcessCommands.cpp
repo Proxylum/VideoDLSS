@@ -172,7 +172,15 @@ void BuildStages(const std::string& projectFile, const std::vector<std::string>&
         if (f.preset) {  // its keys replace the form's (and, from a pipeline preset, the tuning keys); the others stay
             std::vector<std::string> ignored;
             s->params = ApplyPreset(sf.stage, s->params, f.params, f.scope, &ignored);
-            for (const auto& k : ignored) Log()->warn("--param-file {}: {}.{} does not apply to the backend {}, skipped", sf.spec, sf.stage, k, StageBackend(sf.stage, s->params));
+            const std::string backend = StageBackend(sf.stage, s->params);
+            for (const auto& k : ignored) {
+                const ParamSpec* spec = FindStageSchema(sf.stage) ? FindStageSchema(sf.stage)->Find(k) : nullptr;
+                if (spec && IsListlessKey(*spec, backend))
+                    Log()->warn("--param-file {}: {}.{} has no list for the backend {}: presets do not set it, the project's value stays (give --param)", sf.spec,
+                                sf.stage, k, backend);
+                else
+                    Log()->warn("--param-file {}: {}.{} does not apply to the backend {}, skipped", sf.spec, sf.stage, k, backend);
+            }
         } else {  // a settings object merges over the stage's; its backend first, as the aliases
             if (f.params.contains("backend") && f.params["backend"].is_string())
                 s->params = ParamsForBackendChange(sf.stage, s->params, f.params["backend"].get<std::string>());

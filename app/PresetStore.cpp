@@ -43,11 +43,11 @@ std::string CutName(const std::string& s, size_t limit = kPresetNameMax) {
 }
 
 // the first «<name> (n)» no preset of the scope has; the name is cut before the suffix, so a long one still gets it
-std::string FreeCopyName(const std::string& name, PresetScope scope) {
+std::string FreeCopyName(const std::string& name, PresetScope scope, const std::string& stage) {
     for (int n = 2; n < 10000; ++n) {
         const std::string suffix = " (" + std::to_string(n) + ")";  // ASCII: bytes = code points
         const std::string candidate = CutName(name, kPresetNameMax - suffix.size()) + suffix;
-        if (!PresetStore::FindByName(QString::fromStdString(candidate), scope)) return candidate;
+        if (!PresetStore::FindByName(QString::fromStdString(candidate), scope, stage)) return candidate;
     }
     return name;
 }
@@ -84,12 +84,12 @@ QString ValueProblemText(const PresetIssue& i) {
         }
         if (i.key == "chroma") {
             const std::string v = i.got.is_string() ? i.got.get<std::string>() : i.got.dump();
-            if (ValidChromaChoice(v) && caps) {
+            if (i.got.is_string() && ValidChromaChoice(v) && caps) {  // a value the codec cannot encode (a number is a type error)
                 QStringList takes;
                 for (const auto& c : caps->chromas) takes << EncodeValueLabel("chroma", c);
                 return Tr("Субдискретизация: %1 — %2 кодирует %3").arg(EncodeValueLabel("chroma", v), codec, takes.join(Tr(" и ")));
             }
-            return Tr("Субдискретизация: %1 — допустимо: авто, 4:2:0, 4:2:2, 4:4:4").arg(U(v));
+            return Tr("Субдискретизация: %1 — в файле допустимо строкой \"auto\", \"420\", \"422\" или \"444\"").arg(U(v));
         }
         if (i.key == "b") {
             const std::string s = i.got.is_string() ? i.got.get<std::string>() : i.got.is_number() ? i.got.dump() : std::string();
@@ -112,6 +112,7 @@ QString ValueProblemText(const PresetIssue& i) {
             return Tr("%1: %2 — допустимо %3–%4").arg(label, got, Num(spec->min), Num(spec->max));
         case ParamProblem::Kind::Type:
             if (spec->type == ParamType::Bool) return Tr("%1: нужно «да» или «нет», в файле %2").arg(label, got);
+            if (spec->type == ParamType::Int && p.got.is_number()) return Tr("%1: нужно целое число, в файле %2").arg(label, got);
             if (spec->type == ParamType::Int || spec->type == ParamType::Float) return Tr("%1: нужно число, в файле %2").arg(label, got);
             return Tr("%1: нужен текст, в файле %2").arg(label, got);
         case ParamProblem::Kind::Choice: {
@@ -172,10 +173,11 @@ PresetStore::Listing PresetStore::List(const std::string& target) {
     return out;
 }
 
-std::optional<QString> PresetStore::FindByName(const QString& name, PresetScope scope) {
+std::optional<QString> PresetStore::FindByName(const QString& name, PresetScope scope, const std::string& stage) {
     const QString wanted = name.trimmed();
     for (const PresetName& n : Library().Names())
-        if (n.scope == scope && U(n.name).compare(wanted, Qt::CaseInsensitive) == 0) return Text(n.path);
+        if (n.scope == scope && U(n.name).compare(wanted, Qt::CaseInsensitive) == 0 && (stage.empty() || n.stage.empty() || n.stage == stage))
+            return Text(n.path);
     return std::nullopt;
 }
 
@@ -226,7 +228,9 @@ QString PresetStore::IssueText(const PresetIssue& i, bool withStage) {
                 if (const ParamSpec* b = SpecOf(st, "backend"))
                     for (const auto& c : b->choices)
                         if (c.value == i.to) method = U(c.label);
-                text = Tr("%1 не относится к методу «%2» — пропущено").arg(label, method);
+                const ParamSpec* spec = SpecOf(st, i.key);
+                text = spec && IsListlessKey(*spec, i.to) ? Tr("%1: у метода «%2» нет списка — пресет её не задаёт, оставлено значение проекта").arg(label, method)
+                                                          : Tr("%1 не относится к методу «%2» — пропущено").arg(label, method);
             }
             break;
         case K::UnknownStage: return Tr("стадии «%1» нет в этой версии").arg(U(st));
@@ -326,17 +330,18 @@ PresetStore::Result PresetStore::Import(const std::string& target, const QString
     std::string name = p.name;
     if (ReservedPresetName(name)) name = CutName("Импорт — " + name);  // in front: a suffix would leave the form of a slot's name
     std::filesystem::path replace;
+    const std::string cardStage = p.scope == PresetScope::Stage ? p.stage() : std::string();
     if (!replacing.isEmpty()) {
         replace = Path(replacing);
-    } else if (const auto taken = FindByName(U(name), p.scope)) {
+    } else if (const auto taken = FindByName(U(name), p.scope, cardStage)) {
         if (!asCopy) {
             r.exists = true;
             r.name = U(name);
             r.file = *taken;
-            r.copyName = U(FreeCopyName(name, p.scope));  // the button names what «as a copy» will save
+            r.copyName = U(FreeCopyName(name, p.scope, cardStage));  // the button names what «as a copy» will save
             return r;
         }
-        name = FreeCopyName(name, p.scope);
+        name = FreeCopyName(name, p.scope, cardStage);
     }
     p.name = name;
     try {

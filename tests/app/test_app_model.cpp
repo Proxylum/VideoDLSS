@@ -3167,12 +3167,22 @@ TEST_CASE("PresetMenu: import, export and delete through the dialogs", "[app][pr
         return n;
     };
     CHECK(names() == QStringList{QString::fromUtf8("Мягкий"), QString::fromUtf8("Мягкий (2)"), QString::fromUtf8("Мягкий (3)")});
+    auto stored = [] {
+        for (const auto& i : PresetStore::List("nr").items)
+            if (i.name == QString::fromUtf8("Мягкий")) return LoadPreset(PresetStore::Path(i.file)).preset.stages.at("nr").params.at("intensity").get<double>();
+        return -1.0;
+    };
+    WritePreset(d / "soft.json", CardPresetJson("Мягкий", {{"intensity", 0.4}}));
     dialogs.clash = PresetDialogs::Clash::Replace;
     nr.importFile();
     CHECK(names().size() == 3);
+    CHECK(stored() == Approx(0.4));  // replaced
+    CHECK(LastMessage(messages) == QString::fromUtf8("Пресет «Мягкий» импортирован"));
+    WritePreset(d / "soft.json", CardPresetJson("Мягкий", {{"intensity", 0.3}}));
     dialogs.clash = PresetDialogs::Clash::Cancel;
     nr.importFile();
     CHECK(names().size() == 3);
+    CHECK(stored() == Approx(0.4));  // cancelled: untouched
     CHECK(dialogs.warnings == 0);
     // a pipeline preset into the card: its nr settings, said in a dialog
     nlohmann::json pipe = {{"format", "dlssvid-preset"}, {"schema", 1}, {"scope", "pipeline"}, {"name", "Аниме"}, {"stages", nlohmann::json::object()}};
@@ -3213,4 +3223,32 @@ TEST_CASE("PresetMenu: import, export and delete through the dialogs", "[app][pr
     CHECK(dialogs.texts.last().contains(QFileInfo(victim).fileName()));  // the file named in the question
     CHECK_FALSE(std::filesystem::exists(PresetStore::Path(victim)));
     CHECK(PresetStore::NewProjectPreset().isEmpty());
+}
+
+// Review of PR-9: the Russian texts of a few file problems say what the file holds and what it should
+TEST_CASE("PresetStore texts: a whole number, a chroma given as a number or in the card's spelling, a list key without a list", "[app][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_texts");
+    const auto fractional = PresetStore::Import("nr", WritePreset(d / "passes.json", CardPresetJson("Проходы", {{"passes", 2.5}})));
+    INFO(fractional.problems.join(" | ").toStdString());
+    CHECK(fractional.problems.join(" ").contains(QString::fromUtf8("Проходы: нужно целое число")));
+    nlohmann::json pipe = {{"format", "dlssvid-preset"}, {"schema", 1}, {"scope", "pipeline"}, {"name", "Цвет"}, {"stages", nlohmann::json::object()}};
+    pipe["stages"]["nr"] = {{"enabled", true}, {"params", {{"intensity", 0.6}}}};
+    for (const nlohmann::json& chroma : {nlohmann::json(420), nlohmann::json("4:2:0")}) {
+        INFO(chroma.dump());
+        pipe["encode"] = {{"codec", "h264_nvenc"}, {"chroma", chroma}};
+        const auto r = PresetStore::Import(kPipelineTarget, WritePreset(d / "chroma.json", pipe));
+        INFO(r.problems.join(" | ").toStdString());
+        CHECK(r.problems.join(" ").contains(QString::fromUtf8("в файле допустимо строкой \"auto\", \"420\", \"422\" или \"444\"")));
+        CHECK_FALSE(r.problems.join(" ").contains(QString::fromUtf8("кодирует")));
+    }
+    PresetIssue listless;
+    listless.kind = PresetIssueKind::ForeignKey;
+    listless.stage = "depth";
+    listless.key = "model";
+    listless.to = "da3";
+    CHECK(PresetStore::IssueText(listless).contains(QString::fromUtf8("нет списка — пресет её не задаёт, оставлено значение проекта")));
+    listless.key = "window";
+    CHECK(PresetStore::IssueText(listless).contains(QString::fromUtf8("не относится к методу")));
 }

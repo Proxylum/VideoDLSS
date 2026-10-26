@@ -37,8 +37,9 @@ public:
     };
     // target: a stage with card presets ("nr") or kPipelineTarget
     static Listing List(const std::string& target);
-    // the file of a preset of the scope with this name, the case ignored («мягкий» replaces «Мягкий»), over every file
-    static std::optional<QString> FindByName(const QString& name, PresetScope scope);
+    // the file of a preset of the scope with this name, the case ignored («мягкий» replaces «Мягкий»), over every file; a card preset
+    // of another stage does not count (its menu is another one: replacing it would lose it)
+    static std::optional<QString> FindByName(const QString& name, PresetScope scope, const std::string& stage = {});
 
     // Russian texts: one issue; the fatal ones or the notes of a list joined; what a preset leaves out (the save dialog)
     static QString IssueText(const PresetIssue& i, bool withStage = false);

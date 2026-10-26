@@ -22,15 +22,18 @@ PresetSaveDialog::PresetSaveDialog(const Setup& setup, QWidget* parent) : QDialo
     name_->setMaxLength(static_cast<int>(kPresetNameMax));
     label->setBuddy(name_);
     nameNote_ = new QLabel(this);
+    nameNote_->setTextFormat(Qt::PlainText);  // names come from files: never markup
     nameNote_->setWordWrap(true);
     SetRole(nameNote_, "hint");
     newProjects_ = new QCheckBox(tr("Применять к новым проектам"), this);
     newProjects_->setToolTip(tr("Новые проекты (видео без файла проекта рядом) получат эти настройки"));
     markNote_ = new QLabel(setup.markNote, this);
+    markNote_->setTextFormat(Qt::PlainText);
     markNote_->setWordWrap(true);
     SetRole(markNote_, "hint");
     markNote_->setVisible(false);
     leftOut_ = new QLabel(setup.leftOut, this);
+    leftOut_->setTextFormat(Qt::PlainText);
     leftOut_->setWordWrap(true);
     SetRole(leftOut_, "hint");
     leftOut_->setVisible(!setup.leftOut.isEmpty());
@@ -84,6 +87,7 @@ PresetDialogs PresetDialogs::Default() {
         QPushButton* ok = box.addButton(yes, QMessageBox::AcceptRole);
         box.addButton(QObject::tr("Отмена"), QMessageBox::RejectRole);
         box.setDefaultButton(ok);
+        box.setTextFormat(Qt::PlainText);
         box.exec();
         return box.clickedButton() == ok;
     };
@@ -92,11 +96,21 @@ PresetDialogs PresetDialogs::Default() {
         QPushButton* replace = box.addButton(QObject::tr("Заменить"), QMessageBox::AcceptRole);
         QPushButton* copy = box.addButton(QObject::tr("Сохранить как «%1»").arg(QString(copyName).replace("&", "&&")), QMessageBox::AcceptRole);  // no mnemonic
         box.addButton(QObject::tr("Отмена"), QMessageBox::RejectRole);
+        box.setTextFormat(Qt::PlainText);
         box.exec();
         return box.clickedButton() == replace ? Clash::Replace : box.clickedButton() == copy ? Clash::Copy : Clash::Cancel;
     };
-    d.warn = [](QWidget* parent, const QString& title, const QString& text) { QMessageBox::warning(parent, title, text); };
-    d.inform = [](QWidget* parent, const QString& title, const QString& text) { QMessageBox::information(parent, title, text); };
+    // the texts name presets from files: plain text, so «<b>Ночь</b>» reads as it is written (QMessageBox guesses markup otherwise)
+    d.warn = [](QWidget* parent, const QString& title, const QString& text) {
+        QMessageBox box(QMessageBox::Warning, title, text, QMessageBox::Ok, parent);
+        box.setTextFormat(Qt::PlainText);
+        box.exec();
+    };
+    d.inform = [](QWidget* parent, const QString& title, const QString& text) {
+        QMessageBox box(QMessageBox::Information, title, text, QMessageBox::Ok, parent);
+        box.setTextFormat(Qt::PlainText);
+        box.exec();
+    };
     return d;
 }
 

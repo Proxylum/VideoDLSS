@@ -128,15 +128,16 @@ std::vector<PresetName> PresetLibrary::Names() const {
     std::vector<PresetName> out;
     for (const auto& file : TopFiles()) {
         const PresetLoad L = LoadPreset(file);
-        if (L.scopeKnown && !L.preset.name.empty()) out.push_back({file, L.preset.name, L.preset.scope});
+        if (L.scopeKnown && !L.preset.name.empty())
+            out.push_back({file, L.preset.name, L.preset.scope, L.preset.scope == PresetScope::Stage ? L.preset.stage() : std::string()});
     }
     return out;
 }
 
-std::optional<std::filesystem::path> PresetLibrary::FindByName(const std::string& name, PresetScope scope) const {
+std::optional<std::filesystem::path> PresetLibrary::FindByName(const std::string& name, PresetScope scope, const std::string& stage) const {
     const std::string wanted = TrimPresetName(name);
     for (const PresetName& n : Names())
-        if (n.scope == scope && n.name == wanted) return n.path;
+        if (n.scope == scope && n.name == wanted && (stage.empty() || n.stage.empty() || n.stage == stage)) return n.path;
     return std::nullopt;
 }
 
@@ -168,7 +169,7 @@ std::filesystem::path PresetLibrary::Save(const Preset& p, const std::filesystem
         return replacing;
     }
     if (ReservedPresetName(p.name)) Throw("the name '" + p.name + "' is an automatic slot's - give another one");
-    if (const auto taken = FindByName(p.name, p.scope)) Throw("a " + std::string(PresetScopeName(p.scope)) + " preset '" + p.name + "' exists: " + PathText(*taken));
+    if (const auto taken = FindByName(p.name, p.scope, p.scope == PresetScope::Stage ? p.stage() : std::string())) Throw("a " + std::string(PresetScopeName(p.scope)) + " preset '" + p.name + "' exists: " + PathText(*taken));
     const std::string stem = PresetFileStem(p.name);
     for (int n = 1; n < 10000; ++n) {
         const auto path = dir_ / U8Path(stem + (n > 1 ? " (" + std::to_string(n) + ")" : std::string()) + ".json");

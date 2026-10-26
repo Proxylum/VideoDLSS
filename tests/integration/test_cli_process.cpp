@@ -700,6 +700,15 @@ TEST_CASE("dlssvid bench --param-file with a pipeline preset runs its stages wit
     // ProRes cannot encode the preset's 12 bits and bench has no --bit-depth: auto (before: the run failed at the encode)
     CHECK(ReadJson(json)["output_format"]["bit_depth"] == 10);
     CHECK(pr.out.find("bit depth and chroma auto") != std::string::npos);
+    // a pipeline preset without encode gives no encoder: no «over the preset's h264_nvenc» (review of PR-9)
+    nlohmann::json noenc = AnimePreset();
+    noenc.erase("encode");
+    const std::string noencFile = WriteJsonFile(dir / "noenc.json", noenc);
+    const CliResult ne = RunCli({"bench", "-i", clip.string(), "--frames", "3", "--warp", "--param-file", noencFile, "--codec", "ffv1", "--json", json.string()});
+    INFO(ne.out);
+    REQUIRE(ne.code == 0);
+    CHECK(ReadJson(json)["output_format"]["codec"] == "ffv1");
+    CHECK(ne.out.find("over the preset's") == std::string::npos);
 }
 
 // Review of PR-9: the result's container follows --codec only; a project's own result path is kept without it (before PR-9's fix,

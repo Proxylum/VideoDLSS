@@ -79,7 +79,10 @@ void ApplyPipelinePreset(Project& p, const Preset& preset, std::vector<PresetIss
                 i.key = k;
                 i.got = it->second.params.contains(k) ? it->second.params[k] : nlohmann::json();
                 i.to = StageBackend(s, e->params);
-                i.text = s + "." + k + " does not apply to the backend " + i.to + " - skipped";
+                const ParamSpec* spec = FindStageSchema(s) ? FindStageSchema(s)->Find(k) : nullptr;
+                i.text = spec && IsListlessKey(*spec, i.to)
+                             ? s + "." + k + " has no list for the backend " + i.to + " - presets do not set it, the project's value stays"
+                             : s + "." + k + " does not apply to the backend " + i.to + " - skipped";
                 notes->push_back(std::move(i));
             }
     }

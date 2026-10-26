@@ -138,6 +138,8 @@ std::vector<std::string> PresetKeys(const std::string& stage, const std::string&
 
 bool CardResetKey(const ParamSpec& spec) { return !spec.advanced && spec.key != "backend"; }
 
+bool IsListlessKey(const ParamSpec& spec, const std::string& backend) { return OfBackend(spec, backend) && NoRow(spec, backend); }
+
 bool IsMachineKey(const ParamSpec& spec) {
     static const std::set<std::string> machine = {"models_dir", "python", "max_res", "input_size", "tile", "fp32"};
     return spec.advanced && !spec.tuning && machine.count(spec.key) > 0;

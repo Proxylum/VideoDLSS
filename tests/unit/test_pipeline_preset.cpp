@@ -172,7 +172,7 @@ TEST_CASE("ApplyPipelinePreset: a stage or the encode missing from the preset st
     json j = json::parse(PresetToJson(MakePipelinePreset("Частичный", Tuned())).dump());
     j["stages"].erase("depth");
     j.erase("encode");
-    j["stages"]["scenes"]["enabled"] = true;
+    j["stages"]["scenes"]["enabled"] = false;  // the opposite of the inserted stage's default (DefaultStages: on)
     const PresetLoad l = ValidatePreset(j);
     REQUIRE(l.ok());
     CHECK(l.Has(Kind::MissingStage));
@@ -187,7 +187,7 @@ TEST_CASE("ApplyPipelinePreset: a stage or the encode missing from the preset st
     CHECK(p.codec == "ffv1");
     REQUIRE(HasStage(p, "scenes"));
     CHECK(p.stages.front().name == "scenes");  // at its place in the run order
-    CHECK(Stage(p, "scenes").enabled);
+    CHECK_FALSE(Stage(p, "scenes").enabled);  // the preset's switch, not DefaultStages' on
     CHECK(Stage(p, "scenes").params["threshold"] == 0.3);
     // a card preset goes to its stage as a card's: the switch stays
     Project q;
@@ -351,4 +351,20 @@ TEST_CASE("Pipeline preset: a bitrate is written as the reader gives it, so the 
     p.codecOptions = {{"b", "12.5M"}};
     CHECK(EncodeOf(p).bitrate == "12.5M");
     CHECK_THROWS_AS(SavePreset(std::filesystem::path(DLSSVID_TEST_TMP) / "presets" / "bitrate.json", MakePipelinePreset("Битрейт", p)), PresetError);
+}
+
+// Review of PR-9: a key with form lists and none for the backend (depth.model under DA3) is used by the backend - the preset skips it
+// as a key without a row, and the note says so instead of «does not apply to the backend»
+TEST_CASE("ApplyPipelinePreset: a list key without a list for the backend is skipped as such, the project's value kept", "[unit][presets][regression]") {
+    Project p;
+    p.stages = Project::DefaultStages();
+    Stage(p, "depth").params = {{"backend", "da3"}, {"model", "da3metric-large"}};
+    Preset preset = MakePipelinePreset("DA3", p);
+    preset.stages.at("depth").params = {{"backend", "da3"}, {"model", "da3mono-large"}};
+    std::vector<PresetIssue> notes;
+    ApplyPipelinePreset(p, preset, &notes);
+    REQUIRE(notes.size() == 1);
+    CHECK(notes[0].kind == Kind::ForeignKey);
+    CHECK(notes[0].text == "depth.model has no list for the backend da3 - presets do not set it, the project's value stays");
+    CHECK(Stage(p, "depth").params["model"] == "da3metric-large");
 }

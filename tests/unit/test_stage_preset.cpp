@@ -628,6 +628,8 @@ TEST_CASE("PresetLibrary: lists by scope, the pipeline slot, one name in both sc
     CHECK(lib.List(PresetScope::Stage, "depth").presets.empty());
     // the pipeline's slot; no reset slot for it
     CHECK(lib.SlotPath(PresetSlot::BeforeApply, kPipelineTarget) == dir / "auto" / "before-apply-pipeline.json");
+    lib.SaveSlot(PresetSlot::BeforeReset, kPipelineTarget, pipe);  // even a file there is no slot of a pipeline
+    REQUIRE(std::filesystem::is_regular_file(lib.SlotPath(PresetSlot::BeforeReset, kPipelineTarget)));
     CHECK_FALSE(lib.Slot(PresetSlot::BeforeReset, kPipelineTarget));
     // a slot of a newer version is replaced
     WriteText(lib.SlotPath(PresetSlot::BeforeApply, kPipelineTarget), [] {
@@ -692,4 +694,27 @@ TEST_CASE("Pipeline preset: a key with one choice is dropped as nothing to choos
     CHECK_FALSE(IsMachineKey(*FindStageSchema("scenes")->Find("backend")));
     CHECK_FALSE(IsMachineKey(*FindStageSchema("nr")->Find("format")));
     CHECK_FALSE(IsMachineKey(*FindStageSchema("nr")->Find("intensity")));
+}
+
+// Review of PR-9: a card preset of another stage with the same name is no clash - saving an NR preset «Мягкий» next to a depth one
+// made «Заменить» overwrite the depth preset, which the NR menu never lists
+TEST_CASE("PresetLibrary: a card preset's name is taken per stage; another stage's preset of that name is never replaced", "[unit][presets][regression]") {
+    const auto dir = Dir("library_stages");
+    const PresetLibrary lib(dir);
+    const auto depth = lib.Save([] {
+        Preset p;
+        p.name = "Мягкий";
+        p.scope = PresetScope::Stage;
+        p.stages["depth"].params = {{"backend", "vda"}};
+        return p;
+    }());
+    const std::string depthBytes = ReadText(depth);
+    CHECK(lib.FindByName("Мягкий", PresetScope::Stage, "depth") == depth);
+    CHECK_FALSE(lib.FindByName("Мягкий", PresetScope::Stage, "nr"));
+    CHECK(lib.FindByName("Мягкий", PresetScope::Stage) == depth);  // without a stage: any
+    const auto nr = lib.Save(MakePreset("Мягкий", "nr", {{"intensity", 0.7}}));
+    CHECK(nr == dir / U8("Мягкий (2).json"));
+    CHECK(ReadText(depth) == depthBytes);
+    CHECK(lib.FindByName("Мягкий", PresetScope::Stage, "nr") == nr);
+    CHECK_THROWS(lib.Save(MakePreset("Мягкий", "nr", {{"intensity", 0.5}})));  // now taken in nr
 }

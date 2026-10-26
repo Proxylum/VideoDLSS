@@ -93,6 +93,8 @@ bool CardResetKey(const ParamSpec& spec);
 // A key of the machine: a path (models_dir, python) or a size for its GPU memory (max_res, input_size, tile, fp32) - no preset holds it.
 // The other engineer keys without `tuning` (scenes.backend: one method) are left out of presets as nothing to choose.
 bool IsMachineKey(const ParamSpec& spec);
+// A key with form lists and none for this backend (depth.model under DA3): the backend uses it, a preset does not set it (no row).
+bool IsListlessKey(const ParamSpec& spec, const std::string& backend);
 inline constexpr int kPresetMaxDepth = 64;  // JSON nesting a preset or a settings file may have (a preset needs 4)
 
 // semantics. scope: Stage - a card preset, Pipeline - a pipeline preset's entry of the stage.

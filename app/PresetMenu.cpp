@@ -230,7 +230,7 @@ void PresetMenu::rebuild() {
         o->setEnabled(false);
         o->setToolTip(pipe ? tr("Новые проекты берут «Улучшение» из этого пресета. Выберите здесь пресет обработки — метка перейдёт на него")
                            : tr("Новые проекты берут все настройки обработки из «%1». Выберите здесь вариант для «Улучшения» — метка перейдёт на него")
-                                 .arg(markText()));
+                                 .arg(markText().toHtmlEscaped()));  // a tooltip may read a name as markup
         group->addAction(o);
     }
     connect(addAction(tr("Открыть &папку пресетов")), &QAction::triggered, this, [] {
@@ -273,10 +273,11 @@ void PresetMenu::saveCurrent() {
         if (ReservedPresetName(n)) return QObject::tr("Так называются автосохранения — выберите другое имя");
         return {};
     };
-    s.exists = [scope](const QString& name) { return PresetStore::FindByName(name, scope).has_value(); };
+    const std::string stage = pipe ? std::string() : target_;  // a card preset of another stage is no clash (and must not be replaced)
+    s.exists = [scope, stage](const QString& name) { return PresetStore::FindByName(name, scope, stage).has_value(); };
     const auto answer = dialogs_.saveName(dialogParent(), s);
     if (!answer) return;
-    const QString replacing = PresetStore::FindByName(answer->name, scope).value_or(QString());  // the dialog said «будет заменён»
+    const QString replacing = PresetStore::FindByName(answer->name, scope, stage).value_or(QString());  // the dialog said «будет заменён»
     const AppModel::PresetResult r = pipe ? model_.savePipelinePreset(answer->name, replacing, answer->forNewProjects)
                                           : model_.saveStagePreset(target_, answer->name, replacing, answer->forNewProjects);
     if (!r.ok) dialogs_.warn(dialogParent(), tr("Пресет не сохранён"), r.problems.join("\n"));

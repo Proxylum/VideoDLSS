@@ -28,6 +28,7 @@ struct PresetName {
     std::filesystem::path path;
     std::string name;
     PresetScope scope = PresetScope::Stage;
+    std::string stage;  // a card preset's stage ("" when it could not be read)
 };
 
 // A file name stem for a preset name, UTF-8 in and out: <>:"/\|?* and control characters become _, dots and spaces at the ends go,
@@ -50,8 +51,8 @@ public:
     PresetListing List(PresetScope scope, const std::string& stage = {}) const;
     // the name of every top-level file whose envelope gives one, without the limit (a refused file too, when its name was read)
     std::vector<PresetName> Names() const;
-    // exact, in the scope; over every file (Names)
-    std::optional<std::filesystem::path> FindByName(const std::string& name, PresetScope scope) const;
+    // exact, in the scope (a card preset: of this stage too, or of a stage not read); over every file (Names)
+    std::optional<std::filesystem::path> FindByName(const std::string& name, PresetScope scope, const std::string& stage = {}) const;
     // target: a stage or kPipelineTarget; BeforeReset exists for stages only. Read with PresetRead::Slot.
     std::optional<PresetFile> Slot(PresetSlot slot, const std::string& target) const;
     std::filesystem::path SlotPath(PresetSlot slot, const std::string& target) const;
