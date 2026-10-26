@@ -2491,7 +2491,7 @@ TEST_CASE("Pipeline presets: save, apply every card and the encoder at once with
     model.setStageEnabled("fg", true);
     model.setStageParam("scenes", "threshold", 0.24);
     model.setStageParam("nr", "intensity", 1.4);
-    model.setEncode("h264_nvenc", {});
+    model.setEncode("h264_nvenc", {}, {});
     CHECK(model.project().resultVideo.filename() == "clip_result.mp4");
     QSignalSpy project(&model, &AppModel::projectChanged), plans(&model, &AppModel::planChanged), messages(&model, &AppModel::message);
     const auto applied = model.applyPipelinePreset(anime.file);
@@ -2842,4 +2842,193 @@ TEST_CASE("PresetSaveDialog: a bad name disables Save, an existing name turns it
     CHECK(dialogs.lastSetup->leftOut.contains(QString::fromUtf8("Бэкенд stub")));       // the stub method of this project is
     CHECK(dialogs.lastSetup->markNote.isEmpty());  // the mark is on this menu's kind now
     CHECK(PresetStore::List("nr").items.size() == 1);  // the same name: replaced
+}
+
+namespace {
+PresetButton* PipelineButton(QWidget* panel) {
+    for (PresetButton* b : panel->findChildren<PresetButton*>())
+        if (b->accessibleName() == QString::fromUtf8("Пресеты обработки")) return b;
+    return nullptr;
+}
+}  // namespace
+
+TEST_CASE("ProjectPanel: the pipeline preset button sits in the Stages header after Process in the Tab order; Space opens its menu instead of playback; items preview the diff per stage",
+          "[app][panel][presets][regression]") {
+    App();
+    ClearPresets();
+    {  // no project: the button waits
+        AppModel empty(true);
+        TaskQueue queue;
+        ProjectPanel panel(empty, queue);
+        panel.refresh();
+        REQUIRE(PipelineButton(&panel));
+        CHECK_FALSE(PipelineButton(&panel)->isEnabled());
+    }
+    const auto d = Dir("panel_presets");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setStageParam("scenes", "threshold", 0.3);
+    model.setStageEnabled("fg", false);
+    model.setEncode("hevc_nvenc", {{"b", "50M"}}, {10, "auto"});
+    REQUIRE(model.savePipelinePreset(QString::fromUtf8("Аниме")).ok);
+    model.setStageParam("scenes", "threshold", 0.24);
+    model.setStageEnabled("fg", true);
+    model.setEncode("h264_nvenc", {}, {});
+    TaskQueue queue;
+    QWidget window;
+    auto* v = new QVBoxLayout(&window);
+    auto* panel = new ProjectPanel(model, queue, &window);
+    auto* plain = new QPushButton("plain", &window);
+    v->addWidget(panel);
+    v->addWidget(plain);
+    auto* space = new QShortcut(QKeySequence(Qt::Key_Space), &window);
+    QObject::connect(space, &QShortcut::activated, &model, [&] { model.setPlaying(!model.playing()); });
+    panel->refresh();
+    PresetButton* button = PipelineButton(panel);
+    REQUIRE(button);
+    CHECK(button->isEnabled());
+    CHECK(button->text() == QString::fromUtf8("Пресет &обработки"));  // Alt+О
+    QPushButton* process = nullptr;
+    for (QPushButton* b : panel->findChildren<QPushButton*>())
+        if (b->text().startsWith(QString::fromUtf8("Обработать"))) process = b;
+    REQUIRE(process);
+    process->setEnabled(true);  // the plan has no video here: the order is what counts
+    CHECK(NextTab(process, panel) == button);
+    QWidget* after = NextTab(button, panel);
+    REQUIRE(after);
+    CHECK(after->toolTip() == QString::fromUtf8("Стадия участвует в обработке"));  // the switch of the first card
+    window.show();
+    window.activateWindow();
+    REQUIRE(QTest::qWaitForWindowActive(&window));
+    plain->setFocus();
+    QTest::keyClick(plain, Qt::Key_Space);
+    REQUIRE(model.playing());  // the control: the window's Space is live
+    model.setPlaying(false);
+    QMenu* menu = button->menu();
+    REQUIRE(menu);
+    int shown = 0;
+    QObject::connect(menu, &QMenu::aboutToShow, menu, [&] {
+        ++shown;
+        QTimer::singleShot(0, menu, &QMenu::close);
+    });
+    button->setFocus();
+    QTest::keyClick(button, Qt::Key_Space);
+    CHECK(shown == 1);
+    CHECK_FALSE(model.playing());
+    // the preview per stage
+    emit menu->aboutToShow();
+    QAction* item = ActionStarting(menu, QString::fromUtf8("Аниме"));
+    REQUIRE(item);
+    CHECK_FALSE(item->isChecked());
+    const QString tip = item->toolTip();
+    INFO(tip.toStdString());
+    CHECK(tip.startsWith(QString::fromUtf8("Изменит:\n")));
+    CHECK(tip.contains(QString::fromUtf8("  Склейки: Порог склейки %1 → %2").arg(QLocale().toString(0.24, 'f', 2), QLocale().toString(0.3, 'f', 2))));
+    CHECK(tip.contains(QString::fromUtf8("  Генерация кадров: выключится")));
+    CHECK(tip.contains(QString::fromUtf8("  Кодирование: Кодек H.264 NVENC → HEVC NVENC; Разрядность Авто → 10 бит; Битрейт Авто → 50 Мбит/с")));
+    CHECK(tip.contains(QString::fromUtf8("Без изменений: Глубина, Векторы движения, Апскейл, Улучшение")));
+    CHECK(item->statusTip() == QString::fromUtf8("Изменит: Склейки, Генерация кадров, Кодирование"));
+    item->trigger();
+    CHECK_FALSE(model.stageEntry("fg")->enabled);
+    CHECK(model.project().codec == "hevc_nvenc");
+    emit menu->aboutToShow();
+    item = ActionStarting(menu, QString::fromUtf8("Аниме"));
+    REQUIRE(item);
+    CHECK(item->isChecked());
+    CHECK(ActionStarting(menu, QString::fromUtf8("Перед применением · missing")));
+    // the save dialog of this menu names the NR mark it would move
+    model.setStageParam("nr", "intensity", 0.8);
+    REQUIRE(model.saveStagePreset("nr", QString::fromUtf8("Мягкий"), {}, true).ok);
+    StubDialogs dialogs;
+    panel->pipelinePresetMenu()->setDialogs(dialogs.Make());
+    panel->pipelinePresetMenu()->saveCurrent();
+    REQUIRE(dialogs.lastSetup);
+    CHECK(dialogs.lastSetup->title == QString::fromUtf8("Сохранить настройки обработки"));
+    CHECK(dialogs.lastSetup->markNote == QString::fromUtf8("Сейчас для новых проектов: «Улучшение» из «Мягкий» — будет заменено"));
+    emit panel->pipelinePresetMenu()->aboutToShow();
+    QMenu* mark = nullptr;
+    for (QAction* a : panel->pipelinePresetMenu()->actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) mark = a->menu();
+    REQUIRE(mark);
+    QAction* other = mark->actions().last();
+    CHECK(other->text() == QString::fromUtf8("«Улучшение» из «Мягкий»"));
+    CHECK(other->isChecked());
+    CHECK_FALSE(other->isEnabled());
+    CHECK_FALSE(mark->actions()[0]->isChecked());  // «Встроенные умолчания»: the mark is elsewhere
+    QSettings().remove("presets/newProject");
+    model.setPlaying(false);
+}
+
+TEST_CASE("ProjectPanel: a codec outside the list is its own item of the encode card; choosing one of the list changes the project's codec", "[app][panel][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("panel_codec");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setEncode("libx264", {});
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    QComboBox* codec = nullptr;
+    for (QComboBox* c : panel.findChildren<QComboBox*>())
+        if (c->count() > 0 && c->itemData(0).toString() == "h264_nvenc") codec = c;
+    REQUIRE(codec);
+    CHECK(codec->count() == 6);
+    CHECK(codec->currentText() == QString::fromUtf8("libx264 (из файла проекта)"));
+    const auto refused = model.savePipelinePreset(QString::fromUtf8("Не выйдет"));
+    CHECK_FALSE(refused.ok);
+    CHECK(refused.problems.join(" ").contains(QString::fromUtf8("Кодек: «libx264» — нет в списке")));
+    codec->setCurrentIndex(0);  // H.264 NVENC: before, the index stayed 0 and nothing changed
+    CHECK(model.project().codec == "h264_nvenc");
+    panel.refresh();
+    CHECK(codec->count() == 5);
+    CHECK(codec->currentIndex() == 0);
+    CHECK(model.savePipelinePreset(QString::fromUtf8("Теперь")).ok);
+}
+
+// The stages' header with «Пресет обработки» and its open menu (as the NR card's shots: set DLSSVID_SHOTS_DIR, [.shots])
+TEST_CASE("ProjectPanel pipeline preset screenshots for a merge request", "[.shots]") {
+    App();
+    const QString out = qEnvironmentVariable("DLSSVID_SHOTS_DIR");
+    if (out.isEmpty()) SKIP("DLSSVID_SHOTS_DIR is not set");
+    dlssvid::ApplyTheme(App());
+    ClearPresets();
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto d = Dir("panel_shots");
+    Project p = Project::Create(WriteClip(d / "clip.mkv", spec), d / "passes");
+    p.Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setStageParam("nr", "intensity", 0.8);
+    model.setStageEnabled("fg", false);
+    model.savePipelinePreset(QString::fromUtf8("Аниме 4K"), {}, true);
+    model.setStageParam("nr", "intensity", 1.0);
+    model.setStageEnabled("fg", true);
+    TaskQueue queue;
+    const QString scale = QString::number(qEnvironmentVariable("QT_SCALE_FACTOR", "1").toDouble() * 100);
+    ProjectPanel panel(model, queue);
+    panel.setAttribute(Qt::WA_DontShowOnScreen);
+    panel.resize(1100, 900);
+    panel.show();
+    panel.refresh();
+    QApplication::processEvents();
+    PresetButton* button = PipelineButton(&panel);
+    REQUIRE(button);
+    const QPoint at = button->mapTo(&panel, QPoint(0, 0));
+    const QString head = out + "/stages_header_" + scale + ".png";
+    REQUIRE(panel.grab(QRect(0, at.y() - 12, panel.width(), button->height() + 24)).save(head));
+    std::printf("saved %s\n", head.toStdString().c_str());
+    PresetMenu* menu = panel.pipelinePresetMenu();
+    menu->setAttribute(Qt::WA_DontShowOnScreen);
+    emit menu->aboutToShow();
+    menu->adjustSize();
+    const QString file = out + "/pipeline_preset_menu_" + scale + ".png";
+    REQUIRE(menu->grab().save(file));
+    std::printf("saved %s\n", file.toStdString().c_str());
+    QSettings().remove("presets/newProject");
 }

@@ -14,6 +14,8 @@
 namespace dlssvid {
 
 class AppModel;
+class PresetButton;
+class PresetMenu;
 class StageCard;
 class TaskQueue;
 
@@ -30,6 +32,8 @@ class ProjectPanel : public QWidget {
     Q_OBJECT
 public:
     ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent = nullptr);
+    // «Пресет обработки ▾» of the stages' header (PR-9): every stage card and the encoder at once
+    PresetMenu* pipelinePresetMenu() const { return pipelineMenu_; }
 
 public slots:
     void refresh();
@@ -58,6 +62,9 @@ private:
     QLabel* outDisk_;
     QLabel* outError_;
     QPushButton* process_;
+    PresetButton* pipelinePresets_ = nullptr;
+    PresetMenu* pipelineMenu_ = nullptr;
+    int codecItems_ = 0;  // the encoders of the list; an item past them is a codec from the project file (libx264 ...)
     std::vector<StageCard*> cards_;
     QComboBox* codec_;
     QComboBox* bitDepth_;     // «Авто» | 8 | 10 | 12 бит (TASK-0034; items outside the codec's reach are disabled)

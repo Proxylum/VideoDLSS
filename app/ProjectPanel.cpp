@@ -20,6 +20,7 @@
 #include "AppModel.h"
 #include "SceneCutsView.h"
 #include "SourceNames.h"
+#include "PresetMenu.h"
 #include "StageCard.h"
 #include "Theme.h"
 #include "TaskQueue.h"
@@ -171,6 +172,16 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     auto* stagesHead = new QHBoxLayout();
     stagesHead->addWidget(Title(tr("Стадии"), content));
     stagesHead->addWidget(Muted(tr("порядок выполнения сверху вниз · готовые пассы переиспользуются"), content), 1);
+    // PR-9: the whole processing's presets next to what they change; after «Обработать» and before the cards in the Tab order
+    pipelinePresets_ = new PresetButton(tr("Пресет &обработки"), content);
+    SetRole(pipelinePresets_, "small");
+    pipelinePresets_->setProperty("menu", "1");
+    pipelineMenu_ = new PresetMenu(model_, kPipelineTarget, pipelinePresets_);
+    pipelinePresets_->setMenu(pipelineMenu_);
+    pipelinePresets_->setAccessibleName(tr("Пресеты обработки"));
+    pipelinePresets_->setToolTip(tr("Пресеты обработки: включение и настройки всех стадий и кодирование разом — применить, сохранить текущие, импорт и "
+                                    "экспорт. Перед применением прежние настройки сохраняются сами. Alt+О, Space — открыть"));
+    stagesHead->addWidget(pipelinePresets_, 0, Qt::AlignVCenter);
     layout->addLayout(stagesHead);
     for (const std::string& stage : PipelineStageNames()) {  // the run order, one table (PR-13)
         auto* card = new StageCard(model_, stage, content);
@@ -200,6 +211,7 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     codec_->addItem(tr("FFV1 (без потерь)"), "ffv1");
     codec_->setToolTip(tr("Кодер результата. H.264 NVENC — только 8 бит; HEVC и AV1 NVENC — до 10 бит; ProRes — 10 бит, 4:2:2 или 4:4:4, файл .mov; "
                           "FFV1 — без потерь, любая разрядность, файл .mkv"));
+    codecItems_ = codec_->count();
     bitDepth_ = new QComboBox(encodeCard);
     bitDepth_->addItem(tr("Авто"), 0);
     bitDepth_->addItem(tr("8 бит"), 8);
@@ -376,10 +388,18 @@ void ProjectPanel::refresh() {
     }
 
     for (StageCard* c : cards_) c->refresh();
+    pipelinePresets_->setEnabled(model_.hasProject());
     {
         const QSignalBlocker b1(codec_), b2(bitrate_), b3(bitrateCustom_), b4(bitDepth_), b5(chroma_);
-        const int idx = codec_->findData(QString::fromStdString(p.codec));
-        codec_->setCurrentIndex(idx >= 0 ? idx : 0);
+        // a codec outside the list (libx264 from the JSON or --codec) is an item of its own (PR-9): shown as H.264 NVENC before, choosing
+        // H.264 NVENC changed no index and the project kept libx264 - the advice «choose a codec in the card» of a preset's error did nothing
+        while (codec_->count() > codecItems_) codec_->removeItem(codec_->count() - 1);
+        int idx = codec_->findData(QString::fromStdString(p.codec));
+        if (idx < 0) {
+            codec_->addItem(tr("%1 (из файла проекта)").arg(QString::fromStdString(p.codec)), QString::fromStdString(p.codec));
+            idx = codec_->count() - 1;
+        }
+        codec_->setCurrentIndex(idx);
         // bit depth and chroma: the project's choice; the items the codec cannot make are greyed out
         const CodecCaps* caps = FindCodecCaps(p.codec);
         auto enableItem = [](QComboBox* combo, int i, bool on) {
