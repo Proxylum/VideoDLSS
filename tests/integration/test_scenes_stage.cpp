@@ -555,12 +555,16 @@ TEST_CASE("RunProcess: the stages that read the list follow it; the plan says so
     o.keepVersions = 0;
     RunProcess(o);
     const std::string id = ReadSceneList(o.passesRoot / kScenesPass, "")->id;
-    for (const char* pass : {"mv_raw", "mv_dlss", "color_nr"}) {
+    for (const char* pass : {"mv_raw", "mv_dlss", "color_nr", "color_fg"}) {
         INFO(pass);
         CHECK(Manifest::Load(o.passesRoot / pass).inputs.at("scenes") == id);
         CHECK(SceneLabelOf(Manifest::Load(o.passesRoot / pass)) == id);
     }
-    for (const char* pass : {"depth_dlss", "color_sr", "color_fg"}) CHECK(Manifest::Load(o.passesRoot / pass).inputs.count("scenes") == 0);  // fg: commit 8
+    for (const char* pass : {"depth_dlss", "color_sr"}) {  // depth keeps its own breaks, nis no history
+        INFO(pass);
+        CHECK(Manifest::Load(o.passesRoot / pass).inputs.count("scenes") == 0);
+        CHECK(SceneLabelOf(Manifest::Load(o.passesRoot / pass)).empty());
+    }
     CHECK(Manifest::Load(o.passesRoot / "mv_raw").stageParams["scene_cuts"] == nlohmann::json::array({kCutAt}));
 
     auto actions = [](const ProcessPlan& p) {
@@ -652,4 +656,33 @@ TEST_CASE("RunProcess adopts a standalone flow pass only with the current scene 
     CHECK(Report(r, "flow").status == "ran");
     CHECK(!Report(r, "flow").retired.empty());
     CHECK(SceneLabelOf(Manifest::Load(o.passesRoot / "mv_dlss")) == ReadSceneList(o.passesRoot / kScenesPass, "")->id);
+}
+
+// PR-13 (regression): fg reads the list in its own process too (audit fg-2) - the runner hands it the list it planned with, by its id;
+// the child refuses another one before its first frame, and the stage fails alone (the result comes from color_nr)
+TEST_CASE("RunProcess: fg in its own process holds a frame at the cut; a child given another list fails before its first frame", "[integration][process][scenes][fg][isolation]") {
+    const auto dir = Dir("fg_isolated");
+    const auto clip = CutClip(dir);
+    ProcessOptions o = StubProcess(dir, clip);
+    o.fgExecutable = DLSSVID_CLI_PATH;
+    const ProcessResult r = RunProcess(o);
+    const ProcessStageReport& fg = Report(r, "fg");
+    REQUIRE(fg.status == "ran");
+    CHECK(fg.details["isolated"] == true);
+    CHECK(fg.details["duplicated"] == 1);  // x2: real 2 held before the cut at 3
+    const std::string id = ReadSceneList(o.passesRoot / kScenesPass, "")->id;
+    const Manifest m = Manifest::Load(o.passesRoot / "color_fg");
+    CHECK(m.inputs.at("scenes") == id);
+    CHECK(SceneLabelOf(m) == id);
+    CHECK(m.stageParams["duplicated"] == 1);
+    CHECK(PlanProcess(o).runCount == 0);
+
+    // the child itself, with an id the list on disk does not have
+    std::vector<std::string> args{DLSSVID_CLI_PATH, "fg", "--as-stage", "-i", clip.string(), "-o", (dir / "child").string(), "--no-auto",
+                                  "--params-json", R"({"backend":"blend","multiplier":2})", "--warp", "--scenes-dir", (o.passesRoot / "scenes").string(),
+                                  "--scene-cuts-id", "cuts:0000"};
+    std::string out;
+    CHECK(Subprocess::Run(args, &out) != 0);
+    CHECK(out.find("changed") != std::string::npos);
+    CHECK_FALSE(Manifest::Exists(dir / "child" / "color_fg"));
 }

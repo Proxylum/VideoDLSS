@@ -24,6 +24,9 @@ inline constexpr std::string_view kFgResultPrefix = "@result ";
 struct FgProcessSpec {
     std::filesystem::path exe;  // dlssvid.exe
     std::filesystem::path input, passesRoot, colorDir, depthDir, mvDir;
+    // PR-13: the scene list the runner planned with (none: empty) - the child refuses another one before its first frame
+    std::filesystem::path scenesDir;
+    std::string sceneCutsId;
     nlohmann::json params = nlohmann::json::object();  // the stage's parameters, as RunFg applies them in-process
     std::string format = "exr";
     std::string sourceHash;  // "sha256:..." of the source: the child does not hash the video again

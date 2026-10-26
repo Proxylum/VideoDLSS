@@ -16,6 +16,8 @@ public:
         std::string input, output;
         std::string colorDir, depthDir, mvDir;
         bool noAuto = false;
+        std::string scenesDir;  // PR-13: the clip's scene-cut list (default: <output>/scenes when present)
+        bool noScenes = false;
         std::string backend = "dlssg";
         int multiplier = 2;
         std::string model = "rife49";
@@ -35,6 +37,7 @@ public:
         // runner's source hash, @progress / @result lines on stdout; hidden flags
         bool asStage = false;
         std::string paramsJson, sourceHash;
+        std::string sceneCutsId;  // --as-stage: the id of the list the runner planned with (PR-13)
         bool disableUnavailable = false;
         bool crashOnExit = false;  // isolation test: die after printing @result
         bool stall = false;        // isolation test: hang before reading the input

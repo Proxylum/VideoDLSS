@@ -180,11 +180,15 @@ void FgStage::Process(FrameContext& ctx) {
     }
 
     // ---- guides of the current frame through the cache slot ----
+    // PR-13: a cut of the clip's list (frame.index: the source frame, the colour pass counts the same) - the backend starts the new
+    // shot (reset, prev == cur primes its history) and the old shot's last frame is held until this one
+    const bool cut = !first && options_.sceneCuts.IsCut(frame.index);
     FgInputs in;
     in.frameIndex = i;
-    in.reset = first;
+    in.reset = first || cut;
     in.prev = FgFrame{prevTex_, &cpuPrev_};
     in.cur = FgFrame{curTex_, &cpuCur_};
+    if (cut) in.prev = in.cur;
     if (generator_->UsesGuides() && slot) {
         if (depthReader_ && depthReader_->HasFrame(frame.index)) ctx.cache.UploadPass(*slot, "depth_dlss", depthReader_->ReadFrame(frame.index));
         if (mvReader_ && mvReader_->HasFrame(frame.index)) ctx.cache.UploadPass(*slot, "mv_dlss", mvReader_->ReadFrame(frame.index));
@@ -211,15 +215,22 @@ void FgStage::Process(FrameContext& ctx) {
     if (!first) {
         if (static_cast<int>(generated_.size()) != options_.multiplier - 1)
             Throw("fg: backend returned " + std::to_string(generated_.size()) + " frames, expected " + std::to_string(options_.multiplier - 1));
+        PassImage hold;  // at a cut: the last frame of the old shot, as a real frame is written (a PNG16 colour pass is U16)
+        if (cut) hold = cpuPrev_.type == PixelType::F16 ? cpuPrev_ : cpuPrev_.ConvertNormalizedTo(PixelType::F16);
         for (int k = 1; k < options_.multiplier; ++k) {
-            const PassImage& g = generated_[static_cast<size_t>(k - 1)];
+            const PassImage& g = cut ? hold : generated_[static_cast<size_t>(k - 1)];
             if (writer_) writer_->WriteFrame(FgInterpIndex(i - 1, k, options_.multiplier), g);
             if (encoder_) {
                 CpuFrame yuv;
                 RgbToYuv420p(g, options_.color, yuv);
                 encoder_->WriteFrame(yuv);
             }
-            ++stats_.generated;
+            ++(cut ? stats_.duplicated : stats_.generated);
+        }
+        if (cut) {
+            ++stats_.sceneCutCount;
+            if (stats_.sceneCuts.size() < kMaxSceneCuts) stats_.sceneCuts.push_back(frame.index);
+            Log()->info("fg: scene cut at frame {}: frame {} held ({} copies) instead of interpolation", frame.index, frame.index - 1, options_.multiplier - 1);
         }
     }
     PassImage real = cpuCur_.type == PixelType::F16 ? cpuCur_ : cpuCur_.ConvertNormalizedTo(PixelType::F16);  // a PNG16 colour pass is U16
@@ -247,6 +258,10 @@ void FgStage::Finish() {
         Manifest& m = const_cast<Manifest&>(writer_->Man());
         m.stageParams["ms_per_frame_backend"] = stats_.MeanMs();  // the backend's time per real frame; the wall time is process's (TASK-0051)
         m.stageParams["generated"] = stats_.generated;
+        if (!options_.sceneCuts.id.empty()) {  // the label and the held frames (PR-13)
+            m.stageParams["duplicated"] = stats_.duplicated;
+            StampSceneCuts(m.stageParams, options_.sceneCuts, stats_.sceneCuts, stats_.sceneCutCount);
+        }
         m.stageParams["depth_used"] = stats_.depthUsed;
         m.stageParams["mv_used"] = stats_.mvUsed;
         m.stageParams["color_source"] = stats_.colorSource;

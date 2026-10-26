@@ -154,3 +154,36 @@ TEST_CASE("dlssvid fg --as-stage reports progress and the result as lines; --par
 
     CHECK(RunCli({"fg", "--as-stage", "--warp", "-i", clip.string(), "-o", (dir / "p_bad").string(), "--params-json", "[1]"}).code != 0);
 }
+
+// PR-13: dlssvid fg reads the clip's scene list (<output>/scenes) and holds the last frame of a shot instead of interpolating across
+// a cut; --no-scenes interpolates as before; --json says how many frames were held
+TEST_CASE("dlssvid fg holds a frame at the cuts of the clip's scene list", "[integration][cli][fg][scenes]") {
+    const uint32_t w = 40, h = 24;
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("scenes");
+    const auto clip = WriteClipWith(dir / "clip.mkv", spec, [&](int64_t i) {  // a hard cut at frame 3
+        CpuFrame f = SyntheticFrame(i, w, h);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < h; ++r)
+            for (uint32_t c = 0; c < w; ++c) y[r * w + c] = static_cast<uint8_t>(i < 3 ? 40 + c + 4 * i : 220 - c);
+        return f;
+    });
+    const auto root = dir / "passes";
+    REQUIRE(RunCli({"scenes", "-i", clip.string(), "-o", root.string()}).code == 0);
+    const CliResult r = RunCli({"fg", "--backend", "blend", "--warp", "-i", clip.string(), "-o", root.string(), "--json", (dir / "fg.json").string()});
+    INFO(r.out);
+    REQUIRE(r.code == 0);
+    CHECK(r.out.find("held") != std::string::npos);
+    const nlohmann::json j = ReadJson(dir / "fg.json");
+    CHECK(j["stats"]["duplicated"] == 1);
+    CHECK(j["stats"]["generated"] == 3);
+    CHECK(j["stats"]["scene_cut_count"] == 1);
+    CHECK(Manifest::Load(root / "color_fg").stageParams["scene_cuts_id"] == Manifest::Load(root / "scenes").stageParams["cuts_id"]);
+    REQUIRE(RunCli({"fg", "--backend", "blend", "--warp", "--no-scenes", "-i", clip.string(), "-o", root.string(), "--json", (dir / "plain.json").string()}).code == 0);
+    CHECK(ReadJson(dir / "plain.json")["stats"]["duplicated"] == 0);
+    CHECK(ReadJson(dir / "plain.json")["stats"]["generated"] == 4);
+    CHECK_FALSE(Manifest::Load(root / "color_fg").stageParams.contains("scene_cuts_id"));
+}

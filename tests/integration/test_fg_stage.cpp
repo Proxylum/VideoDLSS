@@ -16,6 +16,9 @@
 #include "io/VideoDecoder.h"
 #include "passes/ImageMetrics.h"
 #include "passes/PassSequence.h"
+#include "passes/ScenesPass.h"
+#include "pipeline/Pipeline.h"
+#include "gpu/GpuFrameCache.h"
 #include "stages/fg/FgStage.h"
 #if defined(DLSSVID_WITH_TENSORRT)
 #include "ml/ModelRegistry.h"
@@ -263,4 +266,137 @@ TEST_CASE("RIFE through TensorRT produces color_fg", "[integration][fg][gpu][rif
 #else
     SKIP("built without TensorRT");
 #endif
+}
+
+// PR-13 (regression): no frame between two shots is made of both - between the last frame of a shot and the cut frame the last one is
+// held (multiplier - 1 copies, bit for bit the real frame, from an EXR or a PNG16 colour pass), the cut stays at the time of the cut
+// frame; within a shot the frames are interpolated as before. The frame count is unchanged; generated + duplicated is every frame between.
+namespace {
+SceneList FgCuts(std::vector<int64_t> cuts, int64_t frames) {
+    SceneList l;
+    l.cuts = std::move(cuts);
+    l.id = SceneCutsId(l.cuts);
+    l.threshold = 0.24;
+    l.frames = frames;
+    l.reachedEnd = true;
+    return l;
+}
+struct ResetRecorder final : IFrameGenerator {  // what the stage hands a backend at a cut: a reset, prev == cur
+    std::shared_ptr<std::vector<std::pair<bool, bool>>> log = std::make_shared<std::vector<std::pair<bool, bool>>>();
+    FgDiagnostics diag;
+    int mult = 2;
+    std::string_view Name() const override { return "rec"; }
+    void Init(D3D12Device&, const FgConfig& c) override { mult = c.multiplier; }
+    void Generate(const FgInputs& in, std::vector<PassImage>& out) override {
+        log->push_back({in.reset, in.prev.cpu->data == in.cur.cpu->data});  // the first frame: a copy; a cut: the same frame
+        out.assign(static_cast<size_t>(mult - 1), in.cur.cpu->type == PixelType::F16 ? *in.cur.cpu : in.cur.cpu->ConvertNormalizedTo(PixelType::F16));
+    }
+    const FgDiagnostics& Diagnostics() const override { return diag; }
+    nlohmann::json Describe() const override { return {{"backend", "rec"}}; }
+};
+}  // namespace
+
+TEST_CASE("FgStage holds the last frame of a shot instead of interpolating across a cut of the scene list", "[integration][fg][scenes][regression]") {
+    const uint32_t w = 32, h = 16;
+    const int frames = 4;
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = w;
+    spec.height = h;
+    const FileFormat format = GENERATE(FileFormat::Exr, FileFormat::Png);
+    const auto dir = Dir(format == FileFormat::Exr ? "cut_x3" : "cut_x3_png16");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    {
+        PassWriter writer(dir / "passes" / "color_nr", Manifest::ForPass(PassKind::ColorNr, w, h, format));
+        for (int i = 0; i < frames; ++i) {
+            PassImage img = MakePassImage(PassKind::ColorNr, w, h, PixelType::F16);
+            for (uint32_t y = 0; y < h; ++y)
+                for (uint32_t x = 0; x < w; ++x)
+                    for (size_t c = 0; c < 3; ++c) img.Set(x, y, c, 0.1f * static_cast<float>(i) + 0.02f * static_cast<float>(c));
+            writer.WriteFrame(i, img);
+        }
+        writer.Finish();
+    }
+    D3D12Device dev({true, false});
+    VideoDecoder dec(clip);
+    FgStageOptions o;
+    o.backend = "blend";
+    o.multiplier = 3;
+    o.colorDir = dir / "passes" / "color_nr";
+    o.outputDir = dir / "passes";
+    o.sceneCuts = FgCuts({2}, frames);
+    const FgRunResult r = RunFg(dec, dev, o);
+    CHECK(r.stats.frames == frames);
+    CHECK(r.stats.generated == 4);  // 0-1 and 2-3 interpolated
+    CHECK(r.stats.duplicated == 2);  // 1 held twice before the cut at 2
+    CHECK(r.stats.generated + r.stats.duplicated == (frames - 1) * 2);
+    CHECK(r.stats.sceneCutCount == 1);
+    const PassReader rd = PassReader::Open(r.outDir);
+    CHECK(rd.Man().frameCount == FgFrameCount(frames, 3));
+    const PassImage real1 = rd.ReadFrame(FgRealIndex(1, 3));
+    for (int k = 1; k < 3; ++k) {
+        INFO("k " << k);
+        CHECK(rd.ReadFrame(FgInterpIndex(1, k, 3)).data == real1.data);  // the old shot's last frame, bit for bit
+    }
+    CHECK(rd.ReadFrame(FgRealIndex(2, 3)).Get(3, 3, 0) == Approx(0.2f).margin(2e-3));  // the cut frame where it was
+    CHECK(rd.ReadFrame(FgInterpIndex(0, 1, 3)).Get(3, 3, 0) == Approx(0.1f / 3.f).margin(2e-3));  // within a shot: as before
+    CHECK(rd.ReadFrame(FgInterpIndex(2, 2, 3)).Get(3, 3, 0) == Approx(0.2f + 0.2f / 3.f).margin(2e-3));
+    CHECK(rd.Man().stageParams["duplicated"] == 2);
+    CHECK(rd.Man().stageParams["scene_cuts_id"] == SceneCutsId({2}));
+    CHECK(rd.Man().stageParams["scene_cuts"] == nlohmann::json::array({2}));
+}
+
+TEST_CASE("FgStage at a cut: x2 holds one frame in the pass and the preview, the backend gets a reset with prev == cur", "[integration][fg][scenes][regression]") {
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("cut_x2");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    D3D12Device dev({true, false});
+    {
+        VideoDecoder dec(clip);
+        FgStageOptions o;
+        o.backend = "blend";
+        o.multiplier = 2;
+        o.outputDir = dir / "passes";
+        o.videoOut = dir / "fg.mkv";
+        o.videoCodec = "ffv1";
+        o.sceneCuts = FgCuts({3}, 5);
+        const FgRunResult r = RunFg(dec, dev, o);
+        CHECK(r.stats.generated == 3);
+        CHECK(r.stats.duplicated == 1);
+        const PassReader rd = PassReader::Open(r.outDir);
+        CHECK(rd.Man().frameCount == FgFrameCount(5, 2));
+        CHECK(FgInterpIndex(2, 1, 2) == 5);
+        CHECK(rd.ReadFrame(5).data == rd.ReadFrame(FgRealIndex(2, 2)).data);  // real 2 held, not a blend of 2 and 3
+        CHECK(rd.ReadFrame(FgInterpIndex(1, 1, 2)).data != rd.ReadFrame(FgRealIndex(1, 2)).data);  // a blend within the shot
+        CHECK(DecodeAll(dir / "fg.mkv").size() == 9);  // the preview holds the frame as well
+    }
+    {  // what a backend sees
+        auto rec = std::make_unique<ResetRecorder>();
+        const auto log = rec->log;
+        VideoDecoder dec(clip);
+        FgStageOptions o;
+        o.multiplier = 2;
+        o.outputDir = dir / "rec";
+        o.sceneCuts = FgCuts({3}, 5);
+        o.color = ColorInfoFromStream(dec.Info());
+        Pipeline pipeline(dev, 2);
+        pipeline.AddStage(std::make_unique<FgStage>(o, std::move(rec)));
+        pipeline.Init();
+        CpuFrame f;
+        while (dec.NextFrame(f)) {
+            pipeline.Cache().Acquire(f.index, f.desc);
+            pipeline.ProcessFrame(f);
+        }
+        pipeline.Finish();
+        pipeline.Shutdown();
+        REQUIRE(log->size() == 5);
+        for (size_t i = 0; i < log->size(); ++i) {
+            INFO("real frame " << i);
+            CHECK((*log)[i].first == (i == 0 || i == 3));   // reset on the first frame and the cut
+            CHECK((*log)[i].second == (i == 0 || i == 3));  // prev == cur there, the true previous frame elsewhere
+        }
+    }
 }

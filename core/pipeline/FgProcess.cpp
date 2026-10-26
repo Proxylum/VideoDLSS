@@ -36,6 +36,7 @@ std::vector<std::string> FgProcessArgs(const FgProcessSpec& spec) {
     if (!spec.colorDir.empty()) a.insert(a.end(), {"--color-dir", Utf8Arg(spec.colorDir)});
     if (!spec.depthDir.empty()) a.insert(a.end(), {"--depth-dir", Utf8Arg(spec.depthDir)});
     if (!spec.mvDir.empty()) a.insert(a.end(), {"--mv-dir", Utf8Arg(spec.mvDir)});
+    if (!spec.sceneCutsId.empty()) a.insert(a.end(), {"--scenes-dir", Utf8Arg(spec.scenesDir), "--scene-cuts-id", spec.sceneCutsId});
     // ensure_ascii: the JSON survives the child's ANSI-codepage argv whatever the parameters hold
     a.insert(a.end(), {"--format", spec.format, "--params-json", spec.params.dump(-1, ' ', true, nlohmann::json::error_handler_t::replace)});
     if (spec.frames > 0) a.insert(a.end(), {"--frames", std::to_string(spec.frames)});

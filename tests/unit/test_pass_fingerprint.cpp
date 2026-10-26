@@ -216,7 +216,11 @@ TEST_CASE("Stage pass tables and timestamps", "[unit][fingerprint]") {
     CHECK(StageReadsSceneCuts("flow", nlohmann::json::object()));
     CHECK_FALSE(StageReadsSceneCuts("depth", nlohmann::json::object()));
     CHECK_FALSE(StageReadsSceneCuts("scenes", nlohmann::json::object()));
-    CHECK(StageInputCandidates("fg", {{"guides", false}}).size() == 3);  // nr's key only
+    CHECK(StageInputCandidates("fg", {{"guides", false}}).size() == 4);  // nr's key only; + the list (PR-13)
+    CHECK(StageInputCandidates("fg").back() == std::vector<std::string>{"scenes"});
+    CHECK(StageInputCandidates("fg", {{"multiplier", 1}}).size() == 3);  // x1 makes no frame between two real ones
+    CHECK(StageReadsSceneCuts("fg", {{"multiplier", 3}}));
+    CHECK_FALSE(StageReadsSceneCuts("fg", {{"multiplier", 1}}));
     // PR-13: upscale reads depth and vectors with DLSS alone; the list with DLSS and the worker, which keep a history
     CHECK(StageInputCandidates("upscale") == std::vector<std::vector<std::string>>{{"depth_dlss"}, {"mv_dlss"}, {"scenes"}});
     CHECK(StageInputCandidates("upscale", {{"backend", "dlss"}}).size() == 3);

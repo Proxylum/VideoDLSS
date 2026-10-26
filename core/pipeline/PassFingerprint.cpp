@@ -258,6 +258,10 @@ std::string PipelineStageNamesText() {
 bool StageReadsSceneCuts(const std::string& stage, const nlohmann::json& p) {
     // nr: a history to reset - the model's (guides on: it keeps one with mv) or the flicker filter's; the bypass has neither (NrStage::Init)
     if (stage == "flow") return true;  // zero vectors at a cut (PR-13)
+    if (stage == "fg") {  // x2..x4 makes frames between two real ones: none across a cut; x1 makes none
+        const nlohmann::json m = p.is_object() && p.contains("multiplier") ? p["multiplier"] : nlohmann::json(2);
+        return !m.is_number() || m.get<double>() >= 2.0;
+    }
     if (stage == "upscale") {  // a history: DLSS SR's (reset) and the worker's windows (broken at a cut); nis, bicubic, trt keep none
         const std::string b = Str(p, "backend", "dlss");
         return b == "dlss" || b == "worker";
@@ -267,7 +271,7 @@ bool StageReadsSceneCuts(const std::string& stage, const nlohmann::json& p) {
         const double temporal = p.is_object() && p.contains("temporal") && p["temporal"].is_number() ? p["temporal"].get<double>() : 0.0;
         return !NrBypassParams(p) && (!guidesOff || temporal > 0.0);
     }
-    return false;  // the consumers come one by one (PR-13: fg); depth keeps its own segment breaks
+    return false;  // depth keeps its own segment breaks (DepthPostProcess); scenes is the list
 }
 
 bool UpscaleReadsGuides(const nlohmann::json& p) { return Str(p, "backend", "dlss") == "dlss"; }
@@ -296,7 +300,11 @@ std::vector<std::vector<std::string>> StageInputCandidates(const std::string& st
         if (StageReadsSceneCuts(stage, params)) groups.push_back({kScenesPass});  // the list's id (PR-13): none while it is empty
         return groups;
     }
-    if (stage == "fg") return {{"color_nr", "color_sr"}, {"depth_dlss"}, {"mv_dlss"}};
+    if (stage == "fg") {
+        std::vector<std::vector<std::string>> groups{{"color_nr", "color_sr"}, {"depth_dlss"}, {"mv_dlss"}};
+        if (StageReadsSceneCuts(stage, params)) groups.push_back({kScenesPass});
+        return groups;
+    }
     return {};
 }
 

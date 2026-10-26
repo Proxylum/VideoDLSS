@@ -1206,6 +1206,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 o.sourceHash = sourceHash;
                 o.crashAfter = options.fgCrashAfter;
                 fgColorDir = o.colorDir;
+                const auto sceneInput = d.inputs.find(kScenesPass);
                 // What is on disk before the run: after a failure, the debris of this run is removed, while a signed version
                 // the run did not touch (an in-place completion that died early) stays current.
                 const std::filesystem::path fgDir = root / "color_fg";
@@ -1226,6 +1227,10 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                     spec.colorDir = o.colorDir;
                     spec.depthDir = o.depthDir;
                     spec.mvDir = o.mvDir;
+                    if (sceneInput != d.inputs.end()) {  // the child reads and checks the list itself (ReadSceneListExpect)
+                        spec.scenesDir = root / kScenesPass;
+                        spec.sceneCutsId = sceneInput->second;
+                    }
                     spec.params = p;
                     spec.format = Get<std::string>(p, "format", "exr");
                     spec.sourceHash = sourceHash;
@@ -1252,6 +1257,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                         rep.details = {{"backend", res.value("backend", nlohmann::json::object())},
                                        {"diagnostics", res.value("diagnostics", nlohmann::json::object())},
                                        {"generated", stats.value("generated", int64_t{0})},
+                                       {"duplicated", stats.value("duplicated", int64_t{0})},
                                        {"isolated", true},
                                        {"pid", c.pid}};
                         if (!c.warning.empty()) {
@@ -1267,6 +1273,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 } else {
                     try {
                         VideoDecoder decoder(options.input);
+                        o.sceneCuts = CutsFor(d, ctx);
                         const FgRunResult r = RunFg(decoder, device, o, options.frames, progressFor(name), p);
                         if (r.stats.disabled) {
                             rep.status = "disabled";
@@ -1275,7 +1282,8 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                             rep.frames = r.stats.frames;
                             rep.outDir = r.outDir;
                         }
-                        rep.details = {{"backend", r.backend}, {"diagnostics", r.diagnostics}, {"generated", r.stats.generated}, {"isolated", false}};
+                        rep.details = {{"backend", r.backend}, {"diagnostics", r.diagnostics}, {"generated", r.stats.generated}, {"duplicated", r.stats.duplicated},
+                                       {"isolated", false}};
                     } catch (const std::exception& e) {
                         failure = e.what();
                         failDetails = {{"isolated", false}, {"error", *failure}};
