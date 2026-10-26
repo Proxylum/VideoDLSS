@@ -461,6 +461,21 @@ steps, no 8-bit staircase (measured, `docs/benchmarks.md`; the `[precision]` tes
 | `prores_ks` | 10 | 4:2:2, 4:4:4 | .mov | 422 HQ / 4444, the rate comes from the profile (no bitrate option) |
 | `ffv1` | 8, 10, 12, 16 | 4:2:0, 4:2:2, 4:4:4 | .mkv | lossless |
 
+**Presets (PR-9).** The NR card has «Пресет ▾» under its title: named presets of its settings (the form's keys; the
+backend and the pass format stay the card's), «Сохранить текущие…», «Импорт…», «Экспорт ▸», «Удалить ▸», «Для новых
+проектов ▸», «Открыть папку пресетов»; a preset's tooltip says what it would change («Изменит: Интенсивность 1,00 → 0,70»)
+and the one that matches the current settings is checked. «Пресет обработки ▾» at the right of the «Стадии» header does
+the same for the whole processing at once: every stage on or off with its settings and the engineer keys of the algorithm
+(NIS sharpness, the DLSS preset, the RIFE model, the pass format …), and the encoder card (codec, bit depth, chroma,
+bitrate); its tooltip lists the change per stage. Paths and the sizes for the GPU's memory (`models_dir`, `python`,
+`max_res`, `input_size`, `tile`, `fp32`), the settings note and the encoder options other than the bitrate stay the
+project's — the save dialog names the ones that are set («Не войдут в пресет: …»). Before a preset is applied or a card
+is reset, the settings go into «Перед применением» / «Перед сбросом» (one step back, for every project of this machine);
+a preset with a value out of range is refused whole with the reason in Russian. One preset — of either kind — can be
+marked for new projects: a video opened without a project file next to it gets those settings. The files live in
+`%APPDATA%\dlssvid\dlssvid\presets` (`docs/conventions.md` §8); the CLI reads them with `--param-file` and
+`nr --params-file`.
+
 GUI keys: `1`…`9` source, `Ctrl+1/2/3` single / overlay / grid, wheel = zoom to cursor (25–800 %), middle drag = pan,
 `F` fit, `Ctrl+0` 1:1, `W` wipe (left drag moves it), click a 2x2 cell = expand, `Space` play, `,`/`.` step,
 `L` loop playback, `Ctrl+Shift+S` PNG screenshot with cell labels, `Ctrl+S` save project. The timeline runs in seconds (stage 9): a 24 fps
@@ -478,7 +493,7 @@ The project panel (stage 9) shows the source (frame, sound, passes, hash and whe
 (the result's size and rate, the time and disk of what will run, one button «Обработать · N стадий», `Ctrl+Enter`), one
 card per stage with a form built from the stage schema (backend list, scale / multiplier toggles, sliders; the rows in
 groups, the less used ones under a collapsed «Ещё настройки» that names what was changed, ↺ per row and «Сбросить» for
-the card, changed values in accent; the advanced keys in the JSON editor of the engineer mode) and what the plan does
+the card under its title, changed values in accent; the advanced keys in the JSON editor of the engineer mode) and what the plan does
 with it («переиспользуется», «пересчёт: Интенсивность 1 → 1.4», «будет посчитано», a warning when NR / FG would run
 without depth and vectors, and for the stages that read the scene list what the cuts do to them). The first card,
 «Склейки» (PR-13), holds the threshold (0.24, 0 = off), «Найдено N склеек» with up to eight chips of their time (a click

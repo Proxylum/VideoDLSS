@@ -676,6 +676,34 @@ PlanProcess / RunProcess ── для каждой включённой ста�
   стадиям: «Почти склейки» и предупреждение о плотности помогают подобрать порог. Ручные правки списка, метки на таймлайне,
   эвристика вспышек — отдельные задачи.
 
+### Пресеты (PR-9)
+
+```
+                    ┌ PresetParams(scope) ──▶ Preset ──PresetToJson/SavePreset──▶ <AppData>/presets/<имя>.json, auto/before-*.json
+проект (StageEntry) ┤                                     ◀──LoadPreset/ValidatePreset── (scope stage | pipeline, проверка значений)
+                    └ ApplyPreset(scope) ◀── Preset.stages[s].params          ApplyPipelinePreset: все стадии + enabled + encode
+```
+
+- **Ядро без Qt.** `core/stages/StagePreset` — формат `dlssvid-preset` (`docs/conventions.md` §8), `ValidatePreset` (все
+  проблемы как данные `PresetIssue`, тексты CLI английские), `ApplyPreset`/`ResetStageParams`/`DiffStageParams` по виду
+  (`PresetScope::Stage` — ключи формы, `Pipeline` — ещё и `ParamSpec::tuning`), `StagePresetLeftOut` (что не войдёт),
+  `ReadStageParamsFile` (голый объект или пресет). `core/stages/PresetLibrary` — папка, имена файлов (`PresetFileStem`, UTF-8),
+  слоты, список по виду с «Не прочитаны» и лимитом 500. `core/viewport/PipelinePreset` — `EncodeOf`, `MakePipelinePreset`,
+  `ApplyPipelinePreset`, `DiffPipeline`, `PipelinePresetLeftOut`: их же зовут GUI, посев новых проектов и CLI
+  (`BuildStages` собирает `Project` и применяет пресет обработки как слой 2).
+- **Правило сброса** карточки («Сбросить») — одно, в ядре (`ResetStageParams`, `CardResetKey`): уходят ключи формы, остаются
+  бэкенд, инженерные и незнакомые ключи и ключ списка без списка.
+- **GUI.** `app/PresetStore` (папка `AppDataLocation/presets`, русские тексты `IssueText`/`LeftOutText`, импорт, экспорт,
+  метка «для новых проектов»), `app/PresetMenu` (одно меню на цель: стадия `nr` или `pipeline`; строится на `aboutToShow`;
+  превью — `AppModel::previewStagePreset`/`previewPipelinePreset`, без плана), `PresetButton` (Space/Enter/Alt+↓ открывают меню,
+  Space окна — воспроизведение), `app/PresetDialogs` (`PresetSaveDialog` и подменяемые диалоги для тестов). `AppModel`:
+  `applyStagePreset`/`applyPipelinePreset` сначала пишут слот «Перед применением» (сбой — ничего не меняется, вопрос «без
+  автосохранения?»), применяют одной операцией — один `projectChanged`, один план, — и пишут сводку в строку состояния, разницу
+  по стадиям — в «Лог». Меню «Пресет ▾» есть только у карточки NR (`StageSchema::cardPresets`); настройки остальных карточек
+  переносит пресет обработки.
+- **Границы:** пресет не хранит пути и размеры под видеопамять машины, маски, заметку о настройках и опции кодера кроме
+  битрейта; превью плана при наведении и кнопки «Вернуть» нет (слоты — один шаг назад).
+
 ## Хаки и временные решения
 
 | Где | Что | Почему | Когда убираем |
