@@ -89,6 +89,7 @@ void BuildStages(const std::string& projectFile, const std::vector<std::string>&
     };
     std::vector<StageFile> stageFiles;
     std::string pipelineFile;
+    bool presetEncoder = false;  // the pipeline preset has an encode section (without one the project's or the built-in encoder stays)
     for (const std::string& spec : paramFiles) {
         const size_t eq = spec.find('=');
         const std::string head = eq == std::string::npos ? std::string() : spec.substr(0, eq);
@@ -109,6 +110,7 @@ void BuildStages(const std::string& projectFile, const std::vector<std::string>&
         }
         if (!pipelineFile.empty()) Throw("--param-file: one pipeline preset at a time (" + pipelineFile + ", " + spec + ")");
         pipelineFile = spec;
+        presetEncoder = l.preset.encode.has_value();
         std::vector<PresetIssue> notes = l.issues;
         ApplyPipelinePreset(base, l.preset, &notes);  // the stages it names (switch, settings) and the encoder
         for (const auto& n : notes) Log()->warn("--param-file {}: pipeline preset '{}': {}", spec, l.preset.name, n.text);
@@ -121,7 +123,7 @@ void BuildStages(const std::string& projectFile, const std::vector<std::string>&
             layer->result = base.resultVideo;  // with the container of a pipeline preset's codec
             layer->keep = base.passVersionsKeep;
         }
-        layer->encoder = !projectFile.empty() || !pipelineFile.empty();
+        layer->encoder = !projectFile.empty() || presetEncoder;
         if (layer->encoder) {
             layer->codec = base.codec;
             layer->codecOptions = base.codecOptions;
@@ -450,7 +452,11 @@ void ProcessCommands::Register(CLI::App& app) {
     bench_->add_option("--frames", ba_.frames, "frames to process")->default_val(30);
     bench_->add_option("--stages", ba_.stages, "comma list of stages (default: all)");
     bench_->add_option("--param", ba_.params, "stage parameter stage.key=value (repeatable)");
-    bench_->add_option("--param-file,--param_file", ba_.paramFiles, paramFileHelp);
+    bench_->add_option("--param-file,--param_file", ba_.paramFiles,
+                       "settings from a file (repeatable). stage=<file.json>: a JSON object of the stage's keys merged over the built-in defaults, or a "
+                       "dlssvid-preset whose settings of that stage replace its form keys (a pipeline preset's also its tuning keys). <file.json> without "
+                       "stage=: a dlssvid-preset - a pipeline preset sets the stages it names and the encoder, a card preset goes to its stage. --stages, "
+                       "--codec and --param win; --codec over a pipeline preset's codec takes bit depth and chroma auto");
     bench_->add_option("--passes", ba_.passes, "keep the passes here instead of a temporary folder");
     bench_->add_option("-o,--output", ba_.output, "result video (default: temporary)");
     bench_->add_option("--codec", ba_.codec, "video encoder")->default_val("h264_nvenc");

@@ -196,6 +196,7 @@ struct StubDialogs {
     std::optional<PresetSaveDialog::Answer> saveAnswer;
     QString open, save;
     PresetDialogs::Clash clash = PresetDialogs::Clash::Cancel;
+    QString clashName, clashCopy;
     QStringList texts;
     PresetDialogs Make() {
         PresetDialogs d;
@@ -210,7 +211,11 @@ struct StubDialogs {
             texts << text;
             return answer;
         };
-        d.clash = [this](QWidget*, const QString&, const QString&) { return clash; };
+        d.clash = [this](QWidget*, const QString& name, const QString& copy) {
+            clashName = name;
+            clashCopy = copy;
+            return clash;
+        };
         d.warn = [this](QWidget*, const QString&, const QString& text) {
             ++warnings;
             texts << text;
@@ -2484,6 +2489,7 @@ TEST_CASE("PresetStore: the folder is the test's; import refuses a preset withou
     CHECK(card.preset.stages.at("nr").params == nlohmann::json{{"intensity", 0.6}});  // the backend is the card's engineer key
     const auto whole = PresetStore::Import(kPipelineTarget, pipeFile);
     REQUIRE(whole.ok);
+    CHECK_FALSE(whole.notes.join(" ").contains(QString::fromUtf8("оставлен")));  // the stages it lacks are no skip of the import
     CHECK(PresetStore::List(kPipelineTarget).items.size() == 1);
     CHECK(PresetStore::List("nr").items.size() == 7);  // the pipeline preset is not in the card's menu
     // a slot's name changes in front
@@ -2691,6 +2697,7 @@ TEST_CASE("StageCard: the preset menu sits in the NR card header only, after the
     const QString change = QString::fromUtf8("Интенсивность %1 → %2").arg(QLocale().toString(1.2, 'f', 2), QLocale().toString(0.7, 'f', 2));
     INFO(item->toolTip().toStdString());
     CHECK(item->toolTip().startsWith(QString::fromUtf8("Изменит: ") + change));
+    CHECK(item->toolTip().endsWith(QString::fromUtf8("Файл: A & B.json")));  // two presets of one name tell apart
     CHECK(item->statusTip().startsWith(QString::fromUtf8("Изменит: ")));
     REQUIRE(ActionStarting(menu, QString::fromUtf8("&Сохранить текущие…")));  // the mnemonics of the menu are its own
     CHECK(ActionStarting(menu, QString::fromUtf8("&Импорт…")));
@@ -2718,12 +2725,31 @@ TEST_CASE("StageCard: the preset menu sits in the NR card header only, after the
     emit menu->aboutToShow();
     CHECK(menu->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly).size() == 3);
     // a mark on a file that is gone: cleared, «Встроенные умолчания» checked
+    // a mark on a file that is gone: said in the submenu, kept for the next new project to clear with its message
     PresetStore::SetNewProjectPreset("gone.json");
     emit menu->aboutToShow();
     for (QAction* a : menu->actions())
         if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) mark = a->menu();
-    CHECK(mark->actions()[0]->isChecked());
-    CHECK(PresetStore::NewProjectPreset().isEmpty());
+    CHECK_FALSE(mark->actions()[0]->isChecked());
+    CHECK(mark->actions().last()->text().startsWith(QString::fromUtf8("gone.json — не найден")));
+    CHECK(mark->actions().last()->isChecked());
+    CHECK(PresetStore::NewProjectPreset() == "gone.json");
+    // a refused preset of the other kind is no mark of it: the pipeline menu says the file cannot be read (review of PR-9)
+    nlohmann::json bad = CardPresetJson("Плохой", {{"intensity", 5}});
+    WritePreset(PresetStore::Path(PresetStore::Dir()) / "bad.json", bad);
+    PresetStore::SetNewProjectPreset("bad.json");
+    PresetMenu pipelineMenu(model, kPipelineTarget);
+    emit pipelineMenu.aboutToShow();
+    QMenu* pipelineMark = nullptr;
+    for (QAction* a : pipelineMenu.actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) pipelineMark = a->menu();
+    REQUIRE(pipelineMark);
+    CHECK(pipelineMark->actions().last()->text().startsWith(QString::fromUtf8("bad.json — не читается")));
+    StubDialogs saveStub;
+    pipelineMenu.setDialogs(saveStub.Make());
+    pipelineMenu.saveCurrent();  // no answer: nothing saved
+    REQUIRE(saveStub.lastSetup);
+    CHECK(saveStub.lastSetup->markNote.isEmpty());
     // a mark on a file no menu reads: a line says so, nothing else checked
     nlohmann::json newer = CardPresetJson("Новый", {{"intensity", 1}});
     newer["schema"] = 2;
@@ -2994,7 +3020,12 @@ TEST_CASE("ProjectPanel: the pipeline preset button sits in the Stages header af
     CHECK(tip.contains(QString::fromUtf8("  Кодирование: Кодек H.264 NVENC → HEVC NVENC; Разрядность Авто → 10 бит; Битрейт Авто → 50 Мбит/с")));
     CHECK(tip.contains(QString::fromUtf8("Без изменений: Глубина, Векторы движения, Апскейл, Улучшение")));
     CHECK(item->statusTip() == QString::fromUtf8("Изменит: Склейки, Генерация кадров, Кодирование"));
+    StubDialogs quiet;
+    panel->pipelinePresetMenu()->setDialogs(quiet.Make());
     item->trigger();
+    CHECK(quiet.warnings == 0);  // the summary goes to the status bar and the log: no dialog
+    CHECK(quiet.infos == 0);
+    CHECK(quiet.confirms == 0);
     CHECK_FALSE(model.stageEntry("fg")->enabled);
     CHECK(model.project().codec == "hevc_nvenc");
     emit menu->aboutToShow();
@@ -3105,4 +3136,81 @@ TEST_CASE("ParamText: a change of a text key from or to its empty default reads 
     INFO(t.toStdString());
     CHECK(t == QString::fromUtf8("Целевое разрешение mv_dlss (WxH) по умолчанию → 1920x1080"));
     CHECK(ChangeText("flow", ParamChange{"target", "1920x1080", "", "ofa", "ofa"}).endsWith(QString::fromUtf8("→ по умолчанию")));
+}
+
+// Review of PR-9: the menus' import, export and delete through their dialogs - the copy the clash names, replace, cancel, a pipeline
+// preset into the NR card, the current settings exported with what they leave out, a permanent delete
+TEST_CASE("PresetMenu: import, export and delete through the dialogs", "[app][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("menu_actions");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    QSignalSpy messages(&model, &AppModel::message);
+    PresetMenu nr(model, "nr");
+    StubDialogs dialogs;
+    nr.setDialogs(dialogs.Make());
+    const QString soft = WritePreset(d / "soft.json", CardPresetJson("Мягкий", {{"intensity", 0.7}}));
+    dialogs.open = soft;
+    nr.importFile();
+    REQUIRE(PresetStore::List("nr").items.size() == 1);
+    dialogs.clash = PresetDialogs::Clash::Copy;
+    nr.importFile();
+    CHECK(dialogs.clashName == QString::fromUtf8("Мягкий"));
+    CHECK(dialogs.clashCopy == QString::fromUtf8("Мягкий (2)"));
+    nr.importFile();
+    CHECK(dialogs.clashCopy == QString::fromUtf8("Мягкий (3)"));  // the button names what is saved
+    auto names = [] {
+        QStringList n;
+        for (const auto& i : PresetStore::List("nr").items) n << i.name;
+        return n;
+    };
+    CHECK(names() == QStringList{QString::fromUtf8("Мягкий"), QString::fromUtf8("Мягкий (2)"), QString::fromUtf8("Мягкий (3)")});
+    dialogs.clash = PresetDialogs::Clash::Replace;
+    nr.importFile();
+    CHECK(names().size() == 3);
+    dialogs.clash = PresetDialogs::Clash::Cancel;
+    nr.importFile();
+    CHECK(names().size() == 3);
+    CHECK(dialogs.warnings == 0);
+    // a pipeline preset into the card: its nr settings, said in a dialog
+    nlohmann::json pipe = {{"format", "dlssvid-preset"}, {"schema", 1}, {"scope", "pipeline"}, {"name", "Аниме"}, {"stages", nlohmann::json::object()}};
+    pipe["stages"]["nr"] = {{"enabled", true}, {"params", {{"intensity", 0.6}}}};
+    dialogs.open = WritePreset(d / "pipe.json", pipe);
+    nr.importFile();
+    CHECK(dialogs.infos == 1);
+    CHECK(dialogs.texts.last().startsWith(QString::fromUtf8("Из пресета обработки «Аниме» взяты настройки «Улучшения».")));
+    // the current settings exported: a valid preset of their kind; what it lacks is said
+    model.setStageParam("nr", "format", "png");
+    dialogs.save = Q(d / "out" / "nr.json");
+    nr.exportFile({});
+    const PresetLoad card = LoadPreset(d / "out" / "nr.json");
+    REQUIRE(card.ok());
+    CHECK(card.preset.scope == PresetScope::Stage);
+    CHECK(LastMessage(messages).contains(QString::fromUtf8("Не войдут в пресет")));
+    PresetMenu all(model, kPipelineTarget);
+    all.setDialogs(dialogs.Make());
+    model.setEncode("hevc_nvenc", {{"b", "50M"}}, {});
+    dialogs.save = Q(d / "out" / "all.json");
+    all.exportFile({});
+    const PresetLoad whole = LoadPreset(d / "out" / "all.json");
+    REQUIRE(whole.ok());
+    CHECK(whole.preset.scope == PresetScope::Pipeline);
+    CHECK(whole.preset.stages.size() == 6);
+    REQUIRE(whole.preset.encode);
+    CHECK(whole.preset.encode->codec == "hevc_nvenc");
+    CHECK(dialogs.warnings == 0);
+    // delete: asked, permanent, the mark on it goes
+    const auto listed = PresetStore::List("nr").items;
+    const QString victim = listed[0].file;
+    PresetStore::SetNewProjectPreset(victim);
+    dialogs.answer = false;
+    nr.removeFile(victim, listed[0].name);
+    CHECK(std::filesystem::exists(PresetStore::Path(victim)));
+    dialogs.answer = true;
+    nr.removeFile(victim, listed[0].name);
+    CHECK(dialogs.texts.last().contains(QFileInfo(victim).fileName()));  // the file named in the question
+    CHECK_FALSE(std::filesystem::exists(PresetStore::Path(victim)));
+    CHECK(PresetStore::NewProjectPreset().isEmpty());
 }

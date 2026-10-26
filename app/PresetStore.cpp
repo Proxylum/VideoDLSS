@@ -348,6 +348,10 @@ PresetStore::Result PresetStore::Import(const std::string& target, const QString
         r.problems << Tr("Не удалось сохранить пресет: %1").arg(QString::fromUtf8(e.what()));
         return r;
     }
+    // a stage or the encoder a partial pipeline preset lacks is no skip of the import (nothing is applied here)
+    notes.erase(std::remove_if(notes.begin(), notes.end(),
+                               [](const PresetIssue& i) { return i.kind == PresetIssueKind::MissingStage || i.kind == PresetIssueKind::NoEncode; }),
+                notes.end());
     r.notes = IssueTexts(notes, false, pipeline);
     if (r.message.isEmpty()) r.message = Tr("Пресет «%1» импортирован").arg(r.name);
     return r;

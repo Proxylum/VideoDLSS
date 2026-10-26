@@ -72,7 +72,7 @@ QString PresetMenu::markText() const {
     const QString mark = PresetStore::NewProjectPreset();
     if (mark.isEmpty()) return {};
     const PresetLoad l = LoadPreset(PresetStore::Path(PresetStore::Dir()) / PresetStore::Path(mark));
-    if (!l.scopeKnown) return {};
+    if (!l.scopeKnown || !l.ok()) return {};  // a refused file is no mark of the other kind: new projects get the defaults (seedNewProject)
     const QString name = U(l.preset.name);
     if (pipeline() && l.preset.scope == PresetScope::Stage) return tr("«%1» из «%2»").arg(StageName(l.preset.stage()), name);
     if (!pipeline() && l.preset.scope == PresetScope::Pipeline) return name;
@@ -131,12 +131,10 @@ void PresetMenu::rebuild() {
     clear();
     const bool pipe = pipeline();
     const PresetStore::Listing l = PresetStore::List(target_);
-    QString mark = PresetStore::NewProjectPreset();
+    const QString mark = PresetStore::NewProjectPreset();
     std::error_code ec;
-    if (!mark.isEmpty() && !std::filesystem::is_regular_file(PresetStore::Path(PresetStore::Dir()) / PresetStore::Path(mark), ec)) {
-        PresetStore::SetNewProjectPreset({});  // the file is gone: new projects get the built-in defaults, as openVideo would say
-        mark.clear();
-    }
+    // a mark on a file that is gone stays until the next new project clears it with its message (seedNewProject); here it is said
+    const bool markMissing = !mark.isEmpty() && !std::filesystem::is_regular_file(PresetStore::Path(PresetStore::Dir()) / PresetStore::Path(mark), ec);
     auto isMark = [&](const QString& file) { return !mark.isEmpty() && QFileInfo(file).fileName().compare(mark, Qt::CaseInsensitive) == 0; };
     auto describe = [&](QAction* a, const PresetStore::Listed& item) {
         QString status;
@@ -149,6 +147,7 @@ void PresetMenu::rebuild() {
         if (!skipped.isEmpty()) tip += "\n" + tr("Пропустит: %1").arg(skipped.join("; "));
         if (!slotErrors.isEmpty()) tip += "\n" + tr("В слоте есть и ошибки: %1").arg(slotErrors.join("; "));
         if (!item.when.isEmpty()) tip += "\n" + tr("Создан %1 · VideoDLSS %2").arg(item.when, U(item.preset.app));
+        tip += "\n" + tr("Файл: %1").arg(QFileInfo(item.file).fileName());  // two files of one name tell apart
         a->setToolTip(tip);
         a->setStatusTip(status);  // also while the arrows walk the menu
         return status == tr("Совпадает с текущими настройками");
@@ -184,13 +183,18 @@ void PresetMenu::rebuild() {
     for (const auto* list : {&l.items, &l.autoSlots})
         for (const auto& item : *list) {
             const QString file = item.file;
-            connect(exp->addAction(Escaped(item.name)), &QAction::triggered, this, [this, file] { exportFile(file); });
+            QAction* a = exp->addAction(Escaped(item.name));
+            a->setToolTip(tr("Файл: %1").arg(QFileInfo(file).fileName()));
+            connect(a, &QAction::triggered, this, [this, file] { exportFile(file); });
         }
     QMenu* del = addMenu(tr("&Удалить"));
     for (const auto& item : l.items) {
         const QString file = item.file, name = item.name;
-        connect(del->addAction(Escaped(item.name)), &QAction::triggered, this, [this, file, name] { removeFile(file, name); });
+        QAction* a = del->addAction(Escaped(item.name));
+        a->setToolTip(tr("Файл: %1").arg(QFileInfo(file).fileName()));
+        connect(a, &QAction::triggered, this, [this, file, name] { removeFile(file, name); });
     }
+    del->setToolTipsVisible(true);
     del->setEnabled(!l.items.empty());  // the slots rewrite themselves: not deleted from here
     QMenu* mk = addMenu(tr("Для &новых проектов"));
     mk->setToolTipsVisible(true);
@@ -211,7 +215,9 @@ void PresetMenu::rebuild() {
     }
     const OtherMark other = MarkOfOtherKind(pipe, markText());
     if (!mark.isEmpty() && other.item.isEmpty() && !group->checkedAction()) {  // marked, but a file no menu reads
-        QAction* broken = mk->addAction(tr("%1 — не читается: новые проекты получат встроенные умолчания").arg(Escaped(mark)));
+        QAction* broken = mk->addAction((markMissing ? tr("%1 — не найден: новые проекты получат встроенные умолчания")
+                                                     : tr("%1 — не читается: новые проекты получат встроенные умолчания"))
+                                            .arg(Escaped(mark)));
         broken->setCheckable(true);
         broken->setChecked(true);
         broken->setEnabled(false);
@@ -327,7 +333,7 @@ void PresetMenu::exportFile(const QString& file) {
 void PresetMenu::removeFile(const QString& file, const QString& name) {
     const QString mark = PresetStore::NewProjectPreset();
     const bool marked = !mark.isEmpty() && QFileInfo(file).fileName().compare(mark, Qt::CaseInsensitive) == 0;
-    QString text = tr("Удалить пресет «%1»? Файл будет удалён, вернуть его нельзя.").arg(name);
+    QString text = tr("Удалить пресет «%1» (%2)? Файл будет удалён, вернуть его нельзя.").arg(name, QFileInfo(file).fileName());
     if (marked) text += " " + tr("Новые проекты будут создаваться со встроенными умолчаниями.");
     if (!dialogs_.confirm(dialogParent(), tr("Удалить пресет"), text, tr("Удалить"))) return;
     const PresetStore::Result r = PresetStore::Remove(file);

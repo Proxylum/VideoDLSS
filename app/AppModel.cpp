@@ -1232,6 +1232,7 @@ AppModel::PresetResult AppModel::exportCurrentStagePreset(const std::string& sta
     r.ok = true;
     r.file = to;
     r.message = tr("Пресет сохранён в %1").arg(QFileInfo(to).fileName());
+    if (!r.notes.isEmpty()) r.message += " · " + r.notes.join(" · ");  // what the file lacks, not in silence (principle 11)
     emit message(r.message);
     return r;
 }
@@ -1380,6 +1381,7 @@ AppModel::PresetResult AppModel::exportCurrentPipelinePreset(const QString& to) 
     r.ok = true;
     r.file = to;
     r.message = tr("Пресет обработки сохранён в %1").arg(QFileInfo(to).fileName());
+    if (!r.notes.isEmpty()) r.message += " · " + r.notes.join(" · ");
     emit message(r.message);
     return r;
 }

@@ -90,7 +90,7 @@ PresetDialogs PresetDialogs::Default() {
     d.clash = [](QWidget* parent, const QString& name, const QString& copyName) {
         QMessageBox box(QMessageBox::Question, QObject::tr("Пресет уже есть"), QObject::tr("Пресет «%1» уже есть.").arg(name), QMessageBox::NoButton, parent);
         QPushButton* replace = box.addButton(QObject::tr("Заменить"), QMessageBox::AcceptRole);
-        QPushButton* copy = box.addButton(QObject::tr("Сохранить как «%1»").arg(copyName), QMessageBox::AcceptRole);
+        QPushButton* copy = box.addButton(QObject::tr("Сохранить как «%1»").arg(QString(copyName).replace("&", "&&")), QMessageBox::AcceptRole);  // no mnemonic
         box.addButton(QObject::tr("Отмена"), QMessageBox::RejectRole);
         box.exec();
         return box.clickedButton() == replace ? Clash::Replace : box.clickedButton() == copy ? Clash::Copy : Clash::Cancel;
