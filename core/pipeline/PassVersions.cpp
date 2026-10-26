@@ -85,8 +85,9 @@ std::vector<std::string> AllPasses(const std::filesystem::path& root) {
     for (const auto& n : PassesUnderRoot(root)) names.insert(n);
     for (const auto& n : PassesWithHistory(root)) names.insert(n);
     std::vector<std::string> ordered;
-    for (const char* stage : {"fg", "nr", "upscale", "flow", "depth"}) {
-        const auto& family = StageFamilyPasses(stage);
+    const auto& stages = PipelineStageNames();
+    for (auto st = stages.rbegin(); st != stages.rend(); ++st) {  // the last stage first: what was made from a pass goes before it
+        const auto& family = StageFamilyPasses(*st);
         for (auto it = family.rbegin(); it != family.rend(); ++it)
             if (names.erase(*it)) ordered.push_back(*it);
     }

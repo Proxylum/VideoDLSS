@@ -535,7 +535,7 @@ Prepared Prepare(const ProcessOptions& options) {
     r.ctx.root = options.passesRoot.empty() ? options.output.parent_path() / (options.output.stem().string() + "_passes") : options.passesRoot;
     for (const auto& s : options.stages) {
         if (std::find(ProcessStageOrder().begin(), ProcessStageOrder().end(), s.name) == ProcessStageOrder().end())
-            Throw("process: unknown stage '" + s.name + "' (depth | flow | upscale | nr | fg)");
+            Throw("process: unknown stage '" + s.name + "' " + PipelineStageNamesText());
         if (s.enabled) r.wanted[s.name] = s;
     }
     std::vector<std::string> problems;
@@ -563,7 +563,7 @@ Prepared Prepare(const ProcessOptions& options) {
     if (!problems.empty()) Throw("process: " + Join(problems));
     for (const auto& f : options.forceStages)
         if (std::find(ProcessStageOrder().begin(), ProcessStageOrder().end(), f) == ProcessStageOrder().end())
-            Throw("process: --force: unknown stage '" + f + "' (depth | flow | upscale | nr | fg)");
+            Throw("process: --force: unknown stage '" + f + "' " + PipelineStageNamesText());
     r.sourceFile = options.input.filename().string();
     r.ctx.sourceHash = options.sourceHash.rfind("sha256:", 0) == 0 ? options.sourceHash : "sha256:" + Sha256FileCached(options.input);
     r.ctx.sourceFormat = r.info.decoded.Name();
@@ -640,10 +640,7 @@ nlohmann::json ProcessPlan::ToJson() const {
             {"final_pass", finalPass},            {"run_count", runCount},    {"reuse_count", reuseCount}};
 }
 
-const std::vector<std::string>& ProcessStageOrder() {
-    static const std::vector<std::string> order{"depth", "flow", "upscale", "nr", "fg"};
-    return order;
-}
+const std::vector<std::string>& ProcessStageOrder() { return PipelineStageNames(); }
 
 std::vector<ProcessStage> DefaultProcessStages() {
     std::vector<ProcessStage> out;
@@ -662,7 +659,7 @@ void ApplyParamSpec(std::vector<ProcessStage>& stages, const std::string& spec) 
     if (dot == std::string::npos || eq == std::string::npos || dot > eq || dot == 0 || eq == dot + 1) Throw("--param expects stage.key=value (got '" + spec + "')");
     const std::string stage = spec.substr(0, dot), key = spec.substr(dot + 1, eq - dot - 1), value = spec.substr(eq + 1);
     const auto& order = ProcessStageOrder();
-    if (std::find(order.begin(), order.end(), stage) == order.end()) Throw("--param: unknown stage '" + stage + "' (depth | flow | upscale | nr | fg)");
+    if (std::find(order.begin(), order.end(), stage) == order.end()) Throw("--param: unknown stage '" + stage + "' " + PipelineStageNamesText());
     nlohmann::json v;
     // a key the schema knows as text stays text: --param nr.style=4 is the style "4", not the number 4 (TASK-0044)
     const StageSchema* schema = FindStageSchema(stage);

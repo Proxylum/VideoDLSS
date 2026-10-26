@@ -78,6 +78,10 @@ std::string ShortFingerprint(const std::string& fingerprint);
 // sha256 of a file, cached per process by (path, size, mtime): NVIDIA DLLs are hashed once, not on every plan.
 std::string Sha256FileCached(const std::filesystem::path& path);
 
+// The stages of `process` in run order: one table for the order, StageForPass, the gc order, the stage cards and the error texts
+// (PR-13: a new stage is added here once).
+const std::vector<std::string>& PipelineStageNames();
+std::string PipelineStageNamesText();  // "(depth | flow | upscale | nr | fg)"
 // Pass folders a stage writes under the passes root, in order; the last one is the one checked for completeness.
 std::vector<std::string> StageOutputPasses(const std::string& stage, const nlohmann::json& params);
 // Every pass folder a stage may write (depth: depth_raw and depth_dlss), whatever the parameters.

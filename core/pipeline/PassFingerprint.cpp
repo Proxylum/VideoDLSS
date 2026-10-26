@@ -227,7 +227,7 @@ std::vector<std::string> StageOutputPasses(const std::string& stage, const nlohm
     if (stage == "upscale") return {"color_sr"};
     if (stage == "nr") return {"color_nr"};
     if (stage == "fg") return {"color_fg"};
-    Throw("process: unknown stage '" + stage + "' (depth | flow | upscale | nr | fg)");
+    Throw("process: unknown stage '" + stage + "' " + PipelineStageNamesText());
 }
 
 const std::vector<std::string>& StageFamilyPasses(const std::string& stage) {
@@ -240,8 +240,19 @@ const std::vector<std::string>& StageFamilyPasses(const std::string& stage) {
     return none;
 }
 
+const std::vector<std::string>& PipelineStageNames() {
+    static const std::vector<std::string> names{"depth", "flow", "upscale", "nr", "fg"};
+    return names;
+}
+
+std::string PipelineStageNamesText() {
+    std::string s;
+    for (const auto& n : PipelineStageNames()) s += (s.empty() ? "(" : " | ") + n;
+    return s + ")";
+}
+
 std::string StageForPass(const std::string& pass) {
-    for (const char* stage : {"depth", "flow", "upscale", "nr", "fg"})
+    for (const std::string& stage : PipelineStageNames())
         for (const auto& p : StageFamilyPasses(stage))
             if (p == pass) return stage;
     return {};

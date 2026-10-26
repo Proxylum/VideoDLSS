@@ -169,7 +169,7 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     stagesHead->addWidget(Title(tr("Стадии"), content));
     stagesHead->addWidget(Muted(tr("порядок выполнения сверху вниз · готовые пассы переиспользуются"), content), 1);
     layout->addLayout(stagesHead);
-    for (const char* stage : {"depth", "flow", "upscale", "nr", "fg"}) {
+    for (const std::string& stage : PipelineStageNames()) {  // the run order, one table (PR-13)
         auto* card = new StageCard(model_, stage, content);
         connect(card, &StageCard::runRequested, this, &ProjectPanel::runStage);
         connect(card, &StageCard::patchDllRequested, this, &ProjectPanel::patchDll);

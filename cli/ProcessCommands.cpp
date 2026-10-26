@@ -257,7 +257,9 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_option("-o,--output", pa_.output, "output video file (default: the project's result or <input>_result.mp4)");
     process_->add_option("--passes", pa_.passes, "pass cache root (default: the project's or <output>_passes)");
     process_->add_option("--project", pa_.project, "*.dlssvid.json: stages and their parameters as the GUI saved them")->check(CLI::ExistingFile);
-    process_->add_option("--stages", pa_.stages, "comma list of stages to run (depth,flow,upscale,nr,fg); default: the project's enabled stages");
+    std::string names;
+    for (const auto& n : PipelineStageNames()) names += (names.empty() ? "" : ",") + n;
+    process_->add_option("--stages", pa_.stages, "comma list of stages to run (" + names + "); default: the project's enabled stages");
     process_->add_option("--param", pa_.params, "stage parameter stage.key=value (repeatable), e.g. nr.intensity=1.2, fg.backend=rife");
     process_->add_option("--depth-backend,--depth_backend", pa_.depthBackend, "da3 | vda | worker | worker:vda | stub");
     process_->add_option("--flow-backend,--flow_backend", pa_.flowBackend, "ofa | searaft | stub");
