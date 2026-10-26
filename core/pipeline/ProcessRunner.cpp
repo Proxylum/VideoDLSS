@@ -1131,8 +1131,11 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 VideoDecoder decoder(options.input);
                 UpscaleStageOptions o;
                 o.outputDir = root;
-                o.depthDir = ExistingPass(root, {"depth_dlss"});
-                o.mvDir = ExistingPass(root, {"mv_dlss"});
+                // the guides by the backend asked for, as StageInputCandidates: a fallback dlss -> nis keeps them, nis never opens them
+                if (UpscaleReadsGuides(p)) {
+                    o.depthDir = ExistingPass(root, {"depth_dlss"});
+                    o.mvDir = ExistingPass(root, {"mv_dlss"});
+                }
                 o.allowFallback = !Get<bool>(p, "no_fallback", false);
                 o.format = ParsePassFormat(Get<std::string>(p, "format", "exr"), true);
                 o.sourceFile = sourceFile;

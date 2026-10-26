@@ -823,7 +823,8 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
         if (d->retire) sub << tr("v%1 останется на диске").arg(d->current ? history + 1 : 1);
         st.sub = sub.join(" · ");
     }
-    if (schema && !schema->guides.empty() && (stage == "nr" || stage == "fg" || stage == "upscale")) {
+    // upscale: only DLSS reads the guides (PR-13) - nis, bicubic, trt and worker without them is no loss
+    if (schema && !schema->guides.empty() && (stage == "nr" || stage == "fg" || (stage == "upscale" && UpscaleReadsGuides(d->params)))) {
         bool any = false;
         for (const auto& g : schema->guides) any = any || d->inputs.count(g) > 0;
         const bool guidesOff = stage == "nr" && d->params.contains("guides") && d->params["guides"].is_boolean() && !d->params["guides"].get<bool>();

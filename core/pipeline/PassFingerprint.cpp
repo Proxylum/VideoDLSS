@@ -260,6 +260,8 @@ bool StageReadsSceneCuts(const std::string& stage, const nlohmann::json& p) {
     return false;  // the consumers come one by one (PR-13: flow, upscale, nr, fg); depth keeps its own segment breaks
 }
 
+bool UpscaleReadsGuides(const nlohmann::json& p) { return Str(p, "backend", "dlss") == "dlss"; }
+
 std::string StageForPass(const std::string& pass) {
     for (const std::string& stage : PipelineStageNames())
         for (const auto& p : StageFamilyPasses(stage))
@@ -269,7 +271,10 @@ std::string StageForPass(const std::string& pass) {
 
 std::vector<std::vector<std::string>> StageInputCandidates(const std::string& stage, const nlohmann::json& params) {
     if (stage == "flow") return {{"depth_raw"}};
-    if (stage == "upscale") return {{"depth_dlss"}, {"mv_dlss"}};
+    if (stage == "upscale") {
+        if (!UpscaleReadsGuides(params)) return {};
+        return {{"depth_dlss"}, {"mv_dlss"}};
+    }
     if (stage == "nr") {
         if (NrBypassParams(params)) return {{"color_sr"}};  // intensity 0: the model and its guides and masks are not used (PR-7)
         if (params.is_object() && params.contains("guides") && params["guides"].is_boolean() && !params["guides"].get<bool>())

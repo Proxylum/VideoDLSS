@@ -6,6 +6,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <filesystem>
+#include <map>
 
 #include "TestClips.h"
 #include "passes/PassSequence.h"
@@ -574,6 +575,51 @@ TEST_CASE("RunProcess: an nr pass with the guides off is not recomputed when the
     const ProcessResult r = RunProcess(o);
     CHECK(Report(r, "depth").status == "ran");
     CHECK(Report(r, "nr").status == "reused");  // before: input_changed
+}
+
+// PR-13 (regression): upscale reads depth_dlss / mv_dlss with DLSS alone. With nis a new depth and new vectors keep color_sr; nr and
+// fg, which read them, are recomputed. Before, every upscale backend listed them as inputs and was recomputed for nothing.
+TEST_CASE("RunProcess: an upscale without guides is not recomputed by a new depth and new vectors", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("upscale_inputs");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);  // upscale nis
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    CHECK(Manifest::Load(o.passesRoot / "color_sr").inputs.empty());
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").inputs.count("mv_dlss") == 1);
+    const std::string sr = Manifest::Load(o.passesRoot / "color_sr").fingerprint;
+
+    ApplyParamSpec(o.stages, "depth.z_far=500");  // a new depth, so new vectors (flow reads depth_raw)
+    const ProcessPlan plan = PlanProcess(o);
+    std::map<std::string, std::string> actions;
+    for (const auto& d : plan.stages) actions[d.name] = d.action;
+    CHECK(actions["depth"] == "run");
+    CHECK(actions["flow"] == "run");
+    CHECK(actions["upscale"] == "reuse");
+    CHECK(actions["nr"] == "run");
+    CHECK(actions["fg"] == "run");
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "upscale").status == "reused");
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK(Report(r, "fg").status == "ran");
+    CHECK(Manifest::Load(o.passesRoot / "color_sr").fingerprint == sr);
+
+    // DLSS reads them: in the plan (no DLL on WARP: the plan alone)
+    ApplyParamSpec(o.stages, "upscale.backend=dlss");
+    for (const auto& d : PlanProcess(o).stages)
+        if (d.name == "upscale") {
+            CHECK(d.inputs.count("depth_dlss") == 1);
+            CHECK(d.inputs.count("mv_dlss") == 1);
+        }
 }
 
 TEST_CASE("RunProcess: --frames, passthrough, an unavailable nr stage and a run without colour stages", "[integration][process]") {

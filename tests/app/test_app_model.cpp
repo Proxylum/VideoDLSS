@@ -443,6 +443,16 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     model.setStageParam("nr", "guides", true);
     model.refreshPlan();
     CHECK(model.cardState("nr").warning.isEmpty());
+    // PR-13: nis reads no depth and vectors - without depth and flow only nr warns
+    model.setStageEnabled("depth", false);
+    model.setStageEnabled("flow", false);
+    model.refreshPlan();
+    CHECK(model.cardState("upscale").warning.isEmpty());
+    CHECK(model.cardState("nr").warning == QString::fromUtf8("без глубины и векторов: качество ниже"));
+    model.setStageEnabled("depth", true);
+    model.setStageEnabled("flow", true);
+    model.refreshPlan();
+    CHECK(model.cardState("upscale").warning.isEmpty());
     CHECK(model.sourceHashStatus() == QString::fromUtf8("пассов пока нет"));
     CHECK(!model.plan().sourceHash.empty());
     CHECK(model.project().sourceHash == model.plan().sourceHash);  // cached in the project

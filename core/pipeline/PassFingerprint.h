@@ -85,6 +85,9 @@ std::string PipelineStageNamesText();  // "(scenes | depth | flow | upscale | nr
 // Whether the stage's output depends on the scene-cut list (PR-13): it keeps a history or interpolates across frames. The one gate
 // of StageInputCandidates, the process runner (through the decision's inputs), the standalone commands and the GUI.
 bool StageReadsSceneCuts(const std::string& stage, const nlohmann::json& params);
+// Whether upscale reads depth_dlss / mv_dlss: DLSS alone (IUpscaler::WantsDepthAndMv). PR-13: nis, bicubic, trt and worker have
+// no guide inputs - a new depth or new vectors do not recompute their colour.
+bool UpscaleReadsGuides(const nlohmann::json& params);
 // Pass folders a stage writes under the passes root, in order; the last one is the one checked for completeness.
 std::vector<std::string> StageOutputPasses(const std::string& stage, const nlohmann::json& params);
 // Every pass folder a stage may write (depth: depth_raw and depth_dlss), whatever the parameters.

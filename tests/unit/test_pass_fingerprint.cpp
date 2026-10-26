@@ -207,6 +207,16 @@ TEST_CASE("Stage pass tables and timestamps", "[unit][fingerprint]") {
     CHECK(StageInputCandidates("nr", {{"intensity", 0.0}}) == std::vector<std::vector<std::string>>{{"color_sr"}});
     CHECK(StageInputCandidates("nr", {{"intensity", 1.0}}).size() == 7);
     CHECK(StageInputCandidates("fg", {{"guides", false}}).size() == 3);  // nr's key only
+    // PR-13: upscale reads depth and vectors with DLSS alone
+    CHECK(StageInputCandidates("upscale") == std::vector<std::vector<std::string>>{{"depth_dlss"}, {"mv_dlss"}});
+    CHECK(StageInputCandidates("upscale", {{"backend", "dlss"}}).size() == 2);
+    for (const char* b : {"nis", "bicubic", "trt", "worker"}) {
+        INFO(b);
+        CHECK(StageInputCandidates("upscale", {{"backend", b}}).empty());
+        CHECK(!UpscaleReadsGuides({{"backend", b}}));
+    }
+    CHECK(UpscaleReadsGuides(nlohmann::json::object()));  // the schema default: dlss
+    CHECK(StageInputCandidates("scenes").empty());
 
     CHECK(CompactTimestamp("2026-09-22T14:09:31Z") == "20260922-140931");
     CHECK(CompactTimestamp("yesterday").empty());

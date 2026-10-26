@@ -427,7 +427,7 @@ TEST_CASE("Schema defaults are the same run; --force recomputes one stage in pla
 }
 
 // Audit pass-mv-yup (TASK-0038): PassReader negates v of a y-up motion-vector pass, so toggling mv.y_up of an external
-// (legacy, unfingerprinted) mv_dlss changes what upscale / nr / fg read - the plan must recompute them, and the run agree.
+// (legacy, unfingerprinted) mv_dlss changes what nr / fg (and a DLSS upscale) read - the plan must recompute them, and the run agree.
 TEST_CASE("Regression (pass-mv-yup): toggling mv.y_up of a legacy mv_dlss recomputes the stages that read it", "[integration][process][versions][mv][y_up]") {
     ClipSpec spec;
     spec.frames = 3;
@@ -450,31 +450,36 @@ TEST_CASE("Regression (pass-mv-yup): toggling mv.y_up of a legacy mv_dlss recomp
         if (s.name == "flow") s.enabled = false;
     RunProcess(o);
     REQUIRE(PlanProcess(o).runCount == 0);
-    const std::string legacy = Manifest::Load(o.passesRoot / "color_sr").inputs.at("mv_dlss");
+    const std::string legacy = Manifest::Load(o.passesRoot / "color_nr").inputs.at("mv_dlss");
     CHECK(legacy.rfind("legacy:", 0) == 0);
+    CHECK(Manifest::Load(o.passesRoot / "color_sr").inputs.count("mv_dlss") == 0);  // nis reads no vectors (PR-13)
 
     Manifest m = Manifest::Load(mvDir);
     m.mv.yUp = true;
     m.Save(mvDir);
     const ProcessPlan plan = PlanProcess(o);
-    const StageDecision& up = Decision(plan, "upscale");
-    CHECK(up.action == "run");  // before the fix the pseudo-fingerprint ignored y_up: "reuse" with flipped vectors
-    CHECK(up.kind == "input_changed");
-    CHECK(up.inputs.at("mv_dlss") == legacy + ":y_up");
-    CHECK(Decision(plan, "nr").action == "run");
+    const StageDecision& nr = Decision(plan, "nr");
+    CHECK(nr.action == "run");  // before the fix the pseudo-fingerprint ignored y_up: "reuse" with flipped vectors
+    CHECK(nr.kind == "input_changed");
+    CHECK(nr.inputs.at("mv_dlss") == legacy + ":y_up");
+    CHECK(Decision(plan, "upscale").action == "reuse");  // nis: the vectors are no input of its colour (PR-13)
     CHECK(Decision(plan, "fg").action == "run");
-    // nr and fg read mv_dlss themselves, not only through color_sr / color_nr (review of TASK-0038, yup-4)
-    CHECK(Decision(plan, "nr").inputs.at("mv_dlss") == legacy + ":y_up");
+    // fg reads mv_dlss itself, not only through color_nr (review of TASK-0038, yup-4)
     CHECK(Decision(plan, "fg").inputs.at("mv_dlss") == legacy + ":y_up");
 
     const ProcessResult r = RunProcess(o);
-    CHECK(Report(r, "upscale").status == "ran");
-    CHECK(Manifest::Load(o.passesRoot / "color_sr").inputs.at("mv_dlss") == legacy + ":y_up");
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").inputs.at("mv_dlss") == legacy + ":y_up");
     CHECK(PlanProcess(o).runCount == 0);  // the plan and the run agree
 
     m.mv.yUp = false;
     m.Save(mvDir);
-    CHECK(Decision(PlanProcess(o), "upscale").action == "restore");  // the version made without the flag comes back
+    CHECK(Decision(PlanProcess(o), "nr").action == "restore");  // the version made without the flag comes back
+    // a DLSS upscale reads the vectors too: the flag reaches its inputs (the plan alone: no DLL on WARP)
+    m.mv.yUp = true;
+    m.Save(mvDir);
+    ApplyParamSpec(o.stages, "upscale.backend=dlss");
+    CHECK(Decision(PlanProcess(o), "upscale").inputs.at("mv_dlss") == legacy + ":y_up");
 }
 
 // TASK-0045: process loads the NVIDIA DLL from DLSSVID_NVIDIA_DLL_DIR / <exe>/nvidia / <exe>, a dll_dir in the stage's
