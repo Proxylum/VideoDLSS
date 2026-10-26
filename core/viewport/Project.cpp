@@ -47,13 +47,37 @@ void MigrateNrParamsV1(nlohmann::json& params) {
         }
     }
 }
+
+// schema_version 2 -> 3 (PR-13): the stage scenes (the clip's scene-cut list) comes first
+void MigrateScenesV3(std::vector<StageEntry>& stages) {
+    for (const auto& s : stages)
+        if (s.name == "scenes") return;
+    stages.insert(stages.begin(), StageEntry{"scenes", true, {{"backend", "luma"}}});
+    Log()->info("project v2: the stage scenes added (PR-13)");
+}
 }  // namespace
 
 std::vector<StageEntry> Project::DefaultStages() {
-    return {StageEntry{"depth", true, {{"backend", "da3"}}}, StageEntry{"flow", true, {{"backend", "ofa"}}},
+    return {StageEntry{"scenes", true, {{"backend", "luma"}}},
+            StageEntry{"depth", true, {{"backend", "da3"}}}, StageEntry{"flow", true, {{"backend", "ofa"}}},
             StageEntry{"upscale", true, {{"backend", "dlss"}, {"scale", 2}}},
             StageEntry{"nr", true, {{"backend", "ngx"}, {"intensity", 1.0}, {"passes", 1}}},
             StageEntry{"fg", true, {{"backend", "dlssg"}, {"multiplier", 2}}}};
+}
+
+StageEntry* Project::EnsureStage(const std::string& name) {
+    for (auto& s : stages)
+        if (s.name == name) return &s;
+    const auto defaults = DefaultStages();
+    auto rank = [&](const std::string& n) {
+        for (size_t i = 0; i < defaults.size(); ++i)
+            if (defaults[i].name == n) return static_cast<int>(i);
+        return static_cast<int>(defaults.size());
+    };
+    const int r = rank(name);
+    if (r == static_cast<int>(defaults.size())) return nullptr;
+    auto at = std::find_if(stages.begin(), stages.end(), [&](const StageEntry& s) { return rank(s.name) > r; });
+    return &*stages.insert(at, defaults[static_cast<size_t>(r)]);
 }
 
 Project Project::Create(const std::filesystem::path& sourceVideo, const std::filesystem::path& passesRoot) {
@@ -98,6 +122,7 @@ Project Project::FromJson(const nlohmann::json& j, const std::filesystem::path& 
         if (!e.name.empty()) p.stages.push_back(e);
     }
     if (p.stages.empty()) p.stages = DefaultStages();
+    else if (version < 3) MigrateScenesV3(p.stages);
     p.passVersionsKeep = j.value("pass_versions_keep", 2);
     if (j.contains("encode") && j["encode"].is_object()) {
         p.codec = j["encode"].value("codec", "h264_nvenc");

@@ -81,7 +81,10 @@ std::string Sha256FileCached(const std::filesystem::path& path);
 // The stages of `process` in run order: one table for the order, StageForPass, the gc order, the stage cards and the error texts
 // (PR-13: a new stage is added here once).
 const std::vector<std::string>& PipelineStageNames();
-std::string PipelineStageNamesText();  // "(depth | flow | upscale | nr | fg)"
+std::string PipelineStageNamesText();  // "(scenes | depth | flow | upscale | nr | fg)"
+// Whether the stage's output depends on the scene-cut list (PR-13): it keeps a history or interpolates across frames. The one gate
+// of StageInputCandidates, the process runner (through the decision's inputs), the standalone commands and the GUI.
+bool StageReadsSceneCuts(const std::string& stage, const nlohmann::json& params);
 // Pass folders a stage writes under the passes root, in order; the last one is the one checked for completeness.
 std::vector<std::string> StageOutputPasses(const std::string& stage, const nlohmann::json& params);
 // Every pass folder a stage may write (depth: depth_raw and depth_dlss), whatever the parameters.

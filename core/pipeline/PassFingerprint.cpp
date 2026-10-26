@@ -164,7 +164,7 @@ std::vector<std::string> AddedToolRevisions(const std::string& oldApp, const std
 ToolInfo ToolForStage(const std::string& stage, const nlohmann::json& p) {
     ToolInfo t;
     t.app = PassToolVersionFor(stage, p);  // not DLSSVID_VERSION: a release does not invalidate the passes (CHANGELOG 0.2.0)
-    const char* def = stage == "depth" ? "da3" : stage == "flow" ? "ofa" : stage == "upscale" ? "dlss" : stage == "nr" ? "ngx" : stage == "fg" ? "dlssg" : "";
+    const char* def = stage == "scenes" ? "luma" : stage == "depth" ? "da3" : stage == "flow" ? "ofa" : stage == "upscale" ? "dlss" : stage == "nr" ? "ngx" : stage == "fg" ? "dlssg" : "";
     t.backend = Str(p, "backend", def);
     const std::string model = Str(p, "model", "");
     // the DLL the stage loads: its default lookup (DLSSVID_NVIDIA_DLL_DIR, <exe>/nvidia, <exe>). params.dll_dir is read by
@@ -222,6 +222,7 @@ PassFingerprint ComputeFingerprint(const std::string& stage, const std::string& 
 }
 
 std::vector<std::string> StageOutputPasses(const std::string& stage, const nlohmann::json& params) {
+    if (stage == "scenes") return {"scenes"};
     if (stage == "depth") return Flag(params, "no_dlss") ? std::vector<std::string>{"depth_raw"} : std::vector<std::string>{"depth_raw", "depth_dlss"};
     if (stage == "flow") return Flag(params, "no_dlss") ? std::vector<std::string>{"mv_raw"} : std::vector<std::string>{"mv_raw", "mv_dlss"};
     if (stage == "upscale") return {"color_sr"};
@@ -231,7 +232,9 @@ std::vector<std::string> StageOutputPasses(const std::string& stage, const nlohm
 }
 
 const std::vector<std::string>& StageFamilyPasses(const std::string& stage) {
-    static const std::vector<std::string> depth{"depth_raw", "depth_dlss"}, flow{"mv_raw", "mv_dlss"}, upscale{"color_sr"}, nr{"color_nr"}, fg{"color_fg"}, none;
+    static const std::vector<std::string> scenes{"scenes"}, depth{"depth_raw", "depth_dlss"}, flow{"mv_raw", "mv_dlss"}, upscale{"color_sr"}, nr{"color_nr"},
+        fg{"color_fg"}, none;
+    if (stage == "scenes") return scenes;
     if (stage == "depth") return depth;
     if (stage == "flow") return flow;
     if (stage == "upscale") return upscale;
@@ -241,7 +244,7 @@ const std::vector<std::string>& StageFamilyPasses(const std::string& stage) {
 }
 
 const std::vector<std::string>& PipelineStageNames() {
-    static const std::vector<std::string> names{"depth", "flow", "upscale", "nr", "fg"};
+    static const std::vector<std::string> names{"scenes", "depth", "flow", "upscale", "nr", "fg"};  // scenes first: a property of the source
     return names;
 }
 
@@ -249,6 +252,12 @@ std::string PipelineStageNamesText() {
     std::string s;
     for (const auto& n : PipelineStageNames()) s += (s.empty() ? "(" : " | ") + n;
     return s + ")";
+}
+
+bool StageReadsSceneCuts(const std::string& stage, const nlohmann::json& p) {
+    (void)stage;
+    (void)p;
+    return false;  // the consumers come one by one (PR-13: flow, upscale, nr, fg); depth keeps its own segment breaks
 }
 
 std::string StageForPass(const std::string& pass) {

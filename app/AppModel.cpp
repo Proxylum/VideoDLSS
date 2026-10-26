@@ -8,6 +8,7 @@
 #include <cmath>
 
 #include "SourceNames.h"
+#include "passes/ScenesPass.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "stages/ParamSchema.h"
@@ -613,7 +614,7 @@ QString AppModel::planBlocker() const {
 }
 
 void AppModel::setStageEnabled(const std::string& stage, bool on) {
-    if (StageEntry* e = stageEntry(stage); e && e->enabled != on) {
+    if (StageEntry* e = project_.EnsureStage(stage); e && e->enabled != on) {  // a v3 file without the entry: inserted (PR-13)
         e->enabled = on;
         markDirty();
         emit projectChanged();
@@ -622,7 +623,7 @@ void AppModel::setStageEnabled(const std::string& stage, bool on) {
 }
 
 void AppModel::setStageParam(const std::string& stage, const std::string& key, const nlohmann::json& value) {
-    StageEntry* e = stageEntry(stage);
+    StageEntry* e = project_.EnsureStage(stage);
     if (!e) return;
     if (e->params.contains(key) && e->params[key] == value) return;
     // another backend: a model from the old backend's list goes (VDA Large -> DA3 leaves no VDA model in the project)
@@ -634,7 +635,7 @@ void AppModel::setStageParam(const std::string& stage, const std::string& key, c
 }
 
 void AppModel::setStageParams(const std::string& stage, const nlohmann::json& params) {
-    StageEntry* e = stageEntry(stage);
+    StageEntry* e = project_.EnsureStage(stage);
     if (!e || !params.is_object() || e->params == params) return;
     e->params = params;
     markDirty();
@@ -747,6 +748,7 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     const QString eta = est ? FormatDuration(est->seconds) : QString();
     std::string created;
     if (const ViewportSource* src = store_->FindSource(primary); src && src->manifest) created = src->manifest->created;
+    if (created.empty()) created = d->currentCreated;  // a pass without frames (scenes) is no viewport source
     const StageSchema* schema = FindStageSchema(stage);
     if (d->action == "reuse") {
         st.state = d->kind == "legacy" ? tr("переиспользуется (без отпечатка)") : tr("переиспользуется");
@@ -980,7 +982,8 @@ struct StageWord {
     const char* name;
     const char* done;
 };
-constexpr StageWord kStageWords[] = {{"depth", "глубина", "посчитана"},
+constexpr StageWord kStageWords[] = {{"scenes", "склейки", "посчитаны"},
+                                     {"depth", "глубина", "посчитана"},
                                      {"flow", "векторы", "посчитаны"},
                                      {"upscale", "апскейл", "посчитан"},
                                      {"nr", "NR", "посчитан"},
@@ -1025,6 +1028,7 @@ std::vector<AppModel::Recent> AppModel::recents() const {
                 if (ready) r.result = QString::fromStdWString(p.resultVideo.wstring());
                 // stages with a pass on disk, in the project's order: «глубина и NR посчитаны», «2 из 5 стадий»
                 std::vector<std::string> computed;
+                if (Manifest::Exists(p.passesRoot / kScenesPass)) computed.push_back("scenes");  // a data pass: DiscoverPasses leaves it out
                 for (const auto& s : passes) {
                     const std::string stage = StageOfPass(s.name);
                     if (!stage.empty() && std::find(computed.begin(), computed.end(), stage) == computed.end()) computed.push_back(stage);

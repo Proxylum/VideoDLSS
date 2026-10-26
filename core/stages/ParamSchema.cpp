@@ -136,6 +136,23 @@ std::vector<ParamChoice> Formats(bool png) {
 
 std::vector<StageSchema> Build() {
     std::vector<StageSchema> out;
+    {  // PR-13 (spec §2d): the clip's scene-cut list, read by the temporal stages
+        StageSchema s;
+        s.stage = "scenes";
+        s.title = "Склейки";
+        s.subtitle = "где стадии начинают историю заново · проход по яркости исходника";
+        s.params = {
+            In(Display(Number("threshold", "Порог склейки", ParamType::Float, 0.24, 0.0, 1.0, 0.01, ParamWidget::Spin,
+                              "Средняя разница яркости соседних кадров (0…1), выше которой начинается новый план. На склейке векторы движения "
+                              "нулевые, DLSS SR и улучшение начинают историю заново, генерация кадров повторяет последний кадр плана вместо "
+                              "смешивания двух сцен. 0.24 ловит резкие склейки; яркая вспышка может дать лишний сброс. Смена порога пересчитывает "
+                              "стадии ниже, только если меняется список. 0 — выкл: стадии работают без сбросов."),
+                       "выкл"),
+               "Обнаружение"),
+            Enum("backend", "Метод", "luma", {{"luma", "яркость исходника", "средняя разница яркости соседних кадров"}}, ParamWidget::Select, "", true),
+        };
+        out.push_back(std::move(s));
+    }
     {
         StageSchema s;
         s.stage = "depth";

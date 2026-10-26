@@ -426,10 +426,10 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     CHECK(model.sourceInfo().width == 48);
     CHECK(model.sourceInfo().frames == 4);
     CHECK(model.sourceInfo().audio);
-    REQUIRE(model.plan().stages.size() == 5);
+    REQUIRE(model.plan().stages.size() == 6);
     CHECK(model.outcome().width == 96);
     CHECK(model.outcome().fps == Approx(48.0));
-    CHECK(model.outcome().stagesToRun == 6);
+    CHECK(model.outcome().stagesToRun == 7);  // scenes .. fg + the encode
     CHECK(model.outcome().seconds > 0.0);
     CHECK(model.cardState("depth").state == QString::fromUtf8("будет посчитано"));
     CHECK(model.cardState("depth").tone == "run");
@@ -461,8 +461,10 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     CHECK(model.cardState("depth").tone == "ok");
     CHECK(model.cardState("depth").version == "v1");
     CHECK(model.cardState("depth").sub.startsWith(QString::fromUtf8("0 мин")));
+    CHECK(model.cardState("scenes").state == QString::fromUtf8("переиспользуется"));  // PR-13: the list, a pass without frames
+    CHECK(model.cardState("scenes").sub.startsWith(QString::fromUtf8("0 мин · посчитано")));
     CHECK(model.outcome().stagesToRun == 1);  // only the encode
-    CHECK(model.outcome().reused.size() == 5);
+    CHECK(model.outcome().reused.size() == 6);
     CHECK(model.sourceHashStatus() == QString::fromUtf8("совпадает с пассами"));
 
     // PR-7 (review): an nr pass of before PR-7 with intensity != 1 is recomputed and discarded - the card names the revision, not
@@ -599,9 +601,9 @@ TEST_CASE("AppModel remembers recents and dialog folders, tracks unsaved changes
     CHECK(model.recents()[0].isProject);
     CHECK(model.recents()[0].exists);
     CHECK(model.recents()[0].info.startsWith(QString::fromUtf8("1 пасс")));
-    // the start screen's card: «proj — глубина посчитана» over «1 из 5 стадий · сегодня …»; no source video, no preview
+    // the start screen's card: «proj — глубина посчитана» over «1 из 6 стадий · сегодня …»; no source video, no preview
     CHECK(model.recents()[0].state == QString::fromUtf8("глубина посчитана"));
-    CHECK(model.recents()[0].progress == QString::fromUtf8("1 из 5 стадий"));
+    CHECK(model.recents()[0].progress == QString::fromUtf8("1 из 6 стадий"));
     CHECK(!model.recents()[0].when.isEmpty());
     CHECK(model.recents()[0].video.isEmpty());
     CHECK(model.recents()[0].result.isEmpty());
@@ -1131,7 +1133,7 @@ TEST_CASE("StartPage lays the recents out as cards with a preview, a state and a
     REQUIRE(page.cardTitles().size() == 2);
     CHECK(page.cardTitles()[0] == QString::fromUtf8("clip — глубина посчитана"));
     CHECK(page.cardTitles()[1] == "clip");
-    CHECK(page.cardMetas()[0].contains(QString::fromUtf8("1 из 5 стадий")));
+    CHECK(page.cardMetas()[0].contains(QString::fromUtf8("1 из 6 стадий")));
     CHECK(page.cardMetas()[1].contains(QString::fromUtf8("есть проект")));
     // the third line is the file's path (native separators); the tooltip carries the title, the path and the state
     CHECK(page.cardPaths()[0] == QDir::toNativeSeparators(Q(d / "clip.dlssvid.json")));
@@ -1140,7 +1142,7 @@ TEST_CASE("StartPage lays the recents out as cards with a preview, a state and a
     Pump([&] { return page.cardHasPreview(0) && page.cardHasPreview(1); }, 15000);
     CHECK(page.cardHasPreview(0));
     CHECK(page.cardHasPreview(1));
-    CHECK(page.cardMetas()[0].startsWith(QString::fromUtf8("48×32 24 fps · 1 из 5 стадий · ")));
+    CHECK(page.cardMetas()[0].startsWith(QString::fromUtf8("48×32 24 fps · 1 из 6 стадий · ")));
     CHECK(page.cardMetas()[1].startsWith(QString::fromUtf8("48×32 24 fps · есть проект · ")));
     // a click on a card asks the window to open that file; «очистить» empties the list
     QSignalSpy opened(&page, &dlssvid::StartPage::openPathRequested);

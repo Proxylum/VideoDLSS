@@ -29,7 +29,7 @@ struct SceneList {
     double threshold = 0.0;
     int64_t frames = 0;  // frames analysed: 0..frames-1
     bool reachedEnd = false, off = false;
-    std::vector<std::pair<int64_t, float>> near;  // the highest scores just below the threshold: to check for missed cuts
+    std::vector<std::pair<int64_t, float>> nearMisses;  // the highest scores just below the threshold: to check for missed cuts
     bool IsCut(int64_t f) const { return std::binary_search(cuts.begin(), cuts.end(), f); }
     int64_t CountIn(int64_t first, int64_t last) const;  // cuts in [first, last]
 };

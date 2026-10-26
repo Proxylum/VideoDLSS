@@ -384,10 +384,10 @@ TEST_CASE("process keeps the bit depth through the stages, reports the format an
     legacy.fingerprint = ComputeFingerprint("depth", legacy.sourceHash, legacy.paramsCanonical, legacy.inputs, ToolInfo::FromJson(legacy.tool)).value;
     legacy.Save(dir / "passes" / "depth_dlss");
     const ProcessPlan after = PlanProcess(o);
-    REQUIRE(after.stages.front().name == "depth");
-    CHECK(after.stages.front().action == "run");
-    CHECK(after.stages.front().kind == "source_changed");
-    CHECK_THAT(after.stages.front().detail, ContainsSubstring("yuv420p (now yuv420p10)"));
+    REQUIRE(after.stages[1].name == "depth");  // after scenes (PR-13)
+    CHECK(after.stages[1].action == "run");
+    CHECK(after.stages[1].kind == "source_changed");
+    CHECK_THAT(after.stages[1].detail, ContainsSubstring("yuv420p (now yuv420p10)"));
     // an 8-bit source: the layout is recorded, the fingerprints are the ones from before (no source_format in the hash)
     ClipSpec spec8;
     spec8.frames = 3;

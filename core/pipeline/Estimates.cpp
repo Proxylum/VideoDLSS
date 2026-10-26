@@ -19,6 +19,7 @@ constexpr double kVdaBaseMs = 310.0;   // TASK-0039, 2026-10-12: face 1920x800 (
 constexpr double kVdaLargeMs = 420.0;  // the same: 416 ms/frame
 
 double Baseline(const std::string& stage, const std::string& backend, const std::string& model) {
+    if (stage == "scenes") return 6.0;  // PR-13: a CPU decode and a luma thumb per frame (face 1920x800)
     if (stage == "depth") {
         // VDA by model: Small measured (docs/benchmarks.md); Base and Large - TASK-0039 measurement on the reference GPU
         const double vda = model == "metric-vda-large" ? kVdaLargeMs : model == "metric-vda-base" ? kVdaBaseMs : 300.0;
@@ -59,6 +60,11 @@ const char* StageTimerKey(const std::string& stage) {
 
 std::optional<double> WallMsPerFrame(const Manifest& m, const std::string& stage) {
     const nlohmann::json& sp = m.stageParams;
+    if (stage == "scenes") {  // PR-13: the analysis's own decode time - a rederive copies it, its wall time is ~0 (no decoding)
+        const nlohmann::json a = sp.is_object() ? sp.value("analysis", nlohmann::json::object()) : nlohmann::json::object();
+        if (!a.is_object() || !HasNumber(a, "ms_per_frame") || a["ms_per_frame"].get<double>() <= 0.0) return std::nullopt;
+        return a["ms_per_frame"].get<double>();
+    }
     if (!HasNumber(sp, "ms_per_frame")) return std::nullopt;
     const double ms = sp["ms_per_frame"].get<double>();
     const char* timer = StageTimerKey(stage);
@@ -185,6 +191,7 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
                                                  static_cast<double>(ww) * wh, frames, backend);
             }
         }
+        if (d.name == "scenes" && (d.sceneCuts.rederive || d.sceneCuts.off)) e.msPerFrame = 0.0;  // the threshold over stored scores
         e.frames = d.name == "fg" ? FgFrameCount(frames, multiplier) : frames;
         const double seconds = e.msPerFrame * static_cast<double>(frames) / 1000.0;  // the baselines are per source frame
         o.fullSeconds += seconds;

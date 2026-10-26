@@ -17,13 +17,14 @@
 #include "stages/fg/FgStage.h"
 #include "stages/flow/FlowStage.h"
 #include "stages/nr/NrStage.h"
+#include "stages/scenes/ScenesStage.h"
 #include "stages/upscale/UpscaleStage.h"
 
 using namespace dlssvid;
 
 TEST_CASE("Every stage has a schema whose defaults mirror the stages and the project", "[unit][schema]") {
-    REQUIRE(StageSchemas().size() == 5);
-    for (const char* s : {"depth", "flow", "upscale", "nr", "fg"}) {
+    REQUIRE(StageSchemas().size() == 6);
+    for (const char* s : {"scenes", "depth", "flow", "upscale", "nr", "fg"}) {
         REQUIRE(FindStageSchema(s) != nullptr);
         CHECK(!FindStageSchema(s)->title.empty());
         CHECK(FindStageSchema(s)->Find("backend") != nullptr);
@@ -39,6 +40,11 @@ TEST_CASE("Every stage has a schema whose defaults mirror the stages and the pro
             CHECK(spec->def == v);
         }
     }
+    CHECK(FindStageSchema("scenes")->Find("threshold")->def == ScenesStageOptions{}.threshold);  // PR-13
+    CHECK(FindStageSchema("scenes")->Find("backend")->def == ScenesStageOptions{}.backend);
+    CHECK(FindStageSchema("scenes")->Find("backend")->advanced);
+    CHECK(ParamValueLabel(*FindStageSchema("scenes")->Find("threshold"), 0.0) == "выкл");
+    CHECK(StageSchemas().front().stage == "scenes");  // the cards follow the run order
     CHECK(FindStageSchema("nr")->Find("intensity")->def == NrStageOptions{}.intensity);
     CHECK(FindStageSchema("nr")->Find("passes")->def == NrStageOptions{}.passes);
     CHECK(FindStageSchema("nr")->Find("style")->def == NrStageOptions{}.style);

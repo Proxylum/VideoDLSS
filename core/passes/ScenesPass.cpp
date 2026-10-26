@@ -27,15 +27,15 @@ std::vector<int64_t> CutsFromScores(const std::vector<float>& scores, double thr
 }
 
 std::vector<std::pair<int64_t, float>> NearCuts(const std::vector<float>& scores, double threshold, size_t max) {
-    std::vector<std::pair<int64_t, float>> near;
-    if (threshold <= 0.0) return near;
+    std::vector<std::pair<int64_t, float>> nearMisses;
+    if (threshold <= 0.0) return nearMisses;
     for (size_t i = 1; i < scores.size(); ++i) {
         const double s = scores[i];
-        if (s >= 0.6 * threshold && s <= threshold) near.push_back({static_cast<int64_t>(i), scores[i]});  // <= : not a cut (strict >)
+        if (s >= 0.6 * threshold && s <= threshold) nearMisses.push_back({static_cast<int64_t>(i), scores[i]});  // <= : not a cut (strict >)
     }
-    std::stable_sort(near.begin(), near.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
-    if (near.size() > max) near.resize(max);
-    return near;
+    std::stable_sort(nearMisses.begin(), nearMisses.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    if (nearMisses.size() > max) nearMisses.resize(max);
+    return nearMisses;
 }
 
 std::optional<SceneList> ReadSceneList(const std::filesystem::path& dir, const std::string& sourceHash, std::string* why) {
@@ -75,7 +75,7 @@ std::optional<SceneList> ReadSceneList(const std::filesystem::path& dir, const s
     if (sp.value("cuts_id", std::string()) != l.id) return fail("cuts_id does not match its list");
     if (sp.contains("near") && sp["near"].is_array())
         for (const auto& n : sp["near"])
-            if (n.is_array() && n.size() == 2 && n[0].is_number_integer() && n[1].is_number()) l.near.push_back({n[0].get<int64_t>(), n[1].get<float>()});
+            if (n.is_array() && n.size() == 2 && n[0].is_number_integer() && n[1].is_number()) l.nearMisses.push_back({n[0].get<int64_t>(), n[1].get<float>()});
     return l;
 }
 
@@ -148,9 +148,9 @@ void WriteScenesPass(const std::filesystem::path& dir, Manifest base, const Scen
     m.stageParams["scene_cuts"] = list.cuts;
     m.stageParams["scene_cut_count"] = static_cast<int64_t>(list.cuts.size());
     m.stageParams["cuts_id"] = SceneCutsId(list.cuts);
-    nlohmann::json near = nlohmann::json::array();
-    for (const auto& [f, s] : list.near) near.push_back({f, std::round(static_cast<double>(s) * 1e4) / 1e4});
-    m.stageParams["near"] = near;
+    nlohmann::json nearMisses = nlohmann::json::array();
+    for (const auto& [f, s] : list.nearMisses) nearMisses.push_back({f, std::round(static_cast<double>(s) * 1e4) / 1e4});
+    m.stageParams["near"] = nearMisses;
     analysis["reached_end"] = list.reachedEnd;
     analysis["frames"] = list.frames;
     m.stageParams["analysis"] = analysis;

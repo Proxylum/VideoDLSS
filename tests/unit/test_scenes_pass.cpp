@@ -62,11 +62,11 @@ TEST_CASE("Scene list: id of the content, cuts from the scores, near misses", "[
     CHECK(CutsFromScores(scores, 0.0).empty());                          // 0: off
     CHECK(CutsFromScores(scores, 0.6).empty());
     CHECK(CutsFromScores({}, 0.24).empty());
-    const auto near = NearCuts(scores, 0.24);  // [0.144, 0.24]: 2 (0.24), 4 (0.2), 5 (0.15), highest first
-    REQUIRE(near.size() == 3);
-    CHECK(near[0].first == 2);
-    CHECK(near[1].first == 4);
-    CHECK(near[2].first == 5);
+    const auto nearMisses = NearCuts(scores, 0.24);  // [0.144, 0.24]: 2 (0.24), 4 (0.2), 5 (0.15), highest first
+    REQUIRE(nearMisses.size() == 3);
+    CHECK(nearMisses[0].first == 2);
+    CHECK(nearMisses[1].first == 4);
+    CHECK(nearMisses[2].first == 5);
     CHECK(NearCuts(scores, 0.24, 1).size() == 1);
     CHECK(NearCuts(scores, 0.0).empty());
 }
@@ -74,7 +74,7 @@ TEST_CASE("Scene list: id of the content, cuts from the scores, near misses", "[
 TEST_CASE("Scenes pass: a data pass written and read back; a broken or foreign list is no list", "[unit][scenes][regression]") {
     const auto dir = Root("rw") / "scenes";
     SceneList l = List({3, 40}, 100);
-    l.near = {{12, 0.21f}};
+    l.nearMisses = {{12, 0.21f}};
     SceneScores s;
     s.scores.assign(100, 0.01f);
     s.scores[3] = 0.4f;
@@ -104,8 +104,8 @@ TEST_CASE("Scenes pass: a data pass written and read back; a broken or foreign l
     CHECK(r->IsCut(40));
     CHECK_FALSE(r->IsCut(4));
     CHECK(r->CountIn(0, 39) == 1);
-    REQUIRE(r->near.size() == 1);
-    CHECK(r->near[0].first == 12);
+    REQUIRE(r->nearMisses.size() == 1);
+    CHECK(r->nearMisses[0].first == 12);
     CHECK(ReadSceneList(dir, "")) ;  // no hash given: not checked
     CHECK(ReadSceneListExpect(dir, l.id, "sha256:src").cuts.size() == 2);
     CHECK_THROWS(ReadSceneListExpect(dir, SceneCutsId({3}), "sha256:src"));  // the list changed under a run

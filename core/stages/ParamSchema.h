@@ -79,7 +79,7 @@ struct ParamSpec {
 };
 
 struct StageSchema {
-    std::string stage;     // depth | flow | upscale | nr | fg
+    std::string stage;     // scenes | depth | flow | upscale | nr | fg
     std::string title;     // «Глубина»
     std::string subtitle;  // «guide для DLSS, NR и FG»
     std::vector<ParamSpec> params;

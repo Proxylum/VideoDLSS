@@ -91,6 +91,7 @@ add_executable(dlssvid_integration_tests
   integration/test_cli_process.cpp
   integration/test_process_versions.cpp
   integration/test_cli_pass_versions.cpp
+  integration/test_scenes_stage.cpp
 )
 target_link_libraries(dlssvid_integration_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 target_compile_definitions(dlssvid_integration_tests PRIVATE

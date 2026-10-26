@@ -17,6 +17,7 @@
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/Pipeline.h"
+#include "pipeline/ScenesPlan.h"
 #include "pipeline/SettingsNote.h"
 #include "stages/ParamSchema.h"
 #include "ml/ModelRegistry.h"
@@ -27,6 +28,7 @@
 #include "stages/flow/FlowStage.h"
 #include "stages/nr/NrStage.h"
 #include "stages/passthrough/PassthroughStage.h"
+#include "stages/scenes/ScenesStage.h"
 #include "stages/upscale/UpscaleStage.h"
 #include "util/Error.h"
 #include "util/Log.h"
@@ -155,13 +157,28 @@ struct PlanState {
                                      // them is stale too although every fingerprint matches
     std::set<std::string> discarded;  // stale passes removed (StageDecision::stale): a pass made from one is discarded too, whether
                                       // its stage ran again or was disabled after the removal (review of PR-7)
+    std::set<std::string> pending;  // passes whose content the plan does not know yet (PR-13: scenes before its first analysis)
+    std::string scenesNote;         // what the stages that read the scene list should know about it (unreadable, partial)
 };
 
 std::string LegacyId(const Manifest& m) { return LegacyPassId(m); }  // PassVersions.h
 
-void RefreshFromDisk(PlanState& s, const std::filesystem::path& root) {
+void RefreshFromDisk(PlanState& s, const RunContext& ctx) {
+    const std::filesystem::path& root = ctx.root;
     s.fp.clear();
+    s.scenesNote.clear();
     for (const auto& name : PassesUnderRoot(root)) {
+        if (name == kScenesPass) {  // the stages below read the list, not the pass: no input while empty, off, foreign or unreadable (spec §2d)
+            std::string why;
+            if (const auto l = ReadSceneList(root / name, ctx.sourceHash, &why)) {
+                if (!l->cuts.empty()) s.fp[name] = l->id;
+                if (!l->off && !l->reachedEnd && ctx.needed > 0 && l->frames < ctx.needed)
+                    s.scenesNote = "scene cuts are known for frames 0.." + std::to_string(l->frames - 1) + " of " + std::to_string(ctx.needed) + " only";
+            } else if (!why.empty() && why != "absent") {
+                s.scenesNote = "the scene list is not used: " + why + "; no reset at cuts";
+            }
+            continue;
+        }
         try {
             const Manifest m = Manifest::Load(root / name);
             if (!PassOfClip(m)) {  // a part of the clip or an A/B run: no input of the stages below (its own stage still sees it)
@@ -178,6 +195,16 @@ void RefreshFromDisk(PlanState& s, const std::filesystem::path& root) {
 
 // After a decision, what the passes look like: the stage's outputs carry the planned fingerprint.
 void Advance(PlanState& s, const StageDecision& d) {
+    if (d.name == kScenesPass) {  // the stages below see the list's id, not the pass's fingerprint (PR-13)
+        s.fp.erase(kScenesPass);
+        if (!d.sceneCuts.id.empty()) s.fp[kScenesPass] = d.sceneCuts.id;  // "cuts:…" | "pending:scenes"; empty: no input
+        if (!d.sceneCuts.known) s.pending.insert(kScenesPass);
+        else s.pending.erase(kScenesPass);
+        if (d.action != "reuse") s.ran.insert(kScenesPass);  // for the record: DecideStage does not take it for a changed input
+        return;
+    }
+    if (d.pending)
+        for (const auto& out : d.outputs) s.pending.insert(out);
     if (d.action == "reuse") {
         if (d.kind == "legacy")
             for (const auto& out : d.outputs)
@@ -292,7 +319,8 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             const auto it = state.fp.find(cand);
             if (it == state.fp.end()) continue;
             d.inputs[cand] = it->second;
-            if (state.ran.count(cand)) inputsRan.push_back(cand);
+            // the scene list's id is its content: rewritten is not changed (a rederive with the same list, PR-13)
+            if (state.ran.count(cand) && cand != kScenesPass) inputsRan.push_back(cand);
             break;
         }
     std::vector<std::string> inputsStale;  // inputs rerun in this plan because they were stale (PlanState::staleRan)
@@ -318,7 +346,10 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         }
     }
     d.current = have;
-    if (have) d.currentFingerprint = m.fingerprint;
+    if (have) {
+        d.currentFingerprint = m.fingerprint;
+        d.currentCreated = m.created;
+    }
     // the current pass was made from a broken pass this run removed (PlanState::discarded): it is broken too, even when that stage
     // was disabled since and no longer feeds this one (no nr DLL: fg reads color_sr - the color_fg of the black nr went to the history)
     std::vector<std::string> inputsDiscarded;
@@ -396,6 +427,13 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             run("source_changed", m.sourceHash.empty() ? "the pass has no source hash" : "the pass was made from another source", true);
         } else if (madeFrom != sourceFormatNow) {
             run("source_changed", "the pass was made from the source decoded as " + madeFrom + " (now " + sourceFormatNow + ")", true);
+        } else if (name == kScenesPass && (m.stageParams.value("threshold", -1.0) != p.value("threshold", 0.24) ||
+                                           !m.stageParams.contains("analysis") || !m.stageParams["analysis"].is_object() ||
+                                           (!m.stageParams.value("off", false) &&
+                                            m.stageParams["analysis"].value("algorithm", std::string()) != kScenesAlgorithm))) {
+            // a standalone `dlssvid scenes` under another threshold: adopted it would carry this one's fingerprint (PR-13)
+            d.diff["params"] = {{"threshold", {m.stageParams.value("threshold", nlohmann::json()), p.value("threshold", 0.24)}}};
+            run("params_changed", "made with threshold " + Brief(m.stageParams.value("threshold", nlohmann::json())), true);
         } else if (name == "depth" && p.value("stabilize", std::string("auto")) != "none" && !m.stageParams.contains("stabilize_requested")) {
             // a standalone `dlssvid depth` from before the centred alignment (TASK-0038): metric depth was not aligned
             // then - adopting it would stamp the old depth with the depth.2 revision
@@ -497,6 +535,8 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
 }
 
 void StampPass(const std::filesystem::path& dir, const StageDecision& d, const std::string& created, double msPerFrame = 0.0, bool adopted = false) {
+    for (const auto& [input, id] : d.inputs)  // PR-13: a plan's placeholder never reaches the disk (RunProcess decides from the disk)
+        if (id.rfind("pending:", 0) == 0) Throw("process: internal: " + input + " still pending when " + dir.string() + " was stamped");
     Manifest m = Manifest::Load(dir);
     if (adopted) m.stageParams["adopted"] = true;  // made before fingerprints: the settings note says so (PR-11)
     // the wall time of this run (decode, pass I/O, init and the stage) on this machine: the only time the estimates use; a stage's
@@ -574,7 +614,87 @@ Prepared Prepare(const ProcessOptions& options) {
 }
 
 // Licence and VRAM advice of a depth decision (TASK-0039). An error only for a run: a reused or restored pass needs no GPU.
+// scenes (PR-13): the list this decision leaves - known for a reuse, a restore, threshold 0 and a run over stored scores (the
+// threshold applied to them, no decoding); pending when the source has to be decoded first. Returns the scores a run applies its
+// threshold to, read now: the current folder is retired before the run. A reuse of a list that does not read becomes a run.
+std::optional<ScenesSource> ProjectScenes(const RunContext& ctx, StageDecision& d) {
+    if (d.name != kScenesPass) return std::nullopt;
+    SceneCutsPlan& sc = d.sceneCuts;
+    sc.threshold = d.params.value("threshold", 0.24);
+    std::string why;
+    const auto current = ReadSceneList(d.outDir, ctx.sourceHash, &why);
+    if (current) sc.before = static_cast<int64_t>(current->cuts.size());
+    auto fill = [&](const SceneList& l) {
+        sc.known = true;
+        sc.off = l.off;
+        sc.cuts = l.cuts;
+        sc.id = l.id;
+        sc.count = static_cast<int64_t>(l.cuts.size());
+        sc.nearMisses = l.nearMisses;
+    };
+    if (d.action == "reuse") {
+        if (current) {
+            fill(*current);
+            return std::nullopt;
+        }
+        d.action = "run";  // complete, but not a list the stages can read: analysed again in place
+        d.kind = "incomplete";
+        d.detail = "the scene list does not read: " + why;
+        d.retire = false;
+    } else if (d.action == "restore") {
+        for (const auto& v : ListPassVersions(ctx.root, kScenesPass))
+            if (!v.current && v.id == d.version)
+                if (const auto l = ReadSceneList(v.dir, ctx.sourceHash)) {
+                    fill(*l);
+                    return std::nullopt;
+                }
+        d.action = "run";  // the version does not read either
+        d.kind = "incomplete";
+        d.detail = "the scene list of version " + d.version + " does not read";
+        d.retire = d.current;
+    }
+    // a run: over stored scores when they stand for this source (not when asked to recompute)
+    std::optional<ScenesSource> scores;
+    if (d.kind != "forced") scores = FindSceneScores(ctx.root, ctx.sourceHash, ctx.sourceFormat, ctx.needed);
+    if (sc.threshold <= 0.0) {  // off: no cut; the scores (when any) are kept for the way back
+        sc.known = true;
+        sc.off = true;
+        sc.rederive = scores.has_value();
+        sc.id.clear();
+        sc.count = 0;
+        return scores;
+    }
+    if (scores) {
+        SceneList l;
+        l.cuts = CutsFromScores(scores->scores.scores, sc.threshold);
+        l.id = SceneCutsId(l.cuts);
+        l.nearMisses = NearCuts(scores->scores.scores, sc.threshold);
+        fill(l);
+        sc.rederive = true;
+        d.detail += (d.detail.empty() ? "" : " - ") + std::string("over the stored scores, no decoding");
+        return scores;
+    }
+    sc.known = false;
+    sc.id = kScenesPendingId;
+    return std::nullopt;
+}
+
 void AdviseStage(const RunContext& ctx, StageDecision& d) {
+    if (d.name == kScenesPass) {
+        const SceneCutsPlan& sc = d.sceneCuts;
+        if (!sc.known) {
+            d.info = "список склеек посчитается при обработке";
+        } else if (sc.off) {
+            d.info = "порог 0: без сбросов на склейках";
+        } else {
+            d.info = sc.count == 0 ? "склеек не найдено" : "склеек: " + std::to_string(sc.count);
+            const int64_t frames = ctx.needed > 0 ? ctx.needed : 0;
+            if (frames > 0 && sc.count > std::max<int64_t>(10, frames / 12))  // more than one cut a half-second at 24 fps
+                d.warnings.push_back("scenes: a low threshold: " + std::to_string(sc.count) + " cuts in " + std::to_string(frames) +
+                                     " frames - the temporal stages often lose their history, frame generation repeats frames");
+        }
+        return;
+    }
     if ((d.name == "upscale" || d.name == "nr" || d.name == "fg") && d.params.contains("dll_dir"))
         d.warnings.push_back(d.name + ".dll_dir is ignored by process: the DLL comes from DLSSVID_NVIDIA_DLL_DIR, <exe>/nvidia or <exe>");
     if (d.name == "nr") {
@@ -626,11 +746,19 @@ nlohmann::json ProcessResult::ToJson() const {
                                {"chroma", std::string(ChromaName(outputFormat.format))}, {"description", outputFormat.Describe()}}}};
 }
 
+nlohmann::json SceneCutsPlan::ToJson() const {
+    nlohmann::json n = nlohmann::json::array();
+    for (const auto& [f, s] : nearMisses) n.push_back({f, s});
+    return {{"known", known}, {"rederive", rederive}, {"off", off}, {"id", id}, {"count", count}, {"before", before}, {"cuts", cuts}, {"near", n}, {"threshold", threshold}};
+}
+
 nlohmann::json StageDecision::ToJson() const {
-    return {{"name", name},       {"action", action},   {"kind", kind},         {"detail", detail},   {"diff", diff},
+    nlohmann::json j = {{"name", name},       {"action", action},   {"kind", kind},         {"detail", detail},   {"diff", diff},
             {"fingerprint", fingerprint}, {"source_format", sourceFormat}, {"current", current}, {"current_fingerprint", currentFingerprint}, {"version", version},
             {"outputs", outputs}, {"out_dir", outDir.string()}, {"frames", frames}, {"retire", retire}, {"stale", stale}, {"params", params}, {"inputs", inputs}, {"tool", tool},
-            {"warnings", warnings}, {"info", info}, {"error", error}};
+            {"warnings", warnings}, {"info", info}, {"error", error}, {"pending", pending}, {"current_created", currentCreated}};
+    if (name == kScenesPass) j["scene_cuts"] = sceneCuts.ToJson();
+    return j;
 }
 
 nlohmann::json ProcessPlan::ToJson() const {
@@ -793,11 +921,12 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
     plan.sourceHash = pr.ctx.sourceHash;
     plan.frames = pr.ctx.needed;
     PlanState state;
-    RefreshFromDisk(state, pr.ctx.root);
+    RefreshFromDisk(state, pr.ctx);
     for (const std::string& name : ProcessStageOrder()) {
         const auto it = pr.wanted.find(name);
         if (it == pr.wanted.end()) continue;
         StageDecision d = DecideStage(pr.ctx, it->second, state);
+        ProjectScenes(pr.ctx, d);
         AdviseStage(pr.ctx, d);
         Advance(state, d);
         (d.action == "run" ? plan.runCount : plan.reuseCount)++;
@@ -895,8 +1024,9 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         if (it == pr.wanted.end()) continue;
         // what the fingerprint hashes is what the stage runs with: defaults filled, aliases normalised (TASK-0043)
         const nlohmann::json p = EffectiveStageParams(name, it->second.params);
-        RefreshFromDisk(state, root);  // the decision looks at what is really on disk now (a stage may have been disabled)
+        RefreshFromDisk(state, ctx);  // the decision looks at what is really on disk now (a stage may have been disabled)
         StageDecision d = DecideStage(ctx, it->second, state);
+        const std::optional<ScenesSource> sceneScores = ProjectScenes(ctx, d);  // read before the current pass is retired
         AdviseStage(ctx, d);
         if (!d.error.empty()) Throw("process: " + d.error);  // before anything is retired
         for (const auto& w : d.warnings) {
@@ -907,7 +1037,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         rep.name = name;
         rep.decision = d.ToJson();
         rep.fingerprint = d.fingerprint;
-        auto framesOf = [&]() { return d.frames > 0 ? d.frames : PassReader::Open(d.outDir).Man().frameCount; };
+        auto framesOf = [&]() { return d.frames > 0 ? d.frames : Manifest::Load(d.outDir).frameCount; };  // scenes has no frame files
         if (d.action == "reuse") {
             rep.status = "reused";
             rep.outDir = d.outDir;
@@ -953,7 +1083,30 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         const auto t0 = Clock::now();
         double childMsPerFrame = 0.0, childSeconds = 0.0;  // fg in its own process: its own timing, without the start-up
         try {
-            if (name == "depth") {
+            if (name == kScenesPass) {
+                ScenesStageOptions o;
+                o.threshold = d.params.value("threshold", 0.24);  // the canonical threshold: the one the decision derived with
+                o.backend = Get<std::string>(p, "backend", "luma");
+                o.outputDir = root;
+                o.sourceFile = sourceFile;
+                o.sourceHash = sourceHash;
+                o.sourceFormat = ctx.sourceFormat;
+                ScenesRunResult r;
+                if (sceneScores) {
+                    r = RederiveScenes(sceneScores->manifest, sceneScores->scores, o);
+                } else if (o.threshold <= 0.0) {
+                    VideoDecoder::Options probe;
+                    probe.probe = true;
+                    VideoDecoder decoder(options.input, probe);
+                    r = WriteOffScenes(o, decoder.Info().width, decoder.Info().height, decoder.Info().frameRate, ctx.needed);
+                } else {
+                    VideoDecoder decoder(options.input);
+                    r = AnalyseScenes(decoder, o, options.frames, progressFor(name));
+                }
+                rep.frames = r.list.frames;
+                rep.outDir = r.outDir;
+                rep.details = {{"cuts", r.list.cuts.size()}, {"threshold", o.threshold}, {"rederived", r.rederived}, {"id", r.list.id}};
+            } else if (name == "depth") {
                 VideoDecoder decoder(options.input);
                 DepthStageOptions o = DepthOptions(p, root);
                 o.sourceFile = sourceFile;

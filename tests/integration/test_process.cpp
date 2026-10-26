@@ -45,7 +45,8 @@ const ProcessStageReport& Report(const ProcessResult& r, const std::string& name
 
 TEST_CASE("ApplyParamSpec parses stage.key=value into typed JSON", "[integration][process]") {
     std::vector<ProcessStage> s = DefaultProcessStages();
-    REQUIRE(s.size() == 5);
+    REQUIRE(s.size() == 6);  // PR-13: scenes first
+    CHECK(s.front().name == "scenes");
     ApplyParamSpec(s, "nr.intensity=1.5");
     ApplyParamSpec(s, "fg.multiplier=3");
     ApplyParamSpec(s, "upscale.backend=nis");
@@ -63,7 +64,7 @@ TEST_CASE("ApplyParamSpec parses stage.key=value into typed JSON", "[integration
     CHECK_THROWS(ApplyParamSpec(s, "nr=1"));
     CHECK_THROWS(ApplyParamSpec(s, "bogus.key=1"));
     CHECK_THROWS(ApplyParamSpec(s, "nr.=1"));
-    CHECK(ProcessStageOrder() == std::vector<std::string>{"depth", "flow", "upscale", "nr", "fg"});
+    CHECK(ProcessStageOrder() == std::vector<std::string>{"scenes", "depth", "flow", "upscale", "nr", "fg"});
     CHECK(!PassComplete(TempDir() / "process" / "nowhere", 1));
 }
 
@@ -87,8 +88,8 @@ TEST_CASE("RunProcess: stub stages on WARP produce a result with doubled frames 
         if (seen.empty() || seen.back() != stage) seen.push_back(stage);
     };
     const ProcessResult r = RunProcess(o);
-    REQUIRE(r.stages.size() == 6);
-    for (const char* name : {"depth", "flow", "upscale", "nr", "fg"}) CHECK(Report(r, name).status == "ran");
+    REQUIRE(r.stages.size() == 7);
+    for (const char* name : {"scenes", "depth", "flow", "upscale", "nr", "fg"}) CHECK(Report(r, name).status == "ran");
     CHECK(Report(r, "encode").status == "ran");
     CHECK(Report(r, "fg").frames == 5);
     CHECK(r.finalPass == dir / "passes" / "color_fg");
@@ -96,7 +97,7 @@ TEST_CASE("RunProcess: stub stages on WARP produce a result with doubled frames 
     CHECK(r.framesOut == FgFrameCount(5, 2));
     CHECK(r.outputFps.ToDouble() == Approx(48.0));
     CHECK(r.audio);
-    CHECK(seen == std::vector<std::string>{"depth", "flow", "upscale", "nr", "fg", "encode"});
+    CHECK(seen == std::vector<std::string>{"scenes", "depth", "flow", "upscale", "nr", "fg", "encode"});
     REQUIRE(std::filesystem::exists(o.output));
     CHECK(DecodeAll(o.output).size() == 9);
     const StreamSummary sum = Summarize(o.output);
@@ -107,7 +108,7 @@ TEST_CASE("RunProcess: stub stages on WARP produce a result with doubled frames 
     CHECK(sr.Man().width == 128);
     CHECK(sr.Man().frameCount == 5);
     const nlohmann::json j = r.ToJson();
-    CHECK(j["stages"].size() == 6);
+    CHECK(j["stages"].size() == 7);
     CHECK(j["frames_out"] == 9);
 
     // rerun: every stage's pass is complete -> reused, only the encode runs

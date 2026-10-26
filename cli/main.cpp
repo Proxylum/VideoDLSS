@@ -6,6 +6,7 @@
 #include "FgCommands.h"
 #include "PassesCommands.h"
 #include "ProcessCommands.h"
+#include "ScenesCommands.h"
 #include "NrCommands.h"
 #include "UpscaleCommands.h"
 #include "ViewportCommands.h"
@@ -695,6 +696,8 @@ int main(int argc, char** argv) {
     processCommands.Register(app);
     cli::PassesCommands passesCommands;  // passes list | use | gc (stage 9)
     passesCommands.Register(app);
+    cli::ScenesCommands scenesCommands;  // scenes: the clip's scene-cut list (PR-13)
+    scenesCommands.Register(app);
 
     ExportArgs ea;
     auto* exp = app.add_subcommand("export", "export a pass as a file sequence + manifest.json");
@@ -808,6 +811,7 @@ int main(int argc, char** argv) {
         if (info->parsed()) return CmdInfo(infoInput, infoWarp);
         if (const int rc = processCommands.Dispatch(); rc >= 0) return rc;
         if (const int rc = passesCommands.Dispatch(); rc >= 0) return rc;
+        if (const int rc = scenesCommands.Dispatch(); rc >= 0) return rc;
         if (exp->parsed()) return CmdExport(ea);
         if (imp->parsed()) return CmdImport(ia);
         if (conv->parsed()) return CmdConvert(ca);

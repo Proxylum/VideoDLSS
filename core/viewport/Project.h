@@ -20,9 +20,9 @@ struct StageEntry {
     bool operator==(const StageEntry&) const = default;
 };
 
-// The project file format: 2 since TASK-0043 (nr.exposure in stops; version 1 files are migrated on load, older builds
-// refuse version 2).
-inline constexpr int kProjectSchemaVersion = 2;
+// The project file format: 3 since PR-13 (the stage scenes first, nr.scene_cut moves to scenes.threshold); 2 since TASK-0043
+// (nr.exposure in stops). Older files are migrated on load, older builds refuse a newer version.
+inline constexpr int kProjectSchemaVersion = 3;
 
 // Project file (*.dlssvid.json): source video, passes root, optional result video, stage
 // configs and the viewport state (ТЗ §6: «состояние вьюпорта сохраняется в проект»).
@@ -56,6 +56,9 @@ struct Project {
     // `useProxies`: the source and result videos get their valid scrubbing proxy (ViewportProxy.h; TASK-0040).
     std::vector<ViewportSource> Sources(bool useProxies = true) const;
     static std::vector<StageEntry> DefaultStages();
+    // The stage's entry, inserted with its defaults at its place in the run order when the file has none (a v3 project written
+    // without scenes; PR-13): the card's changes are not lost. nullptr for a stage that is not one of DefaultStages().
+    StageEntry* EnsureStage(const std::string& name);
 };
 
 }  // namespace dlssvid

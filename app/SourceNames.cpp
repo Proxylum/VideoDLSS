@@ -17,6 +17,7 @@ QString Tr(const char* s) { return QCoreApplication::translate("SourceNames", s)
 QString BaseName(const std::string& pass) {
     if (pass == "source") return Tr("Исходник");
     if (pass == "result") return Tr("Результат");
+    if (pass == "scenes") return Tr("Склейки");
     if (pass == "depth_raw") return Tr("Глубина");
     if (pass == "depth_dlss") return Tr("Глубина (DLSS)");
     if (pass == "mv_raw") return Tr("Векторы");
