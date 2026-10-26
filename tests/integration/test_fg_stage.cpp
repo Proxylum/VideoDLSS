@@ -78,6 +78,8 @@ TEST_CASE("FgStage with the blend baseline on WARP: x2 frames, doubled fps, mani
     CHECK(rd.Man().stageParams["multiplier"] == 2);
     CHECK(rd.Man().stageParams["generated"] == 4);
     CHECK(rd.Man().stageParams["color_source"] == "video");
+    CHECK(rd.Man().stageParams["ms_per_frame_backend"].is_number());  // the backend's time; the wall time is process's (TASK-0051)
+    CHECK_FALSE(rd.Man().stageParams.contains("ms_per_frame"));
     const std::vector<PassImage> src = DecodeRgb(clip);
     REQUIRE(src.size() == 5);
     for (int i = 0; i < 5; ++i) {

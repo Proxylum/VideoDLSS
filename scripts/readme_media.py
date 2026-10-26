@@ -566,7 +566,7 @@ def main() -> int:
             nr_media(key, src, d, args.media_dir, w, h, fps, n_src)
         rep = json.loads((d / "process.json").read_text(encoding="utf-8")) if (d / "process.json").exists() else {}
         report[key] = {"input": f"{w}x{h} @ {fps:g} fps, {n_src} frames", "seconds": rep.get("seconds"),
-                       "stages": {s.get("stage"): round(s.get("ms_per_frame", 0)) for s in rep.get("stages", [])}}
+                       "stages": {s.get("name"): round(s.get("ms_per_frame") or 0) for s in rep.get("stages", [])}}  # process --json: "name"
         sizes = {p.name: round(p.stat().st_size / 1e6, 2) for p in sorted(args.media_dir.glob(f"{key}_*"))}
         print("  media:", sizes)
     (args.out / "summary.json").write_text(json.dumps({"sources": SOURCES, "clips": report}, indent=1, ensure_ascii=False), encoding="utf-8")

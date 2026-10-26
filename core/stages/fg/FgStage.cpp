@@ -245,7 +245,7 @@ void FgStage::Process(FrameContext& ctx) {
 void FgStage::Finish() {
     if (writer_) {
         Manifest& m = const_cast<Manifest&>(writer_->Man());
-        m.stageParams["ms_per_frame"] = stats_.MeanMs();
+        m.stageParams["ms_per_frame_backend"] = stats_.MeanMs();  // the backend's time per real frame; the wall time is process's (TASK-0051)
         m.stageParams["generated"] = stats_.generated;
         m.stageParams["depth_used"] = stats_.depthUsed;
         m.stageParams["mv_used"] = stats_.mvUsed;

@@ -5,6 +5,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
+#include <tuple>
+#include <vector>
 
 #include "passes/Manifest.h"
 #include "pipeline/Estimates.h"
@@ -53,6 +55,23 @@ TEST_CASE("Baselines scale with the source size, the recorded ms/frame wins, byt
     CHECK(RecordedMsPerFrame(root, "depth", {{"backend", "vda"}, {"model", "metric-vda-small"}}) == Approx(250.0));
     CHECK(RecordedMsPerFrame(root, "depth", {{"model", ""}}) == Approx(250.0));  // only fields given and non-empty count
     CHECK(RecordedMsPerFrame(root, "depth") == Approx(250.0));
+    // TASK-0051: upscale and fg as nr - a standalone or adopted pass kept the stage's own timer under ms_per_frame (before), it is not
+    // the run's wall time; a record counts only beside the stage's timer, and not below it
+    for (const auto& [stage, pass, kind, timer] : std::vector<std::tuple<const char*, const char*, PassKind, const char*>>{
+             {"upscale", "color_sr", PassKind::ColorSr, "ms_per_frame_gpu"}, {"fg", "color_fg", PassKind::ColorFg, "ms_per_frame_backend"}}) {
+        INFO(stage);
+        Manifest s = Manifest::ForPass(kind, 8, 4, FileFormat::Exr);
+        s.stageParams["ms_per_frame"] = 12.0;  // a stage timer of before
+        s.Save(root / pass);
+        CHECK(!RecordedMsPerFrame(root, stage));
+        s.stageParams[timer] = 12.0;
+        s.stageParams["ms_per_frame"] = 300.0;  // as process records it
+        s.Save(root / pass);
+        CHECK(RecordedMsPerFrame(root, stage) == Approx(300.0));
+        s.stageParams["ms_per_frame"] = 5.0;  // below the stage's own time: not a wall time
+        s.Save(root / pass);
+        CHECK(!RecordedMsPerFrame(root, stage));
+    }
 
     CHECK(BytesPerFrame("depth", 1920, 800, 1.0, 1) == 1920ull * 800 * 4 * 2);
     CHECK(BytesPerFrame("flow", 1920, 800, 1.0, 1) == 1920ull * 800 * 8 * 2);

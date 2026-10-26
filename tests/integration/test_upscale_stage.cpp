@@ -161,7 +161,8 @@ TEST_CASE("UpscaleStage writes color_sr with nis on WARP, uploads it to the slot
     sr.Validate({96, 64, 4, PassKind::ColorSr});
     CHECK(sr.Man().colorspace == "srgb");
     CHECK(sr.Man().stageParams["backend"] == "nis");
-    CHECK(sr.Man().stageParams.contains("ms_per_frame"));
+    CHECK(sr.Man().stageParams.contains("ms_per_frame_gpu"));  // the stage's GPU time; the wall time is process's (TASK-0051)
+    CHECK_FALSE(sr.Man().stageParams.contains("ms_per_frame"));
     const PassImage f0 = sr.ReadFrame(0);
     CHECK(f0.type == PixelType::F16);
     CHECK(f0.channels.size() == 3);
