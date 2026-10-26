@@ -1149,6 +1149,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 FlowStageOptions o = FlowOptions(p, root);
                 o.sourceFile = sourceFile;
                 o.sourceHash = sourceHash;
+                o.sceneCuts = CutsFor(d, ctx);
                 const FlowRunResult r = RunFlow(decoder, device, o, options.frames, progressFor(name));
                 rep.frames = r.stats.frames;
                 rep.outDir = o.writeDlss ? r.dlssDir : r.rawDir;

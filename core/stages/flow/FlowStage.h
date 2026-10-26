@@ -10,6 +10,7 @@
 #include "convert/MvConvert.h"
 #include "gpu/GpuFrame.h"
 #include "passes/PassSequence.h"
+#include "passes/ScenesPass.h"
 #include "pipeline/IStage.h"
 #include "stages/flow/IFlowEstimator.h"
 
@@ -34,6 +35,9 @@ struct FlowStageOptions {
     bool uploadToGpu = true;
     bool computeWarpPsnr = true;
     std::function<void(int64_t frame, double warpPsnr)> onFrame;
+    // PR-13: the clip's cuts (stage scenes); empty: no reset but the first frame. No motion across a cut: mv_raw of the frame before
+    // it and mv_dlss of the cut frame are zero, and the pair stays out of the magnitude and the warp PSNR
+    SceneList sceneCuts;
 };
 
 class FlowStage final : public IStage {
@@ -54,7 +58,9 @@ public:
         int64_t psnrCount = 0;
         double MeanWarpPsnr() const { return psnrCount ? psnrSum / psnrCount : 0.0; }
         double minWarpPsnr = 1e9;
-        double meanMagnitude = 0;  // mean |flow| px over all pairs
+        double meanMagnitude = 0;  // mean |flow| px over the pairs within a shot
+        int64_t cutPairs = 0;          // pairs across a cut of the list: zero vectors (PR-13)
+        std::vector<int64_t> sceneCuts;  // their cut frames (the first kMaxSceneCuts)
     };
     const Stats& GetStats() const { return stats_; }
     const IFlowEstimator& Estimator() const { return *estimator_; }

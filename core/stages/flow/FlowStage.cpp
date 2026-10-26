@@ -144,15 +144,24 @@ void FlowStage::EmitPair(Held& prev, Held& cur) {
     if (prev.gpu.Valid()) a.gpu = &prev.gpu;
     if (cur.gpu.Valid()) b.gpu = &cur.gpu;
     PassImage flow, conf;
-    estimator_->Estimate(a, b, flow, &conf);
+    estimator_->Estimate(a, b, flow, &conf);  // across a cut too: the estimator sets the size of the flow (the writers open on the first pair)
     if (flow.type != PixelType::F32) flow = flow.ConvertTo(PixelType::F32);
     flow.channels = Spec(PassKind::MvRaw).channels;
     ++stats_.pairs;
+    const bool cut = options_.sceneCuts.IsCut(cur.index);
     double mag = 0;
-    for (uint32_t y = 0; y < flow.height; ++y)
-        for (uint32_t x = 0; x < flow.width; ++x) mag += std::hypot(flow.Get(x, y, 0), flow.Get(x, y, 1));
-    mag /= static_cast<double>(flow.width) * flow.height;
-    stats_.meanMagnitude += (mag - stats_.meanMagnitude) / static_cast<double>(stats_.pairs);
+    if (cut) {  // PR-13: no motion across a cut - mv_raw[prev] (prev -> cur) and mv_dlss[cur] (cur -> prev) are zero
+        flow = ZeroMv(flow.width, flow.height);
+        flow.channels = Spec(PassKind::MvRaw).channels;
+        ++stats_.cutPairs;
+        if (stats_.sceneCuts.size() < kMaxSceneCuts) stats_.sceneCuts.push_back(cur.index);
+        Log()->info("flow: scene cut at frame {}: zero vectors", cur.index);
+    } else {
+        for (uint32_t y = 0; y < flow.height; ++y)
+            for (uint32_t x = 0; x < flow.width; ++x) mag += std::hypot(flow.Get(x, y, 0), flow.Get(x, y, 1));
+        mag /= static_cast<double>(flow.width) * flow.height;
+        stats_.meanMagnitude += (mag - stats_.meanMagnitude) / static_cast<double>(stats_.pairs - stats_.cutPairs);
+    }
 
     EnsureWriters(flow.width, flow.height);
     if (rawWriter_) rawWriter_->WriteFrame(prev.index, flow);
@@ -166,7 +175,8 @@ void FlowStage::EmitPair(Held& prev, Held& cur) {
         MvConvertOptions opt = options_.convert;
         opt.targetWidth = options_.targetWidth;
         opt.targetHeight = options_.targetHeight;
-        const PassImage mvDlss = ForwardFlowToBackwardMv(flow, depth ? &*depth : nullptr, opt);
+        PassImage mvDlss = ForwardFlowToBackwardMv(flow, depth ? &*depth : nullptr, opt);
+        if (cut) mvDlss = ZeroMv(mvDlss.width, mvDlss.height);  // explicit zero at the target size, whatever the conversion does
         if (dlssWriter_) {
             if (stats_.pairs == 1) {
                 // first frame of the sequence has no previous frame: zero vectors
@@ -177,7 +187,7 @@ void FlowStage::EmitPair(Held& prev, Held& cur) {
         if (options_.uploadToGpu && cur.cache) {
             if (GpuFrameCache::Slot* slot = cur.cache->Find(cur.index)) cur.cache->UploadPass(*slot, "mv_dlss", mvDlss);
         }
-        if (options_.computeWarpPsnr && !prev.rgb.Empty() && !cur.rgb.Empty()) {
+        if (options_.computeWarpPsnr && !cut && !prev.rgb.Empty() && !cur.rgb.Empty()) {  // a cut pair warps nothing onto nothing
             const PassImage mvSrc = (mvDlss.width == cur.rgb.width && mvDlss.height == cur.rgb.height) ? mvDlss : ScaleMv(mvDlss, cur.rgb.width, cur.rgb.height);
             const double psnr = WarpPsnr(prev.rgb, cur.rgb, mvSrc);
             stats_.psnrSum += psnr;
@@ -210,16 +220,20 @@ void FlowStage::Finish() {
         prev_.reset();
     }
     if (rawWriter_) {
-        const_cast<Manifest&>(rawWriter_->Man()).stageParams["mean_magnitude_px"] = stats_.meanMagnitude;
+        nlohmann::json& sp = const_cast<Manifest&>(rawWriter_->Man()).stageParams;
+        sp["mean_magnitude_px"] = stats_.meanMagnitude;
+        StampSceneCuts(sp, options_.sceneCuts, stats_.sceneCuts, stats_.cutPairs);  // the label of both passes: one family (PR-13)
         rawWriter_->Finish();
     }
     if (dlssWriter_) {
-        const_cast<Manifest&>(dlssWriter_->Man()).stageParams["warp_psnr_mean_db"] = stats_.MeanWarpPsnr();
-        const_cast<Manifest&>(dlssWriter_->Man()).stageParams["warp_psnr_min_db"] = stats_.psnrCount ? stats_.minWarpPsnr : 0.0;
+        nlohmann::json& sp = const_cast<Manifest&>(dlssWriter_->Man()).stageParams;
+        sp["warp_psnr_mean_db"] = stats_.MeanWarpPsnr();
+        sp["warp_psnr_min_db"] = stats_.psnrCount ? stats_.minWarpPsnr : 0.0;
+        StampSceneCuts(sp, options_.sceneCuts, stats_.sceneCuts, stats_.cutPairs);
         dlssWriter_->Finish();
     }
-    Log()->info("flow: {} frames, {} pairs, mean |v| {:.2f} px, warp PSNR mean {:.2f} dB (min {:.2f})", stats_.frames, stats_.pairs, stats_.meanMagnitude,
-                stats_.MeanWarpPsnr(), stats_.psnrCount ? stats_.minWarpPsnr : 0.0);
+    Log()->info("flow: {} frames, {} pairs ({} across a scene cut), mean |v| {:.2f} px, warp PSNR mean {:.2f} dB (min {:.2f})", stats_.frames, stats_.pairs,
+                stats_.cutPairs, stats_.meanMagnitude, stats_.MeanWarpPsnr(), stats_.psnrCount ? stats_.minWarpPsnr : 0.0);
 }
 
 void FlowStage::Shutdown() {

@@ -10,6 +10,7 @@
 #include "gpu/GpuFrameCache.h"
 #include "io/VideoDecoder.h"
 #include "passes/PassSequence.h"
+#include "passes/ScenesPass.h"
 #include "pipeline/Pipeline.h"
 #include "stages/depth/DepthStage.h"
 #include "stages/flow/FlowStage.h"
@@ -155,4 +156,78 @@ TEST_CASE("Stub flow estimator honours its configuration", "[flow]") {
     FlowInput none;
     CHECK_THROWS(est.Estimate(none, none, flow, nullptr));
     CHECK_THROWS(CreateFlowEstimator("nope"));
+}
+
+// PR-13 (regression): no motion across a cut of the clip's list - mv_raw of the frame before the cut (prev -> cut) and mv_dlss of the
+// cut frame (cut -> prev) are zero, every other pair keeps its vectors; the cut pair is no part of the magnitude and the warp PSNR; both
+// passes carry the label. A cut at frame 1 (the first pair) opens the writers at the right size; one beyond --frames changes nothing.
+TEST_CASE("FlowStage writes zero vectors across a cut of the scene list", "[integration][flow][scenes][regression]") {
+    ClipSpec spec;
+    spec.frames = 6;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(TempDir() / "flow_cut.mkv", spec);
+    D3D12Device dev({true, false});
+    auto list = [](std::vector<int64_t> cuts) {
+        SceneList l;
+        l.cuts = std::move(cuts);
+        l.id = SceneCutsId(l.cuts);
+        l.threshold = 0.24;
+        l.frames = 6;
+        l.reachedEnd = true;
+        return l;
+    };
+    auto run = [&](const char* name, const SceneList& cuts, int64_t maxFrames = -1) {
+        VideoDecoder dec(clip);
+        FlowStageOptions o;
+        o.backend = "stub";
+        o.estimator.extra["dx"] = 2.f;
+        o.estimator.extra["dy"] = -1.f;
+        o.outputDir = Dir(name);
+        o.convert.dilateRadius = 0;
+        o.sceneCuts = cuts;
+        return RunFlow(dec, dev, o, maxFrames);
+    };
+    const FlowRunResult r = run("cut3", list({3}));
+    CHECK(r.stats.pairs == 5);
+    CHECK(r.stats.cutPairs == 1);
+    CHECK(r.stats.sceneCuts == std::vector<int64_t>{3});
+    CHECK(std::fabs(r.stats.meanMagnitude - std::sqrt(5.0)) < 1e-4);  // the four pairs within a shot
+    CHECK(r.stats.psnrCount == 4);
+    const PassReader raw = PassReader::Open(r.rawDir), dlss = PassReader::Open(r.dlssDir);
+    for (int64_t f : {0, 1, 3, 4}) {
+        INFO("mv_raw " << f);
+        CHECK(raw.ReadFrame(f).Get(5, 5, 0) == 2.f);
+    }
+    CHECK(raw.ReadFrame(2).Get(5, 5, 0) == 0.f);  // 2 -> 3 crosses the cut
+    CHECK(raw.ReadFrame(2).Get(5, 5, 1) == 0.f);
+    for (int64_t f : {1, 2, 4, 5}) {
+        INFO("mv_dlss " << f);
+        CHECK(dlss.ReadFrame(f).Get(20, 20, 0) == -2.f);
+    }
+    CHECK(dlss.ReadFrame(3).Get(20, 20, 0) == 0.f);  // 3 -> 2 crosses it too
+    CHECK(dlss.ReadFrame(3).Get(20, 20, 1) == 0.f);
+    for (const PassReader* rd : {&raw, &dlss}) {
+        CHECK(rd->Man().stageParams["scene_cuts_id"] == SceneCutsId({3}));
+        CHECK(rd->Man().stageParams["scene_cut_count"] == 1);
+        CHECK(rd->Man().stageParams["scene_cuts"] == nlohmann::json::array({3}));
+        CHECK(SceneLabelOf(rd->Man()) == SceneCutsId({3}));
+    }
+
+    const FlowRunResult first = run("cut1", list({1}));  // the first pair: the writers still get the estimator's size
+    PassReader::Open(first.rawDir).Validate({48, 32, 6, PassKind::MvRaw});
+    PassReader::Open(first.dlssDir).Validate({48, 32, 6, PassKind::MvDlss});
+    CHECK(PassReader::Open(first.rawDir).ReadFrame(0).Get(5, 5, 0) == 0.f);
+    CHECK(PassReader::Open(first.dlssDir).ReadFrame(1).Get(20, 20, 0) == 0.f);
+    CHECK(PassReader::Open(first.dlssDir).ReadFrame(2).Get(20, 20, 0) == -2.f);
+
+    const FlowRunResult part = run("beyond", list({5}), 4);  // frames 0..3: the cut at 5 is not in the run
+    CHECK(part.stats.cutPairs == 0);
+    CHECK(PassReader::Open(part.rawDir).Man().stageParams["scene_cut_count"] == 0);
+    CHECK(PassReader::Open(part.rawDir).ReadFrame(2).Get(5, 5, 0) == 2.f);
+
+    const FlowRunResult none = run("none", SceneList{});  // no list: no label
+    CHECK(none.stats.cutPairs == 0);
+    CHECK_FALSE(PassReader::Open(none.rawDir).Man().stageParams.contains("scene_cuts_id"));
+    CHECK_FALSE(PassReader::Open(none.dlssDir).Man().stageParams.contains("scene_cuts_id"));
 }

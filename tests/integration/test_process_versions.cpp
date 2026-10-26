@@ -99,8 +99,8 @@ TEST_CASE("RunProcess stamps every pass with its fingerprint; PlanProcess predic
     CHECK(plan0.reuseCount == 0);
     CHECK(plan0.finalPass == "color_fg");
     CHECK(plan0.frames == -1);  // MKV carries no frame count: the run covers the whole source
-    // color_sr, depth_dlss, mv_dlss - as the run will produce them - and the scene list, not analysed yet (PR-13): nr's fingerprint and
-    // fg's above it are provisional in this plan; the clip has no cut, so the run's nr has no input scenes
+    // color_sr, depth_dlss, mv_dlss - as the run will produce them - and the scene list, not analysed yet (PR-13): the fingerprints of
+    // flow and nr, which read it, and fg's above them are provisional in this plan; the clip has no cut, so the run's have no input scenes
     CHECK(Decision(plan0, "nr").inputs.size() == 4);
     CHECK(Decision(plan0, "nr").inputs.at("scenes") == kScenesPendingId);
     CHECK(Decision(plan0, "nr").inputs.at("color_sr") == Decision(plan0, "upscale").fingerprint);
@@ -114,7 +114,7 @@ TEST_CASE("RunProcess stamps every pass with its fingerprint; PlanProcess predic
     CHECK(Statuses(r) == std::vector<std::string>(6, "ran"));
     for (const auto& name : kStages) {
         const ProcessStageReport& s = Report(r, name);
-        if (name == "nr" || name == "fg") CHECK(s.fingerprint != Decision(plan0, name).fingerprint);  // provisional: the list was pending
+        if (name == "flow" || name == "nr" || name == "fg") CHECK(s.fingerprint != Decision(plan0, name).fingerprint);  // provisional: the list was pending
         else CHECK(s.fingerprint == Decision(plan0, name).fingerprint);  // the plan and the run agree
         CHECK(s.decision["kind"] == "missing");
         CHECK(s.retired.empty());

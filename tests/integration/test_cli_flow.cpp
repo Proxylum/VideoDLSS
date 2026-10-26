@@ -8,6 +8,7 @@
 
 #include "TestClips.h"
 #include "passes/PassSequence.h"
+#include "passes/ScenesPass.h"
 
 using namespace dlssvid;
 using namespace dlssvid::test;
@@ -74,3 +75,40 @@ TEST_CASE("dlssvid flow --backend ofa on an HEVC 4:4:4 16-bit source whose NVDEC
     raw.Validate({spec.width, spec.height, spec.frames, PassKind::MvRaw});
 }
 #endif
+
+// PR-13: dlssvid flow reads the clip's scene list - <output>/scenes found by itself, --no-scenes, an explicit --scenes-dir of another
+// source refused, one found under -o of another source skipped
+TEST_CASE("dlssvid flow writes zero vectors at the cuts of the clip's scene list", "[integration][cli][flow][scenes]") {
+    const uint32_t w = 40, h = 24;
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = w;
+    spec.height = h;
+    const auto clip = WriteClipWith(TempDir() / "cli_flow_cut.mkv", spec, [&](int64_t i) {  // a hard cut at frame 2
+        CpuFrame f = SyntheticFrame(i, w, h);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < h; ++r)
+            for (uint32_t c = 0; c < w; ++c) y[r * w + c] = static_cast<uint8_t>(i < 2 ? 40 + c + 4 * i : 220 - c);
+        return f;
+    });
+    const auto out = TempDir() / "cli_flow_scenes";
+    std::filesystem::remove_all(out);
+    REQUIRE(Run("scenes -i " + Q(clip) + " -o " + Q(out)) == 0);
+    const std::string id = Manifest::Load(out / "scenes").stageParams["cuts_id"];
+    REQUIRE(id == SceneCutsId({2}));
+    REQUIRE(Run("flow --backend stub --hwaccel none --warp -i " + Q(clip) + " -o " + Q(out)) == 0);
+    CHECK(Manifest::Load(out / "mv_raw").stageParams["scene_cuts_id"] == id);
+    CHECK(Manifest::Load(out / "mv_dlss").stageParams["scene_cut_count"] == 1);
+    REQUIRE(Run("flow --backend stub --hwaccel none --warp --no-scenes -i " + Q(clip) + " -o " + Q(out)) == 0);
+    CHECK_FALSE(Manifest::Load(out / "mv_dlss").stageParams.contains("scene_cuts_id"));
+    // another source's list
+    ClipSpec otherSpec = spec;
+    otherSpec.frames = 3;
+    const auto other = WriteClip(TempDir() / "cli_flow_other.mkv", otherSpec);
+    const auto otherOut = TempDir() / "cli_flow_other";
+    std::filesystem::remove_all(otherOut);
+    REQUIRE(Run("scenes -i " + Q(other) + " -o " + Q(otherOut)) == 0);
+    CHECK(Run("flow --backend stub --hwaccel none --warp --scenes-dir " + Q(otherOut / "scenes") + " -i " + Q(clip) + " -o " + Q(out)) != 0);
+    REQUIRE(Run("flow --backend stub --hwaccel none --warp -i " + Q(clip) + " -o " + Q(otherOut)) == 0);  // found, of another source: skipped
+    CHECK_FALSE(Manifest::Load(otherOut / "mv_dlss").stageParams.contains("scene_cuts_id"));
+}

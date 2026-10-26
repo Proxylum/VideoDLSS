@@ -197,7 +197,7 @@ TEST_CASE("Stage pass tables and timestamps", "[unit][fingerprint]") {
     CHECK(StageForPass("depth_raw") == "depth");
     CHECK(StageForPass("mask_face").empty());
     CHECK(StageInputCandidates("depth").empty());
-    CHECK(StageInputCandidates("flow") == std::vector<std::vector<std::string>>{{"depth_raw"}});
+    CHECK(StageInputCandidates("flow") == std::vector<std::vector<std::string>>{{"depth_raw"}, {"scenes"}});  // + the list (PR-13)
     CHECK(StageInputCandidates("fg").front() == std::vector<std::string>{"color_nr", "color_sr"});
     CHECK(StageInputCandidates("nr").size() == 8);  // + the scene list (PR-13)
     CHECK(StageInputCandidates("nr").back() == std::vector<std::string>{"scenes"});
@@ -213,6 +213,7 @@ TEST_CASE("Stage pass tables and timestamps", "[unit][fingerprint]") {
     CHECK_FALSE(StageReadsSceneCuts("nr", {{"intensity", 0.0}}));
     CHECK_FALSE(StageReadsSceneCuts("nr", {{"guides", false}, {"temporal", 0.0}}));
     CHECK(StageReadsSceneCuts("nr", {{"guides", false}, {"temporal", 0.2}}));
+    CHECK(StageReadsSceneCuts("flow", nlohmann::json::object()));
     CHECK_FALSE(StageReadsSceneCuts("depth", nlohmann::json::object()));
     CHECK_FALSE(StageReadsSceneCuts("scenes", nlohmann::json::object()));
     CHECK(StageInputCandidates("fg", {{"guides", false}}).size() == 3);  // nr's key only

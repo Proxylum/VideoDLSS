@@ -8,6 +8,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <sstream>
 
@@ -541,4 +542,114 @@ TEST_CASE("Regression: on a clip without cuts the stages below have the fingerpr
     REQUIRE(!nr.warnings.empty());
     CHECK_THAT(nr.warnings.front(), ContainsSubstring("the scene list is not used"));
     CHECK(Decision(plan, "upscale").warnings.empty());  // nis reads no list
+}
+
+// PR-13: the stages that read the list follow it, and the plan says what the run does - a list with other cuts recomputes flow and nr
+// (input_changed «scenes») and fg above them, nis keeps its colour; the way back restores every one of them; threshold 0 takes the
+// versions made without a list. Before the first analysis the plan cannot know: the readers are «pending», and on a clip without cuts
+// the run reuses them.
+TEST_CASE("RunProcess: the stages that read the list follow it; the plan says so", "[integration][process][scenes]") {
+    const auto dir = Dir("consumers");
+    const auto clip = CutClip(dir);
+    ProcessOptions o = StubProcess(dir, clip);
+    o.keepVersions = 0;
+    RunProcess(o);
+    const std::string id = ReadSceneList(o.passesRoot / kScenesPass, "")->id;
+    for (const char* pass : {"mv_raw", "mv_dlss", "color_nr"}) {
+        INFO(pass);
+        CHECK(Manifest::Load(o.passesRoot / pass).inputs.at("scenes") == id);
+        CHECK(SceneLabelOf(Manifest::Load(o.passesRoot / pass)) == id);
+    }
+    for (const char* pass : {"depth_dlss", "color_sr", "color_fg"}) CHECK(Manifest::Load(o.passesRoot / pass).inputs.count("scenes") == 0);  // fg: commit 8
+    CHECK(Manifest::Load(o.passesRoot / "mv_raw").stageParams["scene_cuts"] == nlohmann::json::array({kCutAt}));
+
+    auto actions = [](const ProcessPlan& p) {
+        std::map<std::string, std::string> a;
+        for (const auto& d : p.stages) a[d.name] = d.action;
+        return a;
+    };
+    auto agrees = [&](const ProcessPlan& p, const ProcessResult& r) {  // what the plan said is what the run did
+        for (const auto& d : p.stages) {
+            INFO(d.name << ": " << d.action << " " << d.kind);
+            CHECK(Report(r, d.name).status == (d.action == "run" ? "ran" : "reused"));
+            CHECK(Report(r, d.name).fingerprint == d.fingerprint);
+        }
+    };
+    // 0.24 -> 0.6: no cut left - flow and nr have another input, fg follows; depth and the nis upscale stay
+    ApplyParamSpec(o.stages, "scenes.threshold=0.6");
+    const ProcessPlan p6 = PlanProcess(o);
+    CHECK(Decision(p6, "flow").kind == "input_changed");
+    CHECK(Decision(p6, "flow").diff["inputs"] == nlohmann::json::array({"scenes"}));
+    CHECK_FALSE(Decision(p6, "flow").pending);  // the list is known (rederive): the plan is exact
+    CHECK(actions(p6) == std::map<std::string, std::string>{{"scenes", "run"}, {"depth", "reuse"}, {"flow", "run"}, {"upscale", "reuse"}, {"nr", "run"}, {"fg", "run"}});
+    agrees(p6, RunProcess(o));
+    CHECK(Manifest::Load(o.passesRoot / "mv_dlss").inputs.count("scenes") == 0);  // an empty list is no input
+    CHECK(PlanProcess(o).runCount == 0);
+    // threshold 0: no list either - the passes of 0.6 are those of no list: reused
+    ApplyParamSpec(o.stages, "scenes.threshold=0");
+    const ProcessPlan p0 = PlanProcess(o);
+    CHECK(actions(p0) == std::map<std::string, std::string>{{"scenes", "run"}, {"depth", "reuse"}, {"flow", "reuse"}, {"upscale", "reuse"}, {"nr", "reuse"}, {"fg", "reuse"}});
+    agrees(p0, RunProcess(o));
+    // back to 0.24: every version comes back, nothing is computed
+    ApplyParamSpec(o.stages, "scenes.threshold=0.24");
+    const ProcessPlan back = PlanProcess(o);
+    CHECK(back.runCount == 0);
+    for (const char* name : {"scenes", "flow", "nr", "fg"}) CHECK(Decision(back, name).action == "restore");
+    agrees(back, RunProcess(o));
+    CHECK(Manifest::Load(o.passesRoot / "mv_dlss").inputs.at("scenes") == id);
+
+    // the first analysis over passes made without the stage: the readers are pending in the plan; no cut - the run reuses them
+    const auto plainDir = Dir("consumers_first");
+    ClipSpec plain;
+    plain.frames = 4;
+    plain.width = 48;
+    plain.height = 32;
+    ProcessOptions f = StubProcess(plainDir, WriteClip(plainDir / "clip.mkv", plain));
+    for (auto& st : f.stages)
+        if (st.name == "scenes") st.enabled = false;
+    RunProcess(f);
+    for (auto& st : f.stages) st.enabled = true;
+    const ProcessPlan first = PlanProcess(f);
+    CHECK_FALSE(Decision(first, "scenes").sceneCuts.known);
+    for (const char* name : {"flow", "nr"}) {
+        INFO(name);
+        CHECK(Decision(first, name).action == "run");
+        CHECK(Decision(first, name).pending);
+    }
+    CHECK(Decision(first, "upscale").action == "reuse");
+    const ProcessResult fr = RunProcess(f);
+    CHECK(Report(fr, "scenes").status == "ran");
+    for (const char* name : {"depth", "flow", "upscale", "nr", "fg"}) CHECK(Report(fr, name).status == "reused");
+}
+
+// PR-13 (regression): a standalone flow pass (no fingerprint) is adopted only with the label of the list the stage reads now - both
+// passes of the family; made without it under a list with cuts it is recomputed and kept in the history
+TEST_CASE("RunProcess adopts a standalone flow pass only with the current scene list", "[integration][process][scenes][regression]") {
+    const auto dir = Dir("flow_label");
+    ProcessOptions o = StubProcess(dir, CutClip(dir));
+    RunProcess(o);
+    auto standalone = [&](bool keepLabel) {
+        for (const char* pass : {"mv_raw", "mv_dlss"}) {
+            Manifest m = Manifest::Load(o.passesRoot / pass);
+            m.fingerprint.clear();
+            m.tool = nlohmann::json::object();
+            m.inputs.clear();
+            if (!keepLabel)
+                for (const char* k : {"scene_cuts_id", "scene_cut_threshold", "scene_cuts", "scene_cut_count"}) m.stageParams.erase(k);
+            m.Save(o.passesRoot / pass);
+        }
+    };
+    standalone(true);
+    const ProcessResult adopted = RunProcess(o);
+    CHECK(Report(adopted, "flow").status == "reused");
+    CHECK_THAT(Report(adopted, "flow").reason, ContainsSubstring("adopted"));
+    standalone(false);
+    const ProcessPlan plan = PlanProcess(o);
+    CHECK(Decision(plan, "flow").action == "run");
+    CHECK_THAT(Decision(plan, "flow").detail, ContainsSubstring("made without the scene list"));
+    CHECK(Decision(plan, "flow").retire);
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "flow").status == "ran");
+    CHECK(!Report(r, "flow").retired.empty());
+    CHECK(SceneLabelOf(Manifest::Load(o.passesRoot / "mv_dlss")) == ReadSceneList(o.passesRoot / kScenesPass, "")->id);
 }
