@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -619,6 +620,7 @@ TEST_CASE("RunProcess: the stages that read the list follow it; the plan says so
         INFO(name);
         CHECK(Decision(first, name).action == "run");
         CHECK(Decision(first, name).pending);
+        CHECK(Decision(first, name).pendingRule == "no_cut");  // made without a list: reused if none is found
     }
     CHECK(Decision(first, "upscale").action == "reuse");
     const ProcessResult fr = RunProcess(f);
@@ -685,4 +687,134 @@ TEST_CASE("RunProcess: fg in its own process holds a frame at the cut; a child g
     CHECK(Subprocess::Run(args, &out) != 0);
     CHECK(out.find("changed") != std::string::npos);
     CHECK_FALSE(Manifest::Exists(dir / "child" / "color_fg"));
+}
+
+// Review of PR-13: the plan before the analysis says when a stage is reused after all, and only for a stage that waits for the list
+// alone - one that reruns anyway (an incomplete pass) shows that reason; a re-analysis (--force scenes) of stages made with the list
+// promises a reuse when the same cuts are found, and keeps it
+TEST_CASE("PlanProcess: pending only for the stages that wait for the list alone, with the rule of their reuse", "[integration][process][scenes][regression]") {
+    const auto dir = Dir("pending_rule");
+    const auto clip = CutClip(dir);
+    ProcessOptions o = StubProcess(dir, clip);
+    RunProcess(o);
+    o.forceStages = {"scenes"};  // decoded again: the list is not known to the plan
+    const ProcessPlan forced = PlanProcess(o);
+    CHECK_FALSE(Decision(forced, "scenes").sceneCuts.known);
+    for (const char* name : {"flow", "nr", "fg"}) {
+        INFO(name);
+        CHECK(Decision(forced, name).pending);
+        CHECK(Decision(forced, name).pendingRule == "same_list");  // made with {3}: reused if {3} comes out again
+    }
+    CHECK(Decision(forced, "upscale").action == "reuse");  // nis reads no list
+    const ProcessResult r = RunProcess(o);
+    for (const char* name : {"flow", "upscale", "nr", "fg"}) CHECK(Report(r, name).status == "reused");
+    o.forceStages.clear();
+
+    // a short run first (frames 0..2: no cut, 3 scores), then the whole clip: the list is pending, the readers rerun anyway -
+    // their passes are incomplete, and the plan says so
+    const auto dir2 = Dir("pending_incomplete");
+    ProcessOptions s = StubProcess(dir2, CutClip(dir2));
+    s.frames = 3;
+    RunProcess(s);
+    s.frames = 6;  // the length given: with an unknown one (mkv) a pass of 3 frames stands for the clip (PassComplete)
+    const ProcessPlan whole = PlanProcess(s);
+    CHECK_FALSE(Decision(whole, "scenes").sceneCuts.known);
+    for (const char* name : {"flow", "nr", "fg"}) {  // fg: built on nr, incomplete itself - decided with what nr would be
+        INFO(name);
+        CHECK(Decision(whole, name).action == "run");
+        CHECK_FALSE(Decision(whole, name).pending);
+        CHECK(Decision(whole, name).kind == "incomplete");
+    }
+}
+
+TEST_CASE("RunProcess: a forced run at threshold 0 keeps the stored scores; a list of another type is no list, not an exception", "[integration][process][scenes][regression]") {
+    const auto dir = Dir("forced_off");
+    const auto clip = CutClip(dir);
+    ProcessOptions o = StubProcess(dir, clip);
+    o.keepVersions = 1;  // no history to fall back on
+    RunProcess(o);
+    ApplyParamSpec(o.stages, "scenes.threshold=0");
+    RunProcess(o);
+    o.forceStages = {"scenes"};
+    const ProcessPlan forced = PlanProcess(o);
+    CHECK(Decision(forced, "scenes").sceneCuts.rederive);  // threshold 0 over the scores: nothing to decode
+    RunProcess(o);
+    o.forceStages.clear();
+    CHECK(std::filesystem::exists(o.passesRoot / kScenesPass / kScenesScoresFile));
+    ApplyParamSpec(o.stages, "scenes.threshold=0.24");
+    const ProcessPlan back = PlanProcess(o);
+    CHECK(Decision(back, "scenes").sceneCuts.rederive);  // before: pending, the whole source decoded again
+    CHECK(Decision(back, "scenes").sceneCuts.count == 1);
+
+    // a field of another type in the list on disk: the plan warns the readers and runs (the stage off)
+    RunProcess(o);
+    Manifest m = Manifest::Load(o.passesRoot / kScenesPass);
+    m.stageParams["threshold"] = "0.24";
+    m.Save(o.passesRoot / kScenesPass);
+    for (auto& st : o.stages)
+        if (st.name == "scenes") st.enabled = false;
+    ProcessPlan off;
+    REQUIRE_NOTHROW(off = PlanProcess(o));
+    REQUIRE(!Decision(off, "flow").warnings.empty());
+    CHECK_THAT(Decision(off, "flow").warnings.front(), ContainsSubstring("another type"));
+    for (auto& st : o.stages) st.enabled = true;
+    const ProcessPlan on = PlanProcess(o);  // the stage on: analysed again in place
+    CHECK(Decision(on, "scenes").action == "run");
+}
+
+TEST_CASE("PlanProcess: a partial list with the length unknown is named; the density counts the cuts inside the run", "[integration][process][scenes][regression]") {
+    // a cut every two frames: 19 in 40
+    const auto dir = Dir("density");
+    ClipSpec spec;
+    spec.frames = 40;
+    spec.width = kW;
+    spec.height = kH;
+    const auto clip = WriteClipWith(dir / "clip.mkv", spec, [](int64_t i) {
+        CpuFrame f = SyntheticFrame(i, kW, kH);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < kH; ++r)
+            for (uint32_t c = 0; c < kW; ++c) y[r * kW + c] = static_cast<uint8_t>((i / 2) % 2 == 0 ? 40 + c : 220 - c);
+        return f;
+    });
+    ProcessOptions o = StubProcess(dir, clip);
+    for (auto& st : o.stages) st.enabled = st.name == "scenes";
+    RunProcess(o);
+    const ProcessPlan whole = PlanProcess(o);
+    REQUIRE(Decision(whole, "scenes").sceneCuts.count == 19);
+    CHECK_FALSE(Decision(whole, "scenes").warnings.empty());  // 19 cuts in 40 frames: a low threshold
+    o.frames = 12;  // a short preview of the analysed clip: 5 cuts in it
+    const ProcessPlan part = PlanProcess(o);
+    CHECK(Decision(part, "scenes").action == "reuse");
+    CHECK(Decision(part, "scenes").warnings.empty());  // before: «19 cuts in 12 frames»
+    CHECK_THAT(Decision(part, "scenes").info, ContainsSubstring("5)"));
+
+    // a list of the first frames only, the clip's length unknown (mkv), the stage off: the readers are told
+    const auto dir2 = Dir("partial_unknown");
+    const auto clip2 = CutClip(dir2);
+    {
+        VideoDecoder decoder(clip2);
+        AnalyseScenes(decoder, Options(dir2 / "passes", clip2), 5);
+    }
+    ProcessOptions p = StubProcess(dir2, clip2);
+    for (auto& st : p.stages)
+        if (st.name == "scenes") st.enabled = false;
+    const ProcessPlan plan = PlanProcess(p);
+    REQUIRE(plan.frames == -1);
+    REQUIRE(!Decision(plan, "flow").warnings.empty());
+    CHECK_THAT(Decision(plan, "flow").warnings.front(), ContainsSubstring("known for frames 0..4 only"));
+}
+
+TEST_CASE("RunProcess warns when a stage decoded another number of frames than the scene list", "[integration][process][scenes][regression]") {
+    const auto dir = Dir("frame_count");
+    ProcessOptions o = StubProcess(dir, CutClip(dir));
+    RunProcess(o);
+    Manifest m = Manifest::Load(o.passesRoot / kScenesPass);  // as if the analysis had decoded one frame more than flow
+    m.frameCount = 7;
+    m.lastFrame = 6;
+    m.Save(o.passesRoot / kScenesPass);
+    o.forceStages = {"flow"};
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "flow").status == "ran");
+    REQUIRE(!r.warnings.empty());
+    CHECK(std::any_of(r.warnings.begin(), r.warnings.end(), [](const std::string& w) { return w.find("flow: decoded 6 frames, the scene list has 7") != std::string::npos; }));
 }

@@ -58,7 +58,11 @@ TEST_CASE("Scene list: id of the content, cuts from the scores, near misses", "[
     CHECK(ShortFingerprint(a).size() == 8);
 
     const std::vector<float> scores = {0.9f, 0.01f, 0.24f, 0.5f, 0.2f, 0.15f, 0.3f, 0.1f};
-    CHECK(CutsFromScores(scores, 0.24) == std::vector<int64_t>{3, 6});  // frame 0 never; 0.24 itself is not above 0.24
+    CHECK(CutsFromScores(scores, 0.24) == std::vector<int64_t>{3, 6});  // frame 0 never
+    // a score at the threshold is no cut (strict >) and a near miss (<=): 0.5 is exact in float32, 0.24 is not (review of PR-13)
+    CHECK(CutsFromScores(scores, 0.5) == std::vector<int64_t>{});
+    REQUIRE(!NearCuts(scores, 0.5).empty());
+    CHECK(NearCuts(scores, 0.5)[0] == std::pair<int64_t, float>{3, 0.5f});
     CHECK(CutsFromScores(scores, 0.0).empty());                          // 0: off
     CHECK(CutsFromScores(scores, 0.6).empty());
     CHECK(CutsFromScores({}, 0.24).empty());
@@ -126,13 +130,21 @@ TEST_CASE("Scenes pass: a data pass written and read back; a broken or foreign l
     struct Bad {
         const char* key;
         nlohmann::json value;
+        const char* why;
     };
-    for (const Bad& b : {Bad{"scene_cuts", {40, 3}}, Bad{"scene_cuts", {3, 3}}, Bad{"scene_cuts", {0, 3}}, Bad{"scene_cuts", {3, 100}}, Bad{"cuts_id", "cuts:00"},
-                         Bad{"ab", {{"mv_scale", "auto"}}}, Bad{"scene_cuts", "3"}}) {
+    for (const Bad& b : {Bad{"scene_cuts", {40, 3}, "unsorted or repeated"}, Bad{"scene_cuts", {3, 3}, "unsorted or repeated"},
+                         Bad{"scene_cuts", {0, 3}, "outside frames"}, Bad{"scene_cuts", {3, 100}, "outside frames"}, Bad{"cuts_id", "cuts:00", "cuts_id"},
+                         Bad{"ab", {{"mv_scale", "auto"}}, "A/B"}, Bad{"scene_cuts", "3", "not a list"},
+                         // a field of another type: a broken list, never an exception out of the planner (review of PR-13)
+                         Bad{"threshold", "0.24", "another type"}, Bad{"off", 0, "another type"}, Bad{"cuts_id", nullptr, "another type"},
+                         Bad{"analysis", 5, "another type"}}) {
         INFO(b.key << " = " << b.value.dump());
         WriteScenesPass(dir, Base(), l, &s);
         Patch(dir, b.key, b.value);
-        CHECK_FALSE(ReadSceneList(dir, "sha256:src"));
+        // the list's own id with it: only the check of the order or the range can refuse it (review of PR-13)
+        if (std::string(b.key) == "scene_cuts" && b.value.is_array()) Patch(dir, "cuts_id", SceneCutsId(b.value.get<std::vector<int64_t>>()));
+        CHECK_FALSE(ReadSceneList(dir, "sha256:src", &why));
+        CHECK(why.find(b.why) != std::string::npos);
     }
     WriteScenesPass(dir, Base(), l, &s);
     {  // a part of the clip

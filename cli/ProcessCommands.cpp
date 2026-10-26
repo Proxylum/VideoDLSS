@@ -104,7 +104,9 @@ void PrintPlan(const ProcessPlan& p) {
         const std::string onDisk = !s.current ? "-" : s.currentFingerprint.empty() ? "legacy" : ShortFingerprint(s.currentFingerprint);
         // PR-13: a provisional decision says so - the list is analysed first, the run decides on it
         const char* mark = s.name == "scenes" && s.action == "run" && !s.sceneCuts.known ? " (pending: the scene list is analysed first)"
-                           : s.pending                                                 ? " (pending: reused if no cut is found)"
+                           : s.pending && s.pendingRule == "no_cut"                    ? " (pending: reused if no cut is found)"
+                           : s.pending && s.pendingRule == "same_list"                 ? " (pending: reused if the same cuts are found)"
+                           : s.pending                                                 ? " (pending: reused if the stages above are)"
                                                                                        : "";
         std::printf("%-10s %-8s %-9s %-9s  %s%s%s%s\n", s.name.c_str(), s.action.c_str(), ShortFingerprint(s.fingerprint).c_str(), onDisk.c_str(), s.kind.c_str(),
                     s.detail.empty() ? "" : ": ", s.detail.c_str(), mark);
@@ -123,7 +125,7 @@ void PrintPlan(const ProcessPlan& p) {
         else if (StageReadsSceneCuts(s.name, s.params)) unlisted += (unlisted.empty() ? "" : ", ") + s.name;
     }
     if (scenes && scenes->action == "run" && !scenes->sceneCuts.known) {
-        std::printf("note: scenes: not analysed yet; the stages below rerun only if cuts are found\n");
+        std::printf("note: scenes: not analysed yet; the stages below are reused if the list comes out as the one they were made with\n");
     } else if (scenes && scenes->sceneCuts.known && !readers.empty()) {
         std::string cuts;
         for (size_t i = 0; i < scenes->sceneCuts.cuts.size() && i < 10; ++i) cuts += (cuts.empty() ? "" : ", ") + std::to_string(scenes->sceneCuts.cuts[i]);

@@ -150,6 +150,10 @@ class Helpers(unittest.TestCase):
         keys = nr_ab.known_keys(help_text)
         self.assertTrue({"local_tone", "guides", "params_file"} <= keys)
         self.assertNotIn("scene_cut", keys)
+        # PR-13: the list's options are options of the run, not settings a params.json may hold
+        settings = nr_ab.setting_keys(help_text + "  --scenes-dir,--scenes_dir TEXT\n  --no-scenes,--no_scenes\n")
+        self.assertFalse({"scenes_dir", "scenes", "no_scenes"} & settings)
+        self.assertIn("local_tone", settings)
 
     def test_nr_command_scene_list(self):
         # PR-13: the prepared list goes as --scenes-dir (the runs are --no-auto); a variant with inputs {"scenes": None} runs without it
@@ -213,7 +217,12 @@ class Helpers(unittest.TestCase):
         self.assertIn("--start 4 --offset 1 --frames 11", row[0])
         res = {"variants": {"a": {"nr": {}}, "b": {"nr": {}}}}
         meta = nr_ab.experiment_meta(res, "1.0", {"dlssvid": "e"}, inp, exp)
-        self.assertEqual(meta["inputs"], "color_sr; свои входы у a")
+        self.assertEqual(meta["inputs"], "видео; свои входы у a (color: color_sr)")  # the common inputs: b's; a's own named
+        # PR-13: E9's baseline runs without the list - the header says the others read it
+        e9 = next(e for e in nr_ab.EXPERIMENTS if e.id == "E9")
+        inp9 = nr_ab.Inputs(Path("clip.mp4"), color=Path("p/color_sr"), depth=Path("p/depth_dlss"), mv=Path("p/mv_dlss"), scenes=Path("p/scenes"))
+        meta9 = nr_ab.experiment_meta({"variants": {v.name: {"nr": {}} for v in e9.variants}}, "1.0", {"dlssvid": "e"}, inp9, e9)
+        self.assertEqual(meta9["inputs"], "color_sr, depth_dlss, mv_dlss, scenes; свои входы у cut0 (scenes: нет)")
 
     def test_pass_range_and_covers(self):
         d = manifest(self.root / "p", 2, 9)

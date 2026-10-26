@@ -371,7 +371,10 @@ TEST_CASE("FgStage at a cut: x2 holds one frame in the pass and the preview, the
         CHECK(FgInterpIndex(2, 1, 2) == 5);
         CHECK(rd.ReadFrame(5).data == rd.ReadFrame(FgRealIndex(2, 2)).data);  // real 2 held, not a blend of 2 and 3
         CHECK(rd.ReadFrame(FgInterpIndex(1, 1, 2)).data != rd.ReadFrame(FgRealIndex(1, 2)).data);  // a blend within the shot
-        CHECK(DecodeAll(dir / "fg.mkv").size() == 9);  // the preview holds the frame as well
+        const auto preview = DecodeAll(dir / "fg.mkv");  // the preview holds the frame as well: real 2, not a frame of the new shot
+        REQUIRE(preview.size() == 9);
+        CHECK(preview[5].data == preview[FgRealIndex(2, 2)].data);
+        CHECK(preview[5].data != preview[FgRealIndex(3, 2)].data);
     }
     {  // what a backend sees
         auto rec = std::make_unique<ResetRecorder>();

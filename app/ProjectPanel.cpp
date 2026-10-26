@@ -506,14 +506,16 @@ void ProjectPanel::refreshVersions() {
         ah->setContentsMargins(0, 0, 0, 0);
         ah->setSpacing(4);
         const std::string name = v.current ? v.pass : v.pass + "@" + v.id;
-        auto* compare = new QPushButton(tr("Сравнить"), actions);
-        SetRole(compare, "small");
-        compare->setToolTip(tr("Показать эту версию на стороне «после» шторки"));
-        connect(compare, &QPushButton::clicked, this, [this, name] {
-            if (model_.compareView() != AppModel::CompareView::BeforeAfter) model_.setCompareView(AppModel::CompareView::BeforeAfter);
-            model_.showSource(name);
-        });
-        ah->addWidget(compare);
+        if (v.pass != kScenesPass) {  // the list of cuts has no frames to show (a data pass, PR-13)
+            auto* compare = new QPushButton(tr("Сравнить"), actions);
+            SetRole(compare, "small");
+            compare->setToolTip(tr("Показать эту версию на стороне «после» шторки"));
+            connect(compare, &QPushButton::clicked, this, [this, name] {
+                if (model_.compareView() != AppModel::CompareView::BeforeAfter) model_.setCompareView(AppModel::CompareView::BeforeAfter);
+                model_.showSource(name);
+            });
+            ah->addWidget(compare);
+        }
         if (!v.current) {
             const std::string pass = v.pass, id = v.id;
             auto* use = new QPushButton(tr("Вернуть"), actions);

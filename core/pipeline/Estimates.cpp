@@ -19,7 +19,9 @@ constexpr double kVdaBaseMs = 310.0;   // TASK-0039, 2026-10-12: face 1920x800 (
 constexpr double kVdaLargeMs = 420.0;  // the same: 416 ms/frame
 
 double Baseline(const std::string& stage, const std::string& backend, const std::string& model) {
-    if (stage == "scenes") return 6.0;  // PR-13: a CPU decode and a luma thumb per frame (face 1920x800)
+    // PR-13: a CPU decode and a luma thumb per frame at the reference 1920x800 (scaled by the megapixels: ~3.4 on 1080p); measured
+    // 2.0 (ProRes) - 3.1 (H.264) ms on 1080p, 0.7 on 480p (docs/benchmarks.md) - decoding does not grow with the pixels alone
+    if (stage == "scenes") return 2.5;
     if (stage == "depth") {
         // VDA by model: Small measured (docs/benchmarks.md); Base and Large - TASK-0039 measurement on the reference GPU
         const double vda = model == "metric-vda-large" ? kVdaLargeMs : model == "metric-vda-base" ? kVdaBaseMs : 300.0;

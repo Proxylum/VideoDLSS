@@ -300,8 +300,9 @@ void AppModel::stepFrame(int delta) {
 }
 
 void AppModel::seekToSourceFrame(int64_t frame) {
+    // the frame's own time, as stepFrame: FrameAt rounds time × fps, so a half frame more would show the next one
     const double fps = sourceInfo_.fps > 0 ? sourceInfo_.fps : 24.0;
-    setTime((static_cast<double>(std::max<int64_t>(frame, 0)) + 0.5) / fps);
+    setTime(static_cast<double>(std::max<int64_t>(frame, 0)) / fps);
 }
 
 void AppModel::setTimelineFps(Rational fps) {
@@ -619,7 +620,8 @@ QString AppModel::planBlocker() const {
 }
 
 void AppModel::setStageEnabled(const std::string& stage, bool on) {
-    if (StageEntry* e = project_.EnsureStage(stage); e && e->enabled != on) {  // a v3 file without the entry: inserted (PR-13)
+    const bool had = stageEntry(stage) != nullptr;  // a v3 file without the entry: inserted (PR-13) - a change whatever its default
+    if (StageEntry* e = project_.EnsureStage(stage); e && (!had || e->enabled != on)) {
         e->enabled = on;
         markDirty();
         emit projectChanged();
@@ -628,9 +630,11 @@ void AppModel::setStageEnabled(const std::string& stage, bool on) {
 }
 
 void AppModel::setStageParam(const std::string& stage, const std::string& key, const nlohmann::json& value) {
+    const bool had = stageEntry(stage) != nullptr;
     StageEntry* e = project_.EnsureStage(stage);
     if (!e) return;
-    if (e->params.contains(key) && e->params[key] == value) return;
+    if (!had) e->enabled = false;  // the card shows a stage the file lacks as off: an edit keeps it so (PR-13)
+    if (had && e->params.contains(key) && e->params[key] == value) return;
     // another backend: a model from the old backend's list goes (VDA Large -> DA3 leaves no VDA model in the project)
     if (key == "backend" && value.is_string()) e->params = ParamsForBackendChange(stage, e->params, value.get<std::string>());
     e->params[key] = value;
@@ -640,8 +644,11 @@ void AppModel::setStageParam(const std::string& stage, const std::string& key, c
 }
 
 void AppModel::setStageParams(const std::string& stage, const nlohmann::json& params) {
+    if (!params.is_object()) return;
+    const bool had = stageEntry(stage) != nullptr;
     StageEntry* e = project_.EnsureStage(stage);
-    if (!e || !params.is_object() || e->params == params) return;
+    if (!e || (had && e->params == params)) return;
+    if (!had) e->enabled = false;
     e->params = params;
     markDirty();
     emit projectChanged();
@@ -805,16 +812,23 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
                     parts << QString("%1 %2 → %3").arg(label, was, now);
                 }
             st.state = tr("пересчёт: %1").arg(parts.isEmpty() ? QString::fromStdString(d->detail) : parts.join(", "));
-        } else if (d->kind == "input_changed" && d->pending) {  // PR-13: the list is analysed first; no cut - the pass is reused
-            st.state = tr("пересчёт, если найдутся склейки");
+        } else if (d->kind == "input_changed" && d->pending) {  // PR-13: the list is analysed first; the run may reuse the pass
+            st.state = d->pendingRule == "no_cut"      ? tr("пересчёт, если найдутся склейки")
+                       : d->pendingRule == "same_list" ? tr("пересчёт, если склейки изменятся")
+                                                       : tr("пересчёт, если пересчитается стадия выше");
             st.sub = tr("список склеек посчитается первым");
         } else if (d->kind == "input_changed" && d->diff.contains("inputs") && d->diff["inputs"] == nlohmann::json::array({kScenesPass})) {
             st.state = tr("пересчёт: изменились склейки");
             const ViewportSource* src = store_->FindSource(primary);
             const int64_t was = src && src->manifest ? src->manifest->stageParams.value("scene_cut_count", int64_t{0}) : 0;
             int64_t now = 0;
+            bool decided = false;
             for (const auto& s : plan_.stages)
-                if (s.name == kScenesPass) now = s.sceneCuts.count;
+                if (s.name == kScenesPass && s.sceneCuts.known) {
+                    now = s.sceneCuts.count;
+                    decided = true;
+                }
+            if (!decided && plan_.scenesOnDisk) now = plan_.scenesOnDisk->count;  // the stage off: the list on disk
             if (!d->inputs.count(kScenesPass)) now = 0;
             st.sub = QString("%1 → %2").arg(was).arg(now);
         } else if (d->kind == "input_changed") {

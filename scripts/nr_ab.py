@@ -56,7 +56,8 @@ NR_ARG_OK = {"--skip-driver-check": False, "--dll-dir": True, "--params-block": 
 # options of `dlssvid nr` that are not stages.nr.params keys (cli/NrCommands.cpp): ResolveNrParams refuses them in --params-file, after the
 # variants before ran - known_keys of --help minus these is what a params.json may hold
 NOT_SETTINGS = {"input", "output", "color_dir", "depth_dir", "mv_dir", "masks_dir", "no_auto", "auto", "video", "codec", "frames", "start", "warmup",
-                "params_file", "warp", "check", "check_size", "check_repeat", "check_features", "json", "help", "depth_guide"} | {o[2:].replace("-", "_") for o in (*AB_FLAGS, *NR_ARG_OK)}
+                "params_file", "warp", "check", "check_size", "check_repeat", "check_features", "json", "help", "depth_guide",
+                "scenes_dir", "scenes"} | {o[2:].replace("-", "_") for o in (*AB_FLAGS, *NR_ARG_OK)}
 INPUT_KEYS = ("color", "depth", "mv", "scenes")  # a variant's own folders: --color-dir / --depth-dir / --mv-dir / --scenes-dir (None: without it)
 EXPECT_KEYS = ("depth_used", "mv_used", "scenes_used", "work_size", "passes", "mv_scale", "frames_written", "warmup_frames", "masks")  # stats read_nr keeps
 NR_DLLS = ("nvngx_dlssnr.dll", "nvngx.dll_dlssvid.dll")  # kNrDllName, kNrForwarderName (core/stages/nr/INrBackend.h)
@@ -1135,7 +1136,8 @@ def run_check(a, cli: Path, inp: Inputs, exp: Experiment, edir: Path, dry: bool)
 
 def experiment_meta(res: dict, version: str, build: dict, inp: Inputs, exp: Experiment) -> dict:
     """The build and the inputs an experiment was measured with - stored with it: an experiment reused from results.json keeps its own. The
-    inputs are the baseline's, and the variants with folders of their own are named."""
+    inputs are the variants' common ones (of the first without folders of its own), and the variants with folders of their own are named
+    with them: E9's baseline cut0 runs without the list the others read (PR-13)."""
     # the baseline's run first, then the first that reported its GPU: i0 calls no model and has no diagnostics (PR-7)
     variants = res.get("variants", {})
     runs = [x["nr"] for x in ([variants[exp.baseline]] if exp.baseline in variants else []) + list(variants.values()) if x.get("nr")]
@@ -1143,8 +1145,10 @@ def experiment_meta(res: dict, version: str, build: dict, inp: Inputs, exp: Expe
     meta = {"version": version, "exe_sha256": build.get("dlssvid"), "gpu": first.get("gpu"), "driver": first.get("driver"), "dll_sha256": first.get("dll_sha256")}
     if exp.kind != "check":  # E8 and E6f read no passes
         used = sorted({m for x in res.get("variants", {}).values() for m in ((x.get("nr") or {}).get("masks") or [])})
-        d = variant_dirs(inp, next(v for v in exp.variants if v.name == exp.baseline))
-        own = [v.name for v in exp.variants if v.inputs and v.name in res.get("variants", {})]
+        common = next((v for v in exp.variants if not v.inputs), None) or next(v for v in exp.variants if v.name == exp.baseline)
+        d = variant_dirs(inp, common)
+        own = [f"{v.name} ({', '.join(f'{k}: ' + ('нет' if p is None else '--mv-target-dir' if p == '@mv_target' else Path(p).name) for k, p in v.inputs.items())})"
+               for v in exp.variants if v.inputs and v.name in res.get("variants", {})]
         inputs = Inputs(inp.clip, d["color"], d["depth"], d["mv"], scenes=d["scenes"]).describe() + (f"; свои входы у {', '.join(own)}" if own else "")
         meta.update({"inputs": inputs, "masks": ", ".join(used)})
     return meta

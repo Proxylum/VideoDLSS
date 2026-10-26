@@ -800,7 +800,8 @@ TEST_CASE("RunProcess: an fg stage that throws mid-run is failed with disableUna
         CHECK(fg.details["isolated"] == isolated);
         CHECK(r.finalPass == o.passesRoot / "color_nr");
         CHECK(r.framesOut == 3);
-        CHECK(r.warnings.size() == 1);
+        REQUIRE(r.warnings.size() == 2);  // the failure, and the list of the first run covers frames 0..2 only (PR-13)
+        CHECK(std::any_of(r.warnings.begin(), r.warnings.end(), [](const std::string& w) { return w.find("known for frames 0..2 only") != std::string::npos; }));
         CHECK(Report(r, "encode").status == "ran");
         CHECK(!std::filesystem::exists(o.passesRoot / "color_fg"));    // the half-written pass of this run is removed,
         CHECK(!std::filesystem::exists(o.passesRoot / "color_fg.v"));  // not kept as a version

@@ -104,10 +104,17 @@ TEST_CASE("dlssvid flow writes zero vectors at the cuts of the clip's scene list
     // another source's list
     ClipSpec otherSpec = spec;
     otherSpec.frames = 3;
-    const auto other = WriteClip(TempDir() / "cli_flow_other.mkv", otherSpec);
+    const auto other = WriteClipWith(TempDir() / "cli_flow_other.mkv", otherSpec, [&](int64_t i) {  // a cut at 1: a list with a label
+        CpuFrame f = SyntheticFrame(i, w, h);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < h; ++r)
+            for (uint32_t c = 0; c < w; ++c) y[r * w + c] = static_cast<uint8_t>(i < 1 ? 40 + c : 220 - c);
+        return f;
+    });
     const auto otherOut = TempDir() / "cli_flow_other";
     std::filesystem::remove_all(otherOut);
     REQUIRE(Run("scenes -i " + Q(other) + " -o " + Q(otherOut)) == 0);
+    REQUIRE(Manifest::Load(otherOut / "scenes").stageParams["cuts_id"] == SceneCutsId({1}));  // accepted, it would leave its label
     CHECK(Run("flow --backend stub --hwaccel none --warp --scenes-dir " + Q(otherOut / "scenes") + " -i " + Q(clip) + " -o " + Q(out)) != 0);
     REQUIRE(Run("flow --backend stub --hwaccel none --warp -i " + Q(clip) + " -o " + Q(otherOut)) == 0);  // found, of another source: skipped
     CHECK_FALSE(Manifest::Load(otherOut / "mv_dlss").stageParams.contains("scene_cuts_id"));

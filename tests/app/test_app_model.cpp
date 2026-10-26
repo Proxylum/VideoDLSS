@@ -1954,9 +1954,11 @@ TEST_CASE("AppModel: the card of the scene list, its chips and the lines of the 
     REQUIRE(chips.size() == 1);
     CHECK(chips[0]->text() == QString::fromStdString(FormatTimecode(3.0 / 24.0)));
     chips[0]->click();
-    CHECK(model.time() == Approx(3.5 / 24.0));
+    CHECK(model.time() == Approx(3.0 / 24.0));
+    CHECK(model.store().FrameAt("source", model.time()) == 3);  // the cut frame itself, not the next one (review of PR-13)
+    CHECK(model.store().FrameAt("result", model.time()) == 6);  // 48 fps: real frame 3 of the result
     model.seekToSourceFrame(2);
-    CHECK(model.time() == Approx(2.5 / 24.0));
+    CHECK(model.store().FrameAt("source", model.time()) == 2);
     const auto labels = view.findChildren<QLabel*>();
     CHECK(std::any_of(labels.begin(), labels.end(), [](QLabel* l) { return l->text() == QString::fromUtf8("Найдено 1 склейка"); }));
 
@@ -1991,7 +1993,21 @@ TEST_CASE("AppModel: the card of the scene list, its chips and the lines of the 
     CHECK(model.cardState("flow").scenes == QString::fromUtf8("склейки: 1 — векторы на них нулевые"));
     view.refresh();
     CHECK(view.isHidden());
-    // a v3 project without the entry: the switch creates it in its place (Project::EnsureStage)
+    // a v3 project without the entry: the switch creates it in its place (Project::EnsureStage) and counts as a change
+    auto& stages = model.project().stages;
+    stages.erase(std::remove_if(stages.begin(), stages.end(), [](const StageEntry& e) { return e.name == "scenes"; }), stages.end());
+    const size_t before = stages.size();
+    QSignalSpy changed(&model, &AppModel::projectChanged);
     model.setStageEnabled("scenes", true);
+    REQUIRE(model.project().stages.size() == before + 1);
     CHECK(model.project().stages.front().name == "scenes");
+    CHECK(model.project().stages.front().enabled);
+    CHECK(changed.count() == 1);
+    CHECK(model.dirty());
+    // a parameter of a stage the file lacks: inserted as the card shows it - off
+    stages.erase(stages.begin());
+    model.setStageParam("scenes", "threshold", 0.3);
+    CHECK(model.project().stages.front().name == "scenes");
+    CHECK_FALSE(model.project().stages.front().enabled);
+    CHECK(model.project().stages.front().params["threshold"] == 0.3);
 }

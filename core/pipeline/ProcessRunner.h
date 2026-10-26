@@ -101,9 +101,11 @@ struct SceneCutsPlan {
     std::string id;      // "cuts:…" | "pending:scenes" (not known) | "" (no cut: no input of the stages below)
     int64_t count = 0;   // cuts after the decision
     int64_t before = -1;  // cuts of the current pass (-1: none or unreadable)
+    std::string beforeId;  // its list's id: the same as `id` - the list does not change
     std::vector<int64_t> cuts;
     std::vector<std::pair<int64_t, float>> nearMisses;
     double threshold = 0.0;
+    int64_t frames = 0;  // the frames the list covers (the density of a clip of unknown length)
     nlohmann::json ToJson() const;
 };
 
@@ -136,6 +138,9 @@ struct StageDecision {
     std::string error;
     SceneCutsPlan sceneCuts;     // scenes only: the list after this decision (PR-13)
     bool pending = false;        // a stage that reruns only because the scene list is not known yet (a plan only, PR-13)
+    // when a pending stage is reused after all: "no_cut" (made without a list: if none is found), "same_list" (made with one: if the
+    // analysis gives it again), "unchanged" (it reads a pending stage: if that one is reused)
+    std::string pendingRule;
     std::string currentCreated;  // the current pass's manifest.created (the card's «посчитано …» of a pass without frames)
     nlohmann::json ToJson() const;
 };

@@ -56,11 +56,16 @@ std::optional<SceneList> ReadSceneList(const std::filesystem::path& dir, const s
     if (!sp.is_object()) return fail("no stage_params");
     if (sp.contains("ab")) return fail("an A/B pass");
     if (!sourceHash.empty() && m.sourceHash != sourceHash) return fail("of another source");
+    // a field of another type (a manifest edited by hand) is a broken list, as a missing one: no exception out of the planner
+    if ((sp.contains("threshold") && !sp["threshold"].is_number()) || (sp.contains("off") && !sp["off"].is_boolean()) ||
+        (sp.contains("cuts_id") && !sp["cuts_id"].is_string()) || (sp.contains("analysis") && !sp["analysis"].is_object()) ||
+        (sp.contains("analysis") && sp["analysis"].contains("reached_end") && !sp["analysis"]["reached_end"].is_boolean()))
+        return fail("a field of another type");
     SceneList l;
     l.frames = m.frameCount;
     l.threshold = sp.value("threshold", 0.0);
     l.off = sp.value("off", false);
-    l.reachedEnd = sp.contains("analysis") && sp["analysis"].is_object() && sp["analysis"].value("reached_end", false);
+    l.reachedEnd = sp.contains("analysis") && sp["analysis"].value("reached_end", false);
     if (sp.contains("scene_cuts")) {
         if (!sp["scene_cuts"].is_array()) return fail("scene_cuts is not a list");
         for (const auto& v : sp["scene_cuts"]) {
@@ -171,7 +176,7 @@ std::string SceneLabelOf(const Manifest& consumer) {
     if (!sp.is_object()) return {};
     if (sp.contains("scene_cuts_id") && sp["scene_cuts_id"].is_string()) return sp["scene_cuts_id"].get<std::string>();
     // PR-6: nr reset its history by its own detector - a run no list describes
-    if (consumer.pass == "color_nr" && sp.value("scene_cut_count", int64_t{0}) > 0) return "pr6";
+    if (consumer.pass == "color_nr" && sp.contains("scene_cut_count") && sp["scene_cut_count"].is_number() && sp["scene_cut_count"].get<double>() > 0) return "pr6";
     return {};
 }
 
