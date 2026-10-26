@@ -333,3 +333,22 @@ TEST_CASE("Pipeline preset: round trip keeps every stage and the encode; written
         last = i;
     }
 }
+
+// Review of PR-9: the reader writes the bitrate as BitrateOption ("50000k" -> "50M"); EncodeOf now gives the same form, so a project's
+// own preset, saved and read back, is equal to it (before: «Битрейт 50000k → 50M», the slot rewritten, the project dirty)
+TEST_CASE("Pipeline preset: a bitrate is written as the reader gives it, so the project's own preset read back changes nothing", "[unit][presets][regression]") {
+    Project p = Tuned();
+    p.codecOptions = {{"b", "50000k"}, {"preset", "p7"}};
+    CHECK(EncodeOf(p).bitrate == "50M");
+    const json file = json::parse(PresetToJson(MakePipelinePreset("Свой", p)).dump());
+    CHECK(file["encode"]["options"]["b"] == "50M");
+    const PresetLoad l = ValidatePreset(file);
+    REQUIRE(l.ok());
+    Project after = p;
+    ApplyPipelinePreset(after, l.preset);
+    CHECK(DiffPipeline(p, after).empty());
+    // a value the card cannot hold stays as it is: the save refuses it, a slot keeps it
+    p.codecOptions = {{"b", "12.5M"}};
+    CHECK(EncodeOf(p).bitrate == "12.5M");
+    CHECK_THROWS_AS(SavePreset(std::filesystem::path(DLSSVID_TEST_TMP) / "presets" / "bitrate.json", MakePipelinePreset("Битрейт", p)), PresetError);
+}

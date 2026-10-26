@@ -157,8 +157,8 @@ void BuildStages(const std::string& projectFile, const std::vector<std::string>&
             Log()->warn("--param-file {}: the pipeline preset '{}' gives its {} settings only; its other stages, switches and encode are not applied (give it "
                         "without {}= for the whole pipeline)",
                         sf.spec, f.presetName, sf.stage, sf.stage);
-        for (const auto& n : f.notes)
-            if (n.kind != PresetIssueKind::OtherStages && n.kind != PresetIssueKind::PipelineFields)
+        for (const auto& n : f.notes)  // a pipeline preset's other stages and fields: said by the line above; a card preset's: here
+            if (f.scope != PresetScope::Pipeline || (n.kind != PresetIssueKind::OtherStages && n.kind != PresetIssueKind::PipelineFields))
                 Log()->warn("--param-file {}: preset '{}': {}", sf.spec, f.presetName, n.text);
         ProcessStage* s = nullptr;
         for (auto& x : o.stages)
@@ -272,9 +272,11 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     }
     // the project's (or a pipeline preset's) encoder unless --codec says otherwise
     o.codec = !a.codecGiven && file.encoder && !file.codec.empty() ? file.codec : a.codec;
-    // the project's result takes the container of the codec that encodes it - after --codec (PR-9): a ProRes preset, then --codec
-    // h264_nvenc, writes .mp4, not H.264 into the .mov the preset renamed it to; and ProRes of --codec no longer goes into an .mp4
-    o.output = !a.output.empty() ? std::filesystem::path(a.output) : ResultPathFor(projectResult, o.codec);
+    // the project's result takes the container of the codec --codec gives it (PR-9): a ProRes preset, then --codec h264_nvenc,
+    // writes .mp4, not H.264 into the .mov the preset renamed it to; and ProRes of --codec no longer goes into the project's .mp4. Without
+    // --codec the path stays the project's (a pipeline preset renamed it already)
+    const bool codecChanged = a.codecGiven && o.codec != (file.encoder ? file.codec : std::string());
+    o.output = !a.output.empty() ? std::filesystem::path(a.output) : codecChanged ? ResultPathFor(projectResult, o.codec) : projectResult;
     if (o.output.empty()) o.output = o.input.parent_path() / (o.input.stem().string() + "_result" + ResultExtensionFor(o.codec));
     o.passesRoot = !a.passes.empty() ? std::filesystem::path(a.passes) : projectPasses;
     o.skipExisting = !a.noSkipExisting;
@@ -352,8 +354,11 @@ int CmdBench(const ProcessCommands::BenchArgs& a) {
     o.codec = !a.codecGiven && file.encoder ? file.codec : a.codec;  // a pipeline preset's encoder unless --codec says otherwise
     if (file.encoder) {
         o.codecOptions = file.codecOptions;
-        o.outputFormat = file.format;
         o.settingsNote = file.settingsNote;
+        // bench has no --bit-depth / --chroma: over another codec the preset's layout could be one it cannot encode, found only at the
+        // encode after every stage ran - auto then
+        if (!a.codecGiven || a.codec == file.codec) o.outputFormat = file.format;
+        else Log()->info("bench: --codec {} over the preset's {}: bit depth and chroma auto", a.codec, file.codec);
     }
     o.frames = a.frames;
     o.warp = a.warp;
@@ -398,7 +403,8 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_option("--param", pa_.params, "stage parameter stage.key=value (repeatable), e.g. nr.intensity=1.2, fg.backend=rife");
     const char* paramFileHelp =
         "settings from a file (repeatable). stage=<file.json>: a JSON object of the stage's keys (stages.<stage>.params) merged over the project's, or a "
-        "dlssvid-preset whose settings of that stage replace its form keys (engineer keys stay); switches the stage on like --param. <file.json> without "
+        "dlssvid-preset whose settings of that stage replace its form keys (a pipeline preset's also its tuning keys: backend, pass format ...; the "
+        "keys of the machine stay); switches the stage on like --param. <file.json> without "
         "stage=: a dlssvid-preset - a pipeline preset sets the stages it names (on/off and settings) and the encoder as a project would, a card preset goes "
         "to its stage. --stages, the backend options, --codec / --bit-depth / --chroma / --codec-opt and --param win";
     process_->add_option("--param-file,--param_file", pa_.paramFiles, paramFileHelp);

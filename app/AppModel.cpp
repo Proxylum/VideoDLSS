@@ -1247,7 +1247,7 @@ AppModel::PresetResult AppModel::applyPipelinePreset(const QString& file, bool w
     const PresetLoad l = LoadPreset(path, {}, lib.IsSlotFile(path) ? PresetRead::Slot : PresetRead::Strict);
     r.name = QString::fromStdString(l.preset.name);
     r.file = file;
-    if (l.scopeKnown && l.preset.scope == PresetScope::Stage) {
+    if (l.scopeKnown && l.preset.scope == PresetScope::Stage && !l.preset.stage().empty()) {  // a card preset without its stage: the reason below
         r.problems << tr("Это пресет карточки «%1» — он применяется из её меню «Пресет ▾»").arg(StageName(l.preset.stage()));
         return r;
     }

@@ -95,8 +95,11 @@ QString LabelOf(const std::string& stage, const std::string& key) {
 QString ChangeText(const std::string& stage, const ParamChange& c) {
     const ParamSpec* spec = SpecOf(stage, c.key);
     if (!spec) return QString::fromStdString(c.key);
-    return QString("%1 %2 → %3")
-        .arg(QString::fromStdString(spec->label), CardValueLabel(*spec, c.was, c.wasBackend), CardValueLabel(*spec, c.now, c.nowBackend));
+    auto value = [&](const nlohmann::json& v, const std::string& backend) {  // "" of a text key (flow.target): as the card says it
+        const QString s = CardValueLabel(*spec, v, backend);
+        return s.isEmpty() ? Tr("по умолчанию") : s;
+    };
+    return QString("%1 %2 → %3").arg(QString::fromStdString(spec->label), value(c.was, c.wasBackend), value(c.now, c.nowBackend));
 }
 
 QString StageDiffText(const StageDiff& d, int max) {

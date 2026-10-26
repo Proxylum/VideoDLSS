@@ -14,6 +14,7 @@
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/ParamSchema.h"
+#include "stages/StagePreset.h"
 #include "stages/depth/DepthStage.h"
 #include "stages/fg/FgStage.h"
 #include "stages/flow/FlowStage.h"
@@ -352,6 +353,7 @@ TEST_CASE("Schema: tuning marks engineer keys only; every engineer key is tuning
             if (p.tuning) CHECK(p.advanced);
             if (p.tuning) CHECK_FALSE(machine.count(p.key));
             if (p.advanced && !p.tuning) CHECK((machine.count(p.key) || (st.stage == "scenes" && p.key == "backend")));  // scenes: one method
+            CHECK(IsMachineKey(p) == (p.advanced && !p.tuning && machine.count(p.key) > 0));
             if (p.tuning) tuning[st.stage].push_back(p.key);
         }
     CHECK(tuning["depth"] == std::vector<std::string>{"stabilize_window", "z_near", "z_far", "no_fill", "no_dlss", "format"});

@@ -51,6 +51,7 @@ public:
     struct Result {
         bool ok = false;
         bool exists = false;  // import: the name is taken in the scope - ask, then again with `replacing` or `asCopy`
+        QString copyName;     // exists: the name `asCopy` saves under («Аниме (3)» when «(2)» is taken too)
         QString file, name, message;
         QStringList notes, problems;
     };

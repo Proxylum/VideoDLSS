@@ -429,8 +429,9 @@ dlssvid process -i input10.mov -o out.mkv --codec ffv1 --bit-depth 12           
 
 **Settings from files (`--param-file`, PR-9; also `bench`).** `--param-file <stage>=<file.json>` takes one stage's
 settings: a JSON object of its keys (as `stages.<stage>.params` of a project, merged over them; a key the schema does not
-have is refused) or a `dlssvid-preset` of either kind, whose settings of that stage replace the form's keys (the engineer
-keys stay). `--param-file <file.json>` without `stage=` takes a preset only: a pipeline preset (the GUI's «Пресет
+have is refused) or a `dlssvid-preset` of either kind, whose settings of that stage replace the form's keys (a card preset keeps
+the stage's engineer keys; a pipeline preset's entry also replaces its tuning keys — backend, pass format and the other fine
+settings of the algorithm — and only the keys of the machine stay). `--param-file <file.json>` without `stage=` takes a preset only: a pipeline preset (the GUI's «Пресет
 обработки») sets the stages it names — on or off, with their settings and the engineer keys of the algorithm — and the
 encoder (codec, bit depth, chroma, bitrate) as a project would; a card preset goes to its stage. The layers, each over the
 one before: the project (or the built-in defaults) < one pipeline preset, wherever it stands < `--stages` < the stage files
@@ -438,8 +439,9 @@ and card presets, in command-line order < `--depth-backend` … `--fg-backend`, 
 encoder: the project < the pipeline preset < `--codec` / `--bit-depth` / `--chroma` / `--codec-opt` (which replaces all the
 options, the preset's bitrate too). A stage file switches its stage on, as `--param` does, also one `--stages` leaves out;
 `--stages` wins over a pipeline preset's switches. The project's result takes the container of the codec that encodes it
-(`--project` with a ProRes preset writes `.mov`, then `--codec h264_nvenc` writes `.mp4`); `--codec` over a preset's bit depth
-or chroma it cannot encode is an error of the plan — give `--bit-depth auto --chroma auto` with it. `--plan` prints the
+(`--project` with a ProRes preset writes `.mov`, then `--codec h264_nvenc` writes `.mp4`); `process --codec` over a preset's bit
+depth or chroma it cannot encode fails the run at the encode, after the stages (`--plan` does not check the pair) — give
+`--bit-depth auto --chroma auto` with it; `bench` (no such options) takes auto itself when `--codec` replaces the preset's codec. `--plan` prints the
 encoder the run would use (`encode:` line, `encode` in `--json`); the project file is never changed.
 
 **Bit depth and chroma.** The decoder keeps a source's own layout — 8, 10, 12 or 16 bits, 4:2:0 / 4:2:2 / 4:4:4 (HEVC

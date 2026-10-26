@@ -1,5 +1,7 @@
 #include "viewport/PipelinePreset.h"
 
+#include <cmath>
+
 #include "io/EncodeDefaults.h"
 #include "pipeline/PassFingerprint.h"
 
@@ -32,7 +34,15 @@ PresetEncode EncodeOf(const Project& p) {
     PresetEncode e;
     e.codec = p.codec;
     e.format = p.outputFormat;
-    if (const auto b = p.codecOptions.find("b"); b != p.codecOptions.end() && TakesBitrate(p.codec)) e.bitrate = b->second;
+    if (const auto b = p.codecOptions.find("b"); b != p.codecOptions.end() && TakesBitrate(p.codec)) {
+        // the form the reader gives ("50000k" -> "50M", CheckEncodeSection): a project's own preset then compares equal to it after a
+        // save and a read; a value the card cannot hold stays as it is for the save to refuse and a slot to keep
+        e.bitrate = b->second;
+        if (const auto mbps = ParseBitrateMbps(b->second)) {
+            const double whole = std::round(*mbps);
+            if (std::fabs(*mbps - whole) <= 0.01 && whole >= 1 && whole <= 400) e.bitrate = BitrateOption(whole);
+        }
+    }
     return e;
 }
 

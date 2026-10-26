@@ -79,7 +79,12 @@ JsonFile ReadJsonFile(const std::filesystem::path& file) {
     std::stringstream text;
     text << in.rdbuf();
     try {
-        f.json = J::parse(text.str());
+        // depth-limited: the parser is iterative, but copying and dumping a value are recursive - a file nested 100 000 deep (in
+        // 1 MiB) would overflow the stack when the menu lists it (review of PR-9)
+        f.json = J::parse(text.str(), [](int depth, J::parse_event_t, J&) {
+            if (depth > kPresetMaxDepth) throw std::runtime_error("nested deeper than " + std::to_string(kPresetMaxDepth) + " levels");
+            return true;
+        });
     } catch (const std::exception& e) {
         return fail(Kind::NotJson, std::string("not valid JSON (") + e.what() + ")");
     }
@@ -132,6 +137,11 @@ std::vector<std::string> PresetKeys(const std::string& stage, const std::string&
 }
 
 bool CardResetKey(const ParamSpec& spec) { return !spec.advanced && spec.key != "backend"; }
+
+bool IsMachineKey(const ParamSpec& spec) {
+    static const std::set<std::string> machine = {"models_dir", "python", "max_res", "input_size", "tile", "fp32"};
+    return spec.advanced && !spec.tuning && machine.count(spec.key) > 0;
+}
 
 nlohmann::json PresetParams(const std::string& stage, const nlohmann::json& current, PresetScope scope) {
     const J eff = EffectiveStageParams(stage, current.is_object() ? current : J::object());
@@ -456,8 +466,9 @@ PresetLoad ValidatePreset(const nlohmann::json& j, const std::string& forStage, 
             }
             if (!PresetKeyClass(*spec, scope)) {
                 PresetIssue& i = add(Kind::EngineerKey,
-                                     stageScope ? s + "." + k + " is an engineer key - card presets hold the card's settings, dropped"
-                                                : s + "." + k + " is bound to the machine (a path or a size for its GPU memory) - presets do not hold it, dropped");
+                                     stageScope            ? s + "." + k + " is an engineer key - card presets hold the card's settings, dropped"
+                                     : IsMachineKey(*spec) ? s + "." + k + " is bound to the machine (a path or a size for its GPU memory) - presets do not hold it, dropped"
+                                                           : s + "." + k + " is not a preset setting (nothing to choose) - dropped");
                 i.stage = s;
                 i.key = k;
                 i.got = v;

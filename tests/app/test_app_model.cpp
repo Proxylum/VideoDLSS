@@ -51,6 +51,7 @@
 #include "AppModel.h"
 #include "SourceNames.h"
 #include "PlaybackClock.h"
+#include "ParamText.h"
 #include "PresetMenu.h"
 #include "PresetStore.h"
 #include "ProcessingPanel.h"
@@ -2390,6 +2391,13 @@ TEST_CASE("Presets for new projects: one mark - a pipeline preset seeds every st
     QSignalSpy messages(&model, &AppModel::message);
     model.openVideo(Q(WriteClip(d / "clip.mkv", spec)));
     CHECK(LastMessage(messages).contains(QString::fromUtf8("настройки обработки — из «Аниме» (для новых проектов)")));
+    {  // seeded before reloadSources: the first plan is made with those settings
+        const auto& stages = model.plan().stages;
+        CHECK(std::none_of(stages.begin(), stages.end(), [](const StageDecision& s) { return s.name == "fg"; }));  // off in the preset
+        const auto nr = std::find_if(stages.begin(), stages.end(), [](const StageDecision& s) { return s.name == "nr"; });
+        REQUIRE(nr != stages.end());
+        CHECK(nr->params["intensity"] == 0.6);
+    }
     CHECK_FALSE(model.stageEntry("fg")->enabled);
     CHECK(model.stageEntry("scenes")->params["threshold"] == 0.3);
     CHECK(model.stageEntry("nr")->params["intensity"] == 0.6);
@@ -2431,15 +2439,45 @@ TEST_CASE("PresetStore: the folder is the test's; import refuses a preset withou
     CHECK(copy.name == QString::fromUtf8("Мягкий (2)"));
     CHECK(PresetStore::Import("nr", soft, first.file).ok);  // replace
     CHECK(PresetStore::List("nr").items.size() == 2);
+    // review of PR-9: the clash names the copy it will save, «(2)» being taken
+    const auto clash3 = PresetStore::Import("nr", soft);
+    REQUIRE(clash3.exists);
+    CHECK(clash3.copyName == QString::fromUtf8("Мягкий (3)"));
+    // a name of 120 code points (a long video's «Улучшение · …») gets its suffix: the name is cut before it, not with it
+    const std::string longName = PresetNameFor("Улучшение", PresetStore::Path(Q(d / (std::string(200, 'x') + ".mp4"))));
+    const QString longFile = WritePreset(d / "long.json", CardPresetJson(longName.c_str(), {{"intensity", 0.9}}));
+    REQUIRE(PresetStore::Import("nr", longFile).ok);
+    const auto copy2 = PresetStore::Import("nr", longFile, {}, true);
+    const auto copy3 = PresetStore::Import("nr", longFile, {}, true);
+    REQUIRE(copy2.ok);
+    REQUIRE(copy3.ok);
+    CHECK(copy2.name.endsWith(" (2)"));
+    CHECK(copy3.name.endsWith(" (3)"));
+    CHECK(copy2.name.size() <= 120);
+    // a card preset's switch in its entry: the card's text, not the pipeline's
+    nlohmann::json withSwitch = CardPresetJson("Со включением", {{"intensity", 0.6}});
+    withSwitch["stages"]["nr"]["enabled"] = false;
+    const auto switched = PresetStore::Import("nr", WritePreset(d / "switch.json", withSwitch));
+    REQUIRE(switched.ok);
+    CHECK(switched.notes.contains(QString::fromUtf8("включение и кодирование в пресете карточки не хранятся — пропущено")));
+    // a card preset with two stages: the real reason, not «Это пресет карточки «»»
+    nlohmann::json two = CardPresetJson("Две", {{"intensity", 0.6}});
+    two["stages"]["depth"] = {{"params", {{"backend", "vda"}}}};
+    const auto twoStages = PresetStore::Import(kPipelineTarget, WritePreset(d / "two.json", two));
+    CHECK(twoStages.problems.contains(QString::fromUtf8("В пресете карточки должна быть ровно одна стадия.")));
+    CHECK(PresetStore::List("nr").items.size() == 6);
     // a card preset is no pipeline preset; a pipeline preset gives its nr to the card
     CHECK(PresetStore::Import(kPipelineTarget, soft).problems.join(" ").contains(QString::fromUtf8("Это пресет карточки «Улучшение»")));
     nlohmann::json pipe = {{"format", "dlssvid-preset"}, {"schema", 1}, {"scope", "pipeline"}, {"name", "Аниме"}, {"stages", nlohmann::json::object()}};
-    pipe["stages"]["nr"] = {{"enabled", true}, {"params", {{"intensity", 0.6}, {"backend", "stub"}}}};
+    pipe["stages"]["nr"] = {{"enabled", true}, {"params", {{"intensity", 0.6}, {"backend", "stub"}, {"foo", 1}, {"scene_cut", 0.3}}}};
     pipe["stages"]["depth"] = {{"enabled", true}, {"params", {{"backend", "vda"}}}};
     const QString pipeFile = WritePreset(d / "pipe.json", pipe);
     const auto fromPipe = PresetStore::Import("nr", pipeFile);
     REQUIRE(fromPipe.ok);
     CHECK(fromPipe.message == QString::fromUtf8("Из пресета обработки «Аниме» взяты настройки «Улучшения»."));
+    INFO(fromPipe.notes.join(" | ").toStdString());
+    CHECK(fromPipe.notes.contains(QString::fromUtf8("нет в этой версии: «foo»")));  // the entry's own keys keep their notes
+    CHECK(fromPipe.notes.contains(QString::fromUtf8("Сброс на склейках теперь в карточке «Склейки»")));
     const PresetLoad card = LoadPreset(PresetStore::Path(fromPipe.file));
     REQUIRE(card.ok());
     CHECK(card.preset.scope == PresetScope::Stage);
@@ -2447,7 +2485,7 @@ TEST_CASE("PresetStore: the folder is the test's; import refuses a preset withou
     const auto whole = PresetStore::Import(kPipelineTarget, pipeFile);
     REQUIRE(whole.ok);
     CHECK(PresetStore::List(kPipelineTarget).items.size() == 1);
-    CHECK(PresetStore::List("nr").items.size() == 3);  // the pipeline preset is not in the card's menu
+    CHECK(PresetStore::List("nr").items.size() == 7);  // the pipeline preset is not in the card's menu
     // a slot's name changes in front
     const auto slotNamed = PresetStore::Import("nr", WritePreset(d / "slot.json", CardPresetJson("Перед применением · clip", {{"intensity", 0.9}})));
     REQUIRE(slotNamed.ok);
@@ -2562,6 +2600,10 @@ TEST_CASE("Pipeline presets: a refused preset or a card preset changes nothing a
     CHECK(model.project().ToJson({}) == before.ToJson({}));
     CHECK(model.applyPipelinePreset(WritePreset(d / "card.json", CardPresetJson("Карточка", {{"intensity", 0.5}}))).problems.join(" ").contains(
         QString::fromUtf8("Это пресет карточки «Улучшение»")));
+    nlohmann::json two = CardPresetJson("Две", {{"intensity", 0.5}});
+    two["stages"]["depth"] = {{"params", {{"backend", "vda"}}}};
+    const auto twoStages = model.applyPipelinePreset(WritePreset(d / "two.json", two));
+    CHECK(twoStages.problems.contains(QString::fromUtf8("В пресете карточки должна быть ровно одна стадия.")));
     // a failed backup: nothing until asked
     model.setStageParam("nr", "intensity", 1.4);
     const QString dir = PresetStore::Dir();
@@ -2671,6 +2713,29 @@ TEST_CASE("StageCard: the preset menu sits in the NR card header only, after the
     CHECK(mark->actions()[1]->isChecked());
     mark->actions()[0]->trigger();
     CHECK(PresetStore::NewProjectPreset().isEmpty());
+    // review of PR-9: every opening rebuilds the menu - the old submenus go (clear() kept them)
+    emit menu->aboutToShow();
+    emit menu->aboutToShow();
+    CHECK(menu->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly).size() == 3);
+    // a mark on a file that is gone: cleared, «Встроенные умолчания» checked
+    PresetStore::SetNewProjectPreset("gone.json");
+    emit menu->aboutToShow();
+    for (QAction* a : menu->actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) mark = a->menu();
+    CHECK(mark->actions()[0]->isChecked());
+    CHECK(PresetStore::NewProjectPreset().isEmpty());
+    // a mark on a file no menu reads: a line says so, nothing else checked
+    nlohmann::json newer = CardPresetJson("Новый", {{"intensity", 1}});
+    newer["schema"] = 2;
+    WritePreset(PresetStore::Path(PresetStore::Dir()) / "newer.json", newer);
+    PresetStore::SetNewProjectPreset("newer.json");
+    emit menu->aboutToShow();
+    for (QAction* a : menu->actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) mark = a->menu();
+    CHECK_FALSE(mark->actions()[0]->isChecked());
+    CHECK(mark->actions().last()->text().startsWith(QString::fromUtf8("newer.json — не читается")));
+    CHECK(mark->actions().last()->isChecked());
+    QSettings().remove("presets/newProject");
     // a stage switched off still takes a preset
     model.setStageEnabled("nr", false);
     nr.refresh();
@@ -3031,4 +3096,13 @@ TEST_CASE("ProjectPanel pipeline preset screenshots for a merge request", "[.sho
     REQUIRE(menu->grab().save(file));
     std::printf("saved %s\n", file.toStdString().c_str());
     QSettings().remove("presets/newProject");
+}
+
+// Review of PR-9: an empty text value (flow.target "" = the default) read as nothing before the arrow
+TEST_CASE("ParamText: a change of a text key from or to its empty default reads as the default", "[app][presets][regression]") {
+    App();
+    const QString t = ChangeText("flow", ParamChange{"target", "", "1920x1080", "ofa", "ofa"});
+    INFO(t.toStdString());
+    CHECK(t == QString::fromUtf8("Целевое разрешение mv_dlss (WxH) по умолчанию → 1920x1080"));
+    CHECK(ChangeText("flow", ParamChange{"target", "1920x1080", "", "ofa", "ofa"}).endsWith(QString::fromUtf8("→ по умолчанию")));
 }

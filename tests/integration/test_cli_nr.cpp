@@ -498,14 +498,14 @@ TEST_CASE("dlssvid nr --params-file takes a dlssvid-preset: engineer and unknown
     cardStages["nr"] = {{"params", {{"intensity", 0.5}, {"local_tone", 0.3}, {"temporal", 0.4}, {"format", "png"}, {"foo", 1}}}};
     const std::string card = file("card.json", preset("stage", cardStages));
     {
-        const CliResult r = run("card", {"--backend", "stub", "--params-file", card, "--temporal", "0.2"});
+        const CliResult r = run("card_run", {"--backend", "stub", "--params-file", card, "--temporal", "0.2"});
         INFO(r.out);
         REQUIRE(r.code == 0);
         CHECK(r.out.find("nr.format is an engineer key") != std::string::npos);
         CHECK(r.out.find("nr.foo is not a setting of this dlssvid") != std::string::npos);
-        const Manifest m = Manifest::Load(dir / "card" / "color_nr");
+        const Manifest m = Manifest::Load(dir / "card_run" / "color_nr");
         CHECK(m.format == FileFormat::Exr);  // the preset's png is not taken: --format's default
-        const nlohmann::json p = ReadJson(dir / "card.json")["params"];
+        const nlohmann::json p = ReadJson(dir / "card_run.json")["params"];
         CHECK(p["intensity"] == 0.5);
         CHECK(p["local_tone"] == 0.3);
         CHECK(p["temporal"] == 0.2);  // the flag wins
@@ -514,14 +514,14 @@ TEST_CASE("dlssvid nr --params-file takes a dlssvid-preset: engineer and unknown
         nlohmann::json stages = nlohmann::json::object();
         stages["depth"] = {{"enabled", true}, {"params", {{"backend", "vda"}}}};
         stages["nr"] = {{"enabled", true}, {"params", {{"intensity", 0.6}, {"backend", "stub"}, {"format", "png"}}}};
-        const CliResult r = run("pipe", {"--params-file", file("pipe.json", preset("pipeline", stages))});
+        const CliResult r = run("pipe_run", {"--params-file", file("pipe.json", preset("pipeline", stages))});
         INFO(r.out);
         REQUIRE(r.code == 0);
         CHECK(r.out.find("only its nr settings are used here") != std::string::npos);
-        const Manifest m = Manifest::Load(dir / "pipe" / "color_nr");
+        const Manifest m = Manifest::Load(dir / "pipe_run" / "color_nr");
         CHECK(m.format == FileFormat::Png);  // a pipeline entry holds the pass format and the backend
         CHECK(m.stageParams["backend"] == "stub");
-        CHECK(ReadJson(dir / "pipe.json")["params"]["intensity"] == 0.6);
+        CHECK(ReadJson(dir / "pipe_run.json")["params"]["intensity"] == 0.6);
     }
     auto refused = [&](const char* name, const nlohmann::json& j, const char* says) {
         const CliResult r = run("bad", {"--backend", "stub", "--params-file", file(name, j)});

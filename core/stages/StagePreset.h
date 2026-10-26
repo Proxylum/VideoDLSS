@@ -90,6 +90,10 @@ bool IsPresetKey(const ParamSpec& spec, const std::string& backend, PresetScope 
 std::vector<std::string> PresetKeys(const std::string& stage, const std::string& backend, PresetScope scope);  // schema order
 // The keys the card's «Сбросить» returns to their defaults: the form's rows, not the backend - the method has its own ↺ (TASK-0046).
 bool CardResetKey(const ParamSpec& spec);
+// A key of the machine: a path (models_dir, python) or a size for its GPU memory (max_res, input_size, tile, fp32) - no preset holds it.
+// The other engineer keys without `tuning` (scenes.backend: one method) are left out of presets as nothing to choose.
+bool IsMachineKey(const ParamSpec& spec);
+inline constexpr int kPresetMaxDepth = 64;  // JSON nesting a preset or a settings file may have (a preset needs 4)
 
 // semantics. scope: Stage - a card preset, Pipeline - a pipeline preset's entry of the stage.
 // The preset's keys of the current settings with their effective values (defaults written out), canonical.

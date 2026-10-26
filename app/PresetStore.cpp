@@ -31,15 +31,25 @@ const ParamSpec* SpecOf(const std::string& stage, const std::string& key) {
 
 QString Num(double d) { return QLocale().toString(d, 'g', 9); }
 
-// a name cut to kPresetNameMax code points with «…»
-std::string CutName(const std::string& s) {
+// a name cut to `limit` code points with «…»
+std::string CutName(const std::string& s, size_t limit = kPresetNameMax) {
     size_t points = 0;
     for (const unsigned char c : s) points += (c & 0xC0) != 0x80;
-    if (points <= kPresetNameMax) return s;
+    if (points <= limit) return s;
     size_t i = 0, seen = 0;
     for (; i < s.size(); ++i)
-        if ((static_cast<unsigned char>(s[i]) & 0xC0) != 0x80 && seen++ == kPresetNameMax - 1) break;
+        if ((static_cast<unsigned char>(s[i]) & 0xC0) != 0x80 && seen++ == limit - 1) break;
     return s.substr(0, i) + "…";
+}
+
+// the first «<name> (n)» no preset of the scope has; the name is cut before the suffix, so a long one still gets it
+std::string FreeCopyName(const std::string& name, PresetScope scope) {
+    for (int n = 2; n < 10000; ++n) {
+        const std::string suffix = " (" + std::to_string(n) + ")";  // ASCII: bytes = code points
+        const std::string candidate = CutName(name, kPresetNameMax - suffix.size()) + suffix;
+        if (!PresetStore::FindByName(QString::fromStdString(candidate), scope)) return candidate;
+    }
+    return name;
 }
 
 QString ListText(const std::vector<std::string>& items, const char* sep) {
@@ -196,8 +206,10 @@ QString PresetStore::IssueText(const PresetIssue& i, bool withStage) {
         case K::UnknownKey: text = Tr("нет в этой версии: «%1»").arg(U(i.key)); break;
         case K::EngineerKey: {
             const ParamSpec* spec = SpecOf(st, i.key);
-            text = spec && spec->tuning ? Tr("инженерная настройка не входит в пресет карточки: %1").arg(label)
-                                        : Tr("настройки этой машины не входят в пресеты: %1").arg(label);
+            text = spec && spec->tuning   ? Tr("инженерная настройка не входит в пресет карточки: %1").arg(label)
+                   : spec && IsMachineKey(*spec) ? Tr("настройки этой машины не входят в пресеты: %1").arg(label)
+                   : spec && spec->advanced && spec->choices.size() <= 1 ? Tr("выбирать нечего — не входит в пресеты: %1").arg(label)
+                                                                       : Tr("инженерная настройка не входит в пресеты: %1").arg(label);
             break;
         }
         case K::MovedKey: {
@@ -223,9 +235,10 @@ QString PresetStore::IssueText(const PresetIssue& i, bool withStage) {
             for (const auto& s : i.stages) titles << QString::fromUtf8("«%1»").arg(StageName(s));
             return Tr("настройки стадий %1 здесь не применяются").arg(titles.join(", "));
         }
-        case K::PipelineFields:
-            return st.empty() ? Tr("включение и кодирование в пресете карточки не хранятся — пропущено")
-                              : Tr("здесь применяются только настройки «%1»: остальные стадии, включение и кодирование пропущены").arg(StageNameGenitive(st));
+        case K::PipelineFields:  // a card preset's enabled / encode carry the key; a pipeline preset read for one stage does not
+            return st.empty() || !i.key.empty()
+                       ? Tr("включение и кодирование в пресете карточки не хранятся — пропущено")
+                       : Tr("здесь применяются только настройки «%1»: остальные стадии, включение и кодирование пропущены").arg(StageNameGenitive(st));
         case K::MissingStage: return Tr("в пресете нет «%1» — оставлены текущие настройки").arg(StageNameGenitive(st));
         case K::NoEncode: return Tr("в пресете нет кодирования — оставлено текущее");
         case K::EncodeField:
@@ -279,7 +292,7 @@ PresetStore::Result PresetStore::Import(const std::string& target, const QString
     Result r;
     const bool pipeline = target == kPipelineTarget;
     const PresetLoad l = LoadPreset(Path(from), pipeline ? std::string() : target);
-    if (pipeline && l.scopeKnown && l.preset.scope == PresetScope::Stage) {
+    if (pipeline && l.scopeKnown && l.preset.scope == PresetScope::Stage && !l.preset.stage().empty()) {  // else the reason below
         r.problems << Tr("Это пресет карточки «%1» — импортируйте его в её меню «Пресет ▾».").arg(StageName(l.preset.stage()));
         return r;
     }
@@ -300,7 +313,13 @@ PresetStore::Result PresetStore::Import(const std::string& target, const QString
             return r;
         }
         p = c.preset;
-        notes.clear();  // the pipeline's switches and other stages are said by the message
+        // the pipeline's switches, other stages and fields are said by the message; the notes of the NR entry's own keys stay
+        notes.erase(std::remove_if(notes.begin(), notes.end(),
+                                   [](const PresetIssue& i) {
+                                       return i.kind == PresetIssueKind::OtherStages || i.kind == PresetIssueKind::PipelineFields ||
+                                              i.kind == PresetIssueKind::UnknownStage || i.kind == PresetIssueKind::UnknownField;
+                                   }),
+                    notes.end());
         notes.insert(notes.end(), c.issues.begin(), c.issues.end());
         r.message = Tr("Из пресета обработки «%1» взяты настройки «%2».").arg(U(p.name), StageNameGenitive(target));
     }
@@ -314,15 +333,10 @@ PresetStore::Result PresetStore::Import(const std::string& target, const QString
             r.exists = true;
             r.name = U(name);
             r.file = *taken;
+            r.copyName = U(FreeCopyName(name, p.scope));  // the button names what «as a copy» will save
             return r;
         }
-        for (int n = 2; n < 10000; ++n) {
-            const std::string candidate = CutName(name + " (" + std::to_string(n) + ")");
-            if (!FindByName(U(candidate), p.scope)) {
-                name = candidate;
-                break;
-            }
-        }
+        name = FreeCopyName(name, p.scope);
     }
     p.name = name;
     try {

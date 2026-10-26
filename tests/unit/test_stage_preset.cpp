@@ -2,6 +2,7 @@
 // how a card is reset, and the folder of presets.
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <cstdio>
 #include <filesystem>
@@ -652,4 +653,43 @@ TEST_CASE("PresetLibrary: lists by scope, the pipeline slot, one name in both sc
     CHECK(Count(strict, Kind::BadValue) == 2);
     CHECK_THROWS_AS(SavePreset(dir / "export.json", snap), PresetError);  // an export is strict
     CHECK_FALSE(std::filesystem::exists(dir / "export.json"));
+}
+
+// Review of PR-9: the parser of nlohmann is iterative, copying and dumping a value are not - a file nested 100 000 deep in its 1 MiB
+// overflowed the stack when a menu listed the folder. The read refuses it as a broken file.
+TEST_CASE("Preset files nested too deep are refused as broken, without a crash", "[unit][presets][regression]") {
+    const auto dir = Dir("deep");
+    const std::string deep = std::string(100000, '[') + std::string(100000, ']');
+    const auto file = WriteText(dir / "deep.json", R"({"format":"dlssvid-preset","schema":)" + deep + R"(,"scope":"stage"})");
+    const PresetLoad l = LoadPreset(file);
+    REQUIRE(l.Has(Kind::NotJson));
+    CHECK(l.issues.front().text.find("nested deeper than") != std::string::npos);
+    CHECK_THROWS_WITH(ReadStageParamsFile("nr", file), Catch::Matchers::ContainsSubstring("nested deeper than"));
+    const auto params = WriteText(dir / "params.json", R"({"intensity":)" + deep + "}");
+    CHECK_THROWS_WITH(ReadStageParamsFile("nr", params), Catch::Matchers::ContainsSubstring("nested deeper than"));
+    const PresetLibrary lib(dir);
+    CHECK(lib.List(PresetScope::Stage, "nr").refused.size() == 2);
+    // a real preset is far from the limit
+    CHECK(LoadPreset(WriteText(dir / "ok.json", PipelineJson().dump())).ok());
+}
+
+// Review of PR-9: scenes.backend is an engineer key without `tuning` because there is nothing to choose, not a key of the machine
+TEST_CASE("Pipeline preset: a key with one choice is dropped as nothing to choose, not as a key of the machine", "[unit][presets][regression]") {
+    json j = PipelineJson();
+    j["stages"]["scenes"]["params"]["backend"] = "luma";
+    j["stages"]["depth"]["params"]["max_res"] = 720;
+    const PresetLoad l = ValidatePreset(j);
+    REQUIRE(l.ok());
+    for (const auto& i : l.issues) {
+        if (i.kind != Kind::EngineerKey) continue;
+        INFO(i.text);
+        if (i.key == "backend") CHECK(i.text == "scenes.backend is not a preset setting (nothing to choose) - dropped");
+        if (i.key == "max_res") CHECK(i.text.find("bound to the machine") != std::string::npos);
+    }
+    CHECK(Count(l, Kind::EngineerKey) == 2);
+    CHECK(IsMachineKey(*FindStageSchema("depth")->Find("max_res")));
+    CHECK(IsMachineKey(*FindStageSchema("upscale")->Find("models_dir")));
+    CHECK_FALSE(IsMachineKey(*FindStageSchema("scenes")->Find("backend")));
+    CHECK_FALSE(IsMachineKey(*FindStageSchema("nr")->Find("format")));
+    CHECK_FALSE(IsMachineKey(*FindStageSchema("nr")->Find("intensity")));
 }

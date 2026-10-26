@@ -126,10 +126,17 @@ QString PresetMenu::preview(const Preset& preset, QString* statusLine) const {
 }
 
 void PresetMenu::rebuild() {
+    // clear() keeps the submenus addMenu made (their actions belong to them): the old «Экспорт», «Удалить», «Для новых проектов» go here
+    for (QMenu* m : findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly)) delete m;
     clear();
     const bool pipe = pipeline();
     const PresetStore::Listing l = PresetStore::List(target_);
-    const QString mark = PresetStore::NewProjectPreset();
+    QString mark = PresetStore::NewProjectPreset();
+    std::error_code ec;
+    if (!mark.isEmpty() && !std::filesystem::is_regular_file(PresetStore::Path(PresetStore::Dir()) / PresetStore::Path(mark), ec)) {
+        PresetStore::SetNewProjectPreset({});  // the file is gone: new projects get the built-in defaults, as openVideo would say
+        mark.clear();
+    }
     auto isMark = [&](const QString& file) { return !mark.isEmpty() && QFileInfo(file).fileName().compare(mark, Qt::CaseInsensitive) == 0; };
     auto describe = [&](QAction* a, const PresetStore::Listed& item) {
         QString status;
@@ -203,6 +210,13 @@ void PresetMenu::rebuild() {
         connect(a, &QAction::triggered, this, [this, file] { markForNewProjects(file); });
     }
     const OtherMark other = MarkOfOtherKind(pipe, markText());
+    if (!mark.isEmpty() && other.item.isEmpty() && !group->checkedAction()) {  // marked, but a file no menu reads
+        QAction* broken = mk->addAction(tr("%1 — не читается: новые проекты получат встроенные умолчания").arg(Escaped(mark)));
+        broken->setCheckable(true);
+        broken->setChecked(true);
+        broken->setEnabled(false);
+        group->addAction(broken);
+    }
     if (!other.item.isEmpty()) {
         QAction* o = mk->addAction(Escaped(other.item));
         o->setCheckable(true);
@@ -268,7 +282,7 @@ void PresetMenu::importFile() {
     model_.rememberDir("preset", file);
     PresetStore::Result r = PresetStore::Import(target_, file);
     if (r.exists) {
-        switch (dialogs_.clash(dialogParent(), r.name, r.name + " (2)")) {
+        switch (dialogs_.clash(dialogParent(), r.name, r.copyName)) {
             case PresetDialogs::Clash::Replace: r = PresetStore::Import(target_, file, r.file); break;
             case PresetDialogs::Clash::Copy: r = PresetStore::Import(target_, file, {}, true); break;
             case PresetDialogs::Clash::Cancel: return;
