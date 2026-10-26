@@ -185,6 +185,7 @@ void VideoEncoder::Open() {
     const std::string container = fmt_->oformat->name ? fmt_->oformat->name : "";
     if (codec_->codec_id == AV_CODEC_ID_HEVC && (container == "mp4" || container == "mov")) videoStream_->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
 
+    for (const auto& [k, v] : options_.metadata) av_dict_set(&fmt_->metadata, k.c_str(), v.c_str(), 0);
     const std::string url = path_.string();
     if (!(fmt_->oformat->flags & AVFMT_NOFILE)) {
         CheckAv(avio_open(&fmt_->pb, url.c_str(), AVIO_FLAG_WRITE), "avio_open");

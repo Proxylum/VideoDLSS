@@ -148,7 +148,9 @@ void FgStage::Process(FrameContext& ctx) {
     if (colorReader_) {
         if (!colorReader_->HasFrame(frame.index)) Throw("fg: " + options_.colorDir.string() + " has no frame " + std::to_string(frame.index));
         cpuCur_ = colorReader_->ReadFrame(frame.index);
-        source = "pass";
+        std::filesystem::path dir = options_.colorDir;  // which pass: the settings note follows it (PR-11); «color_nr\» has no filename
+        if (!dir.has_filename()) dir = dir.parent_path();
+        source = "pass:" + dir.filename().string();
     } else if (options_.useCachePasses && slot && slot->passes.count("color_nr") && slot->passes.at("color_nr").texture) {
         cpuCur_ = ctx.cache.DownloadPass(*slot, "color_nr");
         source = "slot:color_nr";

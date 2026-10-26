@@ -50,6 +50,7 @@ struct ProcessOptions {
     bool passthrough = false;          // stage 0 behaviour: decode -> GPU -> encode, no stages
     bool gpuRoundtrip = true;          // passthrough: upload / readback each frame
     int keepVersions = 2;              // pass versions kept per pass after the run, the current one included; 0 = keep all
+    bool settingsNote = true;          // the result carries what made it (PR-11, SettingsNote): `comment`, in .mkv also DLSSVID_SETTINGS
     std::set<std::string> forceStages;  // recompute these stages even when their pass matches (a per-stage --no-skip-existing)
     std::string sourceHash;             // "sha256:<hex>" of the input when the caller knows it (Project::SourceHash); empty = hash the file
     uint64_t vramBytes = 0;             // GPU memory for the VRAM advice of the plan (TASK-0039); 0: RunProcess takes the device's, a
@@ -161,6 +162,7 @@ struct EncodeSettings {
     std::string codec = "h264_nvenc";
     std::map<std::string, std::string> codecOptions;
     OutputFormatRequest format;
+    std::map<std::string, std::string> metadata;  // container tags (the settings note, PR-11)
 };
 struct EncodeReport {
     int64_t frames = 0;

@@ -38,6 +38,9 @@ public:
         Rational frameRate;                               // required
         Rational timeBase;                                // pts units for WriteFrame; defaults to 1/frameRate
         ColorTags color;                                  // stream colour tags (none by default)
+        // container (global) metadata, written with the header: `comment` in every container; a custom key only where the muxer keeps
+        // it (Matroska tags; mp4 / mov keep the well-known keys) - PR-11, the settings note
+        std::map<std::string, std::string> metadata;
     };
 
     VideoEncoder(const std::filesystem::path& path, const FrameDesc& frameDesc, const Options& options);

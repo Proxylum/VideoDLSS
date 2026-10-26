@@ -62,7 +62,7 @@ public:
         double msSum = 0.0;     // backend time per real frame
         double MeanMs() const { return frames ? msSum / static_cast<double>(frames) : 0.0; }
         uint32_t width = 0, height = 0;
-        std::string backend, colorSource;
+        std::string backend, colorSource;  // colorSource: pass:<folder> | slot:color_nr | slot:color_sr | video
         int multiplier = 0;
         bool depthUsed = false, mvUsed = false;
         bool disabled = false;

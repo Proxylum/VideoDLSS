@@ -395,6 +395,7 @@ dlssvid process -i input.mp4 -o result.mp4 --no-skip-existing --disable-unavaila
 dlssvid process --project clip.dlssvid.json --plan [--json plan.json]                 :: what would run or be reused and why (fingerprints, versions) — nothing is processed
 dlssvid process -i input.mp4 -o result.mp4 --param nr.intensity=1.4 --keep-versions 3 :: only nr, fg and the encode rerun; the old color_nr / color_fg stay as versions (default keep: 2)
 dlssvid process --project clip.dlssvid.json --force nr,fg                            :: recompute these stages in place even when their passes match; parameters are validated first
+dlssvid process --project clip.dlssvid.json --no-settings-note                      :: no settings note in the result (by default its comment tag says what made it: dlssvid info result.mp4)
 dlssvid passes list --passes result_passes [--pass color_nr] [--json list.json]       :: every pass: the current version and the previous ones (fingerprint, parameters, size)
 dlssvid passes use color_nr 20260922-140200 --passes result_passes                   :: switch a pass (or a whole stage: nr) to a previous version; the current one is kept
 dlssvid passes gc --project clip.dlssvid.json [--keep 2] [--dry-run]                  :: drop old versions beyond the newest N per pass (versions other passes list as inputs stay)

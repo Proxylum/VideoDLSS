@@ -37,6 +37,7 @@ struct Project {
     std::string codec = "h264_nvenc";               // the result's encoder (`process` uses it unless the CLI says otherwise)
     std::map<std::string, std::string> codecOptions;  // encoder private options (b=50M, preset=p5 ...)
     OutputFormatRequest outputFormat;                 // the result's bit depth and chroma (auto: the source's, within the codec)
+    bool settingsNote = true;                         // encode.settings_note: the result carries what made it (PR-11)
     // Source hash cache (stage 9, MR D): the hash is recomputed only when the file's size or time changed.
     std::string sourceHash;   // "sha256:<hex>" of sourceVideo as last seen
     uint64_t sourceSize = 0;

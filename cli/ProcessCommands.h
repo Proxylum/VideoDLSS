@@ -35,6 +35,7 @@ public:
         bool plan = false;         // decide and print what would run / be reused, then exit
         std::string force;         // comma list of stages to recompute even when their pass matches
         bool codecGiven = false;   // --codec on the command line (else the project's encoder)
+        bool noSettingsNote = false;  // PR-11: no settings note in the result (else the project's encode.settings_note, on by default)
         int keepVersions = -1;     // -1: the project's pass_versions_keep or 2
         std::string json;
         // hidden: FG runs in its own process unless --fg-in-process (debugging); hooks of the isolation tests

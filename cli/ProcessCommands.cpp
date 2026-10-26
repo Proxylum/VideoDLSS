@@ -51,7 +51,7 @@ void BuildStages(const std::string& projectFile, const std::string& stageList, c
                  const std::string& flowBackend, const std::string& upscaleBackend, const std::string& nrBackend, const std::string& fgBackend, double scale,
                  int multiplier, ProcessOptions& o, std::filesystem::path* projectInput, std::filesystem::path* projectPasses, std::filesystem::path* projectResult,
                  int* projectKeep = nullptr, std::string* projectCodec = nullptr, std::map<std::string, std::string>* projectCodecOptions = nullptr,
-                 OutputFormatRequest* projectFormat = nullptr) {
+                 OutputFormatRequest* projectFormat = nullptr, bool* projectSettingsNote = nullptr) {
     if (!projectFile.empty()) {
         Project p = Project::Load(projectFile);
         o.stages = StagesFromProject(p);
@@ -64,6 +64,7 @@ void BuildStages(const std::string& projectFile, const std::string& stageList, c
         if (projectCodec) *projectCodec = p.codec;
         if (projectCodecOptions) *projectCodecOptions = p.codecOptions;
         if (projectFormat) *projectFormat = p.outputFormat;
+        if (projectSettingsNote) *projectSettingsNote = p.settingsNote;
     } else {
         o.stages = DefaultProcessStages();
     }
@@ -132,8 +133,10 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     std::string projectCodec;
     std::map<std::string, std::string> projectCodecOptions;
     OutputFormatRequest projectFormat;
+    bool projectSettingsNote = true;
     BuildStages(a.project, a.stages, a.params, a.depthBackend, a.flowBackend, a.upscaleBackend, a.nrBackend, a.fgBackend, a.scale, a.multiplier, o, &projectInput,
-                &projectPasses, &projectResult, &projectKeep, &projectCodec, &projectCodecOptions, &projectFormat);
+                &projectPasses, &projectResult, &projectKeep, &projectCodec, &projectCodecOptions, &projectFormat, &projectSettingsNote);
+    o.settingsNote = projectSettingsNote && !a.noSettingsNote;
     o.keepVersions = a.keepVersions >= 0 ? a.keepVersions : (projectKeep >= 0 ? projectKeep : 2);
     for (const auto& name : Split(a.force, ',')) o.forceStages.insert(name);
     o.input = !a.input.empty() ? std::filesystem::path(a.input) : projectInput;
@@ -264,6 +267,8 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_option("--scale", pa_.scale, "upscale factor 1.5 | 2 | 3");
     process_->add_option("--multiplier", pa_.multiplier, "frame generation multiplier 2 | 3 | 4");
     process_->add_flag("--no-skip-existing,--no_skip_existing", pa_.noSkipExisting, "recompute every stage even when its pass is complete");
+    process_->add_flag("--no-settings-note,--no_settings_note", pa_.noSettingsNote,
+                       "do not write the settings note (what made the result: the comment tag, in .mkv also DLSSVID_SETTINGS) into the result");
     process_->add_flag("--disable-unavailable,--disable_unavailable", pa_.disableUnavailable,
                        "nr / fg without DLL or GPU, or an fg process that fails: skip the stage (fg: encode color_nr) instead of failing");
     process_->add_option("--codec", pa_.codec, "video encoder: h264_nvenc | hevc_nvenc | av1_nvenc | prores_ks | ffv1 (default: the project's, else h264_nvenc)")

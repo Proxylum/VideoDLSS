@@ -9,6 +9,12 @@
 
 namespace dlssvid {
 
+std::string LegacyPassId(const Manifest& m) {
+    std::string id = "legacy:" + m.sourceHash + ":" + std::to_string(m.frameCount);
+    if (m.IsYUpMv()) id += ":y_up";
+    return id;
+}
+
 namespace {
 
 constexpr const char* kHistorySuffix = ".v";

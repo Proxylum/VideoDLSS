@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <string>
 
 #include "gpu/GpuFrame.h"
@@ -68,6 +69,10 @@ FrameDesc DecodedFrameDescFor(const std::string& pixelFormat);
 // and software decoding agree bit for bit). With HwAccel::Cuda the stream is decoded by NVDEC; an NV12 frame stays in
 // CUDA memory (primary context) and is exposed as a GpuFrame, and the CPU copy is made only when asked for (bit-exact
 // NV12 -> YUV420P). Audio packets are handed to the sink untouched for stream copy.
+// The container's global metadata (tags) of a media file, keys lower-cased (Matroska stores COMMENT): `comment`, `dlssvid_settings`
+// (PR-11). Throws when the file cannot be opened.
+std::map<std::string, std::string> ReadContainerTags(const std::filesystem::path& path);
+
 class VideoDecoder {
 public:
     struct Options {

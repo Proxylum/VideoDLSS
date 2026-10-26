@@ -544,6 +544,13 @@ dlssvid process ── ProcessRunner::RunProcess ── depth ─▶ flow ─▶
 - `EncodePassToVideo`: кадры пасса с его fps; источник декодируется параллельно только ради аудио-пакетов
   (`SetAudioPacketSink` → `WriteAudioPacket`), `mult = round(passFps / sourceFps)` кадров пасса на кадр источника —
   видео и аудио пишутся вперемежку. Без цветовых стадий — passthrough (этап 0).
+- **Заметка о настройках (PR-11).** `pipeline/SettingsNote` собирает из манифестов цепочки пассов результата — от
+  кодируемого пасса назад по `color_source` стадий (`color_fg` ← `color_nr` ← `color_sr`) — их `stageParams`, записанные
+  самими стадиями по прогону (`paramsCanonical` усыновлённого пасса — параметры проекта, а не то, что запускалось), и
+  пишет её в контейнер через `VideoEncoder::Options::metadata`: `comment` — одна ASCII-строка до 1 КБ, в `.mkv` ещё
+  `DLSSVID_SETTINGS` — компактный JSON. Только имена и числа: путей нет. Усыновлённый пасс помечен `(adopted)`
+  (`stage_params.adopted` ставит `StampPass`). Выключается `encode.settings_note: false` в проекте или
+  `process --no-settings-note`; в passthrough заметки нет; на отпечатки не влияет. `dlssvid info` печатает оба тега.
 - **Разрядность и цветность (TASK-0034).** `CpuFrame` хранит кадр в собственной раскладке источника: `PixelFormat`
   yuv420p / yuv422p / yuv444p (8 бит) и их 16-битные варианты с `FrameDesc::bitDepth` 10 / 12 / 16 (слова LSB-aligned, как
   `yuv4xxp10le` FFmpeg). `VideoDecoder::ConvertFrame` копирует планарные YUV-кадры как есть (альфа отбрасывается), 16-битные

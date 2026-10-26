@@ -10,6 +10,8 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <optional>
 
@@ -82,6 +84,21 @@ FrameDesc DecodedFrameDescFor(const std::string& pixelFormat) {
         if (const auto lay = NativeLayoutFor(fmt, d ? d->comp[0].depth : 8)) return lay->desc;
     }
     return FrameDesc{0, 0, PixelFormat::Yuv420p, 8};
+}
+
+std::map<std::string, std::string> ReadContainerTags(const std::filesystem::path& path) {
+    AVFormatContext* fmt = nullptr;
+    const std::string url = path.string();
+    CheckAv(avformat_open_input(&fmt, url.c_str(), nullptr, nullptr), "avformat_open_input");
+    std::map<std::string, std::string> tags;
+    const AVDictionaryEntry* e = nullptr;
+    while ((e = av_dict_iterate(fmt->metadata, e))) {
+        std::string key = e->key;  // Matroska stores COMMENT, mp4 / mov comment: one spelling for the callers
+        std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        tags[key] = e->value;
+    }
+    avformat_close_input(&fmt);
+    return tags;
 }
 
 KeyframeScan ScanKeyframes(const std::filesystem::path& path) {

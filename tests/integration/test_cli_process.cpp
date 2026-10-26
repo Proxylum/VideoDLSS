@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "TestClips.h"
+#include "io/VideoDecoder.h"
 #include "passes/Manifest.h"
 #include "passes/PassSequence.h"
 #include "util/Subprocess.h"
@@ -79,6 +80,23 @@ TEST_CASE("dlssvid process --project runs the saved stages and encodes the resul
     CHECK(j["audio"] == true);
     CHECK(j["stages"].size() == 6);
     CHECK(std::filesystem::exists(dir / "passes" / "color_fg" / Manifest::kFileName));
+    // PR-11: the result says what made it - the comment in every container, the JSON in Matroska; dlssvid info prints both
+    {
+        const auto tags = ReadContainerTags(dir / "result.mkv");
+        REQUIRE(tags.count("comment"));
+        const std::string note = tags.at("comment");
+        CHECK(note.rfind("VideoDLSS ", 0) == 0);
+        CHECK(note.find("| upscale: nis x2") != std::string::npos);
+        CHECK(note.find("| nr: stub") != std::string::npos);
+        CHECK(note.find("| fg: blend x2") != std::string::npos);
+        CHECK(note.find(dir.string()) == std::string::npos);
+        REQUIRE(tags.count("dlssvid_settings"));
+        CHECK(nlohmann::json::parse(tags.at("dlssvid_settings"))["stages"]["nr"]["backend"] == "stub");
+        const CliResult info = RunCli({"info", (dir / "result.mkv").string(), "--warp"});
+        CHECK(info.code == 0);
+        CHECK(info.out.find("comment:     VideoDLSS ") != std::string::npos);
+        CHECK(info.out.find("settings:    {") != std::string::npos);
+    }
     // the same project again: passes reused
     const CliResult again = RunCli({"process", "--project", (dir / "clip.dlssvid.json").string(), "--warp", "--codec", "ffv1", "--json", json.string()});
     CHECK(again.code == 0);
@@ -90,6 +108,21 @@ TEST_CASE("dlssvid process --project runs the saved stages and encodes the resul
                                  "--no-skip-existing", "--frames", "3"});
     CHECK(x3.code == 0);
     CHECK(DecodeAll(dir / "x3.mkv").size() == 7);
+    CHECK(ReadContainerTags(dir / "x3.mkv").at("comment").find("| fg: blend x3") != std::string::npos);  // what ran, not the project
+    // --no-settings-note, and encode.settings_note false in the project: none
+    CHECK(RunCli({"process", "--project", (dir / "clip.dlssvid.json").string(), "-o", (dir / "plain.mkv").string(), "--warp", "--codec", "ffv1",
+                  "--no-settings-note"}).code == 0);
+    CHECK_FALSE(ReadContainerTags(dir / "plain.mkv").count("comment"));
+    CHECK_FALSE(ReadContainerTags(dir / "plain.mkv").count("dlssvid_settings"));
+    p.settingsNote = false;
+    p.Save(dir / "quiet.dlssvid.json");
+    CHECK(RunCli({"process", "--project", (dir / "quiet.dlssvid.json").string(), "-o", (dir / "quiet.mkv").string(), "--warp", "--codec", "ffv1"}).code == 0);
+    CHECK_FALSE(ReadContainerTags(dir / "quiet.mkv").count("comment"));
+    // MOV (ProRes): the comment the mov muxer keeps (spec §2g: «по факту теста»); no Matroska JSON there
+    CHECK(RunCli({"process", "--project", (dir / "clip.dlssvid.json").string(), "-o", (dir / "result.mov").string(), "--warp", "--codec", "prores_ks"}).code == 0);
+    const auto mov = ReadContainerTags(dir / "result.mov");
+    CHECK(mov.count("comment"));
+    CHECK_FALSE(mov.count("dlssvid_settings"));
     // bad spec / unknown stage
     CHECK(RunCli({"process", "-i", clip.string(), "-o", (dir / "bad.mkv").string(), "--warp", "--stages", "bogus"}).code != 0);
     CHECK(RunCli({"process", "-i", clip.string(), "-o", (dir / "bad2.mkv").string(), "--warp", "--param", "nr=1"}).code != 0);

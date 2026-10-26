@@ -201,6 +201,19 @@ F…L: их называет `frame_range`, а `stage_params.range = {first, las
 действует только на этот прогон: манифест не меняется, CLI предупреждает. При импорте проверяются разрешение, число кадров и
 непрерывность нумерации — несовпадение перечисляется в ошибке.
 
+### 6.1. Заметка о настройках в результате (PR-11)
+
+Результат `dlssvid process` несёт в метаданных контейнера, что его сделало:
+- `comment` (все контейнеры; mkv, mp4, mov): `VideoDLSS <версия> | upscale: dlss x2 quality=… | nr: ngx style=natural
+  intensity=1.2 passes=1 … scene_cut=0.24 cuts=3 … | fg: dlssg x2` — одна ASCII-строка до 1 КБ, только стадии цепочки
+  кодируемого пасса, значения из их `stage_params`; усыновлённый пасс — `(adopted)`, обход модели NR — `(no model)`;
+- `DLSSVID_SETTINGS` (только Matroska): `{"app": "VideoDLSS <версия>", "stages": {"upscale": {…}, "nr": {…}, "fg": {…}}}`.
+
+`ReadContainerTags` (и `dlssvid info`) отдаёт ключи в нижнем регистре: Matroska хранит `COMMENT`. Цепочку стадий заметка
+берёт из `stage_params.color_source`: у FG — `pass:<папка>`, `slot:color_nr`, `slot:color_sr` или `video`.
+
+Путей машины в заметке нет. Ключ проекта `encode.settings_note` (по умолчанию `true`), в CLI — `process --no-settings-note`.
+
 ## 7. CLI
 
 ```

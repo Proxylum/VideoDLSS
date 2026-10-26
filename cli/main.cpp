@@ -143,6 +143,9 @@ int CmdInfo(const std::string& input, bool warp) {
     std::printf("frames:      %lld%s\n", static_cast<long long>(i.frameCount), i.frameCount ? "" : " (unknown)");
     std::printf("duration:    %.3f s\n", i.durationUs / 1e6);
     std::printf("audio:       %s\n", i.hasAudio ? i.audioCodecName.c_str() : "none");
+    const auto tags = ReadContainerTags(input);  // a dlssvid result says what made it (PR-11)
+    if (const auto it = tags.find("comment"); it != tags.end()) std::printf("comment:     %s\n", it->second.c_str());
+    if (const auto it = tags.find("dlssvid_settings"); it != tags.end()) std::printf("settings:    %s\n", it->second.c_str());
 
     D3D12Device device({warp, false});
     std::printf("d3d12:       %s%s, VRAM %llu MiB\n", device.AdapterName().c_str(), device.IsWarp() ? " [WARP]" : "",
