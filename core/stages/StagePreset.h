@@ -60,8 +60,9 @@ enum class PresetRead : uint8_t { Strict, Slot };
 struct PresetIssue {
     PresetIssueKind kind = PresetIssueKind::NotJson;
     std::string stage, key;               // stage "encode" for the encoder; key: the field (encode: codec | bit_depth | chroma | b)
-    std::string to;                       // MovedKey: where the key went
-    std::vector<std::string> stages;      // OtherStages: the stages left out
+    std::string to;                       // MovedKey: where the key went; ForeignKey of a stage: the backend; EncodeField: "options" for an option
+    std::string codec;                    // encode: the codec the value was checked against
+    std::vector<std::string> stages;      // OtherStages: the stages left out; BadScope of a card preset: the stages it has
     std::optional<ParamProblem> problem;  // BadValue / SlotValue of a stage
     nlohmann::json got;                   // the value (BadValue of encode, an engineer / unknown key)
     int schema = 0;                       // NewerSchema

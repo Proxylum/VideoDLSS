@@ -22,6 +22,7 @@
 #include <set>
 
 #include "AppModel.h"
+#include "ParamText.h"
 #include "Theme.h"
 #include "stages/ParamSchema.h"
 #include "stages/StagePreset.h"
@@ -58,17 +59,6 @@ int ChoiceIndex(const ParamSpec& spec, const nlohmann::json& value) {
         }
     }
     return -1;
-}
-
-// A value as the card's fields show it (the locale's decimal separator, the field's decimals, the suffix), for the
-// summary of «Ещё настройки» and the ↺ text; the special values and the lists keep their words (ParamValueLabel)
-QString CardValueLabel(const ParamSpec& spec, const nlohmann::json& v, const std::string& backend) {
-    if (v.is_number() && spec.choices.empty() && spec.formChoices.empty()) {
-        const double d = v.get<double>();
-        const bool special = (spec.sentinel && d == *spec.sentinel && !spec.sentinelLabel.empty()) || (!spec.zeroLabel.empty() && d == spec.min);
-        if (!special) return QLocale().toString(d, 'f', spec.type == ParamType::Int ? 0 : ParamDecimals(spec)) + QString::fromStdString(spec.suffix);
-    }
-    return QString::fromStdString(ParamValueLabel(spec, v, backend));
 }
 
 // A double click on a slider resets its row (spec §1.1: the mouse's extra way; ↺ and the label's menu are the others)
@@ -591,9 +581,8 @@ void StageCard::resetParam(const std::string& key) {
 
 void StageCard::resetCard() {
     if (!model_.stageEntry(stage_) || !schema_) return;
-    // the form's keys go; the backend and the keys of the JSON editor (format, ...) stay - setStageParams replaces the
-    // whole object, so ResetStageParams carries them over (TASK-0046)
-    model_.setStageParams(stage_, ResetStageParams(stage_, stageParams()));
+    // the form's keys go, the backend and the engineer keys stay (TASK-0046); a card with presets saves «Перед сбросом» first (PR-9)
+    model_.resetStageCard(stage_);
 }
 
 bool StageCard::changed(const ParamSpec& spec) const {

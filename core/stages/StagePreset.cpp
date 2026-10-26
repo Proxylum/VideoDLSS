@@ -207,12 +207,14 @@ std::string PresetNameProblem(const std::string& raw) {
 
 std::vector<PresetIssue> CheckEncodeSection(const nlohmann::json& encode, PresetEncode* out, PresetRead read) {
     std::vector<PresetIssue> issues;
+    PresetEncode e;
     auto add = [&](Kind k, const std::string& key, const J& got, std::string text) -> PresetIssue& {
         PresetIssue i;
         i.kind = k;
         i.stage = "encode";
         i.key = key;
         i.got = got;
+        i.codec = e.codec;
         i.text = std::move(text);
         issues.push_back(std::move(i));
         return issues.back();
@@ -222,7 +224,6 @@ std::vector<PresetIssue> CheckEncodeSection(const nlohmann::json& encode, Preset
         if (read == PresetRead::Slot) add(Kind::SlotValue, key, got, "the slot keeps a value with an error: " + text);
         else add(Kind::BadValue, key, got, text);
     };
-    PresetEncode e;
     if (!encode.is_object()) {
         add(Kind::BadStages, "", encode, "encode must be an object (codec, bit_depth, chroma, options)");
         if (out) *out = e;
@@ -272,7 +273,7 @@ std::vector<PresetIssue> CheckEncodeSection(const nlohmann::json& encode, Preset
         } else {
             for (const auto& [k, v] : opts.items()) {
                 if (k != "b") {
-                    add(Kind::EncodeField, k, v, "encode.options." + k + " is not a preset setting (the card has no row for it) - dropped");
+                    add(Kind::EncodeField, k, v, "encode.options." + k + " is not a preset setting (the card has no row for it) - dropped").to = "options";
                     continue;
                 }
                 if (caps && !(LossyCodec(e.codec) && HasBitrateControl(e.codec))) {
@@ -374,7 +375,7 @@ PresetLoad ValidatePreset(const nlohmann::json& j, const std::string& forStage, 
             return L;
         }
         if (names.size() > 1) {
-            add(Kind::BadScope, "a card preset (scope stage) holds exactly one stage, this one has " + Join(names));
+            add(Kind::BadScope, "a card preset (scope stage) holds exactly one stage, this one has " + Join(names)).stages = names;
             return L;
         }
         if (j.contains("encode")) add(Kind::PipelineFields, "a card preset holds no encode - dropped").key = "encode";

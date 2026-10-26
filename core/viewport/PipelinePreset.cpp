@@ -68,7 +68,8 @@ void ApplyPipelinePreset(Project& p, const Preset& preset, std::vector<PresetIss
                 i.stage = s;
                 i.key = k;
                 i.got = it->second.params.contains(k) ? it->second.params[k] : nlohmann::json();
-                i.text = s + "." + k + " does not apply to the backend " + StageBackend(s, e->params) + " - skipped";
+                i.to = StageBackend(s, e->params);
+                i.text = s + "." + k + " does not apply to the backend " + i.to + " - skipped";
                 notes->push_back(std::move(i));
             }
     }

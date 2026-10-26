@@ -7,11 +7,14 @@
 #include <algorithm>
 #include <cmath>
 
+#include "ParamText.h"
+#include "PresetStore.h"
 #include "SourceNames.h"
 #include "passes/ScenesPass.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "stages/ParamSchema.h"
+#include "stages/PresetLibrary.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "stages/nr/INrBackend.h"
 #include "stages/upscale/IUpscaler.h"
@@ -75,12 +78,13 @@ void AppModel::openVideo(const QString& file) {
         project_.file = std::filesystem::path(file.toStdWString()).replace_extension(".dlssvid.json");
         const bool loaded = std::filesystem::exists(project_.file);
         if (loaded) project_ = Project::Load(project_.file);
+        const QString seeded = loaded ? QString() : seedNewProject();  // before the first plan: it is made with those settings
         reloadSources();
         dirty_ = !loaded;  // a project made from the video is not on disk yet: it is saved next to the video on close
         emit dirtyChanged(dirty_);
         emit projectChanged();
         addRecent(file);
-        emit message(tr("Открыт %1").arg(file));
+        emit message(tr("Открыт %1").arg(file) + seeded);
     } catch (const std::exception& e) {
         emit message(tr("Ошибка: %1").arg(e.what()));
     }
@@ -1041,6 +1045,381 @@ void AppModel::setLastRun(double seconds) {
 AppModel::CloseAction AppModel::closeAction() const {
     if (!dirty_ || !hasProject()) return CloseAction::Nothing;
     return project_.file.empty() ? CloseAction::Ask : CloseAction::AutoSave;
+}
+
+// ---- presets (PR-9) --------------------------------------------------------------------------------
+
+namespace {
+
+nlohmann::json CanonEffective(const std::string& stage, const nlohmann::json& params) { return CanonicalizeJson(EffectiveStageParams(stage, params)); }
+
+// the notes of a read preset for a message: what was left out, and a slot's values with errors apart
+void SplitNotes(const std::vector<PresetIssue>& issues, QStringList* skipped, QStringList* slotErrors, bool withStage) {
+    for (const auto& i : issues) {
+        if (i.fatal() || i.kind == PresetIssueKind::MissingStage || i.kind == PresetIssueKind::NoEncode) continue;
+        const QString t = PresetStore::IssueText(i, withStage);
+        if (i.kind == PresetIssueKind::SlotValue) slotErrors->append(t);
+        else skipped->append(t);
+    }
+    skipped->removeDuplicates();
+    slotErrors->removeDuplicates();
+}
+
+std::string Utf8(const QString& s) { return s.toStdString(); }
+
+}  // namespace
+
+nlohmann::json AppModel::stageParamsOf(const std::string& stage) const {
+    for (const auto& s : project_.stages)
+        if (s.name == stage) return s.params;
+    return nlohmann::json::object();
+}
+
+AppModel::PresetResult AppModel::applyStagePreset(const std::string& stage, const QString& file, bool withoutBackup) {
+    PresetResult r;
+    if (!hasProject()) {
+        r.problems << tr("Нет проекта");
+        return r;
+    }
+    const PresetLibrary lib = PresetStore::Library();
+    const auto path = PresetStore::Path(file);
+    const PresetLoad l = LoadPreset(path, stage, lib.IsSlotFile(path) ? PresetRead::Slot : PresetRead::Strict);
+    r.name = QString::fromStdString(l.preset.name);
+    r.file = file;
+    if (l.scopeKnown && l.preset.scope == PresetScope::Pipeline) {
+        r.problems << tr("Это пресет обработки — он применяется из «Пресет обработки» в шапке «Стадии»");
+        return r;
+    }
+    if (!l.ok()) {
+        r.problems = PresetStore::IssueTexts(l.issues, true);
+        return r;
+    }
+    const nlohmann::json cur = stageParamsOf(stage);
+    std::vector<std::string> ignored;
+    const nlohmann::json next = ApplyPreset(stage, cur, l.preset.stages.at(stage).params, PresetScope::Stage, &ignored);
+    if (CanonEffective(stage, next) == CanonEffective(stage, cur)) {  // nothing to change: no slot, not dirty
+        r.ok = true;
+        r.message = tr("Настройки «%1» уже совпадают с «%2»").arg(StageNameGenitive(stage), r.name);
+        emit message(r.message);
+        return r;
+    }
+    if (!withoutBackup) {
+        try {
+            lib.SaveSlot(PresetSlot::BeforeApply, stage, MakePreset(PresetNameFor("Перед применением", project_.sourceVideo), stage, cur));
+        } catch (const std::exception& e) {
+            r.backupFailed = true;
+            r.problems << tr("Не удалось сохранить «Перед применением»: %1").arg(QString::fromUtf8(e.what()));
+            return r;
+        }
+    }
+    const auto changes = DiffStageParams(stage, cur, next, PresetScope::Stage);
+    setStageParams(stage, next);
+    refreshPlan();  // one event: the plan now, not after the sliders' timer
+    QStringList parts;
+    for (size_t i = 0; i < changes.size(); ++i) {
+        if (i == 3) {
+            parts << tr("ещё %1").arg(changes.size() - 3);
+            break;
+        }
+        parts << ChangeText(stage, changes[i]);
+    }
+    QString msg = tr("Пресет «%1» применён").arg(r.name);
+    if (!parts.isEmpty()) msg += ": " + parts.join(", ");
+    if (!withoutBackup) msg += tr(" · прежние — в «Перед применением»");
+    QStringList skipped, slotErrors;
+    SplitNotes(l.issues, &skipped, &slotErrors, false);
+    for (const auto& k : ignored) skipped << tr("%1 не относится к этому методу").arg(LabelOf(stage, k));
+    if (!skipped.isEmpty()) msg += tr(" · пропущено: %1").arg(skipped.join("; "));
+    if (!slotErrors.isEmpty()) msg += tr(" · в слоте были и ошибки: %1").arg(slotErrors.join("; "));
+    if (const StageEntry* e = stageEntry(stage); e && !e->enabled) msg += tr(" · стадия выключена");
+    r.ok = true;
+    r.notes = skipped + slotErrors;
+    r.message = msg;
+    emit message(msg);
+    return r;
+}
+
+AppModel::PresetResult AppModel::saveStagePreset(const std::string& stage, const QString& name, const QString& replacing, bool forNewProjects) {
+    PresetResult r;
+    if (!hasProject()) {
+        r.problems << tr("Нет проекта");
+        return r;
+    }
+    const std::string n = TrimPresetName(Utf8(name));
+    r.name = QString::fromStdString(n);
+    if (!PresetNameProblem(n).empty()) {
+        r.problems << tr("Имя пресета — от 1 до 120 символов, без управляющих.");
+        return r;
+    }
+    if (ReservedPresetName(n)) {
+        r.problems << tr("Так называются автосохранения — выберите другое имя");
+        return r;
+    }
+    if (replacing.isEmpty())
+        if (const auto taken = PresetStore::FindByName(r.name, PresetScope::Stage)) {
+            r.exists = true;
+            r.file = *taken;
+            return r;
+        }
+    const nlohmann::json cur = stageParamsOf(stage);
+    try {
+        const auto path = PresetStore::Library().Save(MakePreset(n, stage, cur), replacing.isEmpty() ? std::filesystem::path() : PresetStore::Path(replacing));
+        r.file = PresetStore::Text(path);
+    } catch (const PresetError& e) {
+        r.problems << tr("Текущие настройки содержат ошибку — исправьте её перед сохранением:");
+        r.problems << PresetStore::IssueTexts(e.issues, true);
+        return r;
+    } catch (const std::exception& e) {
+        r.problems << tr("Не удалось сохранить пресет: %1").arg(QString::fromUtf8(e.what()));
+        return r;
+    }
+    if (forNewProjects) PresetStore::SetNewProjectPreset(r.file);
+    if (const QString left = presetLeftOut(stage); !left.isEmpty()) r.notes << left;
+    r.ok = true;
+    r.message = tr("Пресет «%1» сохранён").arg(r.name) + (forNewProjects ? tr(" · для новых проектов") : QString());
+    emit message(r.message);
+    return r;
+}
+
+AppModel::PresetResult AppModel::resetStageCard(const std::string& stage, bool withoutBackup) {
+    PresetResult r;
+    const StageSchema* schema = FindStageSchema(stage);
+    if (!stageEntry(stage) || !schema) return r;
+    const nlohmann::json cur = stageParamsOf(stage);
+    // the form's keys go; the backend and the keys of the JSON editor (format, ...) stay - setStageParams replaces the whole object, so
+    // ResetStageParams carries them over (TASK-0046)
+    const nlohmann::json next = ResetStageParams(stage, cur);
+    r.ok = true;
+    if (CanonEffective(stage, next) == CanonEffective(stage, cur)) return r;  // nothing to reset: no slot
+    if (schema->cardPresets && !withoutBackup) {
+        try {
+            PresetStore::Library().SaveSlot(PresetSlot::BeforeReset, stage, MakePreset(PresetNameFor("Перед сбросом", project_.sourceVideo), stage, cur));
+        } catch (const std::exception& e) {
+            r.ok = false;
+            r.backupFailed = true;
+            r.problems << tr("Не удалось сохранить «Перед сбросом»: %1").arg(QString::fromUtf8(e.what()));
+            return r;
+        }
+    }
+    setStageParams(stage, next);
+    refreshPlan();
+    if (schema->cardPresets) {
+        r.message = tr("Настройки «%1» сброшены").arg(StageNameGenitive(stage)) + (withoutBackup ? QString() : tr(" · прежние — в «Перед сбросом»"));
+        emit message(r.message);
+    }
+    return r;
+}
+
+AppModel::PresetResult AppModel::exportCurrentStagePreset(const std::string& stage, const QString& to) {
+    PresetResult r;
+    if (!hasProject()) {
+        r.problems << tr("Нет проекта");
+        return r;
+    }
+    const Preset p = MakePreset(PresetNameFor(Utf8(StageName(stage)), project_.sourceVideo), stage, stageParamsOf(stage));
+    r.name = QString::fromStdString(p.name);
+    try {
+        SavePreset(PresetStore::Path(to), p);
+    } catch (const PresetError& e) {
+        r.problems << tr("Текущие настройки содержат ошибку — исправьте её перед сохранением:");
+        r.problems << PresetStore::IssueTexts(e.issues, true);
+        return r;
+    } catch (const std::exception& e) {
+        r.problems << tr("Не удалось записать файл: %1").arg(QString::fromUtf8(e.what()));
+        return r;
+    }
+    if (const QString left = presetLeftOut(stage); !left.isEmpty()) r.notes << left;
+    r.ok = true;
+    r.file = to;
+    r.message = tr("Пресет сохранён в %1").arg(QFileInfo(to).fileName());
+    emit message(r.message);
+    return r;
+}
+
+AppModel::PresetResult AppModel::applyPipelinePreset(const QString& file, bool withoutBackup) {
+    PresetResult r;
+    if (!hasProject()) {
+        r.problems << tr("Нет проекта");
+        return r;
+    }
+    const PresetLibrary lib = PresetStore::Library();
+    const auto path = PresetStore::Path(file);
+    const PresetLoad l = LoadPreset(path, {}, lib.IsSlotFile(path) ? PresetRead::Slot : PresetRead::Strict);
+    r.name = QString::fromStdString(l.preset.name);
+    r.file = file;
+    if (l.scopeKnown && l.preset.scope == PresetScope::Stage) {
+        r.problems << tr("Это пресет карточки «%1» — он применяется из её меню «Пресет ▾»").arg(StageName(l.preset.stage()));
+        return r;
+    }
+    if (!l.ok()) {
+        r.problems = PresetStore::IssueTexts(l.issues, true, true);
+        return r;
+    }
+    Project next = project_;  // one copy, every stage and the encoder at once: one projectChanged, one plan
+    std::vector<PresetIssue> notes = l.issues;
+    ApplyPipelinePreset(next, l.preset, &notes);
+    const PipelineDiff diff = DiffPipeline(project_, next);
+    if (diff.empty()) {
+        r.ok = true;
+        r.message = tr("Настройки обработки уже совпадают с «%1»").arg(r.name);
+        emit message(r.message);
+        return r;
+    }
+    if (!withoutBackup) {
+        try {
+            lib.SaveSlot(PresetSlot::BeforeApply, kPipelineTarget, MakePipelinePreset(PresetNameFor("Перед применением", project_.sourceVideo), project_));
+        } catch (const std::exception& e) {
+            r.backupFailed = true;
+            r.problems << tr("Не удалось сохранить «Перед применением»: %1").arg(QString::fromUtf8(e.what()));
+            return r;
+        }
+    }
+    const bool renamed = next.resultVideo != project_.resultVideo;
+    project_ = std::move(next);
+    markDirty();
+    emit projectChanged();
+    if (renamed) reloadSources();  // a result under the old name is no longer the project's; it plans too
+    else refreshPlan();
+    // the summary: up to four items, the full difference in the log
+    QStringList items;
+    for (const StageDiff& sd : diff.stages) {
+        QString t = StageName(sd.stage);
+        if (sd.enabledWas != sd.enabledNow) t += sd.enabledNow ? tr(" включена") : tr(" выключена");
+        if (sd.enabledWas == sd.enabledNow && sd.params.size() == 1) t += ": " + ChangeText(sd.stage, sd.params[0]);
+        else if (!sd.params.empty()) t += QString(" (%1)").arg(sd.params.size());
+        items << t;
+        Log()->info("{}", tr("Пресет обработки «%1»: %2: %3").arg(r.name, StageName(sd.stage), StageDiffText(sd, 1000)).toStdString());
+    }
+    if (!diff.encode.empty()) {
+        items << (diff.encode.size() == 1 ? tr("Кодирование: %1").arg(EncodeChangeText(diff.encode[0])) : tr("Кодирование (%1)").arg(diff.encode.size()));
+        QStringList enc;
+        for (const auto& c : diff.encode) enc << EncodeChangeText(c);
+        Log()->info("{}", tr("Пресет обработки «%1»: Кодирование: %2").arg(r.name, enc.join("; ")).toStdString());
+    }
+    if (items.size() > 4) {
+        const qsizetype more = items.size() - 4;
+        items = items.mid(0, 4);
+        items << tr("ещё %1").arg(more);
+    }
+    QString msg = tr("Пресет обработки «%1» применён: %2").arg(r.name, items.join(", "));
+    if (renamed) msg += tr(" · результат: %1").arg(QString::fromStdWString(project_.resultVideo.filename().wstring()));
+    msg += tr(" · подробности — в «Лог»");
+    if (!withoutBackup) msg += tr(" · прежние — в «Перед применением»");
+    QStringList skipped, slotErrors;
+    SplitNotes(notes, &skipped, &slotErrors, true);
+    if (!skipped.isEmpty()) msg += tr(" · пропущено: %1").arg(skipped.join("; "));
+    if (!slotErrors.isEmpty()) msg += tr(" · в слоте были и ошибки: %1").arg(slotErrors.join("; "));
+    r.ok = true;
+    r.notes = skipped + slotErrors;
+    r.message = msg;
+    emit message(msg);
+    return r;
+}
+
+AppModel::PresetResult AppModel::savePipelinePreset(const QString& name, const QString& replacing, bool forNewProjects) {
+    PresetResult r;
+    if (!hasProject()) {
+        r.problems << tr("Нет проекта");
+        return r;
+    }
+    const std::string n = TrimPresetName(Utf8(name));
+    r.name = QString::fromStdString(n);
+    if (!PresetNameProblem(n).empty()) {
+        r.problems << tr("Имя пресета — от 1 до 120 символов, без управляющих.");
+        return r;
+    }
+    if (ReservedPresetName(n)) {
+        r.problems << tr("Так называются автосохранения — выберите другое имя");
+        return r;
+    }
+    if (replacing.isEmpty())
+        if (const auto taken = PresetStore::FindByName(r.name, PresetScope::Pipeline)) {
+            r.exists = true;
+            r.file = *taken;
+            return r;
+        }
+    try {
+        const auto path = PresetStore::Library().Save(MakePipelinePreset(n, project_), replacing.isEmpty() ? std::filesystem::path() : PresetStore::Path(replacing));
+        r.file = PresetStore::Text(path);
+    } catch (const PresetError& e) {
+        // every stage is checked, the switched-off ones too, and the encoder: the plan checks only what runs
+        r.problems << tr("Текущие настройки содержат ошибку — исправьте её перед сохранением:");
+        r.problems << PresetStore::IssueTexts(e.issues, true, true);
+        return r;
+    } catch (const std::exception& e) {
+        r.problems << tr("Не удалось сохранить пресет: %1").arg(QString::fromUtf8(e.what()));
+        return r;
+    }
+    if (forNewProjects) PresetStore::SetNewProjectPreset(r.file);
+    if (const QString left = presetLeftOut(kPipelineTarget); !left.isEmpty()) r.notes << left;
+    r.ok = true;
+    r.message = tr("Пресет обработки «%1» сохранён").arg(r.name) + (forNewProjects ? tr(" · для новых проектов") : QString());
+    emit message(r.message);
+    return r;
+}
+
+AppModel::PresetResult AppModel::exportCurrentPipelinePreset(const QString& to) {
+    PresetResult r;
+    if (!hasProject()) {
+        r.problems << tr("Нет проекта");
+        return r;
+    }
+    const Preset p = MakePipelinePreset(PresetNameFor("Обработка", project_.sourceVideo), project_);
+    r.name = QString::fromStdString(p.name);
+    try {
+        SavePreset(PresetStore::Path(to), p);
+    } catch (const PresetError& e) {
+        r.problems << tr("Текущие настройки содержат ошибку — исправьте её перед сохранением:");
+        r.problems << PresetStore::IssueTexts(e.issues, true, true);
+        return r;
+    } catch (const std::exception& e) {
+        r.problems << tr("Не удалось записать файл: %1").arg(QString::fromUtf8(e.what()));
+        return r;
+    }
+    if (const QString left = presetLeftOut(kPipelineTarget); !left.isEmpty()) r.notes << left;
+    r.ok = true;
+    r.file = to;
+    r.message = tr("Пресет обработки сохранён в %1").arg(QFileInfo(to).fileName());
+    emit message(r.message);
+    return r;
+}
+
+QString AppModel::presetLeftOut(const std::string& target) const {
+    if (target == kPipelineTarget) return PresetStore::LeftOutText(PipelinePresetLeftOut(project_), true);
+    return PresetStore::LeftOutText(StagePresetLeftOut(target, stageParamsOf(target), PresetScope::Stage), false);
+}
+
+std::vector<ParamChange> AppModel::previewStagePreset(const std::string& stage, const Preset& preset) const {
+    const auto it = preset.stages.find(stage);
+    if (it == preset.stages.end()) return {};
+    const nlohmann::json cur = stageParamsOf(stage);
+    return DiffStageParams(stage, cur, ApplyPreset(stage, cur, it->second.params, PresetScope::Stage), PresetScope::Stage);
+}
+
+PipelineDiff AppModel::previewPipelinePreset(const Preset& preset) const {
+    Project next = project_;
+    ApplyPipelinePreset(next, preset);
+    return DiffPipeline(project_, next);
+}
+
+QString AppModel::seedNewProject() {
+    const QString mark = PresetStore::NewProjectPreset();
+    if (mark.isEmpty()) return {};
+    const auto path = PresetStore::Path(PresetStore::Dir()) / PresetStore::Path(mark);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) {  // removed by hand or not roamed here: the mark goes
+        PresetStore::SetNewProjectPreset({});
+        return tr(" · пресет для новых проектов «%1» не найден — отметка снята, взяты встроенные умолчания").arg(mark);
+    }
+    const PresetLoad l = LoadPreset(path);
+    const QString name = l.preset.name.empty() ? mark : QString::fromStdString(l.preset.name);
+    if (!l.ok())  // newer, broken, a value out of range: the built-in defaults, the mark stays (a version may be rolled back)
+        return tr(" · пресет для новых проектов «%1» не применён: %2; взяты встроенные умолчания").arg(name, PresetStore::IssueTexts(l.issues, true).join("; "));
+    std::vector<PresetIssue> notes = l.issues;
+    ApplyPipelinePreset(project_, l.preset, &notes);  // a card preset goes to its stage; no slot is written for a new project
+    for (const auto& n : notes) Log()->info("new project: preset '{}': {}", l.preset.name, n.text);
+    if (l.preset.scope == PresetScope::Pipeline) return tr(" · настройки обработки — из «%1» (для новых проектов)").arg(name);
+    return tr(" · «%1» — из пресета «%2» (для новых проектов)").arg(StageName(l.preset.stage()), name);
 }
 
 QString AppModel::lastDir(const QString& key) const { return QSettings().value("dialogs/" + key).toString(); }
