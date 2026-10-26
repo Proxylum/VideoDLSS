@@ -90,6 +90,8 @@ QPushButton:disabled { color: @disabled; border-color: @border; background: @dim
 QPushButton:flat { background: transparent; border: 1px solid transparent; min-height: 22px; padding: 0 9px; border-radius: 4px; font-size: 12px; color: @muted; }
 QPushButton:flat:hover { border-color: @control; color: @text; }
 QPushButton[role="small"] { min-height: 22px; padding: 0 9px; border-radius: 4px; font-size: 12px; background: @bg; }
+QPushButton[role="small"][menu="1"] { padding-right: 22px; }
+QPushButton[role="small"]::menu-indicator { subcontrol-origin: padding; subcontrol-position: center right; right: 7px; }
 QPushButton[role="tall"] { min-height: 42px; padding: 0 12px; }
 QPushButton[role="start"] { min-height: 44px; padding: 0 22px; font-size: 15px; font-weight: 500; }
 QPushButton[role="quiet"] { min-height: 44px; padding: 0 12px; background: @border; color: @muted; border: 0; }

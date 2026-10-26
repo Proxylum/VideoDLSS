@@ -15,7 +15,11 @@
 #include <QComboBox>
 #include <QDir>
 #include <QPushButton>
+#include <QLineEdit>
+#include <QMenu>
 #include <QScrollArea>
+#include <QShortcut>
+#include <QTimer>
 #include <QScrollBar>
 #include <QSignalSpy>
 #include <QSlider>
@@ -47,6 +51,7 @@
 #include "AppModel.h"
 #include "SourceNames.h"
 #include "PlaybackClock.h"
+#include "PresetMenu.h"
 #include "PresetStore.h"
 #include "ProcessingPanel.h"
 #include "ProjectPanel.h"
@@ -168,6 +173,54 @@ void StubProjectFile(const std::filesystem::path& file, const std::filesystem::p
 }
 
 QString LastMessage(const QSignalSpy& spy) { return spy.isEmpty() ? QString() : spy.last().at(0).toString(); }
+
+// the next widget Tab reaches from `w` inside `root`
+QWidget* NextTab(QWidget* w, QWidget* root) {
+    for (QWidget* n = w->nextInFocusChain(); n && n != w; n = n->nextInFocusChain())
+        if ((n->focusPolicy() & Qt::TabFocus) && n->isVisibleTo(root) && n->isEnabled()) return n;
+    return nullptr;
+}
+
+QAction* ActionStarting(QMenu* menu, const QString& text) {
+    for (QAction* a : menu->actions())
+        if (a->text().startsWith(text)) return a;
+    return nullptr;
+}
+
+// dialogs that answer as told and count what was asked
+struct StubDialogs {
+    int confirms = 0, warnings = 0, infos = 0;
+    bool answer = false;
+    std::optional<PresetSaveDialog::Setup> lastSetup;
+    std::optional<PresetSaveDialog::Answer> saveAnswer;
+    QString open, save;
+    PresetDialogs::Clash clash = PresetDialogs::Clash::Cancel;
+    QStringList texts;
+    PresetDialogs Make() {
+        PresetDialogs d;
+        d.saveName = [this](QWidget*, const PresetSaveDialog::Setup& s) {
+            lastSetup = s;
+            return saveAnswer;
+        };
+        d.openFile = [this](QWidget*, const QString&, const QString&, const QString&) { return open; };
+        d.saveFile = [this](QWidget*, const QString&, const QString&, const QString&) { return save; };
+        d.confirm = [this](QWidget*, const QString&, const QString& text, const QString&) {
+            ++confirms;
+            texts << text;
+            return answer;
+        };
+        d.clash = [this](QWidget*, const QString&, const QString&) { return clash; };
+        d.warn = [this](QWidget*, const QString&, const QString& text) {
+            ++warnings;
+            texts << text;
+        };
+        d.inform = [this](QWidget*, const QString&, const QString& text) {
+            ++infos;
+            texts << text;
+        };
+        return d;
+    }
+};
 
 }  // namespace
 
@@ -1949,6 +2002,20 @@ TEST_CASE("StageCard NR screenshots for a merge request", "[.shots]") {
         std::printf("saved %s\n", file.toStdString().c_str());
     };
     shot("nr_default", false);
+    {  // PR-9: the open preset menu
+        model.setStageParam("nr", "intensity", 0.8);
+        model.saveStagePreset("nr", QString::fromUtf8("Мягкий портрет"), {}, true);
+        model.setStageParam("nr", "intensity", 1.0);
+        dlssvid::StageCard card(model, "nr");
+        card.refresh();
+        PresetMenu* menu = card.presetMenu();
+        menu->setAttribute(Qt::WA_DontShowOnScreen);
+        emit menu->aboutToShow();
+        menu->adjustSize();
+        const QString file = out + "/nr_preset_menu_" + scale + ".png";
+        REQUIRE(menu->grab().save(file));
+        std::printf("saved %s\n", file.toStdString().c_str());
+    }
     model.setStageParam("nr", "intensity", 1.4);
     model.setStageParam("nr", "local_tone", 1.5);
     model.setStageParam("nr", "exposure", 1.0);
@@ -2534,4 +2601,245 @@ TEST_CASE("Pipeline presets: a refused preset or a card preset changes nothing a
     model.setEncode("hevc_nvenc", {{"b", "50M"}}, {});
     const auto ok = model.savePipelinePreset(QString::fromUtf8("Битрейт"));
     CHECK(ok.ok);
+}
+
+TEST_CASE("StageCard: the preset menu sits in the NR card header only, after the stage switch in the Tab order; items show the diff, the match and the new-projects mark; a click applies",
+          "[app][card][presets]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("card_presets");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    model.setStageParam("nr", "intensity", 0.7);
+    REQUIRE(model.saveStagePreset("nr", "A & B", {}, true).ok);
+    model.setStageParam("nr", "intensity", 1.0);
+    dlssvid::StageCard nr(model, "nr");
+    nr.refresh();
+    dlssvid::StageCard depth(model, "depth");
+    depth.refresh();
+    CHECK_FALSE(depth.presetMenu());
+    CHECK(depth.findChildren<PresetButton*>().isEmpty());
+    REQUIRE(nr.presetMenu());
+    PresetButton* button = nr.findChild<PresetButton*>();
+    REQUIRE(button);
+    CHECK(button->accessibleName() == QString::fromUtf8("Пресеты «Улучшения»"));
+    CHECK(button->isEnabled());
+    CHECK(button->focusPolicy() & Qt::TabFocus);
+    QCheckBox* stageSwitch = nullptr;
+    for (QCheckBox* c : nr.findChildren<QCheckBox*>())
+        if (c->toolTip() == QString::fromUtf8("Стадия участвует в обработке")) stageSwitch = c;
+    REQUIRE(stageSwitch);
+    CHECK(NextTab(stageSwitch, &nr) == button);  // the switch, then «Пресет», then «Сбросить», then the form
+    model.setStageParam("nr", "intensity", 1.2);
+    nr.refresh();
+    QPushButton* reset = nullptr;
+    for (QPushButton* b : nr.findChildren<QPushButton*>())
+        if (b->text() == QString::fromUtf8("Сбросить")) reset = b;
+    REQUIRE(reset);
+    CHECK(NextTab(button, &nr) == reset);
+    CHECK(reset->accessibleName() == QString::fromUtf8("Сбросить «Улучшение»"));
+    // the menu: built on aboutToShow, the name escaped, the mark in words, the difference in the tooltip
+    PresetMenu* menu = nr.presetMenu();
+    emit menu->aboutToShow();
+    QAction* item = ActionStarting(menu, QString::fromUtf8("A && B · для новых проектов"));
+    REQUIRE(item);
+    CHECK(item->isCheckable());
+    CHECK_FALSE(item->isChecked());
+    const QString change = QString::fromUtf8("Интенсивность %1 → %2").arg(QLocale().toString(1.2, 'f', 2), QLocale().toString(0.7, 'f', 2));
+    INFO(item->toolTip().toStdString());
+    CHECK(item->toolTip().startsWith(QString::fromUtf8("Изменит: ") + change));
+    CHECK(item->statusTip().startsWith(QString::fromUtf8("Изменит: ")));
+    REQUIRE(ActionStarting(menu, QString::fromUtf8("&Сохранить текущие…")));  // the mnemonics of the menu are its own
+    CHECK(ActionStarting(menu, QString::fromUtf8("&Импорт…")));
+    item->trigger();
+    CHECK(model.stageEntry("nr")->params["intensity"] == 0.7);
+    emit menu->aboutToShow();
+    item = ActionStarting(menu, QString::fromUtf8("A && B"));
+    REQUIRE(item);
+    CHECK(item->isChecked());  // matches now
+    CHECK(item->toolTip().startsWith(QString::fromUtf8("Совпадает с текущими настройками")));
+    // the slot of that application, after a separator
+    CHECK(ActionStarting(menu, QString::fromUtf8("Перед применением · missing")));
+    // «Для новых проектов ▸»: the built-in defaults and the presets, one checked
+    QMenu* mark = nullptr;
+    for (QAction* a : menu->actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) mark = a->menu();
+    REQUIRE(mark);
+    REQUIRE(mark->actions().size() == 2);
+    CHECK_FALSE(mark->actions()[0]->isChecked());
+    CHECK(mark->actions()[1]->isChecked());
+    mark->actions()[0]->trigger();
+    CHECK(PresetStore::NewProjectPreset().isEmpty());
+    // a stage switched off still takes a preset
+    model.setStageEnabled("nr", false);
+    nr.refresh();
+    CHECK(button->isEnabled());
+}
+
+TEST_CASE("StageCard: card reset saves the before-reset preset first and asks when it cannot; cards without presets reset as before", "[app][card][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("card_reset_presets");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    dlssvid::StageCard nr(model, "nr");
+    StubDialogs dialogs;
+    nr.setDialogs(dialogs.Make());
+    auto resetButton = [](QWidget& card) {
+        QPushButton* reset = nullptr;
+        for (QPushButton* b : card.findChildren<QPushButton*>())
+            if (b->text() == QString::fromUtf8("Сбросить")) reset = b;
+        return reset;
+    };
+    // the slot cannot be written: asked once per click; «Отмена» keeps the settings, «Сбросить» resets
+    const QString dir = PresetStore::Dir();
+    std::ofstream(d / "blocker", std::ios::binary) << "x";
+    PresetStore::SetDir(Q(d / "blocker" / "presets"));
+    model.setStageParam("nr", "intensity", 1.4);
+    nr.refresh();
+    REQUIRE(resetButton(nr));
+    dialogs.answer = false;
+    resetButton(nr)->click();
+    CHECK(dialogs.confirms == 1);
+    CHECK(dialogs.texts.last().contains(QString::fromUtf8("Сбросить без автосохранения?")));
+    CHECK(model.stageEntry("nr")->params["intensity"] == 1.4);
+    dialogs.answer = true;
+    resetButton(nr)->click();
+    CHECK(dialogs.confirms == 2);
+    CHECK_FALSE(model.stageEntry("nr")->params.contains("intensity"));
+    PresetStore::SetDir(dir);
+    // an error in the current settings (from the JSON) does not keep the slot from being written: it is a snapshot
+    model.setStageParams("nr", {{"backend", "ngx"}, {"intensity", 5}});
+    nr.refresh();
+    resetButton(nr)->click();
+    CHECK(dialogs.confirms == 2);
+    const auto slot = PresetStore::Library().Slot(PresetSlot::BeforeReset, "nr");
+    REQUIRE(slot);
+    CHECK(slot->load.ok());
+    CHECK(slot->load.preset.stages.at("nr").params["intensity"] == 5);
+    CHECK_FALSE(model.stageEntry("nr")->params.contains("intensity"));
+    // a card without presets: no slot, no question
+    dlssvid::StageCard depth(model, "depth");
+    depth.setDialogs(dialogs.Make());
+    model.setStageParams("depth", {{"backend", "da3"}, {"stabilize", "none"}});
+    depth.refresh();
+    REQUIRE(resetButton(depth));
+    resetButton(depth)->click();
+    CHECK(model.stageEntry("depth")->params == nlohmann::json{{"backend", "da3"}});
+    CHECK_FALSE(std::filesystem::exists(PresetSlotFile(PresetSlot::BeforeReset, "depth")));
+    CHECK(dialogs.confirms == 2);
+}
+
+// Space is the window's playback (MainWindow: a QShortcut on the window) and QAbstractButton does not claim ShortcutOverride: without
+// PresetButton the key would start playback instead of opening the menu. The control check proves the shortcut is live in this window.
+TEST_CASE("StageCard: Space on the NR preset button opens the menu, not playback", "[app][card][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("card_presets_space");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    QWidget window;
+    auto* v = new QVBoxLayout(&window);
+    auto* card = new dlssvid::StageCard(model, "nr", &window);
+    auto* plain = new QPushButton("plain", &window);
+    v->addWidget(card);
+    v->addWidget(plain);
+    auto* space = new QShortcut(QKeySequence(Qt::Key_Space), &window);
+    QObject::connect(space, &QShortcut::activated, &model, [&] { model.setPlaying(!model.playing()); });
+    int processRequests = 0;
+    auto* process = new QShortcut(QKeySequence("Ctrl+Return"), &window);
+    QObject::connect(process, &QShortcut::activated, &window, [&] { ++processRequests; });
+    card->refresh();
+    window.show();
+    window.activateWindow();
+    REQUIRE(QTest::qWaitForWindowActive(&window));
+    // the control: on a plain button Space reaches the window's shortcut
+    plain->setFocus();
+    QTest::keyClick(plain, Qt::Key_Space);
+    REQUIRE(model.playing());
+    model.setPlaying(false);
+    PresetButton* button = card->findChild<PresetButton*>();
+    REQUIRE(button);
+    QMenu* menu = button->menu();
+    REQUIRE(menu);
+    int shown = 0;
+    QObject::connect(menu, &QMenu::aboutToShow, menu, [&] {
+        ++shown;
+        QTimer::singleShot(0, menu, &QMenu::close);
+    });
+    button->setFocus();
+    QTest::keyClick(button, Qt::Key_Return, Qt::ControlModifier);  // «Обработать» stays the window's (before a menu takes the activation)
+    CHECK(processRequests == 1);
+    CHECK(shown == 0);
+    QTest::keyClick(button, Qt::Key_Space);
+    CHECK(shown == 1);
+    CHECK_FALSE(model.playing());
+    QTest::keyClick(button, Qt::Key_Return);
+    CHECK(shown == 2);
+    QTest::keyClick(button, Qt::Key_Down, Qt::AltModifier);
+    CHECK(shown == 3);
+    QTest::keyClick(button, Qt::Key_Down);
+    CHECK(shown == 3);
+    model.setPlaying(false);
+}
+
+TEST_CASE("PresetSaveDialog: a bad name disables Save, an existing name turns it into Replace; it names the mark it replaces and what the preset leaves out",
+          "[app][presets]") {
+    App();
+    ClearPresets();
+    PresetSaveDialog::Setup setup;
+    setup.title = QString::fromUtf8("Сохранить настройки «Улучшения»");
+    setup.markNote = QString::fromUtf8("Сейчас для новых проектов: все настройки обработки из «Y» — будет заменено");
+    setup.leftOut = QString::fromUtf8("Не войдут в пресет: Формат пасса PNG 16 бит (инженерная настройка) — их переносит только файл проекта");
+    setup.problem = [](const QString& n) { return n.isEmpty() ? QString::fromUtf8("пусто") : QString(); };
+    setup.exists = [](const QString& n) { return n == QString::fromUtf8("Мягкий"); };
+    PresetSaveDialog dialog(setup);
+    CHECK_FALSE(dialog.saveButton()->isEnabled());
+    CHECK(dialog.nameNote()->text() == QString::fromUtf8("пусто"));
+    dialog.nameEdit()->setText(QString::fromUtf8("Новый"));
+    CHECK(dialog.saveButton()->isEnabled());
+    CHECK(dialog.saveButton()->text() == QString::fromUtf8("Сохранить"));
+    dialog.nameEdit()->setText(QString::fromUtf8("Мягкий"));
+    CHECK(dialog.saveButton()->text() == QString::fromUtf8("Заменить"));
+    CHECK(dialog.nameNote()->text() == QString::fromUtf8("Пресет «Мягкий» уже есть — будет заменён"));
+    CHECK(dialog.nameEdit()->maxLength() == 120);
+    CHECK_FALSE(dialog.markNote()->isVisibleTo(&dialog));  // only with «Применять к новым проектам»
+    dialog.newProjects()->setChecked(true);
+    CHECK(dialog.markNote()->isVisibleTo(&dialog));
+    CHECK(dialog.leftOut()->isVisibleTo(&dialog));
+    CHECK(dialog.answer().forNewProjects);
+    CHECK(dialog.answer().name == QString::fromUtf8("Мягкий"));
+    setup.leftOut.clear();
+    PresetSaveDialog bare(setup);
+    CHECK_FALSE(bare.leftOut()->isVisibleTo(&bare));
+    // the NR menu fills it: the pipeline preset's mark it would move, the pass format the preset leaves out
+    const auto d = Dir("save_dialog");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    REQUIRE(model.savePipelinePreset("Y", {}, true).ok);
+    model.setStageParam("nr", "format", "png");
+    PresetMenu menu(model, "nr");
+    StubDialogs dialogs;
+    menu.setDialogs(dialogs.Make());
+    dialogs.saveAnswer = PresetSaveDialog::Answer{QString::fromUtf8("Мягкий"), true};
+    menu.saveCurrent();
+    REQUIRE(dialogs.lastSetup);
+    CHECK(dialogs.lastSetup->title == QString::fromUtf8("Сохранить настройки «Улучшения»"));
+    CHECK(dialogs.lastSetup->markNote == QString::fromUtf8("Сейчас для новых проектов: все настройки обработки из «Y» — будет заменено"));
+    CHECK(dialogs.lastSetup->leftOut.contains(QString::fromUtf8("Формат пасса")));
+    CHECK(dialogs.lastSetup->problem(QString::fromUtf8("Перед сбросом · clip")).contains(QString::fromUtf8("автосохранения")));
+    CHECK(dialogs.lastSetup->exists(QString::fromUtf8("мягкий")));  // saved by this very call
+    CHECK(PresetStore::List("nr").items.size() == 1);
+    CHECK(PresetStore::NewProjectPreset() == QFileInfo(PresetStore::List("nr").items[0].file).fileName());  // the one mark moved
+    model.setStageParam("nr", "format", "exr");
+    dialogs.lastSetup.reset();
+    menu.saveCurrent();
+    CHECK_FALSE(dialogs.lastSetup->leftOut.contains(QString::fromUtf8("Формат пасса")));  // at its default: nothing to name
+    CHECK(dialogs.lastSetup->leftOut.contains(QString::fromUtf8("Бэкенд stub")));       // the stub method of this project is
+    CHECK(dialogs.lastSetup->markNote.isEmpty());  // the mark is on this menu's kind now
+    CHECK(PresetStore::List("nr").items.size() == 1);  // the same name: replaced
 }

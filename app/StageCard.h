@@ -14,9 +14,13 @@
 #include <string>
 #include <vector>
 
+#include "PresetDialogs.h"
+
 namespace dlssvid {
 
 class AppModel;
+class PresetButton;
+class PresetMenu;
 struct ParamSpec;
 struct StageSchema;
 
@@ -32,6 +36,9 @@ public:
     const std::string& stage() const { return stage_; }
     // A widget of the stage's own under the form (PR-13: the list of the card «Склейки»), refreshed by itself
     void setExtra(QWidget* extra);
+    // The dialogs of «Сбросить» and of the preset menu (PR-9); the tests put their own
+    void setDialogs(PresetDialogs dialogs);
+    PresetMenu* presetMenu() const { return presetMenu_; }  // nullptr for a card without presets
 
 public slots:
     void refresh();  // parameters from the project, the state from the plan, engineer widgets shown or hidden
@@ -85,6 +92,9 @@ private:
     QPushButton* run_;
     QPushButton* patch_ = nullptr;
     QPushButton* resetCard_ = nullptr;
+    PresetButton* presets_ = nullptr;  // «Пресет ▾» in the header: the cards with presets (StageSchema::cardPresets)
+    PresetMenu* presetMenu_ = nullptr;
+    PresetDialogs dialogs_;
     QToolButton* moreToggle_ = nullptr;  // «Ещё настройки ▸/▾»
     QLabel* moreSummary_ = nullptr;      // «изменено: … · не действует: …», wrapped: it never sets the card's width
     QWidget* more_ = nullptr;

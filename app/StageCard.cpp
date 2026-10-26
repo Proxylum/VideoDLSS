@@ -23,6 +23,7 @@
 
 #include "AppModel.h"
 #include "ParamText.h"
+#include "PresetMenu.h"
 #include "Theme.h"
 #include "stages/ParamSchema.h"
 #include "stages/StagePreset.h"
@@ -109,6 +110,37 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     head->setSpacing(2);
     head->addWidget(title_);
     head->addWidget(subtitle_);
+    // PR-9: «Пресет ▾» (the cards with presets) and «Сбросить» under the title, before the form in the Tab order
+    dialogs_ = PresetDialogs::Default();
+    const QString name = schema_ ? QString::fromStdString(schema_->title) : QString::fromStdString(stage);
+    auto* tools = new QHBoxLayout();
+    tools->setContentsMargins(0, 4, 0, 0);
+    tools->setSpacing(6);
+    if (schema_ && schema_->cardPresets) {
+        presets_ = new PresetButton(tr("Пресет"), this);
+        SetRole(presets_, "small");
+        presets_->setProperty("menu", "1");
+        presetMenu_ = new PresetMenu(model_, stage, presets_);
+        presets_->setMenu(presetMenu_);
+        presets_->setAccessibleName(tr("Пресеты «%1»").arg(StageNameGenitive(stage)));
+        presets_->setToolTip(tr("Пресеты настроек «%1»: применить, сохранить текущие, импорт и экспорт. Перед применением и сбросом прежние "
+                                "настройки сохраняются сами. Space — открыть")
+                                 .arg(StageNameGenitive(stage)));
+        tools->addWidget(presets_);
+    }
+    resetCard_ = new QPushButton(tr("Сбросить"), this);
+    SetRole(resetCard_, "small");
+    resetCard_->setAccessibleName(tr("Сбросить «%1»").arg(name));
+    resetCard_->setToolTip(schema_ && schema_->cardPresets
+                               ? tr("Вернуть настройки к умолчаниям (бэкенд и инженерные ключи остаются; прежние — в «Перед сбросом»)")
+                               : tr("Вернуть настройки стадии к умолчаниям (бэкенд и инженерные ключи остаются)"));
+    QSizePolicy keep = resetCard_->sizePolicy();
+    keep.setRetainSizeWhenHidden(true);  // the header and the form do not jump when it hides
+    resetCard_->setSizePolicy(keep);
+    connect(resetCard_, &QPushButton::clicked, this, [this] { resetCard(); });
+    tools->addWidget(resetCard_);
+    tools->addStretch(1);
+    head->addLayout(tools);
     grid->addWidget(enabled_, 0, 0, Qt::AlignTop);
     grid->addLayout(head, 0, 1, Qt::AlignTop);
 
@@ -258,11 +290,6 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     force_ = new QCheckBox(tr("пересчитать"), this);
     force_->setToolTip(tr("Посчитать заново, даже если пасс совпадает по отпечатку"));
     side->addWidget(force_);
-    resetCard_ = new QPushButton(tr("Сбросить"), this);
-    SetRole(resetCard_, "small");
-    resetCard_->setToolTip(tr("Вернуть настройки стадии к умолчаниям (бэкенд и инженерные ключи остаются)"));
-    side->addWidget(resetCard_, 0, Qt::AlignLeft);
-    connect(resetCard_, &QPushButton::clicked, this, [this] { resetCard(); });
     grid->addLayout(side, 0, 3, 2, 1, Qt::AlignTop);
     grid->setColumnStretch(2, 1);
     grid->setColumnMinimumWidth(3, 190);
@@ -581,8 +608,16 @@ void StageCard::resetParam(const std::string& key) {
 
 void StageCard::resetCard() {
     if (!model_.stageEntry(stage_) || !schema_) return;
-    // the form's keys go, the backend and the engineer keys stay (TASK-0046); a card with presets saves «Перед сбросом» first (PR-9)
-    model_.resetStageCard(stage_);
+    // the form's keys go, the backend and the engineer keys stay (TASK-0046); a card with presets saves «Перед сбросом» first (PR-9):
+    // when that cannot be written, nothing changes until the person says so
+    const AppModel::PresetResult r = model_.resetStageCard(stage_);
+    if (r.backupFailed && dialogs_.confirm(window(), tr("Настройки не сброшены"), r.problems.join("\n") + "\n" + tr("Сбросить без автосохранения?"), tr("Сбросить")))
+        model_.resetStageCard(stage_, true);
+}
+
+void StageCard::setDialogs(PresetDialogs dialogs) {
+    dialogs_ = dialogs;
+    if (presetMenu_) presetMenu_->setDialogs(std::move(dialogs));
 }
 
 bool StageCard::changed(const ParamSpec& spec) const {
@@ -658,6 +693,7 @@ void StageCard::refresh() {
         moreSummary_->setToolTip(full.join("\n"));
     }
     resetCard_->setVisible(anyChanged);
+    if (presets_) presets_->setEnabled(model_.hasProject());  // also while the stage is off: a preset changes the settings, not the switch
     const AppModel::StageCardState st = model_.cardState(stage_);
     state_->setText(st.state);
     SetRole(state_, kToneRole[ToneIndex(st.tone)]);
