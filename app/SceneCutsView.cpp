@@ -132,8 +132,9 @@ void SceneCutsView::refresh() {
                 for (const auto& in : s.diff["inputs"])
                     if (in == kScenesPass) again << StageWord(s.name);
         const QString now = Plural(static_cast<int>(sc.count), tr("склейка"), tr("склейки"), tr("склеек"));
-        if (sc.before >= 0 && sc.id == sc.beforeId)  // the same cuts: nobody below has another input
-            change = tr("Список не изменится — стадии ниже не пересчитываются");
+        if (sc.before >= 0 && sc.id == sc.beforeId)  // the same cuts - a stage made with another list runs again all the same
+            change = again.isEmpty() ? tr("Список не изменится — стадии ниже не пересчитываются")
+                                     : tr("Список не изменится — пересчитаются %1: сделаны с другим списком").arg(again.join(", "));
         else  // another list: the stages that read it run again - or come back from the history, or none of them is on
             change = (sc.before >= 0 ? tr("При этих настройках: %1 (сейчас %2)").arg(now).arg(sc.before) : tr("При этих настройках: %1").arg(now)) + " — " +
                      (again.isEmpty() ? tr("стадии ниже не пересчитываются") : tr("пересчитаются %1").arg(again.join(", ")));

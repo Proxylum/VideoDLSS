@@ -821,15 +821,15 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
             st.state = tr("пересчёт: изменились склейки");
             const ViewportSource* src = store_->FindSource(primary);
             const int64_t was = src && src->manifest ? src->manifest->stageParams.value("scene_cut_count", int64_t{0}) : 0;
-            int64_t now = 0;
-            bool decided = false;
+            QString now = "0";
+            bool inPlan = false;
             for (const auto& s : plan_.stages)
-                if (s.name == kScenesPass && s.sceneCuts.known) {
-                    now = s.sceneCuts.count;
-                    decided = true;
+                if (s.name == kScenesPass) {
+                    inPlan = true;
+                    now = s.sceneCuts.known ? QString::number(s.sceneCuts.count) : QString("?");  // not analysed yet: not known
                 }
-            if (!decided && plan_.scenesOnDisk) now = plan_.scenesOnDisk->count;  // the stage off: the list on disk
-            if (!d->inputs.count(kScenesPass)) now = 0;
+            if (!inPlan && plan_.scenesOnDisk) now = QString::number(plan_.scenesOnDisk->count);  // the stage off: the list on disk
+            if (!d->inputs.count(kScenesPass)) now = "0";
             st.sub = QString("%1 → %2").arg(was).arg(now);
         } else if (d->kind == "input_changed") {
             st.state = tr("пересчёт: изменился вход");

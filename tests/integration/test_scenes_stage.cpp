@@ -818,3 +818,81 @@ TEST_CASE("RunProcess warns when a stage decoded another number of frames than t
     REQUIRE(!r.warnings.empty());
     CHECK(std::any_of(r.warnings.begin(), r.warnings.end(), [](const std::string& w) { return w.find("flow: decoded 6 frames, the scene list has 7") != std::string::npos; }));
 }
+
+// Review of PR-13, round 2: the case DecidePending plans is one list for every stage - a stage made with another list than the stages
+// above were planned with reruns whatever comes out; a stage restored from the history is rewritten (a standalone pass built on it
+// reruns). Neither is pending. The plan's marks say the rule.
+TEST_CASE("PlanProcess: pending under one list for all stages; a restored stage above is rewritten", "[integration][process][scenes][regression]") {
+    {  // flow made without a list, nr and fg with {3} over it (flow was off); then the list is analysed again
+        const auto dir = Dir("pending_mixed");
+        const auto clip = CutClip(dir);
+        ProcessOptions o = StubProcess(dir, clip);
+        for (auto& st : o.stages)
+            if (st.name == "scenes") st.enabled = false;
+        RunProcess(o);  // no list anywhere
+        for (auto& st : o.stages) st.enabled = st.name != "flow";
+        RunProcess(o);  // the list {3}: nr and fg made with it over flow's vectors without it
+        REQUIRE(Manifest::Load(o.passesRoot / "color_nr").inputs.at("scenes") == SceneCutsId({kCutAt}));
+        REQUIRE(Manifest::Load(o.passesRoot / "mv_dlss").inputs.count("scenes") == 0);
+        for (auto& st : o.stages) st.enabled = true;
+        o.forceStages = {"scenes"};
+        const ProcessPlan plan = PlanProcess(o);
+        CHECK(Decision(plan, "flow").pending);
+        CHECK(Decision(plan, "flow").pendingRule == "no_cut");
+        for (const char* name : {"nr", "fg"}) {  // {3}: flow reruns and their vectors change; none: their list changes
+            INFO(name);
+            CHECK(Decision(plan, name).action == "run");
+            CHECK_FALSE(Decision(plan, name).pending);
+        }
+        const ProcessResult r = RunProcess(o);
+        for (const char* name : {"flow", "nr", "fg"}) CHECK(Report(r, name).status == "ran");
+    }
+    {  // flow comes back from the history, a standalone nr pass (with the label) was made over the flow replaced
+        const auto dir = Dir("pending_restore");
+        ProcessOptions o = StubProcess(dir, CutClip(dir));
+        o.keepVersions = 0;
+        ApplyParamSpec(o.stages, "depth.z_far=400");
+        RunProcess(o);
+        ApplyParamSpec(o.stages, "depth.z_far=500");
+        RunProcess(o);
+        ApplyParamSpec(o.stages, "depth.z_far=400");
+        Manifest nr = Manifest::Load(o.passesRoot / "color_nr");  // as a standalone `dlssvid nr` leaves it: no fingerprint, the label
+        nr.fingerprint.clear();
+        nr.tool = nlohmann::json::object();
+        nr.inputs.clear();
+        nr.Save(o.passesRoot / "color_nr");
+        REQUIRE(SceneLabelOf(Manifest::Load(o.passesRoot / "color_nr")) == SceneCutsId({kCutAt}));
+        o.forceStages = {"scenes"};
+        const ProcessPlan plan = PlanProcess(o);
+        CHECK(Decision(plan, "flow").pending);  // restored if the same cuts are found
+        CHECK(Decision(plan, "flow").pendingRule == "same_list");
+        CHECK_FALSE(Decision(plan, "nr").pending);  // built on the flow that is replaced: reruns whatever the list
+        CHECK(Decision(plan, "nr").action == "run");
+        const ProcessResult r = RunProcess(o);
+        CHECK(!Report(r, "flow").restored.empty());
+        CHECK(Report(r, "nr").status == "ran");
+    }
+}
+
+TEST_CASE("dlssvid process --plan names the rule of a pending stage", "[integration][cli][process][scenes]") {
+    const auto dir = Dir("cli_pending");
+    const auto clip = CutClip(dir);
+    const auto root = dir / "passes";
+    const std::vector<std::string> common{"process", "-i", clip.string(), "-o", (dir / "r.mkv").string(), "--passes", root.string(), "--warp", "--codec", "ffv1",
+                                          "--param", "depth.backend=stub", "--param", "flow.backend=stub", "--param", "upscale.backend=nis",
+                                          "--param", "nr.backend=stub", "--param", "fg.backend=blend"};
+    auto with = [&](std::vector<std::string> extra) {
+        std::vector<std::string> a = common;
+        a.insert(a.end(), extra.begin(), extra.end());
+        return RunCli(a);
+    };
+    REQUIRE(with({"--stages", "depth,flow,upscale,nr,fg"}).code == 0);  // made without a list
+    const CliResult first = with({"--plan"});
+    CHECK(first.out.find("(pending: reused if no cut is found)") != std::string::npos);
+    CHECK(first.out.find("the stages below are reused if the list comes out as the one they were made with") != std::string::npos);
+    REQUIRE(with({}).code == 0);  // with the list {3}
+    const CliResult forced = with({"--plan", "--force", "scenes"});
+    INFO(forced.out);
+    CHECK(forced.out.find("(pending: reused if the same cuts are found)") != std::string::npos);
+    CHECK(forced.out.find("(pending: the scene list is analysed first)") != std::string::npos);
+}

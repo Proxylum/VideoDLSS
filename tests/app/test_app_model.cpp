@@ -1962,6 +1962,13 @@ TEST_CASE("AppModel: the card of the scene list, its chips and the lines of the 
     const auto labels = view.findChildren<QLabel*>();
     CHECK(std::any_of(labels.begin(), labels.end(), [](QLabel* l) { return l->text() == QString::fromUtf8("Найдено 1 склейка"); }));
 
+    // a re-analysis: the stages made with the list are reused if it comes out the same (review of PR-13)
+    model.setForce("scenes", true);
+    model.refreshPlan();
+    CHECK(model.cardState("flow").state == QString::fromUtf8("пересчёт, если склейки изменятся"));
+    CHECK(model.cardState("flow").sub.contains(QString::fromUtf8("список склеек посчитается первым")));
+    model.clearForce();
+    model.refreshPlan();
     // another threshold, the same list: over the stored scores, nothing below
     model.setStageParam("scenes", "threshold", 0.3);
     model.refreshPlan();
@@ -2010,4 +2017,69 @@ TEST_CASE("AppModel: the card of the scene list, its chips and the lines of the 
     CHECK(model.project().stages.front().name == "scenes");
     CHECK_FALSE(model.project().stages.front().enabled);
     CHECK(model.project().stages.front().params["threshold"] == 0.3);
+}
+
+// Review of PR-13, round 2: «Список не изменится» names the stages made with another list, which run again all the same; a stage that
+// reads the list on disk (the stage off) says how many cuts it will meet
+TEST_CASE("AppModel: the same list names the stages made with another one; the list on disk counts for a stage off", "[app][model][scenes][gpu][regression]") {
+    App();
+    const auto d = Dir("scenes_again");
+    const uint32_t w = 48, h = 32;
+    ClipSpec spec;
+    spec.frames = 6;
+    spec.width = w;
+    spec.height = h;
+    const auto clip = WriteClipWith(d / "clip.mkv", spec, [&](int64_t i) {  // a hard cut at frame 3
+        CpuFrame f = SyntheticFrame(i, w, h);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < h; ++r)
+            for (uint32_t c = 0; c < w; ++c) y[r * w + c] = static_cast<uint8_t>(i < 3 ? 40 + c + 4 * i : 220 - c);
+        return f;
+    });
+    Project p = Project::Create(clip, d / "passes");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.params["backend"] = "blend";
+    }
+    p.resultVideo = d / "result.mkv";
+    p.codec = "ffv1";
+    p.Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    auto run = [&] {
+        REQUIRE(model.saveProject());
+        QStringList args = model.processArgs();
+        args << "--warp";
+        std::vector<std::string> cmd{DLSSVID_CLI_PATH};
+        for (const QString& a : args) cmd.push_back(a.toStdString());
+        std::string out;
+        REQUIRE(Subprocess::Run(cmd, &out) == 0);
+        model.reloadSources();
+    };
+    run();  // the list {3}: flow, nr, fg made with it
+    model.setStageEnabled("nr", false);
+    model.setStageParam("scenes", "threshold", 0.6);  // no cut: flow and fg run without a list, nr keeps {3}
+    run();
+    model.setStageEnabled("nr", true);
+    model.setStageParam("scenes", "threshold", 0.7);  // still no cut: the same (empty) list - but nr was made with {3}
+    model.refreshPlan();
+    QWidget host;
+    dlssvid::SceneCutsView view(model, &host);
+    view.refresh();
+    const auto labels = view.findChildren<QLabel*>();
+    CHECK(std::any_of(labels.begin(), labels.end(),
+                      [](QLabel* l) { return l->text() == QString::fromUtf8("Список не изменится — пересчитаются улучшение: сделаны с другим списком"); }));
+    CHECK(model.cardState("nr").runs);  // its vectors and its list changed: «изменился вход»
+    // the stage off: the stages read the list on disk, and the count of the cuts comes from it
+    run();  // threshold 0.7: no list anywhere
+    model.setStageEnabled("scenes", false);
+    model.setStageEnabled("flow", false);  // its vectors stay: nr's only new input is the list
+    std::string out;  // a list with a cut on disk, as `dlssvid scenes` (or «Вернуть» of a version) leaves it
+    REQUIRE(Subprocess::Run({DLSSVID_CLI_PATH, "scenes", "-i", clip.string(), "-o", (d / "passes").string(), "--threshold", "0.24"}, &out) == 0);
+    model.reloadSources();
+    model.refreshPlan();
+    CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: изменились склейки"));
+    CHECK(model.cardState("nr").sub.contains(QString::fromUtf8("0 → 1")));  // before: «0 → 0», the stage off had no count
+    CHECK(model.cardState("nr").scenes == QString::fromUtf8("склейки: 1 — история модели и подавления мерцания сбрасывается"));
 }

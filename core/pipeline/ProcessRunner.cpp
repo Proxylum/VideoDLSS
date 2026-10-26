@@ -161,7 +161,9 @@ struct PlanState {
     // passes planned with such a pass: what they would be if the list came out as the passes on disk were made with (DecidePending)
     struct Provisional {
         std::string fingerprint;
-        bool reused = false;
+        bool reused = false;     // reused or restored in that case: the stage reruns for the list alone
+        bool rewritten = true;   // run or restored: the pass is rewritten (a reuse is not)
+        std::string list;        // the list that case assumes ("cuts:…" | "" | "mixed": its inputs assumed different ones)
     };
     std::map<std::string, Provisional> provisional;
     std::string scenesNote;         // what the stages that read the scene list should know about it (unreadable, partial)
@@ -220,21 +222,35 @@ void DecidePending(const RunContext& ctx, const ProcessStage& stage, PlanState& 
             else if (const auto it = m.inputs.find(kScenesPass); it != m.inputs.end()) made = it->second;
         } catch (const std::exception&) {
         }
+    if (made.rfind("cuts:", 0) != 0) made.clear();  // none (or NR's own detector of PR-6): the case of no list
+    // the one list the case assumes: this stage's own when it reads it, else the one its provisional inputs assumed - a stage above
+    // planned with another list is not what it would be in this case, and stays as the plan has it (rewritten)
+    std::string list = made;
+    if (!d.inputs.count(kScenesPass)) {
+        std::optional<std::string> common;
+        for (const auto& [input, fp] : d.inputs)
+            if (const auto it = state.provisional.find(input); it != state.provisional.end()) {
+                if (!common) common = it->second.list;
+                else if (*common != it->second.list) common = std::string("mixed");
+            }
+        list = common.value_or(std::string());
+    }
     PlanState alt = state;
     for (const auto& [pass, pv] : state.provisional) {
+        if (pv.list != list) continue;
         alt.fp[pass] = pv.fingerprint;
-        if (pv.reused) {  // reused in that case: not rewritten
+        if (!pv.rewritten) {
             alt.ran.erase(pass);
             alt.staleRan.erase(pass);
         }
     }
     alt.pending.clear();
     alt.provisional.clear();
-    if (made.rfind("cuts:", 0) == 0) alt.fp[kScenesPass] = made;
+    if (!made.empty()) alt.fp[kScenesPass] = made;
     else alt.fp.erase(kScenesPass);
-    const StageDecision a = DecideStage(ctx, stage, alt);
+    const StageDecision a = list == "mixed" ? d : DecideStage(ctx, stage, alt);  // mixed: no one case - it reruns as planned
     const bool reused = a.action != "run";
-    for (const auto& out : d.outputs) state.provisional[out] = {a.fingerprint, reused};
+    for (const auto& out : d.outputs) state.provisional[out] = {a.fingerprint, reused, a.action != "reuse", list};
     if (reused) {
         d.pending = true;
         d.pendingRule = !d.inputs.count(kScenesPass) ? "unchanged" : made.rfind("cuts:", 0) == 0 ? "same_list" : "no_cut";
