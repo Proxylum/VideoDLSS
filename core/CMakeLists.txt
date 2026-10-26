@@ -99,6 +99,7 @@ add_library(dlssvid_core STATIC
   viewport/FrameStore.h viewport/FrameStore.cpp
   viewport/ViewportProxy.h viewport/ViewportProxy.cpp
   viewport/Project.h viewport/Project.cpp
+  viewport/PipelinePreset.h viewport/PipelinePreset.cpp
   gpu/ComputeKernel.h gpu/ComputeKernel.cpp
   passes/ImageMetrics.h passes/ImageMetrics.cpp
   stages/upscale/IUpscaler.h stages/upscale/IUpscaler.cpp
