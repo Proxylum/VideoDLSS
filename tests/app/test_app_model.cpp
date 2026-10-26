@@ -19,6 +19,7 @@
 #include <QMenu>
 #include <QScrollArea>
 #include <QShortcut>
+#include <QTextDocument>
 #include <QTimer>
 #include <QScrollBar>
 #include <QSignalSpy>
@@ -2371,6 +2372,12 @@ TEST_CASE("Presets: new projects take the marked preset; a project file next to 
     model.openVideo(Q(third));
     CHECK(LastMessage(messages).contains(QString::fromUtf8("не применён")));
     CHECK(PresetStore::NewProjectPreset() == "newer.json");
+    // a value out of range: the problem names its stage
+    WritePreset(PresetStore::Path(PresetStore::Dir()) / "strong.json", CardPresetJson("Сильный", {{"intensity", 5}}));
+    PresetStore::SetNewProjectPreset("strong.json");
+    model.openVideo(Q(WriteClip(d / "fourth.mkv", spec)));
+    CHECK(LastMessage(messages).contains(QString::fromUtf8("не применён: Улучшение: Интенсивность: 5 — допустимо")));
+    CHECK(model.stageEntry("nr")->params == Project::DefaultStages()[4].params);
     QSettings().remove("presets/newProject");
 }
 
@@ -3248,7 +3255,83 @@ TEST_CASE("PresetStore texts: a whole number, a chroma given as a number or in t
     listless.stage = "depth";
     listless.key = "model";
     listless.to = "da3";
+    listless.kept = true;
     CHECK(PresetStore::IssueText(listless).contains(QString::fromUtf8("нет списка — пресет её не задаёт, оставлено значение проекта")));
+    listless.kept = false;  // the preset's switch of the method dropped the project's value
+    CHECK(PresetStore::IssueText(listless).contains(QString::fromUtf8("работает значение метода по умолчанию")));
     listless.key = "window";
     CHECK(PresetStore::IssueText(listless).contains(QString::fromUtf8("не относится к методу")));
+}
+
+// Review of PR-9: in the GUI too a card preset's name is taken per stage - an NR «Мягкий» next to a depth one is saved and imported
+// as a new file, the depth preset untouched (before: «Заменить» overwrote it)
+TEST_CASE("Presets: the NR menu never replaces a card preset of another stage with the same name", "[app][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_other_stage");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    const auto depthFile = PresetStore::Path(PresetStore::Dir()) / "depth-soft.json";
+    WritePreset(depthFile, CardPresetJson("Мягкий", {{"backend", "vda"}}, "depth"));
+    auto bytes = [](const std::filesystem::path& f) {
+        std::ifstream in(f, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), {});
+    };
+    const std::string depthBytes = bytes(depthFile);
+    CHECK_FALSE(PresetStore::FindByName(QString::fromUtf8("Мягкий"), PresetScope::Stage, "nr"));
+    CHECK(PresetStore::FindByName(QString::fromUtf8("Мягкий"), PresetScope::Stage, "depth"));
+    PresetMenu menu(model, "nr");
+    StubDialogs dialogs;
+    menu.setDialogs(dialogs.Make());
+    menu.saveCurrent();  // cancelled: the dialog's setup only
+    REQUIRE(dialogs.lastSetup);
+    CHECK_FALSE(dialogs.lastSetup->exists(QString::fromUtf8("Мягкий")));  // no «Заменить» over the depth preset
+    dialogs.saveAnswer = PresetSaveDialog::Answer{QString::fromUtf8("Мягкий"), false};
+    menu.saveCurrent();
+    const auto listed = PresetStore::List("nr").items;
+    REQUIRE(listed.size() == 1);
+    CHECK(PresetStore::Path(listed[0].file) != depthFile);
+    CHECK(bytes(depthFile) == depthBytes);
+    const auto again = model.saveStagePreset("nr", QString::fromUtf8("Мягкий"));
+    CHECK(again.exists);
+    CHECK(again.file == listed[0].file);  // the clash is with the NR preset
+    // an import of an NR «Мягкий» clashes with the NR one only
+    const auto imported = PresetStore::Import("nr", WritePreset(d / "soft.json", CardPresetJson("Мягкий", {{"intensity", 0.5}})));
+    CHECK(imported.exists);
+    CHECK(imported.file == listed[0].file);
+    CHECK(bytes(depthFile) == depthBytes);
+    // a card preset of a card without a menu, where a pipeline preset is expected: the command line, not a menu that does not exist
+    const auto refused = model.applyPipelinePreset(Q(depthFile));
+    CHECK(refused.problems.join(" ").contains(QString::fromUtf8("--param-file depth=")));
+    CHECK_FALSE(refused.problems.join(" ").contains(QString::fromUtf8("Пресет ▾")));
+    // a name with a no-break space at its end: the clash is found before the core would refuse the save
+    const auto nbsp = PresetStore::Import("nr", WritePreset(d / "nbsp.json", CardPresetJson("Ночь\xC2\xA0", {{"intensity", 0.4}})));
+    REQUIRE(nbsp.ok);
+    const auto nbspAgain = PresetStore::Import("nr", WritePreset(d / "nbsp.json", CardPresetJson("Ночь\xC2\xA0", {{"intensity", 0.4}})));
+    CHECK(nbspAgain.exists);
+    CHECK(nbspAgain.problems.isEmpty());
+}
+
+// Review of PR-9: the tooltip of the other kind's mark is explicit rich text - «A & B» reads as written, not «A &amp; B»
+TEST_CASE("PresetMenu: the other kind's mark names a preset with & as written", "[app][presets][regression]") {
+    App();
+    ClearPresets();
+    const auto d = Dir("presets_mark_tip");
+    StubProjectFile(d / "proj.dlssvid.json", d / "missing.mp4");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    REQUIRE(model.savePipelinePreset("A & B", {}, true).ok);
+    PresetMenu menu(model, "nr");
+    emit menu.aboutToShow();
+    QMenu* mark = nullptr;
+    for (QAction* a : menu.actions())
+        if (a->menu() && a->text() == QString::fromUtf8("Для &новых проектов")) mark = a->menu();
+    REQUIRE(mark);
+    QAction* other = mark->actions().last();
+    CHECK(other->text() == QString::fromUtf8("Пресет обработки «A && B»"));
+    QTextDocument doc;
+    doc.setHtml(other->toolTip());
+    CHECK(doc.toPlainText().contains(QString::fromUtf8("из «A & B»")));
+    QSettings().remove("presets/newProject");
 }

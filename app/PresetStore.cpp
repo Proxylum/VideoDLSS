@@ -52,6 +52,16 @@ std::string FreeCopyName(const std::string& name, PresetScope scope, const std::
     return name;
 }
 
+// a card preset where a pipeline preset is expected: where it goes - its card's menu, or the command line for a card without one
+QString CardPresetElsewhere(const std::string& stage, bool import) {
+    const StageSchema* schema = FindStageSchema(stage);
+    if (schema && schema->cardPresets)
+        return import ? Tr("Это пресет карточки «%1» — импортируйте его в её меню «Пресет ▾».").arg(StageName(stage))
+                      : Tr("Это пресет карточки «%1» — он применяется из её меню «Пресет ▾»").arg(StageName(stage));
+    return Tr("Это пресет карточки «%1» — у этой карточки нет меню пресетов, он применяется в командной строке: --param-file %2=<файл>")
+        .arg(StageName(stage), U(stage));
+}
+
 QString ListText(const std::vector<std::string>& items, const char* sep) {
     QStringList l;
     for (const auto& x : items) l << U(x);
@@ -157,6 +167,8 @@ std::filesystem::path PresetStore::Path(const QString& file) { return std::files
 
 QString PresetStore::Text(const std::filesystem::path& p) { return QString::fromStdWString(p.wstring()); }
 
+QString PresetStore::CardPresetRefusal(const std::string& stage) { return CardPresetElsewhere(stage, false); }
+
 PresetStore::Listing PresetStore::List(const std::string& target) {
     Listing out;
     const bool pipeline = target == kPipelineTarget;
@@ -176,7 +188,8 @@ PresetStore::Listing PresetStore::List(const std::string& target) {
 std::optional<QString> PresetStore::FindByName(const QString& name, PresetScope scope, const std::string& stage) {
     const QString wanted = name.trimmed();
     for (const PresetName& n : Library().Names())
-        if (n.scope == scope && U(n.name).compare(wanted, Qt::CaseInsensitive) == 0 && (stage.empty() || n.stage.empty() || n.stage == stage))
+        // both sides trimmed alike (a no-break space at an end): every name the core's exact check would take is found here first
+        if (n.scope == scope && U(n.name).trimmed().compare(wanted, Qt::CaseInsensitive) == 0 && (stage.empty() || n.stage.empty() || n.stage == stage))
             return Text(n.path);
     return std::nullopt;
 }
@@ -229,8 +242,12 @@ QString PresetStore::IssueText(const PresetIssue& i, bool withStage) {
                     for (const auto& c : b->choices)
                         if (c.value == i.to) method = U(c.label);
                 const ParamSpec* spec = SpecOf(st, i.key);
-                text = spec && IsListlessKey(*spec, i.to) ? Tr("%1: у метода «%2» нет списка — пресет её не задаёт, оставлено значение проекта").arg(label, method)
-                                                          : Tr("%1 не относится к методу «%2» — пропущено").arg(label, method);
+                if (spec && IsListlessKey(*spec, i.to))
+                    text = (i.kept ? Tr("%1: у метода «%2» нет списка — пресет её не задаёт, оставлено значение проекта")
+                                   : Tr("%1: у метода «%2» нет списка — пресет её не задаёт, работает значение метода по умолчанию"))
+                               .arg(label, method);
+                else
+                    text = Tr("%1 не относится к методу «%2» — пропущено").arg(label, method);
             }
             break;
         case K::UnknownStage: return Tr("стадии «%1» нет в этой версии").arg(U(st));
@@ -297,7 +314,7 @@ PresetStore::Result PresetStore::Import(const std::string& target, const QString
     const bool pipeline = target == kPipelineTarget;
     const PresetLoad l = LoadPreset(Path(from), pipeline ? std::string() : target);
     if (pipeline && l.scopeKnown && l.preset.scope == PresetScope::Stage && !l.preset.stage().empty()) {  // else the reason below
-        r.problems << Tr("Это пресет карточки «%1» — импортируйте его в её меню «Пресет ▾».").arg(StageName(l.preset.stage()));
+        r.problems << CardPresetElsewhere(l.preset.stage(), true);
         return r;
     }
     if (!l.ok()) {

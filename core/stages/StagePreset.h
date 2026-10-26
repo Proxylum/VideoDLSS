@@ -66,6 +66,7 @@ struct PresetIssue {
     std::optional<ParamProblem> problem;  // BadValue / SlotValue of a stage
     nlohmann::json got;                   // the value (BadValue of encode, an engineer / unknown key)
     int schema = 0;                       // NewerSchema
+    bool kept = false;                    // ForeignKey of a list key without a list: the project's value stays (else the backend's default runs)
     std::string text;                     // English, as the CLI prints it
     bool fatal() const;
 };

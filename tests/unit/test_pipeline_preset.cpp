@@ -125,6 +125,8 @@ TEST_CASE("ApplyPipelinePreset: stage settings as ApplyPreset, enabled replaced,
     Project p = Tuned();
     Stage(p, "depth").params = {{"backend", "da3"}, {"max_res", 720}, {"models_dir", "D:/m"}};
     Stage(p, "fg").enabled = true;
+    p.viewport.time = 2.5;  // not the default: the check below can fail
+    p.viewport.mode = ViewMode::Grid;
     const Project before = p;
     Preset preset = MakePipelinePreset("Другой", Tuned());
     preset.stages.at("nr").params = {{"intensity", 0.6}, {"backend", "stub"}, {"format", "exr"}};
@@ -366,5 +368,14 @@ TEST_CASE("ApplyPipelinePreset: a list key without a list for the backend is ski
     REQUIRE(notes.size() == 1);
     CHECK(notes[0].kind == Kind::ForeignKey);
     CHECK(notes[0].text == "depth.model has no list for the backend da3 - presets do not set it, the project's value stays");
+    CHECK(notes[0].kept);
     CHECK(Stage(p, "depth").params["model"] == "da3metric-large");
+    // a switch of the method in the same preset dropped the project's VDA model: the note says the backend's default runs
+    Stage(p, "depth").params = {{"backend", "vda"}, {"model", "metric-vda-large"}};
+    notes.clear();
+    ApplyPipelinePreset(p, preset, &notes);
+    REQUIRE(notes.size() == 1);
+    CHECK(notes[0].text == "depth.model has no list for the backend da3 - presets do not set it, the backend's default runs");
+    CHECK_FALSE(notes[0].kept);
+    CHECK_FALSE(Stage(p, "depth").params.contains("model"));
 }

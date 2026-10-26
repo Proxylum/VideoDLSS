@@ -80,8 +80,11 @@ void ApplyPipelinePreset(Project& p, const Preset& preset, std::vector<PresetIss
                 i.got = it->second.params.contains(k) ? it->second.params[k] : nlohmann::json();
                 i.to = StageBackend(s, e->params);
                 const ParamSpec* spec = FindStageSchema(s) ? FindStageSchema(s)->Find(k) : nullptr;
+                // the project's value can be gone already: the preset's switch of the method drops a value of the old list
+                i.kept = e->params.contains(k);
                 i.text = spec && IsListlessKey(*spec, i.to)
-                             ? s + "." + k + " has no list for the backend " + i.to + " - presets do not set it, the project's value stays"
+                             ? s + "." + k + " has no list for the backend " + i.to + " - presets do not set it, " +
+                                   (i.kept ? "the project's value stays" : "the backend's default runs")
                              : s + "." + k + " does not apply to the backend " + i.to + " - skipped";
                 notes->push_back(std::move(i));
             }

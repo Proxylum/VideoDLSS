@@ -21,6 +21,8 @@ public:
     static PresetLibrary Library();
     static std::filesystem::path Path(const QString& file);  // QString -> path without the ANSI code page
     static QString Text(const std::filesystem::path& p);
+    // «Это пресет карточки «X» — …» when one is applied where a pipeline preset is expected: its menu, or the command line
+    static QString CardPresetRefusal(const std::string& stage);
 
     struct Listed {
         QString file, name, when;  // when: HumanWhen(created)

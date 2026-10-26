@@ -176,8 +176,8 @@ void BuildStages(const std::string& projectFile, const std::vector<std::string>&
             for (const auto& k : ignored) {
                 const ParamSpec* spec = FindStageSchema(sf.stage) ? FindStageSchema(sf.stage)->Find(k) : nullptr;
                 if (spec && IsListlessKey(*spec, backend))
-                    Log()->warn("--param-file {}: {}.{} has no list for the backend {}: presets do not set it, the project's value stays (give --param)", sf.spec,
-                                sf.stage, k, backend);
+                    Log()->warn("--param-file {}: {}.{} has no list for the backend {}: presets do not set it, {} (give --param)", sf.spec, sf.stage, k,
+                                backend, s->params.contains(k) ? "the project's value stays" : "the backend's default runs");
                 else
                     Log()->warn("--param-file {}: {}.{} does not apply to the backend {}, skipped", sf.spec, sf.stage, k, backend);
             }

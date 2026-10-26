@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QKeyEvent>
+#include <QTextDocument>
 #include <QUrl>
 
 #include "AppModel.h"
@@ -228,9 +229,11 @@ void PresetMenu::rebuild() {
         o->setCheckable(true);
         o->setChecked(true);
         o->setEnabled(false);
-        o->setToolTip(pipe ? tr("Новые проекты берут «Улучшение» из этого пресета. Выберите здесь пресет обработки — метка перейдёт на него")
-                           : tr("Новые проекты берут все настройки обработки из «%1». Выберите здесь вариант для «Улучшения» — метка перейдёт на него")
-                                 .arg(markText().toHtmlEscaped()));  // a tooltip may read a name as markup
+        // a name from a file: explicit rich text with the name escaped («A & B» and «<b>» read as written; escaping alone showed «&amp;»)
+        o->setToolTip(Qt::convertFromPlainText(
+            pipe ? tr("Новые проекты берут «Улучшение» из этого пресета. Выберите здесь пресет обработки — метка перейдёт на него")
+                 : tr("Новые проекты берут все настройки обработки из «%1». Выберите здесь вариант для «Улучшения» — метка перейдёт на него").arg(markText()),
+            Qt::WhiteSpaceNormal));
         group->addAction(o);
     }
     connect(addAction(tr("Открыть &папку пресетов")), &QAction::triggered, this, [] {
