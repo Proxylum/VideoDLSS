@@ -42,15 +42,26 @@ double SceneCutScore(const LumaThumb& a, const LumaThumb& b) {
     return sum / static_cast<double>(a.y.size());
 }
 
-bool SceneCutDetector::Next(const CpuFrame& frame, double threshold, double* score) {
-    if (score) *score = 0.0;
+double SceneCutDetector::Push(const CpuFrame& frame, bool& compared) {
+    compared = false;
     LumaThumb t = MakeLumaThumb(frame, info_, maxWidth_);
-    if (t.Empty()) return false;
-    const bool first = prev_.Empty();
-    const double s = first ? 0.0 : SceneCutScore(prev_, t);
+    if (t.Empty()) return 0.0;
+    compared = !prev_.Empty();
+    const double s = compared ? SceneCutScore(prev_, t) : 0.0;
     prev_ = std::move(t);
+    return s;
+}
+
+double SceneCutDetector::Score(const CpuFrame& frame) {
+    bool compared = false;
+    return Push(frame, compared);
+}
+
+bool SceneCutDetector::Next(const CpuFrame& frame, double threshold, double* score) {
+    bool compared = false;
+    const double s = Push(frame, compared);
     if (score) *score = s;
-    return !first && s > threshold;
+    return compared && s > threshold;
 }
 
 }  // namespace dlssvid

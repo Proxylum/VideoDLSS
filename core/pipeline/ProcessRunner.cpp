@@ -691,6 +691,14 @@ void ApplyParamSpec(std::vector<ProcessStage>& stages, const std::string& spec) 
 bool PassComplete(const std::filesystem::path& dir, int64_t neededFrames, const std::string& sourceHash) {
     if (!std::filesystem::exists(dir / Manifest::kFileName)) return false;
     try {
+        if (const Manifest m = Manifest::Load(dir); m.IsDataPass()) {  // scenes (PR-13): the manifest is the content, no frame files
+            if (m.firstFrame != 0) return false;
+            if (!sourceHash.empty() && m.sourceHash != sourceHash) return false;  // data of the source: checked always
+            if (m.stageParams.value("off", false)) return true;                    // threshold 0: the length does not matter
+            if (neededFrames > 0) return m.frameCount >= neededFrames;
+            const nlohmann::json a = m.stageParams.value("analysis", nlohmann::json::object());
+            return m.frameCount > 0 && a.is_object() && a.value("reached_end", false);
+        }
         const PassReader r = PassReader::Open(dir);
         const Manifest& m = r.Man();
         // a pass of the clip starts at frame 0 - a part of it (dlssvid nr --start, export --range) never stands for the clip:

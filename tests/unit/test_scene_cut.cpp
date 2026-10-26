@@ -104,4 +104,13 @@ TEST_CASE("SceneCutDetector: a hard cut and a size change are cuts, motion, a di
     CHECK_FALSE(det.Next(CpuFrame{}, 0.24));
     CHECK_FALSE(det.Next(clip[6], 0.24));
     CHECK(det.Next(clip[0], 0.24));
+    // PR-13: Score is the same number without a threshold (the stage scenes stores it); an empty frame does not move the last thumb
+    SceneCutDetector a(ColorInfo{}), b(ColorInfo{});
+    for (size_t i = 0; i < clip.size(); ++i) {
+        double s = -1.0;
+        a.Next(clip[i], 0.24, &s);
+        CHECK(b.Score(clip[i]) == s);
+    }
+    CHECK(b.Score(CpuFrame{}) == 0.0);
+    CHECK(b.Score(clip.back()) == 0.0);  // the same frame as the last one given
 }

@@ -504,6 +504,8 @@ void StampPass(const std::filesystem::path& dir, Manifest m) {
 }
 
 int CmdImport(const ImportArgs& a) {
+    if (Manifest::Exists(a.dir) && Manifest::Load(a.dir).IsDataPass())  // PR-13: scenes - a list, not frames to check or convert
+        Throw("import: " + a.dir + " is a data pass (scenes) with no frames: make it with dlssvid scenes");
     PassReader r = OpenReader(a.dir, a.pass, a.convention, a.size);
     ApplyYUp(r, a.yUp);  // before PrintManifest / --write-manifest: the flag describes the files
     if (a.zNear > 0.f) r.Man().depth.zNear = a.zNear;

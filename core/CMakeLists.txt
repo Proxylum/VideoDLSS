@@ -85,6 +85,7 @@ add_library(dlssvid_core STATIC
   convert/YuvConvert.h convert/YuvConvert.cpp
   convert/Warp.h convert/Warp.cpp
   convert/SceneCut.h convert/SceneCut.cpp
+  passes/ScenesPass.h passes/ScenesPass.cpp
   gpu/GpuFrame.h
   stages/flow/IFlowEstimator.h
   stages/flow/StubFlowEstimator.h stages/flow/StubFlowEstimator.cpp

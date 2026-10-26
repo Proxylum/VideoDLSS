@@ -151,6 +151,7 @@ std::vector<ViewportSource> FrameStore::DiscoverPasses(const std::filesystem::pa
         try {
             ViewportSource s;
             s.manifest = std::make_shared<const Manifest>(Manifest::Load(entry.path()));
+            if (s.manifest->IsDataPass()) continue;  // a data pass (scenes, PR-13): no frames to show
             s.name = s.manifest->pass.empty() ? entry.path().filename().string() : s.manifest->pass;
             s.pass = s.name;
             s.path = entry.path();
@@ -177,6 +178,7 @@ std::vector<ViewportSource> FrameStore::DiscoverPassVersions(const std::filesyst
         try {
             ViewportSource s;
             s.manifest = std::make_shared<const Manifest>(Manifest::Load(v.dir));
+            if (s.manifest->IsDataPass()) continue;  // a data pass (scenes, PR-13): no frames to show
             s.pass = v.pass;
             s.version = v.id;
             s.name = VersionSourceName(v.pass, v.id);
