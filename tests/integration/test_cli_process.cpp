@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <nlohmann/json.hpp>
 #include <regex>
 #include <string>
@@ -465,4 +466,215 @@ TEST_CASE("dlssvid process --plan: a backend switch drops the VDA model, a non-c
     CHECK(plan["stages"][0]["params"]["backend"] == "da3");
     CHECK(plan["stages"][0]["params"]["model"] == "");  // the schema default, not the VDA model
     CHECK(plan["stages"][0]["warnings"].empty());
+}
+
+// PR-9: --param-file - the stages in layers. Here the card files: a card preset replaces the form's keys (the project's engineer keys
+// stay), a bare object merges over it, in command-line order; the backend options and --param win; a file switches its stage on, also
+// one --stages leaves out
+namespace {
+Project StubProject(const std::filesystem::path& clip, const std::filesystem::path& dir) {
+    Project p = Project::Create(clip, dir / "passes");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.params["backend"] = "blend";
+    }
+    return p;
+}
+
+std::string WriteJsonFile(const std::filesystem::path& p, const nlohmann::json& j) {
+    std::ofstream(p, std::ios::binary) << j.dump(2);
+    return p.string();
+}
+
+nlohmann::json PresetJson(const char* scope, const char* name, const nlohmann::json& stages) {
+    return {{"format", "dlssvid-preset"}, {"schema", 1}, {"scope", scope}, {"name", name}, {"stages", stages}};
+}
+
+nlohmann::json NrCard(const nlohmann::json& params) {
+    nlohmann::json s = nlohmann::json::object();
+    s["nr"] = {{"params", params}};
+    return s;
+}
+
+// a pipeline preset over the stub methods: scenes at 0.3, NIS with a sharpness, nr at 0.6, fg off, ProRes 10-bit 4:2:2
+nlohmann::json AnimePreset() {
+    nlohmann::json stages = nlohmann::json::object();
+    stages["scenes"] = {{"enabled", true}, {"params", {{"threshold", 0.3}}}};
+    stages["depth"] = {{"enabled", true}, {"params", {{"backend", "stub"}}}};
+    stages["flow"] = {{"enabled", true}, {"params", {{"backend", "stub"}}}};
+    stages["upscale"] = {{"enabled", true}, {"params", {{"backend", "nis"}, {"scale", 2}, {"sharpness", 0.8}}}};
+    stages["nr"] = {{"enabled", true}, {"params", {{"intensity", 0.6}, {"backend", "stub"}}}};
+    stages["fg"] = {{"enabled", false}, {"params", {{"backend", "blend"}, {"multiplier", 2}}}};
+    nlohmann::json j = PresetJson("pipeline", "Anime", stages);
+    j["encode"] = {{"codec", "prores_ks"}, {"bit_depth", "10"}, {"chroma", "422"}, {"options", nlohmann::json::object()}};
+    return j;
+}
+}  // namespace
+
+TEST_CASE("dlssvid process --param-file: project < stages < files < backend options < param; a preset keeps the project's engineer keys; the stage is switched on",
+          "[integration][cli][process][presets]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("param_file");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    Project p = StubProject(clip, dir);
+    for (auto& st : p.stages)
+        if (st.name == "nr") {
+            st.enabled = false;
+            st.params = {{"backend", "ngx"}, {"format", "png"}, {"intensity", 1.4}, {"exposure", 1.0}};
+        }
+    p.Save(dir / "p.dlssvid.json");
+    const std::string card = WriteJsonFile(dir / "card.json", PresetJson("stage", "Soft", NrCard({{"intensity", 0.7}, {"local_tone", 0.5}})));
+    const std::string bare = WriteJsonFile(dir / "bare.json", {{"temporal", 0.3}, {"intensity", 0.9}});
+    const auto json = dir / "plan.json";
+    const CliResult r = RunCli({"process", "--project", (dir / "p.dlssvid.json").string(), "--plan", "--warp", "--json", json.string(), "--stages", "depth,flow,upscale",
+                                "--param-file", "nr=" + card, "--param-file", "nr=" + bare, "--param", "nr.passes=2", "--nr-backend", "stub"});
+    INFO(r.out);
+    REQUIRE(r.code == 0);
+    const nlohmann::json plan = ReadJson(json);
+    nlohmann::json nr = StageJson(plan, "nr")["params"];  // on: the files switched it on, past --stages and the project
+    CHECK(nr["intensity"] == 0.9);   // the bare file, after the card preset
+    CHECK(nr["local_tone"] == 0.5);  // the card preset
+    CHECK(nr["temporal"] == 0.3);
+    CHECK(nr["exposure"] == 0.0);    // the card preset holds the card: the project's 1 EV is back at its default
+    CHECK(nr["passes"] == 2);        // --param
+    CHECK(nr["format"] == "png");    // an engineer key of the project stays
+    CHECK(nr["backend"] == "stub");  // --nr-backend over the project's ngx
+    CHECK_THROWS(StageJson(plan, "fg"));  // --stages left it out
+    // without stage=: a card preset goes to its stage
+    const CliResult c = RunCli({"process", "--project", (dir / "p.dlssvid.json").string(), "--plan", "--warp", "--json", json.string(), "--param-file", card,
+                                "--nr-backend", "stub"});
+    INFO(c.out);
+    REQUIRE(c.code == 0);
+    CHECK(c.out.find("a card preset of nr") != std::string::npos);
+    CHECK(StageJson(ReadJson(json), "nr")["params"]["intensity"] == 0.7);
+}
+
+TEST_CASE("dlssvid process --param-file with a pipeline preset: enabled, settings and the encoder from it; --stages, stage files, backend options, --codec, --bit-depth and --param win",
+          "[integration][cli][process][presets]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("pipeline_preset");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    Project p = StubProject(clip, dir);
+    p.resultVideo = dir / "clip_result.mp4";
+    p.codecOptions = {{"preset", "p7"}, {"b", "20M"}};
+    for (auto& st : p.stages)
+        if (st.name == "depth") st.params["max_res"] = 512;  // a key of the machine: no preset touches it
+    p.Save(dir / "p.dlssvid.json");
+    std::string projectText;
+    {
+        std::ifstream in(dir / "p.dlssvid.json", std::ios::binary);
+        projectText.assign(std::istreambuf_iterator<char>(in), {});
+    }
+    const std::string anime = WriteJsonFile(dir / "anime.json", AnimePreset());
+    const std::string soft = WriteJsonFile(dir / "soft.json", PresetJson("stage", "Soft", NrCard({{"intensity", 0.8}})));
+    const auto json = dir / "plan.json";
+    auto plan = [&](std::vector<std::string> extra) {
+        std::vector<std::string> args{"process", "--project", (dir / "p.dlssvid.json").string(), "--plan", "--warp", "--json", json.string()};
+        args.insert(args.end(), extra.begin(), extra.end());
+        const CliResult r = RunCli(args);
+        INFO(r.out);
+        REQUIRE(r.code == 0);
+        return std::pair{ReadJson(json), r.out};
+    };
+    {  // the stage file written before the pipeline preset still wins: the preset is layer 2 wherever it stands
+        const auto [j, out] = plan({"--param-file", "nr=" + soft, "--param-file", anime});
+        CHECK_THROWS(StageJson(j, "fg"));  // switched off by the preset
+        CHECK(StageJson(j, "nr")["params"]["intensity"] == 0.8);
+        CHECK(StageJson(j, "upscale")["params"]["sharpness"] == 0.8);
+        CHECK(StageJson(j, "scenes")["params"]["threshold"] == 0.3);
+        CHECK(StageJson(j, "depth")["params"]["max_res"] == 512);
+        CHECK(j["encode"]["codec"] == "prores_ks");
+        CHECK(j["encode"]["bit_depth"] == "10");
+        CHECK(j["encode"]["chroma"] == "422");
+        CHECK(j["encode"]["options"] == nlohmann::json{{"preset", "p7"}});  // the preset's «Авто» bitrate; the project's other option stays
+        CHECK(j["encode"]["settings_note"] == true);
+        CHECK(std::filesystem::path(j["encode"]["output"].get<std::string>()).filename() == "clip_result.mov");
+        CHECK(out.find("encode: prores_ks, bit depth 10, chroma 422") != std::string::npos);
+    }
+    {  // the flags over the preset; the container follows the codec that encodes
+        const auto [j, out] = plan({"--param-file", anime, "--codec", "ffv1", "--bit-depth", "12", "--param", "nr.intensity=0.5"});
+        CHECK(j["encode"]["codec"] == "ffv1");
+        CHECK(j["encode"]["bit_depth"] == "12");
+        CHECK(std::filesystem::path(j["encode"]["output"].get<std::string>()).filename() == "clip_result.mkv");
+        CHECK(StageJson(j, "nr")["params"]["intensity"] == 0.5);
+    }
+    {
+        const auto [j, out] = plan({"--param-file", anime, "--codec", "h264_nvenc", "--bit-depth", "auto", "--chroma", "auto", "--stages",
+                                    "scenes,depth,flow,upscale,nr,fg", "--fg-backend", "blend"});
+        CHECK(std::filesystem::path(j["encode"]["output"].get<std::string>()).filename() == "clip_result.mp4");
+        CHECK(StageJson(j, "fg")["params"]["backend"] == "blend");  // --stages switched it back on
+    }
+    {  // --codec-opt replaces the options, as with a project
+        const auto [j, out] = plan({"--param-file", anime, "--codec-opt", "b=30M"});
+        CHECK(j["encode"]["options"] == nlohmann::json{{"b", "30M"}});
+    }
+    std::ifstream in(dir / "p.dlssvid.json", std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(in), {}) == projectText);  // the project file is not changed
+}
+
+TEST_CASE("dlssvid process and bench --param-file refuse: an unknown stage, an unknown key of a bare file, a bare object without stage=, two pipeline presets, a preset without the stage, a value out of range, an impossible encode",
+          "[integration][cli][process][presets][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("param_file_refused");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const std::string bare = WriteJsonFile(dir / "bare.json", {{"intensty", 1.0}});
+    const std::string anime = WriteJsonFile(dir / "anime.json", AnimePreset());
+    const std::string card = WriteJsonFile(dir / "card.json", PresetJson("stage", "Soft", NrCard({{"intensity", 0.8}})));
+    const std::string five = WriteJsonFile(dir / "five.json", PresetJson("stage", "Five", NrCard({{"intensity", 5}})));
+    nlohmann::json h264 = AnimePreset();
+    h264["encode"] = {{"codec", "h264_nvenc"}, {"bit_depth", 10}};
+    const std::string h264file = WriteJsonFile(dir / "h264.json", h264);
+    auto refused = [&](const char* cmd, std::vector<std::string> extra, const char* says) {
+        std::vector<std::string> args{cmd, "-i", clip.string(), "--warp"};
+        if (std::string(cmd) == "process") args.push_back("--plan");
+        args.insert(args.end(), extra.begin(), extra.end());
+        const CliResult r = RunCli(args);
+        INFO(r.out);
+        CHECK(r.code != 0);
+        CHECK(r.out.find(says) != std::string::npos);
+    };
+    refused("process", {"--param-file", "export=" + card}, "export=");  // not a stage: a path, and there is no such file
+    refused("process", {"--param-file", "nr=" + bare}, "'intensty' not nr settings");
+    refused("process", {"--param-file", bare}, "needs stage=<file.json>");
+    refused("bench", {"--param-file", bare}, "needs stage=<file.json>");
+    refused("process", {"--param-file", anime, "--param-file", anime}, "one pipeline preset at a time");
+    refused("process", {"--param-file", "depth=" + card}, "has no settings for depth");
+    refused("process", {"--param-file", "nr=" + five}, "nr.intensity must be within");
+    refused("bench", {"--param-file", five}, "nr.intensity must be within");
+    refused("process", {"--param-file", h264file}, "encode.bit_depth 10: H.264 NVENC does not encode 10-bit");
+    refused("process", {"--param-file", "nr="}, "no file");
+}
+
+TEST_CASE("dlssvid bench --param-file with a pipeline preset runs its stages with its encoder; --codec wins", "[integration][cli][bench][presets]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("bench_preset");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    nlohmann::json preset = AnimePreset();
+    preset["encode"] = {{"codec", "ffv1"}, {"bit_depth", "auto"}, {"chroma", "auto"}, {"options", nlohmann::json::object()}};
+    const std::string file = WriteJsonFile(dir / "ffv1.json", preset);
+    const auto json = dir / "bench.json";
+    const CliResult b = RunCli({"bench", "-i", clip.string(), "--frames", "3", "--warp", "--param-file", file, "--json", json.string()});
+    INFO(b.out);
+    REQUIRE(b.code == 0);
+    const nlohmann::json j = ReadJson(json);
+    CHECK(j["output_format"]["codec"] == "ffv1");
+    CHECK(StageJson(j, "nr")["status"] == "ran");  // the preset's stub
+    CHECK_THROWS(StageJson(j, "fg"));  // off in the preset: not run, not in the report
+    const CliResult pr = RunCli({"bench", "-i", clip.string(), "--frames", "3", "--warp", "--param-file", file, "--codec", "prores_ks", "--json", json.string()});
+    INFO(pr.out);
+    REQUIRE(pr.code == 0);
+    CHECK(ReadJson(json)["output_format"]["codec"] == "prores_ks");
 }

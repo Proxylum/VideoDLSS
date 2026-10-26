@@ -12,10 +12,12 @@
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/ParamSchema.h"
+#include "stages/StagePreset.h"
 #include "stages/nr/INrBackend.h"
 #include "util/Error.h"
 #include "util/Log.h"
 #include "util/Paths.h"
+#include "viewport/PipelinePreset.h"
 #include "viewport/Project.h"
 
 namespace dlssvid::cli {
@@ -46,27 +48,86 @@ std::vector<std::string> Split(const std::string& s, char sep) {
     return out;
 }
 
-// Common: stages from the project / defaults, --stages filter, aliases and --param.
-void BuildStages(const std::string& projectFile, const std::string& stageList, const std::vector<std::string>& params, const std::string& depthBackend,
-                 const std::string& flowBackend, const std::string& upscaleBackend, const std::string& nrBackend, const std::string& fgBackend, double scale,
-                 int multiplier, ProcessOptions& o, std::filesystem::path* projectInput, std::filesystem::path* projectPasses, std::filesystem::path* projectResult,
-                 int* projectKeep = nullptr, std::string* projectCodec = nullptr, std::map<std::string, std::string>* projectCodecOptions = nullptr,
-                 OutputFormatRequest* projectFormat = nullptr, bool* projectSettingsNote = nullptr) {
+// What the command line takes from the project file and a pipeline preset (layers 1 and 2, docs/conventions.md «--param-file»).
+struct FileLayer {
+    std::filesystem::path input, passes, result;  // the project's (empty without one)
+    int keep = -1;
+    bool encoder = false;  // a project or a pipeline preset gave the encoder
+    std::string codec;
+    std::map<std::string, std::string> codecOptions;
+    OutputFormatRequest format;
+    bool settingsNote = true;
+};
+
+bool IsProcessStage(const std::string& name) {
+    return std::find(ProcessStageOrder().begin(), ProcessStageOrder().end(), name) != ProcessStageOrder().end();
+}
+
+std::string Quoted(const std::vector<std::string>& keys) {
+    std::string s;
+    for (const auto& k : keys) s += (s.empty() ? "'" : ", '") + k + "'";
+    return s;
+}
+
+// Common: the stages and the encoder in layers (PR-9): the project or the built-in defaults < a pipeline preset (--param-file without
+// stage=) < --stages < the stage files (--param-file stage=..., a card preset without stage=), in command-line order < the backend
+// options, --scale, --multiplier < --param. A stage file switches its stage on, as --param does.
+void BuildStages(const std::string& projectFile, const std::vector<std::string>& paramFiles, const std::string& stageList, const std::vector<std::string>& params,
+                 const std::string& depthBackend, const std::string& flowBackend, const std::string& upscaleBackend, const std::string& nrBackend,
+                 const std::string& fgBackend, double scale, int multiplier, ProcessOptions& o, FileLayer* layer) {
+    Project base;
     if (!projectFile.empty()) {
-        Project p = Project::Load(projectFile);
-        o.stages = StagesFromProject(p);
-        o.sourceHash = p.SourceHash();  // the project's cache: no rehash when the file is unchanged
-        if (o.sourceHash.empty()) o.sourceHash = p.sourceHash;  // the file is gone (moved): what the project last saw
-        if (projectInput) *projectInput = p.sourceVideo;
-        if (projectPasses) *projectPasses = p.passesRoot;
-        if (projectResult) *projectResult = p.resultVideo;
-        if (projectKeep) *projectKeep = p.passVersionsKeep;
-        if (projectCodec) *projectCodec = p.codec;
-        if (projectCodecOptions) *projectCodecOptions = p.codecOptions;
-        if (projectFormat) *projectFormat = p.outputFormat;
-        if (projectSettingsNote) *projectSettingsNote = p.settingsNote;
+        base = Project::Load(projectFile);
+        o.sourceHash = base.SourceHash();  // the project's cache: no rehash when the file is unchanged
+        if (o.sourceHash.empty()) o.sourceHash = base.sourceHash;  // the file is gone (moved): what the project last saw
     } else {
-        o.stages = DefaultProcessStages();
+        base.stages = Project::DefaultStages();
+    }
+    // the --param-file list: one pipeline preset (layer 2, wherever it stands) and the stage files (layer 4, in order)
+    struct StageFile {
+        std::string stage, file, spec;
+    };
+    std::vector<StageFile> stageFiles;
+    std::string pipelineFile;
+    for (const std::string& spec : paramFiles) {
+        const size_t eq = spec.find('=');
+        const std::string head = eq == std::string::npos ? std::string() : spec.substr(0, eq);
+        if (IsProcessStage(head)) {  // the stage form only when the text before the first '=' is a stage: a path with '=' stays a path
+            if (eq + 1 == spec.size()) Throw("--param-file " + spec + ": no file after " + head + "=");
+            stageFiles.push_back({head, spec.substr(eq + 1), spec});
+            continue;
+        }
+        const PresetLoad l = LoadPreset(spec);  // without stage=: a preset only
+        if (l.Has(PresetIssueKind::NotPreset))
+            Throw("--param-file " + spec + ": a JSON object of stage settings needs stage=<file.json> (e.g. nr=" + spec +
+                  "); without stage= the file must be a dlssvid-preset");
+        if (!l.ok()) Throw("--param-file " + spec + ": " + l.problemsText());
+        if (l.preset.scope == PresetScope::Stage) {  // a card preset: to its stage, as <stage>=<file>
+            Log()->info("--param-file {}: a card preset of {} ('{}'), applied to {}", spec, l.preset.stage(), l.preset.name, l.preset.stage());
+            stageFiles.push_back({l.preset.stage(), spec, spec});
+            continue;
+        }
+        if (!pipelineFile.empty()) Throw("--param-file: one pipeline preset at a time (" + pipelineFile + ", " + spec + ")");
+        pipelineFile = spec;
+        std::vector<PresetIssue> notes = l.issues;
+        ApplyPipelinePreset(base, l.preset, &notes);  // the stages it names (switch, settings) and the encoder
+        for (const auto& n : notes) Log()->warn("--param-file {}: pipeline preset '{}': {}", spec, l.preset.name, n.text);
+    }
+    o.stages = StagesFromProject(base);
+    if (layer) {
+        if (!projectFile.empty()) {
+            layer->input = base.sourceVideo;
+            layer->passes = base.passesRoot;
+            layer->result = base.resultVideo;  // with the container of a pipeline preset's codec
+            layer->keep = base.passVersionsKeep;
+        }
+        layer->encoder = !projectFile.empty() || !pipelineFile.empty();
+        if (layer->encoder) {
+            layer->codec = base.codec;
+            layer->codecOptions = base.codecOptions;
+            layer->format = base.outputFormat;
+            layer->settingsNote = base.settingsNote;
+        }
     }
     if (!stageList.empty()) {
         const std::vector<std::string> only = Split(stageList, ',');
@@ -88,6 +149,35 @@ void BuildStages(const std::string& projectFile, const std::string& stageList, c
             }
         o.stages.push_back(ProcessStage{stage, true, {{key, value}}});
     };
+    for (const StageFile& sf : stageFiles) {
+        StageParamsFile f = ReadStageParamsFile(sf.stage, sf.file);  // throws: unreadable, > 1 MiB, broken, a moved key, a refused preset
+        if (!f.dropped.empty())
+            Throw("--param-file " + sf.spec + ": " + Quoted(f.dropped) + " not " + sf.stage + " settings (stages." + sf.stage + ".params keys)");
+        if (f.preset && f.scope == PresetScope::Pipeline)
+            Log()->warn("--param-file {}: the pipeline preset '{}' gives its {} settings only; its other stages, switches and encode are not applied (give it "
+                        "without {}= for the whole pipeline)",
+                        sf.spec, f.presetName, sf.stage, sf.stage);
+        for (const auto& n : f.notes)
+            if (n.kind != PresetIssueKind::OtherStages && n.kind != PresetIssueKind::PipelineFields)
+                Log()->warn("--param-file {}: preset '{}': {}", sf.spec, f.presetName, n.text);
+        ProcessStage* s = nullptr;
+        for (auto& x : o.stages)
+            if (x.name == sf.stage) s = &x;
+        if (!s) {
+            o.stages.push_back(ProcessStage{sf.stage, true, nlohmann::json::object()});
+            s = &o.stages.back();
+        }
+        if (f.preset) {  // its keys replace the form's (and, from a pipeline preset, the tuning keys); the others stay
+            std::vector<std::string> ignored;
+            s->params = ApplyPreset(sf.stage, s->params, f.params, f.scope, &ignored);
+            for (const auto& k : ignored) Log()->warn("--param-file {}: {}.{} does not apply to the backend {}, skipped", sf.spec, sf.stage, k, StageBackend(sf.stage, s->params));
+        } else {  // a settings object merges over the stage's; its backend first, as the aliases
+            if (f.params.contains("backend") && f.params["backend"].is_string())
+                s->params = ParamsForBackendChange(sf.stage, s->params, f.params["backend"].get<std::string>());
+            for (const auto& [k, v] : f.params.items()) s->params[k] = v;
+        }
+        s->enabled = true;  // as --param
+    }
     if (!depthBackend.empty()) alias("depth", "backend", depthBackend);
     if (!flowBackend.empty()) alias("flow", "backend", flowBackend);
     if (!upscaleBackend.empty()) alias("upscale", "backend", upscaleBackend);
@@ -154,16 +244,12 @@ void PrintReport(const ProcessResult& r) {
 
 int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     ProcessOptions o;
-    std::filesystem::path projectInput, projectPasses, projectResult;
-    int projectKeep = -1;
-    std::string projectCodec;
-    std::map<std::string, std::string> projectCodecOptions;
-    OutputFormatRequest projectFormat;
-    bool projectSettingsNote = true;
-    BuildStages(a.project, a.stages, a.params, a.depthBackend, a.flowBackend, a.upscaleBackend, a.nrBackend, a.fgBackend, a.scale, a.multiplier, o, &projectInput,
-                &projectPasses, &projectResult, &projectKeep, &projectCodec, &projectCodecOptions, &projectFormat, &projectSettingsNote);
-    o.settingsNote = projectSettingsNote && !a.noSettingsNote;
-    o.keepVersions = a.keepVersions >= 0 ? a.keepVersions : (projectKeep >= 0 ? projectKeep : 2);
+    FileLayer file;
+    BuildStages(a.project, a.paramFiles, a.stages, a.params, a.depthBackend, a.flowBackend, a.upscaleBackend, a.nrBackend, a.fgBackend, a.scale, a.multiplier, o,
+                &file);
+    std::filesystem::path projectInput = file.input, projectPasses = file.passes, projectResult = file.result;
+    o.settingsNote = file.settingsNote && !a.noSettingsNote;
+    o.keepVersions = a.keepVersions >= 0 ? a.keepVersions : (file.keep >= 0 ? file.keep : 2);
     for (const auto& name : Split(a.force, ',')) o.forceStages.insert(name);
     o.input = !a.input.empty() ? std::filesystem::path(a.input) : projectInput;
     if (o.input.empty()) Throw("process: -i/--input (or --project with a source video) is required");
@@ -184,19 +270,22 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
             o.sourceHash = inputHash;
         }
     }
-    o.codec = !a.codecGiven && !projectCodec.empty() ? projectCodec : a.codec;  // the project's encoder unless --codec says otherwise
-    o.output = !a.output.empty() ? std::filesystem::path(a.output) : projectResult;
+    // the project's (or a pipeline preset's) encoder unless --codec says otherwise
+    o.codec = !a.codecGiven && file.encoder && !file.codec.empty() ? file.codec : a.codec;
+    // the project's result takes the container of the codec that encodes it - after --codec (PR-9): a ProRes preset, then --codec
+    // h264_nvenc, writes .mp4, not H.264 into the .mov the preset renamed it to; and ProRes of --codec no longer goes into an .mp4
+    o.output = !a.output.empty() ? std::filesystem::path(a.output) : ResultPathFor(projectResult, o.codec);
     if (o.output.empty()) o.output = o.input.parent_path() / (o.input.stem().string() + "_result" + ResultExtensionFor(o.codec));
     o.passesRoot = !a.passes.empty() ? std::filesystem::path(a.passes) : projectPasses;
     o.skipExisting = !a.noSkipExisting;
     o.disableUnavailable = a.disableUnavailable;
-    if (a.codecOptions.empty()) o.codecOptions = projectCodecOptions;
+    if (a.codecOptions.empty()) o.codecOptions = file.codecOptions;  // --codec-opt replaces them all, a preset's bitrate too
     for (const auto& kv : a.codecOptions) {
         const auto eq = kv.find('=');
         if (eq == std::string::npos) Throw("--codec-opt expects key=value, got: " + kv);
         o.codecOptions[kv.substr(0, eq)] = kv.substr(eq + 1);
     }
-    o.outputFormat = projectFormat;  // the project's bit depth / chroma unless the flags say otherwise
+    o.outputFormat = file.format;  // the project's (a pipeline preset's) bit depth / chroma unless the flags say otherwise
     if (!a.bitDepth.empty()) {
         const auto depth = ParseBitDepthChoice(a.bitDepth);
         if (!depth) Throw("--bit-depth must be auto | 8 | 10 | 12 (got '" + a.bitDepth + "')");
@@ -223,7 +312,21 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
         }
         const ProcessPlan plan = PlanProcess(o);
         PrintPlan(plan);
-        if (!a.json.empty()) std::ofstream(a.json) << DumpJson(plan.ToJson()) << "\n";
+        // PR-9: what the CLI decided about the encoder (layer 2 cannot be checked otherwise without a run)
+        std::string options;
+        for (const auto& [k, v] : o.codecOptions) options += (options.empty() ? "" : " ") + k + "=" + v;
+        std::printf("encode: %s, bit depth %s, chroma %s, %s, settings note %s, output %s\n", o.codec.c_str(), BitDepthChoiceName(o.outputFormat.bitDepth).c_str(),
+                    o.outputFormat.chroma.c_str(), options.empty() ? "no options" : options.c_str(), o.settingsNote ? "on" : "off", PathText(o.output).c_str());
+        if (!a.json.empty()) {
+            nlohmann::json j = plan.ToJson();
+            j["encode"] = {{"codec", o.codec},
+                           {"options", o.codecOptions},
+                           {"bit_depth", BitDepthChoiceName(o.outputFormat.bitDepth)},
+                           {"chroma", o.outputFormat.chroma},
+                           {"settings_note", o.settingsNote},
+                           {"output", PathText(o.output)}};
+            std::ofstream(a.json) << DumpJson(j) << "\n";
+        }
         for (const auto& s : plan.stages)
             if (!s.error.empty()) return 1;  // the run would be refused
         return 0;
@@ -236,7 +339,8 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
 
 int CmdBench(const ProcessCommands::BenchArgs& a) {
     ProcessOptions o;
-    BuildStages("", a.stages, a.params, "", "", "", "", "", 0.0, 0, o, nullptr, nullptr, nullptr);
+    FileLayer file;
+    BuildStages("", a.paramFiles, a.stages, a.params, "", "", "", "", "", 0.0, 0, o, &file);
     o.input = a.input;
     wchar_t tmp[MAX_PATH];
     const std::filesystem::path scratch = !a.passes.empty() ? std::filesystem::path(a.passes)
@@ -245,7 +349,12 @@ int CmdBench(const ProcessCommands::BenchArgs& a) {
     o.output = !a.output.empty() ? std::filesystem::path(a.output) : scratch / "result.mkv";  // MKV takes any codec (ffv1, nvenc)
     o.skipExisting = false;
     o.disableUnavailable = true;
-    o.codec = a.codec;
+    o.codec = !a.codecGiven && file.encoder ? file.codec : a.codec;  // a pipeline preset's encoder unless --codec says otherwise
+    if (file.encoder) {
+        o.codecOptions = file.codecOptions;
+        o.outputFormat = file.format;
+        o.settingsNote = file.settingsNote;
+    }
     o.frames = a.frames;
     o.warp = a.warp;
     o.progress = &Progress;
@@ -287,6 +396,12 @@ void ProcessCommands::Register(CLI::App& app) {
     for (const auto& n : PipelineStageNames()) names += (names.empty() ? "" : ",") + n;
     process_->add_option("--stages", pa_.stages, "comma list of stages to run (" + names + "); default: the project's enabled stages");
     process_->add_option("--param", pa_.params, "stage parameter stage.key=value (repeatable), e.g. nr.intensity=1.2, fg.backend=rife");
+    const char* paramFileHelp =
+        "settings from a file (repeatable). stage=<file.json>: a JSON object of the stage's keys (stages.<stage>.params) merged over the project's, or a "
+        "dlssvid-preset whose settings of that stage replace its form keys (engineer keys stay); switches the stage on like --param. <file.json> without "
+        "stage=: a dlssvid-preset - a pipeline preset sets the stages it names (on/off and settings) and the encoder as a project would, a card preset goes "
+        "to its stage. --stages, the backend options, --codec / --bit-depth / --chroma / --codec-opt and --param win";
+    process_->add_option("--param-file,--param_file", pa_.paramFiles, paramFileHelp);
     process_->add_option("--depth-backend,--depth_backend", pa_.depthBackend, "da3 | vda | worker | worker:vda | stub");
     process_->add_option("--flow-backend,--flow_backend", pa_.flowBackend, "ofa | searaft | stub");
     process_->add_option("--upscale-backend,--upscale_backend", pa_.upscaleBackend, "dlss | nis | bicubic | trt | worker");
@@ -329,6 +444,7 @@ void ProcessCommands::Register(CLI::App& app) {
     bench_->add_option("--frames", ba_.frames, "frames to process")->default_val(30);
     bench_->add_option("--stages", ba_.stages, "comma list of stages (default: all)");
     bench_->add_option("--param", ba_.params, "stage parameter stage.key=value (repeatable)");
+    bench_->add_option("--param-file,--param_file", ba_.paramFiles, paramFileHelp);
     bench_->add_option("--passes", ba_.passes, "keep the passes here instead of a temporary folder");
     bench_->add_option("-o,--output", ba_.output, "result video (default: temporary)");
     bench_->add_option("--codec", ba_.codec, "video encoder")->default_val("h264_nvenc");
@@ -342,7 +458,10 @@ int ProcessCommands::Dispatch() {
         pa_.codecGiven = process_->count("--codec") > 0;
         return CmdProcess(pa_);
     }
-    if (bench_ && bench_->parsed()) return CmdBench(ba_);
+    if (bench_ && bench_->parsed()) {
+        ba_.codecGiven = bench_->count("--codec") > 0;
+        return CmdBench(ba_);
+    }
     return -1;
 }
 
