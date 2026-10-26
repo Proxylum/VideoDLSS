@@ -233,6 +233,73 @@ TEST_CASE("DLSS Frame Generation produces color_fg on an NVIDIA GPU", "[integrat
     }
 }
 
+// PR-13 (design §10.4, run with the user's consent): DLSS-G takes a reset in the middle of the stream at a cut (prev == cur) - no error,
+// the frame count of x2 unchanged, the frame before the cut held, and the first frame made after it is of the new shot, not a blend
+// with the old one
+TEST_CASE("DLSS-G accepts a mid-stream reset at a scene cut: the old shot held, the new one not blended", "[integration][fg][gpu][dlssg][scenes]") {
+    D3D12Device dev({false, false});
+    if (!dev.IsNvidia()) SKIP("DLSS Frame Generation needs an NVIDIA GPU");
+    const FgAvailability avail = FgAvailable("dlssg");
+    if (!avail.available) SKIP(avail.reason);
+    const uint32_t w = 256, h = 144;
+    const int frames = 8, cutAt = 4;
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("dlssg_cut");
+    const auto clip = WriteClipWith(dir / "clip.mkv", spec, [&](int64_t i) {  // scene A brightens, a hard cut to scene B, the gradient inverted
+        CpuFrame f = SyntheticFrame(i, w, h);
+        uint8_t* y = f.Plane(0);
+        for (uint32_t r = 0; r < h; ++r)
+            for (uint32_t c = 0; c < w; ++c) {
+                const int v = i < cutAt ? 30 + static_cast<int>(c * 150 / w) + 3 * static_cast<int>(i) : 220 - static_cast<int>(c * 150 / w);
+                y[r * w + c] = static_cast<uint8_t>(v);
+            }
+        return f;
+    });
+    SceneList cuts;
+    cuts.cuts = {cutAt};
+    cuts.id = SceneCutsId(cuts.cuts);
+    cuts.threshold = 0.24;
+    cuts.frames = frames;
+    cuts.reachedEnd = true;
+    FgStageOptions o;
+    o.backend = "dlssg";
+    o.multiplier = 2;
+    o.outputDir = dir / "passes";
+    o.sceneCuts = cuts;
+    VideoDecoder dec(clip);
+    FgRunResult r;
+    try {
+        r = RunFg(dec, dev, o);
+    } catch (const std::exception& e) {
+        const std::string what = e.what();
+        if (what.find("not available on this GPU") != std::string::npos) SKIP(what);
+        throw;
+    }
+    CHECK(r.stats.frames == frames);
+    CHECK(r.stats.generated == frames - 2);  // every pair but the one across the cut
+    CHECK(r.stats.duplicated == 1);
+    CHECK(r.stats.sceneCutCount == 1);
+    const PassReader rd = PassReader::Open(r.outDir);
+    CHECK(rd.Man().frameCount == FgFrameCount(frames, 2));
+    CHECK(rd.Man().stageParams["scene_cuts_id"] == cuts.id);
+    CHECK(rd.ReadFrame(FgInterpIndex(cutAt - 1, 1, 2)).data == rd.ReadFrame(FgRealIndex(cutAt - 1, 2)).data);  // the old shot held
+    const std::vector<PassImage> src = DecodeRgb(clip);
+    const PassImage after = rd.ReadFrame(FgInterpIndex(cutAt, 1, 2));  // made from the cut frame and the next one, after the reset
+    const double toNew = CompareImages(src[static_cast<size_t>(cutAt)], after).psnrY, toOld = CompareImages(src[static_cast<size_t>(cutAt - 1)], after).psnrY;
+    INFO("PSNR Y to the new shot " << toNew << " dB, to the old one " << toOld << " dB");
+    CHECK(toNew > 20.0);
+    CHECK(toNew > toOld + 6.0);
+    for (int i = 1; i < frames - 1; ++i) {
+        if (i == cutAt - 1) continue;  // the held one
+        const PassImage g = rd.ReadFrame(FgInterpIndex(i, 1, 2));
+        INFO("generated after real frame " << i);
+        CHECK(CompareImages(src[static_cast<size_t>(i)], g).psnrY > 12.0);  // not garbage
+    }
+}
+
 TEST_CASE("RIFE through TensorRT produces color_fg", "[integration][fg][gpu][rife]") {
 #if defined(DLSSVID_WITH_TENSORRT)
     D3D12Device dev({false, false});
