@@ -66,6 +66,7 @@ add_library(dlssvid_core STATIC
   stages/scenes/ScenesStage.h stages/scenes/ScenesStage.cpp
   stages/ParamSchema.h stages/ParamSchema.cpp
   stages/StagePreset.h stages/StagePreset.cpp
+  stages/PresetLibrary.h stages/PresetLibrary.cpp
   gpu/D3D12Device.h gpu/D3D12Device.cpp
   gpu/GpuFrameCache.h gpu/GpuFrameCache.cpp
   io/VideoDecoder.h io/VideoDecoder.cpp

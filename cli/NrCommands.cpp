@@ -16,6 +16,7 @@
 #include "stages/nr/INrBackend.h"
 #include "stages/nr/NrPatch.h"
 #include "stages/ParamSchema.h"
+#include "stages/StagePreset.h"
 #include "stages/nr/NrStage.h"
 #include "util/Error.h"
 #include "util/Log.h"
@@ -115,8 +116,12 @@ nlohmann::json ArgsAsParams(const NrCommands::NrArgs& a) {
 nlohmann::json ResolveNrParams(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     nlohmann::json params = nlohmann::json::object();
     if (!a.paramsFile.empty()) {
-        std::vector<std::string> dropped;
-        params = ReadStageParamsFile("nr", a.paramsFile, &dropped);
+        // a bare object, or a dlssvid-preset (PR-9): a card preset of nr or a pipeline preset's nr entry, its values checked
+        // when read; a preset without nr settings is refused there
+        StageParamsFile f = ReadStageParamsFile("nr", a.paramsFile);
+        params = std::move(f.params);
+        for (const PresetIssue& n : f.notes) Log()->warn("nr: --params-file {}: preset '{}': {}", a.paramsFile, f.presetName, n.text);
+        const std::vector<std::string>& dropped = f.dropped;
         // refused, not skipped: a typo, or an option of the run written into the file, would change nothing and say nothing -
         // an A/B variant would compare two equal runs. An option is recognised by the parser itself (every long option of nr
         // has its snake spelling), so the message never names an option that does not exist (review of TASK-0047)
@@ -559,7 +564,9 @@ void NrCommands::Register(CLI::App& app) {
         ->default_val(0)
         ->check(CLI::NonNegativeNumber);
     nr_->add_option("--params-file,--params_file", na_.paramsFile,
-                    "JSON object of nr settings under the project's keys (stages.nr.params); options given on the command line win")
+                    "JSON object of nr settings under the project's keys (stages.nr.params), or a dlssvid-preset (a card preset's nr "
+                    "settings or a pipeline preset's nr entry; a card preset leaves the engineer keys backend and format to the options); "
+                    "options given on the command line win")
         ->check(CLI::ExistingFile);
     nr_->add_flag("--warp", na_.warp, "use the WARP software adapter (stub)");
     nr_->add_option("--dll-dir,--dll_dir", na_.dllDir, "folder with nvngx_dlssnr.dll (default: bin/nvidia next to the executable)");

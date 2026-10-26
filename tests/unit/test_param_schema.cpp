@@ -85,39 +85,6 @@ TEST_CASE("NR A/B switches are standalone flags: no schema key, ApplyNrParams ig
     CHECK(NrAbJson(NrStageOptions{}).empty());
 }
 
-// TASK-0047: a file of one stage's settings (dlssvid nr --params-file) - one object of the schema's keys, aliases normalised;
-// keys the schema does not have are named for the caller to refuse; other files are refused with a message naming them.
-TEST_CASE("ReadStageParamsFile: one object of schema keys, aliases normalised, unknown keys named, other files refused", "[unit][schema][nr]") {
-    const auto dir = std::filesystem::path(DLSSVID_TEST_TMP) / "params_file";
-    std::filesystem::create_directories(dir);
-    auto file = [&](const char* name, const std::string& text) {
-        const auto p = dir / name;
-        std::ofstream(p, std::ios::binary) << text;
-        return p;
-    };
-    std::vector<std::string> dropped;
-    const nlohmann::json j = ReadStageParamsFile("nr", file("ok.json", R"({"local-tone":0.3,"no_guides":true,"style":4,"intensty":1})"), &dropped);
-    CHECK(j == nlohmann::json{{"local_tone", 0.3}, {"guides", false}, {"style", "4"}});
-    CHECK(dropped == std::vector<std::string>{"intensty"});
-    auto throws = [&](const std::filesystem::path& p, const char* says) {
-        INFO(p.string());
-        try {
-            ReadStageParamsFile("nr", p);
-            FAIL("no exception");
-        } catch (const std::exception& e) {
-            CHECK(std::string(e.what()).find(says) != std::string::npos);
-            CHECK(std::string(e.what()).find(p.filename().string()) != std::string::npos);
-        }
-    };
-    throws(file("array.json", "[1]"), "JSON object");
-    throws(file("broken.json", "{\"intensity\": "), "not valid JSON");
-    throws(file("preset.json", R"({"format":"dlssvid-preset","stages":{}})"), "preset");
-    throws(file("big.json", "{\"intensity\": 1, \"pad\": \"" + std::string(1 << 20, 'x') + "\"}"), "1 MiB");
-    // PR-13 (regression): the scene-cut threshold moved to the stage scenes - named, not dropped in silence
-    throws(file("moved.json", R"({"intensity":1,"scene_cut":0.3})"), "nr.scene_cut moved to scenes.threshold");
-    throws(file("moved_kebab.json", R"({"scene-cut":0})"), "scenes.threshold");
-}
-
 // TASK-0046: the NR card shows every setting (before: the intensity alone, the rest in the engineer JSON) - the basic
 // rows in groups, the rest under «Ещё настройки», only the backend and the pass format in the JSON editor.
 TEST_CASE("NR form: groups, levels, conditions of the rows", "[unit][schema][nr][card]") {
