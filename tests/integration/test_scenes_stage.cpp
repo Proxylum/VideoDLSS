@@ -5,17 +5,22 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <sstream>
 
 #include "TestClips.h"
+#include "convert/ColorConvert.h"
+#include "convert/SceneCut.h"
+#include "gpu/D3D12Device.h"
 #include "io/VideoDecoder.h"
 #include "passes/ScenesPass.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/ProcessRunner.h"
 #include "pipeline/ScenesPlan.h"
+#include "stages/nr/NrStage.h"
 #include "stages/scenes/ScenesStage.h"
 #include "util/Sha256.h"
 #include "util/Subprocess.h"
@@ -47,6 +52,28 @@ std::filesystem::path CutClip(const std::filesystem::path& dir, int frames = 6) 
         uint8_t* y = f.Plane(0);
         for (uint32_t r = 0; r < kH; ++r)
             for (uint32_t c = 0; c < kW; ++c) y[r * kW + c] = static_cast<uint8_t>(i < kCutAt ? 40 + c + 4 * i : 220 - c);
+        return f;
+    });
+}
+
+// The clips of the equivalence with PR-6: its cut at 3 in 8 and in 10 bit (the low bits a static ramp), and a flash - a bright
+// frame 3 over a slow scene, two scores above the threshold
+std::filesystem::path EquivalenceClip(const std::filesystem::path& dir, const std::string& kind) {
+    ClipSpec spec;
+    spec.frames = 7;
+    spec.width = kW;
+    spec.height = kH;
+    if (kind == "10bit") spec.pixFmt = "yuv420p10le";
+    const FrameDesc desc = FrameDescFor(spec);
+    return WriteClipWith(dir / (kind + ".mkv"), spec, [&](int64_t i) {
+        CpuFrame f = SyntheticFrame(i, desc);
+        for (uint32_t r = 0; r < kH; ++r)
+            for (uint32_t c = 0; c < kW; ++c) {
+                const int y = kind == "flash" ? (i == 3 ? 235 : 40 + static_cast<int>(c) + 2 * static_cast<int>(i))
+                                              : (i < kCutAt ? 40 + static_cast<int>(c) + 4 * static_cast<int>(i) : 220 - static_cast<int>(c));
+                if (desc.HighBitDepth()) f.Plane16(0)[r * kW + c] = static_cast<uint16_t>((y << 2) | ((r + c) & 3));
+                else f.Plane(0)[r * kW + c] = static_cast<uint8_t>(y);
+            }
         return f;
     });
 }
@@ -433,4 +460,43 @@ TEST_CASE("dlssvid scenes: the list on the console and in JSON; a second thresho
     const CliResult bad = RunCli({"scenes", "-i", clip.string(), "-o", root.string(), "--threshold", "2"});
     CHECK(bad.code != 0);
     CHECK(bad.out.find("scenes.threshold") != std::string::npos);
+}
+
+// PR-13 (regression): at 0.24 the list of the stage scenes is the one NR's own detector of PR-6 reset its history at - the module
+// it called, as it called it (every decoded source frame, Next(frame, 0.24f)). No score lies within 1e-4 of the threshold, so the
+// stored float32 scores and the detector's double agree on every frame.
+TEST_CASE("Regression: the scene list at 0.24 is the one NR's detector of PR-6 found (8 bit, 10 bit, a flash)", "[integration][scenes][regression]") {
+    const auto dir = Dir("equivalence");
+    D3D12Device dev({true, false});
+    const std::vector<std::pair<std::string, std::vector<int64_t>>> clips{{"cut", {kCutAt}}, {"10bit", {kCutAt}}, {"flash", {3, 4}}};
+    for (const auto& [kind, expected] : clips) {
+        INFO(kind);
+        const auto clip = EquivalenceClip(dir, kind);
+        const ScenesStageOptions o = Options(dir / kind, clip);
+        VideoDecoder decoder(clip);
+        const ScenesRunResult r = AnalyseScenes(decoder, o, -1);
+        const auto scores = ReadSceneScores(r.outDir, Manifest::Load(r.outDir));
+        REQUIRE(scores);
+        REQUIRE(scores->scores.size() == 7);
+        for (const float v : scores->scores) CHECK(std::fabs(static_cast<double>(v) - 0.24) > 1e-4);
+        CHECK(r.list.cuts == expected);
+
+        std::vector<int64_t> pr6;
+        {
+            VideoDecoder d(clip);
+            SceneCutDetector det(ColorInfoFromStream(d.Info()));
+            CpuFrame f;
+            while (d.NextFrame(f))
+                if (det.Next(f, 0.24f)) pr6.push_back(f.index);
+        }
+        CHECK(r.list.cuts == pr6);
+
+        NrStageOptions no;  // the stage itself, before PR-13 moved the detector out of it
+        no.backend = "stub";
+        no.outputDir = dir / kind / "nr";
+        no.temporal = 0.5f;
+        no.sceneCut = 0.24f;
+        VideoDecoder dn(clip);
+        CHECK(RunNr(dn, dev, no).stats.sceneCuts == r.list.cuts);
+    }
 }
