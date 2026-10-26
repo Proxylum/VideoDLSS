@@ -500,7 +500,7 @@ void StampPass(const std::filesystem::path& dir, const StageDecision& d, const s
     Manifest m = Manifest::Load(dir);
     if (adopted) m.stageParams["adopted"] = true;  // made before fingerprints: the settings note says so (PR-11)
     // the wall time of this run (decode, pass I/O, init and the stage) on this machine: the only time the estimates use; a stage's
-    // own timer is ms_per_frame_gpu (nr, D8)
+    // own timer is ms_per_frame_gpu (nr D8, upscale) or ms_per_frame_backend (fg, TASK-0051)
     if (msPerFrame > 0) m.stageParams["ms_per_frame"] = msPerFrame;
     m.fingerprint = d.fingerprint;
     m.inputs = d.inputs;

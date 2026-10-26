@@ -48,7 +48,9 @@ bool HasNumber(const nlohmann::json& j, const char* key) { return j.is_object() 
 
 // The wall time a `process` run recorded (StampPass), never a stage's own timer (D8, see RecordedMsPerFrame)
 // The stage's own timer, written by the stage beside the wall time `process` writes: nr and upscale time the GPU, fg its backend. A
-// record of these stages without it is that timer written as ms_per_frame (nr before TASK-0049, upscale and fg before TASK-0051).
+// record of these stages without it is from before (nr TASK-0049, upscale and fg TASK-0051): the stage's timer of a standalone or
+// adopted pass, or a wall time process wrote over it - the two cannot be told apart, so it is not used (the baseline until the stage
+// runs again).
 const char* StageTimerKey(const std::string& stage) {
     if (stage == "nr" || stage == "upscale") return "ms_per_frame_gpu";
     if (stage == "fg") return "ms_per_frame_backend";
