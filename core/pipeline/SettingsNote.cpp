@@ -24,6 +24,12 @@ std::optional<Manifest> Load(const std::filesystem::path& dir) {
 
 std::string IdOf(const Manifest& m) { return m.fingerprint.empty() ? LegacyPassId(m) : m.fingerprint; }
 
+// `m` is the version recorded as `rec`: its id, or - a pass recorded while legacy and adopted since (process stamped a fingerprint
+// on the same files) - its legacy id (review round 2 of PR-11)
+bool Matches(const Manifest& m, const std::string& rec) {
+    return IdOf(m) == rec || (m.stageParams.value("adopted", false) && LegacyPassId(m) == rec);
+}
+
 // The version of `pass` the pass `down` was made from: process records it among `inputs` - the current folder when it matches,
 // else the history version with that fingerprint (a color_fg kept while nr was recomputed under it, review of PR-11); without
 // a record (a standalone pass) the current folder. nullopt: that version is not on disk any more.
@@ -32,10 +38,11 @@ std::optional<Manifest> Upstream(const std::filesystem::path& root, const std::s
     const auto it = down.inputs.find(pass);
     std::optional<Manifest> cur = Load(root / pass);
     if (it == down.inputs.end() || it->second.empty()) return cur;
-    if (cur && IdOf(*cur) == it->second) return cur;
-    for (const auto& v : ListPassVersions(root, pass))
-        if (!v.current && v.fingerprint == it->second)
-            if (auto m = Load(v.dir)) return m;
+    if (cur && Matches(*cur, it->second)) return cur;
+    for (const auto& v : ListPassVersions(root, pass)) {  // a retired legacy version has no fingerprint: matched by its manifest
+        if (v.current) continue;
+        if (auto m = Load(v.dir); m && Matches(*m, it->second)) return m;
+    }
     found = false;
     return std::nullopt;
 }
@@ -80,9 +87,13 @@ nlohmann::json Nr(const Manifest& m) {
         if (p.contains("skin_structure") && p["skin_structure"].is_number())
             s["skin_structure"] = p["skin_structure"].get<double>() < 0 ? nlohmann::json("follow") : p["skin_structure"];
         Pick(p, s, {"auto_mask", "guides", "temporal", "model_scale"});
-        // what acts only with its switch: the filter's threshold with the filter, the ratio transfer at another model resolution
+        // what acts only with its switch: the filter's threshold with the filter, the ratio transfer when the model ran at another size -
+        // the stage's own test (work size != frame size: an odd side is rounded down to even at model_scale 1 too)
         if (p.value("temporal", 0.0) > 0.0) Pick(p, s, {"temporal_threshold"});
-        if (p.contains("model_scale") && p["model_scale"].is_number() && p["model_scale"].get<double>() != 1.0) Pick(p, s, {"transfer", "max_ratio"});
+        bool reduced = p.contains("model_scale") && p["model_scale"].is_number() && p["model_scale"].get<double>() != 1.0;
+        if (p.contains("work_size") && p["work_size"].is_array() && p["work_size"].size() == 2 && p["work_size"][0].is_number() && p["work_size"][1].is_number())
+            reduced = p["work_size"][0].get<uint32_t>() != m.width || p["work_size"][1].get<uint32_t>() != m.height;
+        if (reduced) Pick(p, s, {"transfer", "max_ratio"});
     }
     if (p.contains("scene_cut_count")) {  // the detector ran (PR-6)
         Pick(p, s, {"scene_cut_threshold"});

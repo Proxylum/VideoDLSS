@@ -138,3 +138,48 @@ TEST_CASE("Settings note follows the versions the encoded pass was made from", "
     std::filesystem::remove_all(root / "color_nr.v");  // gc took it
     CHECK(BuildSettingsNote(root, "color_fg").find("nr: ? (that version is not on disk)") != std::string::npos);
 }
+
+// review round 2 of PR-11: an input recorded while the nr pass was legacy (a standalone run) - the same files adopted since (a
+// fingerprint stamped), or retired into the history without one - is that version, not «not on disk»; the ratio transfer acts
+// whenever the model ran at another size than the frame (an odd side at model_scale 1).
+TEST_CASE("Settings note: legacy records, adopted and retired legacy versions, the work size", "[unit][encode][regression]") {
+    const auto root = Root("legacy");
+    Manifest legacy = Manifest::ForPass(PassKind::ColorNr, 1920, 1080, FileFormat::Exr);
+    legacy.sourceHash = "sha256:5ource";
+    legacy.frameCount = 48;
+    legacy.stageParams = {{"backend", "ngx"}, {"intensity", 1.1}, {"color_source", "video"}};
+    legacy.Save(root / "color_nr");
+    const std::string rec = LegacyPassId(legacy);
+    Manifest fg = Manifest::ForPass(PassKind::ColorFg, 1920, 1080, FileFormat::Exr);
+    fg.stageParams = {{"backend", "blend"}, {"multiplier", 2}, {"color_source", "pass:color_nr"}};
+    fg.fingerprint = std::string("sha256:") + std::string(64, 'f');
+    fg.inputs["color_nr"] = rec;
+    fg.Save(root / "color_fg");
+    CHECK(BuildSettingsNote(root, "color_fg").find("nr: ngx intensity=1.1 |") != std::string::npos);
+    // adopted: the same files with a fingerprint and stage_params.adopted
+    Manifest adopted = legacy;
+    adopted.fingerprint = std::string("sha256:") + std::string(64, 'a');
+    adopted.stageParams["adopted"] = true;
+    adopted.Save(root / "color_nr");
+    CHECK(BuildSettingsNote(root, "color_fg").find("nr: ngx intensity=1.1 (adopted)") != std::string::npos);
+    // retired without a fingerprint, another current pass in its place
+    legacy.Save(root / "color_nr");
+    REQUIRE(RetirePassVersion(root, "color_nr"));
+    Manifest now = Manifest::ForPass(PassKind::ColorNr, 1920, 1080, FileFormat::Exr);
+    now.stageParams = {{"backend", "ngx"}, {"intensity", 1.6}, {"color_source", "video"}};
+    now.fingerprint = std::string("sha256:") + std::string(64, 'b');
+    now.Save(root / "color_nr");
+    const std::string note = BuildSettingsNote(root, "color_fg");
+    CHECK(note.find("intensity=1.1") != std::string::npos);
+    CHECK(note.find("1.6") == std::string::npos);
+    CHECK(note.find("not on disk") == std::string::npos);
+    // an odd side: the model at 852 for an 853-wide frame - the ratio transfer acted
+    const auto odd = Root("odd");
+    Manifest m = Manifest::ForPass(PassKind::ColorNr, 853, 480, FileFormat::Exr);
+    m.stageParams = {{"backend", "ngx"}, {"model_scale", 1.0}, {"work_size", {852, 480}}, {"transfer", 0.5}, {"max_ratio", 6.0}, {"color_source", "video"}};
+    m.Save(odd / "color_nr");
+    CHECK(BuildSettingsNote(odd, "color_nr").find("model_scale=1 transfer=0.5 max_ratio=6") != std::string::npos);
+    m.stageParams["work_size"] = {853, 480};
+    m.Save(odd / "color_nr");
+    CHECK(BuildSettingsNote(odd, "color_nr").find("transfer") == std::string::npos);
+}
