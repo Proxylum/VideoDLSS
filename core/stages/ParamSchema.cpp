@@ -287,6 +287,12 @@ std::vector<StageSchema> Build() {
                              "При какой разнице цвета смешивание с прошлым кадром отменяется: ниже порог — меньше шлейфов, но слабее подавление."),
                       "temporal", Op::Gt, 0.0),
                "Временная стабильность", true),
+            In(Display(Number("scene_cut", "Сброс на склейках", ParamType::Float, 0.24, 0.0, 1.0, 0.01, ParamWidget::Spin,
+                              "Когда соседние кадры резко различаются по яркости (склейка), история модели и подавления мерцания начинается "
+                              "заново: прошлая сцена не протекает в новую. Выше порог — реже срабатывает; 0.24 ловит резкие склейки, яркая "
+                              "вспышка может дать лишний сброс. Действует с глубиной и векторами или с подавлением мерцания."),
+                       "выкл"),
+               "Временная стабильность", true),
             In(Flag("guides", "Глубина и векторы", true,
                     "Подавать модели глубину и векторы движения. Без них каждый кадр обрабатывается отдельно: «дыхания» нет, но на движении "
                     "ниже согласованность во времени.",
@@ -391,11 +397,13 @@ nlohmann::json NormalizeStageParams(const std::string& stage, const nlohmann::js
         out.erase(from);
     };
     if (stage == "nr") {
-        for (const char* key : {"local_tone", "local_structure", "skin_structure", "auto_mask", "model_scale", "max_ratio", "temporal_threshold", "skin_blend",
-                                "input_transfer"}) {
-            std::string kebab = key;
+        // every snake key of the schema under its kebab spelling (ApplyNrParams reads both): from the schema, so a new key cannot be
+        // forgotten here - scene-cut was (review of PR-6)
+        for (const ParamSpec& s : FindStageSchema("nr")->params) {
+            if (s.key.find('_') == std::string::npos) continue;
+            std::string kebab = s.key;
             std::replace(kebab.begin(), kebab.end(), '_', '-');
-            alias(kebab.c_str(), key);
+            alias(kebab.c_str(), s.key.c_str());
         }
         // a style given as a number (JSON, --param nr.style=4) or as the index of a named one: the schema's string
         if (out.contains("style") && out["style"].is_number_integer()) out["style"] = std::to_string(out["style"].get<int64_t>());

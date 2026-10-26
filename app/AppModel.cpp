@@ -775,8 +775,17 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
                     const std::string newBackend = StageBackend(stage, d->params);
                     const nlohmann::json& bd = d->diff["params"].contains("backend") ? d->diff["params"]["backend"] : nlohmann::json();
                     const std::string oldBackend = bd.is_array() && !bd.empty() && bd[0].is_string() ? bd[0].get<std::string>() : newBackend;
-                    parts << QString("%1 %2 → %3").arg(label, spec ? QString::fromStdString(ParamValueLabel(*spec, o, oldBackend)) : QString::fromStdString(o.dump()),
-                                                          spec ? QString::fromStdString(ParamValueLabel(*spec, n, newBackend)) : QString::fromStdString(n.dump()));
+                    const QString now = spec ? QString::fromStdString(ParamValueLabel(*spec, n, newBackend)) : QString::fromStdString(n.dump());
+                    const QString was = spec ? QString::fromStdString(ParamValueLabel(*spec, o, oldBackend)) : QString::fromStdString(o.dump());
+                    // a null that is not «at the default» (omitDefault labels that): the key is absent on one side - the old pass predates it
+                    // («null → 0.24» on every NR pass of before PR-6), or it is one backend's parameter across a switch
+                    if (spec && !spec->omitDefault && o.is_null() != n.is_null()) {
+                        const bool switched = !bd.is_null() || !spec->backends.empty();
+                        if (o.is_null() && !switched) parts << tr("%1: новая настройка, %2").arg(label, now);
+                        else parts << QString("%1: %2").arg(label, o.is_null() ? now : was);
+                        continue;
+                    }
+                    parts << QString("%1 %2 → %3").arg(label, was, now);
                 }
             st.state = tr("пересчёт: %1").arg(parts.isEmpty() ? QString::fromStdString(d->detail) : parts.join(", "));
         } else if (d->kind == "input_changed") {

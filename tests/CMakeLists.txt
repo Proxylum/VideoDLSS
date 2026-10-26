@@ -34,6 +34,7 @@ add_executable(dlssvid_unit_tests
   unit/test_trt_upscaler.cpp
   unit/test_model_registry.cpp
   unit/test_warp.cpp
+  unit/test_scene_cut.cpp
   unit/test_ofa.cpp
   unit/test_viewport_state.cpp
   unit/test_viewport_renderer.cpp

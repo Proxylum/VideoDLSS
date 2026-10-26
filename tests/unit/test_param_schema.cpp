@@ -1,8 +1,10 @@
 // Stage parameter schema (stage 9, MR D): every stage described, defaults mirror the stages, validation catches wrong
 // types / ranges / choices, effective parameters make an explicit default and an absent key the same run.
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -114,7 +116,8 @@ TEST_CASE("NR form: groups, levels, conditions of the rows", "[unit][schema][nr]
     std::vector<std::string> basic, more, engineer;
     for (const auto& p : nr->params) (p.advanced ? engineer : p.more ? more : basic).push_back(p.key);
     CHECK(basic == std::vector<std::string>{"style", "intensity", "passes", "local_tone", "local_structure", "temporal", "auto_mask", "skin_structure", "skin_blend"});
-    CHECK(more == std::vector<std::string>{"temporal_threshold", "guides", "tonemap", "input_transfer", "exposure", "model_scale", "transfer", "max_ratio"});
+    CHECK(more == std::vector<std::string>{"temporal_threshold", "scene_cut", "guides", "tonemap", "input_transfer", "exposure", "model_scale", "transfer",
+                                           "max_ratio"});
     CHECK(engineer == std::vector<std::string>{"backend", "format"});
     for (const auto& p : nr->params) {
         INFO(p.key);
@@ -193,6 +196,7 @@ TEST_CASE("NR: the options from the schema's defaults are the stage's defaults, 
     CHECK(o.useGuides == def.useGuides);
     CHECK(o.temporal == def.temporal);
     CHECK(o.temporalThreshold == def.temporalThreshold);
+    CHECK(o.sceneCut == def.sceneCut);
     CHECK(o.skinBlend == def.skinBlend);
     CHECK(o.tonemap.curve == def.tonemap.curve);
     CHECK(o.tonemap.inputTransfer == def.tonemap.inputTransfer);
@@ -212,8 +216,8 @@ TEST_CASE("NR: the options from the schema's defaults are the stage's defaults, 
         ApplyNrParams(one, b);
         const auto key = [](const NrStageOptions& x) {
             return nlohmann::json{x.backend, x.intensity, x.style, x.localTone, x.localStructure, x.skinStructure, x.autoMask, x.passes, x.modelScale,
-                                  x.transfer, x.maxRatio, x.useGuides, x.temporal, x.temporalThreshold, x.skinBlend, x.tonemap.curve, x.tonemap.inputTransfer,
-                                  x.tonemap.exposureEv};
+                                  x.transfer, x.maxRatio, x.useGuides, x.temporal, x.temporalThreshold, x.sceneCut, x.skinBlend, x.tonemap.curve,
+                                  x.tonemap.inputTransfer, x.tonemap.exposureEv};
         };
         INFO("nr." << spec.key);
         CHECK(key(a) != key(b));
@@ -231,6 +235,17 @@ TEST_CASE("NormalizeStageParams: aliases take the schema's key; validation and t
     CHECK(NormalizeStageParams("fg", {{"backbuffer-format", "rgba8"}}) == nlohmann::json{{"backbuffer_format", "rgba8"}});
     CHECK(NormalizeStageParams("depth", {{"z-near", 1}}) == nlohmann::json{{"z-near", 1}});  // no aliases there: unknown keys stay
     CHECK(EffectiveStageParams("nr", {{"model-scale", 0.5}})["model_scale"] == 0.5);
+    // every snake key under its kebab spelling (review of PR-6: scene-cut ran at the default 0.24 under a fingerprint with both keys)
+    for (const ParamSpec& s : FindStageSchema("nr")->params) {
+        if (s.key.find('_') == std::string::npos) continue;
+        std::string kebab = s.key;
+        std::replace(kebab.begin(), kebab.end(), '_', '-');
+        INFO(kebab);
+        CHECK(NormalizeStageParams("nr", {{kebab, s.def}}) == nlohmann::json{{s.key, s.def}});
+    }
+    CHECK(EffectiveStageParams("nr", {{"scene-cut", 0.0}})["scene_cut"] == 0.0);
+    CHECK_FALSE(EffectiveStageParams("nr", {{"scene-cut", 0.0}}).contains("scene-cut"));
+    CHECK_FALSE(ValidateStageParams("nr", {{"scene-cut", 2.0}}).empty());
     CHECK_FALSE(EffectiveStageParams("nr", {{"model-scale", 0.5}}).contains("model-scale"));
     CHECK_FALSE(ValidateStageParams("nr", {{"local-tone", 5.0}}).empty());  // out of range under its alias too
     CHECK_FALSE(ValidateStageParams("nr", {{"no-guides", "yes"}}).empty());  // a non-boolean inverse: guides of the wrong type
@@ -287,6 +302,12 @@ TEST_CASE("ValidateStageParams catches types, ranges and choices; unknown keys p
     CHECK(ValidateStageParams("nr", {{"passes", 1.5}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"passes", 2}}).empty());
     CHECK(ValidateStageParams("nr", {{"passes", 4}}).empty());  // PR-5: 1..4
+    CHECK(ValidateStageParams("nr", {{"scene_cut", 0.0}}).empty());  // PR-6: 0 = off .. 1
+    CHECK(ValidateStageParams("nr", {{"scene_cut", 1.5}}).size() == 1);
+    CHECK(FindStageSchema("nr")->Find("scene_cut")->def == 0.24);
+    CHECK(FindStageSchema("nr")->Find("scene_cut")->more);
+    CHECK(ParamValueLabel(*FindStageSchema("nr")->Find("scene_cut"), 0.0) == "выкл");
+    CHECK(static_cast<double>(NrStageOptions{}.sceneCut) == Catch::Approx(0.24));
     CHECK(ValidateStageParams("nr", {{"passes", 5}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"passes", 0}}).size() == 1);
     CHECK(ValidateStageParams("nr", {{"guides", "yes"}}).size() == 1);

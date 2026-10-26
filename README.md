@@ -458,7 +458,8 @@ always gets 1), passes (1..4: each pass is a model of its own that reworks the l
 0.5 GB at 1440p and 0.9 GB at 4K; the plan notes 3 and 4 as markedly synthetic), local tone and structure, the flicker filter,
 the automatic skin mask, the skin structure (enabled with the mask; «отдельно» off = as the local structure) and the
 strength on skin (shown when the plan has face / skin masks), and under «Ещё настройки» the flicker
-filter's threshold (with the filter on), the guides, the tonemap / input transfer / exposure in EV and the model
+filter's threshold (with the filter on), the scene-cut reset (a hard cut in the source starts the model's and the filter's
+history again; 0.24 by default, 0 = off), the guides, the tonemap / input transfer / exposure in EV and the model
 resolution with the transfer strength and the ratio limit (at a resolution ≠ 1). A changed value whose row its
 condition hides is named on «Ещё настройки» as «не действует». The look follows the mockups of `docs/ux-guidelines.md`
 (`app/Theme`: dark palette, control sizes and paddings, the accent for the one primary action).

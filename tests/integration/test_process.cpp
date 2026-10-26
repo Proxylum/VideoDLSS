@@ -194,6 +194,7 @@ TEST_CASE("RunProcess: an nr pass from before PR-7 with intensity != 1 is discar
         m.tool["app"] = std::string(kPassToolVersion);  // what the builds before stamped: no +nr.gain, so another fingerprint
         m.fingerprint = keepFingerprint ? "sha256:" + std::string(64, '0') : std::string();
         if (!keepFingerprint) m.tool = nlohmann::json::object();  // a standalone `dlssvid nr` pass, adopted as legacy
+        m.stageParams.erase("scene_cut_threshold");  // nor a key of PR-6 (review of PR-6, round 2: that check kept it as a version)
         m.Save(nrDir);
     };
     stampOld(true);
@@ -207,7 +208,12 @@ TEST_CASE("RunProcess: an nr pass from before PR-7 with intensity != 1 is discar
     CHECK(Manifest::Load(nrDir).stageParams.contains("model_intensity"));
     CHECK(Report(RunProcess(o), "nr").status == "reused");
     stampOld(false);
-    CHECK(Report(RunProcess(o), "nr").status == "ran");  // nor adopted without a fingerprint
+    const size_t nrLegacy = ListPassVersions(o.passesRoot, "color_nr").size(), fgLegacy = ListPassVersions(o.passesRoot, "color_fg").size();
+    const ProcessResult legacy = RunProcess(o);
+    CHECK(Report(legacy, "nr").status == "ran");  // nor adopted without a fingerprint
+    CHECK_THAT(Report(legacy, "nr").reason, Catch::Matchers::ContainsSubstring("before PR-7"));
+    CHECK(ListPassVersions(o.passesRoot, "color_nr").size() == nrLegacy);  // discarded, not kept as a version
+    CHECK(ListPassVersions(o.passesRoot, "color_fg").size() == fgLegacy);
     // the stage disabled after the discard (no DLL - the GUI runs --disable-unavailable): fg reads color_sr then, and the color_fg
     // made from the discarded pass went to the history; discarded too now
     stampOld(true);
@@ -261,6 +267,45 @@ TEST_CASE("PlanProcess notes nr passes 3 and 4", "[integration][process]") {
     CHECK_THAT(info({"nr.passes=3"}), Catch::Matchers::ContainsSubstring("3 прохода"));
     CHECK_THAT(info({"nr.passes=4"}), Catch::Matchers::ContainsSubstring("синтетичнее"));
     CHECK(info({"nr.passes=4", "nr.intensity=0"}).empty());
+}
+
+// PR-6 (review): a standalone nr pass of before PR-6 has no fingerprint and no scene_cut_threshold - its history crossed every cut.
+// Adopted as legacy it was stamped with scene_cut 0.24; recomputed now (the old one kept as a version). At scene_cut 0 it is that run.
+TEST_CASE("RunProcess: an nr pass without a fingerprint from before PR-6 is not adopted under a scene-cut reset", "[integration][process][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("old_scene_cut");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    const auto nrDir = o.passesRoot / "color_nr";
+    REQUIRE(Manifest::Load(nrDir).stageParams.contains("scene_cut_threshold"));  // what this build writes
+    auto stampOld = [&](bool before) {
+        Manifest m = Manifest::Load(nrDir);
+        m.fingerprint.clear();  // a standalone `dlssvid nr` pass
+        m.tool = nlohmann::json::object();
+        if (before) m.stageParams.erase("scene_cut_threshold");
+        m.Save(nrDir);
+    };
+    stampOld(false);
+    CHECK(Report(RunProcess(o), "nr").status == "reused");  // a standalone pass of this build: adopted
+    stampOld(true);
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK_THAT(Report(r, "nr").reason, Catch::Matchers::ContainsSubstring("PR-6"));
+    stampOld(true);
+    ProcessOptions off = o;
+    off.stages = StubStages(2);
+    ApplyParamSpec(off.stages, "nr.scene_cut=0");
+    CHECK(Report(RunProcess(off), "nr").status == "reused");  // scene_cut 0: the run it is
 }
 
 // TASK-0047: with the source's frame count unknown (mkv) PassComplete looked at the last frame only, so a color_nr of a part

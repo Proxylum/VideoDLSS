@@ -494,6 +494,17 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
         stampOld(0.0);
         CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: при силе 0 модель не вызывается"));
         CHECK(model.cardState("nr").warning.isEmpty());  // no guides read at 0: no «без глубины и векторов»
+        // PR-6 (review): a pass of before the key - «новая настройка», not «null → 0.24»
+        {
+            nlohmann::json j = nlohmann::json::parse(saved);
+            j["params_canonical"].erase("scene_cut");
+            j["fingerprint"] = "sha256:" + std::string(64, '1');
+            std::ofstream(manifestPath, std::ios::binary) << j.dump(2);
+            model.setStageParam("nr", "intensity", 1.0);
+            model.reloadSources();
+            CHECK(model.cardState("nr").state == QString::fromUtf8("пересчёт: Сброс на склейках: новая настройка, 0.24"));
+            CHECK_FALSE(model.cardState("nr").state.contains("null"));
+        }
         std::ofstream(manifestPath, std::ios::binary) << saved;
         model.setStageParam("nr", "intensity", 1.0);
         model.reloadSources();

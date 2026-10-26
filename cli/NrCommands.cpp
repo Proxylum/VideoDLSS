@@ -96,6 +96,7 @@ nlohmann::json ArgsAsParams(const NrCommands::NrArgs& a) {
     o.useGuides = !a.noGuides;
     o.temporal = a.temporal;
     o.temporalThreshold = a.temporalThreshold;
+    o.sceneCut = a.sceneCut;
     o.skinBlend = a.skinBlend;
     o.tonemap.curve = a.tonemap;
     o.tonemap.inputTransfer = a.inputTransfer;
@@ -431,6 +432,11 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
         std::printf("range:       %lld..%lld (warm-up %lld)\n", static_cast<long long>(r.stats.firstWritten), static_cast<long long>(r.stats.lastWritten),
                     static_cast<long long>(r.stats.warmup));
     if (r.stats.mvScaleX > 0) std::printf("mv scale:    %.3f x %.3f (%s)\n", r.stats.mvScaleX, r.stats.mvScaleY, a.mvScale.c_str());
+    if (r.stats.sceneCutActive) {
+        std::string cuts;
+        for (const int64_t c : r.stats.sceneCuts) cuts += (cuts.empty() ? " at " : ", ") + std::to_string(c);
+        std::printf("scene cuts:  %lld%s\n", static_cast<long long>(r.stats.sceneCutCount), cuts.c_str());
+    }
     if (const auto ab = NrAbJson(o); !ab.empty()) std::printf("a/b:         %s (the pass carries stage_params.ab: process never adopts it)\n", ab.dump().c_str());
     if (!a.video.empty()) std::printf("video:       %s\n", a.video.c_str());
     if (!a.json.empty()) {
@@ -454,6 +460,8 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
                               {"mv_used", r.stats.mvUsed},
                               {"masks", r.stats.masks},
                               {"color_source", r.stats.colorSource},
+                              {"scene_cuts", r.stats.sceneCutActive ? nlohmann::json(r.stats.sceneCuts) : nlohmann::json(nullptr)},  // null: not checked
+                              {"scene_cut_count", r.stats.sceneCutCount},
                               {"mv_scale", r.stats.mvScaleX > 0 ? nlohmann::json::array({r.stats.mvScaleX, r.stats.mvScaleY}) : nlohmann::json(nullptr)}}}};
         if (range.Ranged()) j["range"] = {{"first", r.stats.firstWritten}, {"last", r.stats.lastWritten}, {"warmup", r.stats.warmup}};
         std::ofstream(a.json) << j.dump(2) << "\n";
@@ -525,6 +533,9 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_flag("--no-depth-guide,--no_depth_guide", na_.noDepthGuide, "A/B: motion vectors to the model, depth not");
     nr_->add_option("--temporal", na_.temporal, "temporal filter weight 0..1 (0 = off): blend with the previous frame warped by mv_dlss")->default_val(0.f);
     nr_->add_option("--temporal-threshold,--temporal_threshold", na_.temporalThreshold, "colour difference that rejects the temporal blend")->default_val(0.1f);
+    nr_->add_option("--scene-cut,--scene_cut", na_.sceneCut,
+                    "scene-cut threshold 0..1 (0 = off): mean |dY| of the source's luma above it resets the model's history and the temporal filter")
+        ->default_val(0.24f);
     nr_->add_option("--skin-blend,--skin_blend", na_.skinBlend, "edit strength inside mask_face / mask_skin (0 = keep the input)")->default_val(1.f);
     nr_->add_option("--tonemap", na_.tonemap, "passthrough | aces | reinhard")->default_val("passthrough");
     nr_->add_option("--input-transfer,--input_transfer", na_.inputTransfer, "srgb | linear | pq | hlg")->default_val("srgb");
