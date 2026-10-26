@@ -44,6 +44,11 @@ struct ParamSpec {
     double min = 0, max = 0, step = 0;  // Int / Float (max <= min: no range)
     std::vector<ParamChoice> choices;  // Enum, or a fixed set of numbers (Toggle over 1.5 / 2 / 3)
     bool advanced = false;             // engineer mode only (the JSON editor); validated all the same
+    // An engineer key of the algorithm (NIS sharpness, the DLSS preset, the RIFE model, the pass format, nr's backend): a pipeline
+    // preset holds it with the form keys (PR-9, the user's answer). An engineer key without it is bound to the machine - a path
+    // (models_dir, python) or a size for the GPU's memory (max_res, input_size, tile, fp32) - and no preset holds it. Off by
+    // default, so a key added later goes into no preset until it is decided (a test names the machine keys).
+    bool tuning = false;
     // When set, the parameter belongs to these backends only: EffectiveStageParams drops it for the others, so a
     // parameter added for one backend leaves the fingerprints of the other backends' passes untouched.
     std::vector<std::string> backends;
@@ -84,8 +89,13 @@ struct StageSchema {
     std::string subtitle;  // «guide для DLSS, NR и FG»
     std::vector<ParamSpec> params;
     std::vector<std::string> guides;  // passes the stage reads as guides (its quality depends on them)
+    bool cardPresets = false;         // the card offers presets of its own (PR-9: nr only; a pipeline preset takes every card)
     const ParamSpec* Find(const std::string& key) const;
 };
+
+// Where a key sits (TASK-0046): Basic - the card's form, More - under «Ещё настройки», Engineer - the JSON editor only.
+enum class ParamLevel : uint8_t { Basic, More, Engineer };
+ParamLevel LevelOf(const ParamSpec& spec);
 
 const std::vector<StageSchema>& StageSchemas();
 const StageSchema* FindStageSchema(const std::string& stage);
@@ -94,8 +104,19 @@ const StageSchema* FindStageSchema(const std::string& stage);
 // and nr's inverse no_guides / no-guides, which the validation and the defaults did not see - {"model-scale": 0.5} ran
 // at 0.5 under a fingerprint saying 1.0 (TASK-0043). The schema key wins over an alias; the aliases are removed.
 nlohmann::json NormalizeStageParams(const std::string& stage, const nlohmann::json& params);
-// Problems with the parameters (wrong type, out of range, not a choice), after NormalizeStageParams; unknown keys pass
-// (backends take extra keys).
+// One problem of the parameters as data, for the GUI's Russian texts (PR-9): the kind, the key and the value; `text` is the
+// English line ValidateStageParams gives. Shape: an unknown stage or parameters that are not an object (key empty).
+struct ParamProblem {
+    enum class Kind : uint8_t { Shape, Type, Range, Choice, Moved };
+    Kind kind = Kind::Shape;
+    std::string stage, key;
+    nlohmann::json got;
+    std::string text;
+};
+// Problems with the parameters (wrong type, out of range, not a choice, a moved key), after NormalizeStageParams; unknown keys
+// pass (backends take extra keys).
+std::vector<ParamProblem> CheckStageParams(const std::string& stage, const nlohmann::json& params);
+// The texts of CheckStageParams.
 std::vector<std::string> ValidateStageParams(const std::string& stage, const nlohmann::json& params);
 // A key that left a stage's schema for another stage (PR-13: nr.scene_cut -> scenes.threshold), in its snake or kebab spelling:
 // ValidateStageParams and ReadStageParamsFile name it instead of passing it on (unknown keys are kept for the backends, and this one

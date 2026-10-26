@@ -24,6 +24,7 @@
 #include "AppModel.h"
 #include "Theme.h"
 #include "stages/ParamSchema.h"
+#include "stages/StagePreset.h"
 
 namespace dlssvid {
 
@@ -58,9 +59,6 @@ int ChoiceIndex(const ParamSpec& spec, const nlohmann::json& value) {
     }
     return -1;
 }
-
-// The keys «Сбросить» removes: the form's rows, not the backend - the method is switched back by its own ↺ (TASK-0046)
-bool CardResets(const ParamSpec& spec) { return !spec.advanced && spec.key != "backend"; }
 
 // A value as the card's fields show it (the locale's decimal separator, the field's decimals, the suffix), for the
 // summary of «Ещё настройки» and the ↺ text; the special values and the lists keep their words (ParamValueLabel)
@@ -143,7 +141,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     auto addRows = [this](QFormLayout* f, bool more) {
         std::string group;
         for (const ParamSpec& spec : schema_->params) {
-            if (spec.advanced || spec.more != more) continue;
+            if (LevelOf(spec) != (more ? ParamLevel::More : ParamLevel::Basic)) continue;
             if (!spec.group.empty() && spec.group != group) {
                 group = spec.group;
                 auto* header = new QLabel(QString::fromStdString(group), f->parentWidget());
@@ -205,7 +203,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     if (schema_) {
         addRows(basic, false);
         bool anyMore = false;
-        for (const ParamSpec& spec : schema_->params) anyMore = anyMore || (!spec.advanced && spec.more);
+        for (const ParamSpec& spec : schema_->params) anyMore = anyMore || LevelOf(spec) == ParamLevel::More;
         if (anyMore) {
             moreToggle_ = new QToolButton(form_);
             moreToggle_->setCheckable(true);
@@ -594,18 +592,8 @@ void StageCard::resetParam(const std::string& key) {
 void StageCard::resetCard() {
     if (!model_.stageEntry(stage_) || !schema_) return;
     // the form's keys go; the backend and the keys of the JSON editor (format, ...) stay - setStageParams replaces the
-    // whole object, so they are carried over (TASK-0046). Folded first: an alias of a form key goes with it.
-    nlohmann::json params = nlohmann::json::object();
-    const nlohmann::json current = stageParams();  // named: items() of a temporary dangles in the range-for (C++20)
-    const std::string backend = currentBackend();
-    for (const auto& [key, value] : current.items()) {
-        const ParamSpec* spec = schema_->Find(key);
-        // a list key without a list for this backend (depth.model under DA3, from the JSON) has no row: the card neither
-        // shows nor counts it, so it stays like a key of the JSON editor
-        const bool noRow = spec && !spec->formChoices.empty() && !FormChoicesFor(*spec, backend);
-        if (!spec || !CardResets(*spec) || noRow) params[key] = value;
-    }
-    model_.setStageParams(stage_, params);
+    // whole object, so ResetStageParams carries them over (TASK-0046)
+    model_.setStageParams(stage_, ResetStageParams(stage_, stageParams()));
 }
 
 bool StageCard::changed(const ParamSpec& spec) const {
@@ -660,7 +648,7 @@ void StageCard::refresh() {
         if (def.isEmpty()) def = tr("по умолчанию");
         row.reset->setToolTip(tr("Сбросить: %1").arg(def));
         row.resetAction->setText(row.reset->toolTip());
-        anyChanged = anyChanged || (differs && CardResets(spec));  // as resetCard: the backend's ↺ is its own
+        anyChanged = anyChanged || (differs && CardResetKey(spec));  // as resetCard: the backend's ↺ is its own
         const QString item = QString("%1 %2").arg(QString::fromStdString(spec.label).toLower(),
                                                   CardValueLabel(spec, folded.contains(spec.key) ? folded[spec.key] : spec.def, backend));
         if (differs && !visible) hiddenChanged << item;

@@ -85,7 +85,8 @@ QString HumanStageParams(const std::string& stage, const nlohmann::json& rawPara
             const bool isDefault = v.is_number() && spec.def.is_number() ? std::fabs(v.get<double>() - spec.def.get<double>()) < 1e-9 : v == spec.def;
             const bool always = !spec.advanced && (spec.key == "backend" || spec.key == "scale" || spec.key == "multiplier" || spec.key == "intensity");
             if (isDefault && !always) continue;
-            (spec.advanced ? engineer : spec.more ? more : basic) << QString("%1 %2").arg(QString::fromStdString(spec.label), value);
+            const ParamLevel level = LevelOf(spec);
+            (level == ParamLevel::Engineer ? engineer : level == ParamLevel::More ? more : basic) << QString("%1 %2").arg(QString::fromStdString(spec.label), value);
         }
     QStringList parts = basic + more + engineer;
     if (parts.size() > 6) parts = parts.mid(0, 6) << QString::fromUtf8("…");

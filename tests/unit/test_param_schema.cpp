@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <set>
 
@@ -339,6 +340,67 @@ TEST_CASE("ValidateStageParams catches types, ranges and choices; unknown keys p
     REQUIRE(two.size() == 2);
     CHECK(two[0].find("nr.intensity") != std::string::npos);
     CHECK(two[1].find("nr.style") != std::string::npos);
+}
+
+// PR-9: the problems as data for the GUI's Russian texts; the English texts of ValidateStageParams are the same as before
+TEST_CASE("CheckStageParams gives the kind, key and value of each problem; ValidateStageParams keeps its texts", "[unit][schema][presets]") {
+    using Kind = ParamProblem::Kind;
+    const nlohmann::json bad = {{"intensity", 5}, {"passes", "two"}, {"style", "vivid"}, {"guides", "yes"}, {"scene_cut", 0.3}, {"whatever", 1}};
+    const auto problems = CheckStageParams("nr", bad);
+    const auto texts = ValidateStageParams("nr", bad);
+    REQUIRE(problems.size() == 5);  // the unknown key passes
+    REQUIRE(texts.size() == problems.size());
+    std::map<std::string, ParamProblem> byKey;
+    for (size_t i = 0; i < problems.size(); ++i) {
+        CHECK(problems[i].text == texts[i]);
+        CHECK(problems[i].stage == "nr");
+        byKey[problems[i].key] = problems[i];
+    }
+    CHECK(byKey["intensity"].kind == Kind::Range);
+    CHECK(byKey["intensity"].got == 5);
+    CHECK(byKey["intensity"].text == "nr.intensity must be within 0.0..2.0 (got 5)");
+    CHECK(byKey["passes"].kind == Kind::Type);
+    CHECK(byKey["passes"].got == "two");
+    CHECK(byKey["style"].kind == Kind::Choice);
+    CHECK(byKey["guides"].kind == Kind::Type);
+    CHECK(byKey["scene_cut"].kind == Kind::Moved);
+    CHECK(CheckStageParams("fg", {{"multiplier", 5}}).at(0).kind == Kind::Choice);  // a fixed set of numbers
+    CHECK(CheckStageParams("nr", {{"skin_structure", -0.5}}).at(0).kind == Kind::Range);
+    CHECK(CheckStageParams("nr", {{"skin_structure", -1}}).empty());  // the special value
+    const auto shape = CheckStageParams("nr", nlohmann::json::array());
+    REQUIRE(shape.size() == 1);
+    CHECK(shape[0].kind == Kind::Shape);
+    CHECK(shape[0].key.empty());
+    CHECK(CheckStageParams("bogus", nlohmann::json::object()).at(0).kind == Kind::Shape);
+}
+
+// PR-9 (the user's answer): a pipeline preset holds the form keys and the engineer keys of the algorithm (tuning); the keys of the
+// machine - paths and sizes for the GPU's memory - none. A new engineer key is decided here: tuning, or named a machine key.
+TEST_CASE("Schema: tuning marks engineer keys only; every engineer key is tuning or bound to the machine", "[unit][schema][presets][regression]") {
+    const std::set<std::string> machine = {"models_dir", "python", "max_res", "input_size", "tile", "fp32"};
+    std::map<std::string, std::vector<std::string>> tuning;
+    for (const StageSchema& st : StageSchemas())
+        for (const ParamSpec& p : st.params) {
+            INFO(st.stage << "." << p.key);
+            if (p.tuning) CHECK(p.advanced);
+            if (p.tuning) CHECK_FALSE(machine.count(p.key));
+            if (p.advanced && !p.tuning) CHECK((machine.count(p.key) || (st.stage == "scenes" && p.key == "backend")));  // scenes: one method
+            if (p.tuning) tuning[st.stage].push_back(p.key);
+        }
+    CHECK(tuning["depth"] == std::vector<std::string>{"stabilize_window", "z_near", "z_far", "no_fill", "no_dlss", "format"});
+    CHECK(tuning["flow"] == std::vector<std::string>{"model", "grid", "dilate", "target", "hwaccel", "no_dlss", "format"});
+    CHECK(tuning["upscale"] == std::vector<std::string>{"window", "overlap", "sharpness", "preset", "jitter", "jitter_sign", "artifact_reduction_only",
+                                                        "target_width", "target_height", "no_fallback", "format"});
+    CHECK(tuning["nr"] == std::vector<std::string>{"backend", "format"});
+    CHECK(tuning["fg"] == std::vector<std::string>{"model", "backbuffer_format", "format"});
+    CHECK(tuning.count("scenes") == 0);
+    // levels as the card places them; only nr offers card presets in PR-9
+    for (const StageSchema& st : StageSchemas()) {
+        INFO(st.stage);
+        CHECK(st.cardPresets == (st.stage == "nr"));
+        for (const ParamSpec& p : st.params)
+            CHECK(LevelOf(p) == (p.advanced ? ParamLevel::Engineer : p.more ? ParamLevel::More : ParamLevel::Basic));
+    }
 }
 
 TEST_CASE("EffectiveStageParams fills the defaults: an explicit default and an absent key fingerprint alike", "[unit][schema]") {

@@ -74,6 +74,12 @@ ParamSpec OmitDefault(ParamSpec s) {
     return s;
 }
 
+// an engineer key a pipeline preset holds (PR-9): of the algorithm, not of the machine
+ParamSpec Tuning(ParamSpec s) {
+    s.tuning = true;
+    return s;
+}
+
 // form placement (TASK-0046)
 ParamSpec In(ParamSpec s, const char* group, bool more = false) {
     s.group = group;
@@ -177,14 +183,14 @@ std::vector<StageSchema> Build() {
                                 {"vda", "worker:vda"})),
             Number("input_size", "Размер входа модели", ParamType::Int, 518, 64, 4096, 14, ParamWidget::Spin, "", true),
             Number("max_res", "Максимальная сторона", ParamType::Int, 1080, 256, 8192, 1, ParamWidget::Spin, "", true),
-            Number("stabilize_window", "Окно стабилизации, ± кадров", ParamType::Int, 8, 1, 64, 1, ParamWidget::Spin,
-                   "кадр выравнивается по кадрам t−N…t+N; глубина выходит с задержкой N кадров", true),
-            Number("z_near", "Ближняя плоскость, м", ParamType::Float, 0.1, 0.001, 100.0, 0.01, ParamWidget::Spin, "", true),
-            Number("z_far", "Дальняя плоскость, м", ParamType::Float, 1000.0, 1.0, 100000.0, 1.0, ParamWidget::Spin, "", true),
+            Tuning(Number("stabilize_window", "Окно стабилизации, ± кадров", ParamType::Int, 8, 1, 64, 1, ParamWidget::Spin,
+                          "кадр выравнивается по кадрам t−N…t+N; глубина выходит с задержкой N кадров", true)),
+            Tuning(Number("z_near", "Ближняя плоскость, м", ParamType::Float, 0.1, 0.001, 100.0, 0.01, ParamWidget::Spin, "", true)),
+            Tuning(Number("z_far", "Дальняя плоскость, м", ParamType::Float, 1000.0, 1.0, 100000.0, 1.0, ParamWidget::Spin, "", true)),
             Flag("fp32", "FP32", false, "модель в fp32 вместо fp16"),
-            Flag("no_fill", "Не заполнять дыры", false),
-            Flag("no_dlss", "Только depth_raw", false, "не писать depth_dlss"),
-            Enum("format", "Формат пасса", "exr", Formats(false), ParamWidget::Select, "", true),
+            Tuning(Flag("no_fill", "Не заполнять дыры", false)),
+            Tuning(Flag("no_dlss", "Только depth_raw", false, "не писать depth_dlss")),
+            Tuning(Enum("format", "Формат пасса", "exr", Formats(false), ParamWidget::Select, "", true)),
             Text("models_dir", "Папка моделей", ""),
             Text("python", "Python воркера", ""),
         };
@@ -201,16 +207,16 @@ std::vector<StageSchema> Build() {
                  {{"ofa", "Optical Flow (NVIDIA, точнее)", "NVIDIA Optical Flow SDK"}, {"searaft", "SEA-RAFT", "TensorRT"}, {"stub", "stub (тест)", ""}}),
             Enum("perf", "Качество", "slow", {{"slow", "высокое", ""}, {"medium", "среднее", ""}, {"fast", "быстрое", ""}}, ParamWidget::Toggle,
                  "уровень производительности Optical Flow"),
-            Text("model", "Модель (id реестра)", "", "пусто = модель бэкенда по умолчанию"),
+            Tuning(Text("model", "Модель (id реестра)", "", "пусто = модель бэкенда по умолчанию")),
             Number("max_res", "Максимальная сторона", ParamType::Int, 720, 256, 8192, 1, ParamWidget::Spin, "", true),
-            Number("grid", "Сетка OFA", ParamType::Int, 1, 1, 4, 1, ParamWidget::Spin, "", true),
-            Number("dilate", "Дилатация у границ", ParamType::Int, 1, 0, 2, 1, ParamWidget::Spin, "", true),
-            Text("target", "Целевое разрешение mv_dlss (WxH)", ""),
+            Tuning(Number("grid", "Сетка OFA", ParamType::Int, 1, 1, 4, 1, ParamWidget::Spin, "", true)),
+            Tuning(Number("dilate", "Дилатация у границ", ParamType::Int, 1, 0, 2, 1, ParamWidget::Spin, "", true)),
+            Tuning(Text("target", "Целевое разрешение mv_dlss (WxH)", "")),
             // NVDEC for OFA only: searaft / stub decode on the CPU whatever the key says (TASK-0043: it was hashed as "cuda")
-            OnlyFor(Enum("hwaccel", "Декод", "cuda", {{"cuda", "CUDA", ""}, {"none", "CPU", ""}}, ParamWidget::Select, "", true), {"ofa"}),
+            Tuning(OnlyFor(Enum("hwaccel", "Декод", "cuda", {{"cuda", "CUDA", ""}, {"none", "CPU", ""}}, ParamWidget::Select, "", true), {"ofa"})),
             Flag("fp32", "FP32", false),
-            Flag("no_dlss", "Только mv_raw", false, "не писать mv_dlss"),
-            Enum("format", "Формат пасса", "exr", Formats(false), ParamWidget::Select, "", true),
+            Tuning(Flag("no_dlss", "Только mv_raw", false, "не писать mv_dlss")),
+            Tuning(Enum("format", "Формат пасса", "exr", Formats(false), ParamWidget::Select, "", true)),
             Text("models_dir", "Папка моделей", ""),
         };
         out.push_back(std::move(s));
@@ -237,18 +243,21 @@ std::vector<StageSchema> Build() {
                     {"trt"}),
             OnlyFor(Number("tile", "Тайл", ParamType::Int, 0, 0, 1024, 64, ParamWidget::Spin, "окно нейросети в px, 0 = как в реестре (512)", true), {"trt"}),
             OnlyFor(Text("models_dir", "Папка моделей", ""), {"trt", "worker"}),
-            OnlyFor(Number("window", "Окно кадров", ParamType::Int, 0, 0, 60, 1, ParamWidget::Spin, "кадров за проход RealBasicVSR, 0 = как в реестре (15)", true), {"worker"}),
-            OnlyFor(Number("overlap", "Перекрытие окон", ParamType::Int, 0, 0, 10, 1, ParamWidget::Spin, "кадров, пересчитываемых следующим окном, 0 = как в реестре (3)", true), {"worker"}),
-            Number("sharpness", "Резкость NIS", ParamType::Float, 0.5, 0.0, 1.0, 0.05, ParamWidget::Slider, "", true),
-            Text("preset", "Пресет DLSS", "default"),
-            Flag("jitter", "Джиттер DLSS", true),
-            Number("jitter_sign", "Знак джиттера", ParamType::Float, 1.0, -1.0, 1.0, 2.0, ParamWidget::Spin, "", true),
-            Flag("artifact_reduction_only", "Без масштабирования (×1)", false,
-                 "DLSS — сглаживание DLAA, NIS — повышение резкости; артефакты сжатия не подавляются"),
-            Number("target_width", "Ширина цели", ParamType::Int, 0, 0, 7680, 2, ParamWidget::Spin, "0 = по масштабу", true),
-            Number("target_height", "Высота цели", ParamType::Int, 0, 0, 4320, 2, ParamWidget::Spin, "0 = по масштабу", true),
-            Flag("no_fallback", "Без запасного NIS", false, "ошибка вместо перехода на NIS"),
-            Enum("format", "Формат пасса", "exr", Formats(true), ParamWidget::Select, "", true),
+            Tuning(OnlyFor(Number("window", "Окно кадров", ParamType::Int, 0, 0, 60, 1, ParamWidget::Spin, "кадров за проход RealBasicVSR, 0 = как в реестре (15)", true),
+                           {"worker"})),
+            Tuning(OnlyFor(Number("overlap", "Перекрытие окон", ParamType::Int, 0, 0, 10, 1, ParamWidget::Spin,
+                                  "кадров, пересчитываемых следующим окном, 0 = как в реестре (3)", true),
+                           {"worker"})),
+            Tuning(Number("sharpness", "Резкость NIS", ParamType::Float, 0.5, 0.0, 1.0, 0.05, ParamWidget::Slider, "", true)),
+            Tuning(Text("preset", "Пресет DLSS", "default")),
+            Tuning(Flag("jitter", "Джиттер DLSS", true)),
+            Tuning(Number("jitter_sign", "Знак джиттера", ParamType::Float, 1.0, -1.0, 1.0, 2.0, ParamWidget::Spin, "", true)),
+            Tuning(Flag("artifact_reduction_only", "Без масштабирования (×1)", false,
+                        "DLSS — сглаживание DLAA, NIS — повышение резкости; артефакты сжатия не подавляются")),
+            Tuning(Number("target_width", "Ширина цели", ParamType::Int, 0, 0, 7680, 2, ParamWidget::Spin, "0 = по масштабу", true)),
+            Tuning(Number("target_height", "Высота цели", ParamType::Int, 0, 0, 4320, 2, ParamWidget::Spin, "0 = по масштабу", true)),
+            Tuning(Flag("no_fallback", "Без запасного NIS", false, "ошибка вместо перехода на NIS")),
+            Tuning(Enum("format", "Формат пасса", "exr", Formats(true), ParamWidget::Select, "", true)),
         };
         out.push_back(std::move(s));
     }
@@ -339,9 +348,11 @@ std::vector<StageSchema> Build() {
                              "Ограничивает поканальное отношение при переносе, защищает от выбросов в тенях."),
                       "model_scale", Op::Ne, 1.0),
                "Разрешение модели", true),
-            Enum("backend", "Бэкенд", "ngx", {{"ngx", "DLSS NR (NGX)", "nvngx_dlssnr.dll"}, {"stub", "stub (тест)", ""}}, ParamWidget::Select, "", true),
-            Enum("format", "Формат пасса", "exr", Formats(true), ParamWidget::Select, "", true),
+            // engineer keys: a card preset never changes them (spec §2h), a pipeline preset does
+            Tuning(Enum("backend", "Бэкенд", "ngx", {{"ngx", "DLSS NR (NGX)", "nvngx_dlssnr.dll"}, {"stub", "stub (тест)", ""}}, ParamWidget::Select, "", true)),
+            Tuning(Enum("format", "Формат пасса", "exr", Formats(true), ParamWidget::Select, "", true)),
         };
+        s.cardPresets = true;  // PR-9: the card's «Пресет ▾»
         out.push_back(std::move(s));
     }
     {
@@ -355,10 +366,10 @@ std::vector<StageSchema> Build() {
                    {{"2", "×2", ""}, {"3", "×3", ""}, {"4", "×4", ""}}),
             Enum("backend", "Метод", "dlssg",
                  {{"dlssg", "DLSS Frame Generation", "nvngx_dlssg.dll, ×2 на RTX 40"}, {"rife", "RIFE (TensorRT)", "×2..×4, любой RTX"}, {"blend", "смешивание (тест)", ""}}),
-            Text("model", "Модель RIFE", "rife49"),
+            Tuning(Text("model", "Модель RIFE", "rife49")),
             Flag("fp32", "FP32", false),
-            Enum("backbuffer_format", "Формат буфера", "rgba16f", {{"rgba16f", "RGBA16F", ""}, {"rgba8", "RGBA8", ""}}, ParamWidget::Select, "", true),
-            Enum("format", "Формат пасса", "exr", Formats(true), ParamWidget::Select, "", true),
+            Tuning(Enum("backbuffer_format", "Формат буфера", "rgba16f", {{"rgba16f", "RGBA16F", ""}, {"rgba8", "RGBA8", ""}}, ParamWidget::Select, "", true)),
+            Tuning(Enum("format", "Формат пасса", "exr", Formats(true), ParamWidget::Select, "", true)),
         };
         out.push_back(std::move(s));
     }
@@ -387,6 +398,8 @@ const ParamSpec* StageSchema::Find(const std::string& key) const {
         if (p.key == key) return &p;
     return nullptr;
 }
+
+ParamLevel LevelOf(const ParamSpec& spec) { return spec.advanced ? ParamLevel::Engineer : spec.more ? ParamLevel::More : ParamLevel::Basic; }
 
 const std::vector<StageSchema>& StageSchemas() {
     static const std::vector<StageSchema> schemas = Build();
@@ -478,65 +491,74 @@ nlohmann::json ReadStageParamsFile(const std::string& stage, const std::filesyst
     return j;
 }
 
-std::vector<std::string> ValidateStageParams(const std::string& stage, const nlohmann::json& rawParams) {
-    std::vector<std::string> problems;
+std::vector<ParamProblem> CheckStageParams(const std::string& stage, const nlohmann::json& rawParams) {
+    using Kind = ParamProblem::Kind;
+    std::vector<ParamProblem> problems;
+    const auto add = [&](Kind kind, const std::string& key, const J& got, std::string text) { problems.push_back({kind, stage, key, got, std::move(text)}); };
     const nlohmann::json params = NormalizeStageParams(stage, rawParams);
     const StageSchema* schema = FindStageSchema(stage);
     if (!schema) {
-        problems.push_back("unknown stage '" + stage + "'");
+        add(Kind::Shape, "", J(), "unknown stage '" + stage + "'");
         return problems;
     }
     if (params.is_null()) return problems;
     if (!params.is_object()) {
-        problems.push_back(stage + ": parameters must be a JSON object");
+        add(Kind::Shape, "", params, stage + ": parameters must be a JSON object");
         return problems;
     }
     for (const auto& [key, v] : params.items()) {
         const ParamSpec* spec = schema->Find(key);
         if (!spec) {
-            if (const MovedParam* m = FindMovedParam(stage, key)) problems.push_back(MovedParamProblem(*m));  // else hashed and ignored
+            if (const MovedParam* m = FindMovedParam(stage, key)) add(Kind::Moved, key, v, MovedParamProblem(*m));  // else hashed and ignored
             continue;  // backends take extra keys
         }
         const std::string where = stage + "." + key;
         switch (spec->type) {
             case ParamType::Bool:
-                if (!v.is_boolean()) problems.push_back(where + " must be true or false (got " + Brief(v) + ")");
+                if (!v.is_boolean()) add(Kind::Type, key, v, where + " must be true or false (got " + Brief(v) + ")");
                 break;
             case ParamType::Int:
             case ParamType::Float: {
                 if (!v.is_number() || (spec->type == ParamType::Int && !v.is_number_integer() && v.get<double>() != std::floor(v.get<double>()))) {
-                    problems.push_back(where + " must be a number (got " + Brief(v) + ")");
+                    add(Kind::Type, key, v, where + " must be a number (got " + Brief(v) + ")");
                     break;
                 }
                 if (!spec->choices.empty() && !IsChoice(*spec, v)) {
                     std::string all;
                     for (const auto& c : spec->choices) all += (all.empty() ? "" : " | ") + c.value;
-                    problems.push_back(where + " must be one of " + all + " (got " + Brief(v) + ")");
+                    add(Kind::Choice, key, v, where + " must be one of " + all + " (got " + Brief(v) + ")");
                 } else if (spec->sentinel && v.get<double>() == *spec->sentinel) {
                     // the special value (skin_structure -1 = «as the local structure»)
                 } else if (spec->max > spec->min) {
                     const double lo = spec->sentinel ? spec->rangeMin : spec->min;
                     if (v.get<double>() < lo || v.get<double>() > spec->max)
-                        problems.push_back(where + " must be " + (spec->sentinel ? J(*spec->sentinel).dump() + " or " : std::string()) + "within " + J(lo).dump() + ".." +
-                                           J(spec->max).dump() + " (got " + Brief(v) + ")");
+                        add(Kind::Range, key, v,
+                            where + " must be " + (spec->sentinel ? J(*spec->sentinel).dump() + " or " : std::string()) + "within " + J(lo).dump() + ".." +
+                                J(spec->max).dump() + " (got " + Brief(v) + ")");
                 }
                 break;
             }
             case ParamType::Enum:
                 if (!v.is_string()) {
-                    problems.push_back(where + " must be a string (got " + Brief(v) + ")");
+                    add(Kind::Type, key, v, where + " must be a string (got " + Brief(v) + ")");
                 } else if (!IsChoice(*spec, v)) {
                     std::string all;
                     for (const auto& c : spec->choices) all += (all.empty() ? "" : " | ") + c.value;
-                    problems.push_back(where + " must be one of " + all + " (got " + Brief(v) + ")");
+                    add(Kind::Choice, key, v, where + " must be one of " + all + " (got " + Brief(v) + ")");
                 }
                 break;
             case ParamType::String:
-                if (!v.is_string()) problems.push_back(where + " must be a string (got " + Brief(v) + ")");
+                if (!v.is_string()) add(Kind::Type, key, v, where + " must be a string (got " + Brief(v) + ")");
                 break;
         }
     }
     return problems;
+}
+
+std::vector<std::string> ValidateStageParams(const std::string& stage, const nlohmann::json& params) {
+    std::vector<std::string> texts;
+    for (ParamProblem& p : CheckStageParams(stage, params)) texts.push_back(std::move(p.text));
+    return texts;
 }
 
 nlohmann::json EffectiveStageParams(const std::string& stage, const nlohmann::json& params) {

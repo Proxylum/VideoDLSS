@@ -44,6 +44,7 @@ add_executable(dlssvid_unit_tests
   unit/test_pass_fingerprint.cpp
   unit/test_pass_versions.cpp
   unit/test_param_schema.cpp
+  unit/test_stage_preset.cpp
   unit/test_estimates.cpp
   unit/test_settings_note.cpp
   unit/test_encode_defaults.cpp
