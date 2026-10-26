@@ -206,4 +206,11 @@ TEST_CASE("Project keeps the output bit depth and chroma; older files mean auto"
     CHECK(num.outputFormat.chroma == "422");
     CHECK_THROWS(Project::FromJson(nlohmann::json::parse(R"({"schema_version": 1, "encode": {"codec": "ffv1", "bit_depth": "9"}})"), d));
     CHECK_THROWS(Project::FromJson(nlohmann::json::parse(R"({"schema_version": 1, "encode": {"codec": "ffv1", "chroma": "411"}})"), d));
+    // PR-11: the settings note, on unless the project says no
+    CHECK(old.settingsNote);
+    CHECK(j["encode"]["settings_note"] == true);
+    p.settingsNote = false;
+    p.Save(d / "p.dlssvid.json");
+    CHECK_FALSE(Project::Load(d / "p.dlssvid.json").settingsNote);
+    CHECK_THROWS(Project::FromJson(nlohmann::json::parse(R"({"schema_version": 2, "encode": {"codec": "ffv1", "settings_note": "yes"}})"), d));
 }

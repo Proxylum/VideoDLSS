@@ -301,6 +301,8 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["model_scale"] = options_.modelScale;
         m.stageParams["work_size"] = {workW_, workH_};
         m.stageParams["transfer"] = options_.transfer;
+        m.stageParams["max_ratio"] = options_.maxRatio;  // what the settings note names (PR-11)
+        m.stageParams["temporal_threshold"] = options_.temporalThreshold;
         m.stageParams["temporal"] = options_.temporal;
         m.stageParams["skin_blend"] = options_.skinBlend;
         m.stageParams["tonemap"] = {{"curve", options_.tonemap.curve}, {"input_transfer", options_.tonemap.inputTransfer}, {"exposure_ev", options_.tonemap.exposureEv}};

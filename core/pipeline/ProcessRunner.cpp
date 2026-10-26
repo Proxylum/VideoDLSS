@@ -1,6 +1,7 @@
 #include "pipeline/ProcessRunner.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <optional>
@@ -16,6 +17,7 @@
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/Pipeline.h"
+#include "pipeline/SettingsNote.h"
 #include "stages/ParamSchema.h"
 #include "ml/ModelRegistry.h"
 #include "stages/depth/DepthModels.h"
@@ -500,8 +502,9 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     return d;
 }
 
-void StampPass(const std::filesystem::path& dir, const StageDecision& d, const std::string& created, double msPerFrame = 0.0) {
+void StampPass(const std::filesystem::path& dir, const StageDecision& d, const std::string& created, double msPerFrame = 0.0, bool adopted = false) {
     Manifest m = Manifest::Load(dir);
+    if (adopted) m.stageParams["adopted"] = true;  // made before fingerprints: the settings note says so (PR-11)
     // the wall time of this run (decode, pass I/O, init and the stage) on this machine: the only time the estimates use; a stage's
     // own timer is ms_per_frame_gpu (nr, D8)
     if (msPerFrame > 0) m.stageParams["ms_per_frame"] = msPerFrame;
@@ -740,6 +743,7 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     eo.frameRate = fps.num > 0 ? fps : Rational{30, 1};
     eo.timeBase = Rational{eo.frameRate.den, eo.frameRate.num};
     eo.color = ColorTagsFor(ci, info);
+    eo.metadata = encode.metadata;
     // no `b` given: the bitrate for this output (NVENC's own default is far too low for 4K)
     eo.codecOptions = EffectiveCodecOptions(encode.codec, encode.codecOptions, m.width, m.height, eo.frameRate.ToDouble());
     if (!encode.codecOptions.count("b") && eo.codecOptions.count("b"))
@@ -912,7 +916,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             if (d.kind == "legacy") {
                 rep.reason = "adopted: " + d.detail;
                 for (const auto& pass : StageFamilyPasses(name))
-                    if (Manifest::Exists(root / pass)) StampPass(root / pass, d, FileTimeIso8601(root / pass / Manifest::kFileName));
+                    if (Manifest::Exists(root / pass)) StampPass(root / pass, d, FileTimeIso8601(root / pass / Manifest::kFileName), 0.0, true);
             }
             Log()->info("process: {} — {} is complete, reused{}", name, d.outDir.string(), d.kind == "legacy" ? " (adopted)" : "");
             result.stages.push_back(rep);
@@ -1191,6 +1195,15 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         es.codec = options.codec;
         es.codecOptions = options.codecOptions;
         es.format = options.outputFormat;
+        if (options.settingsNote) {
+            // PR-11 (spec §2g): what made the result, from the stages' own records - the result is not a pass, no fingerprint changes
+            const nlohmann::json settings = BuildSettingsJson(root, result.finalPass.filename().string());
+            es.metadata["comment"] = SettingsNoteText(settings);
+            std::string ext = options.output.extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (ext == ".mkv") es.metadata["DLSSVID_SETTINGS"] = settings.dump();
+            Log()->info("encode: settings note: {}", es.metadata["comment"]);
+        }
         const EncodeReport r = EncodePassToVideo(result.finalPass, options.input, options.output, es, options.frames,
                                                  [&](int64_t n, int64_t total) {
                                                      if (options.progress) options.progress("encode", n, total);

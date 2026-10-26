@@ -129,7 +129,7 @@ TEST_CASE("FgStage: x3 from a colour pass folder, frame layout and weights", "[i
     const FgRunResult r = RunFg(dec, dev, o);
     CHECK(r.stats.frames == frames);
     CHECK(r.stats.generated == (frames - 1) * 2);
-    CHECK(r.stats.colorSource == "pass");
+    CHECK(r.stats.colorSource == "pass:color_nr");  // the pass it read: the settings note follows it (PR-11)
     const PassReader rd = PassReader::Open(r.outDir);
     CHECK(rd.Man().frameCount == FgFrameCount(frames, 3));
     CHECK(rd.Man().fps.num == spec.fpsNum * 3);
