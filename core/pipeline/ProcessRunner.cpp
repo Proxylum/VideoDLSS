@@ -789,8 +789,11 @@ nlohmann::json StageDecision::ToJson() const {
 nlohmann::json ProcessPlan::ToJson() const {
     nlohmann::json st = nlohmann::json::array();
     for (const auto& s : stages) st.push_back(s.ToJson());
-    return {{"passes_root", passesRoot.string()}, {"source_hash", sourceHash}, {"frames", frames},       {"stages", st},
-            {"final_pass", finalPass},            {"run_count", runCount},    {"reuse_count", reuseCount}};
+    nlohmann::json j = {{"passes_root", passesRoot.string()}, {"source_hash", sourceHash}, {"frames", frames},       {"stages", st},
+                        {"final_pass", finalPass},            {"run_count", runCount},    {"reuse_count", reuseCount}};
+    if (scenesOnDisk)
+        j["scenes_on_disk"] = {{"count", scenesOnDisk->count}, {"frames", scenesOnDisk->frames}, {"threshold", scenesOnDisk->threshold}, {"off", scenesOnDisk->off}};
+    return j;
 }
 
 const std::vector<std::string>& ProcessStageOrder() { return PipelineStageNames(); }
@@ -945,6 +948,8 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
     plan.passesRoot = pr.ctx.root;
     plan.sourceHash = pr.ctx.sourceHash;
     plan.frames = pr.ctx.needed;
+    if (const auto l = ReadSceneList(pr.ctx.root / kScenesPass, pr.ctx.sourceHash))
+        plan.scenesOnDisk = SceneListOnDisk{static_cast<int64_t>(l->cuts.size()), l->frames, l->threshold, l->off};
     PlanState state;
     RefreshFromDisk(state, pr.ctx);
     for (const std::string& name : ProcessStageOrder()) {

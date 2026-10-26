@@ -30,6 +30,8 @@ class StageCard : public QFrame {
 public:
     StageCard(AppModel& model, const std::string& stage, QWidget* parent = nullptr);
     const std::string& stage() const { return stage_; }
+    // A widget of the stage's own under the form (PR-13: the list of the card «Склейки»), refreshed by itself
+    void setExtra(QWidget* extra);
 
 public slots:
     void refresh();  // parameters from the project, the state from the plan, engineer widgets shown or hidden
@@ -75,6 +77,7 @@ private:
     QLabel* sub_;
     QLabel* version_;
     QLabel* warning_;
+    QLabel* scenes_;  // a stage that reads the scene list: what its cuts do (StageCardState::scenes, PR-13)
     QCheckBox* force_;
     QWidget* engineer_;
     QPlainTextEdit* json_;

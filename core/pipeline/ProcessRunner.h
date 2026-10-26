@@ -140,6 +140,13 @@ struct StageDecision {
     nlohmann::json ToJson() const;
 };
 
+// The scene list on disk when the plan was made (PR-13): what the stages below read while the stage scenes is off.
+struct SceneListOnDisk {
+    int64_t count = 0, frames = 0;
+    double threshold = 0.0;
+    bool off = false;
+};
+
 struct ProcessPlan {
     std::filesystem::path passesRoot;
     std::string sourceHash;
@@ -147,6 +154,7 @@ struct ProcessPlan {
     std::vector<StageDecision> stages;  // enabled stages in run order
     std::string finalPass;              // colour pass the encode step would use ("" -> the source is passed through)
     int runCount = 0, reuseCount = 0;   // reuseCount includes restores
+    std::optional<SceneListOnDisk> scenesOnDisk;  // a readable list of this source under the root (PR-13)
     nlohmann::json ToJson() const;
 };
 

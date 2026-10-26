@@ -7,6 +7,7 @@ qt_add_library(dlssvid_app STATIC
   SourceNames.h SourceNames.cpp
   CompareBar.h CompareBar.cpp
   StageCard.h StageCard.cpp
+  SceneCutsView.h SceneCutsView.cpp
   StartPage.h StartPage.cpp
   RecentPreviews.h RecentPreviews.cpp
   ViewportWindow.h ViewportWindow.cpp

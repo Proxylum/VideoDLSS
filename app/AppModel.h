@@ -88,6 +88,7 @@ public:
         QString version;  // «v1», «v2»
         QString warning;  // «без глубины и векторов: качество ниже»; empty when fine
         QString tone;     // ok | run | off | none
+        QString scenes;   // a stage that reads the scene list: what the cuts do to it («склейки: 3 — векторы на них нулевые», PR-13)
         bool runs = false;
     };
     const ProcessPlan& plan() const { return plan_; }        // PlanProcess over the project (empty without a source)
@@ -158,6 +159,9 @@ public slots:
     void setLastRun(double seconds);       // the run that has just produced the result
     void reloadSources();  // after a stage finished: rescan pass folders
     void setTime(double seconds);
+    // The time of frame `frame` of the source (its rate, not the base layer's: color_fg may run at twice it), in the middle of the
+    // frame - the chips of the scene list (PR-13)
+    void seekToSourceFrame(int64_t frame);
     void setFrame(int64_t timelineFrame);  // in frames of the timeline rate
     void stepFrame(int delta);             // by frames of the base source
     void setTimelineFps(Rational fps);     // {0,1}: follow the base source

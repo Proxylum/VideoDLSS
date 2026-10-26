@@ -99,7 +99,7 @@ QString Plural(int n, const QString& one, const QString& few, const QString& man
 
 int SourceRank(const std::string& source) {
     const std::string pass = SplitSourceVersion(source).first;
-    static const char* order[] = {"source", "depth_raw", "depth_dlss", "mv_raw", "mv_dlss", "color_sr", "color_nr", "color_fg", "result"};
+    static const char* order[] = {"source", "depth_raw", "depth_dlss", "mv_raw", "mv_dlss", "color_sr", "color_nr", "color_fg", "result"};  // scenes: no source
     for (int i = 0; i < 9; ++i)
         if (pass == order[i]) return i;
     return 9;

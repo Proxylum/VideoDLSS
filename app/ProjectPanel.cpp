@@ -18,12 +18,14 @@
 #include <map>
 
 #include "AppModel.h"
+#include "SceneCutsView.h"
 #include "SourceNames.h"
 #include "StageCard.h"
 #include "Theme.h"
 #include "TaskQueue.h"
 #include "io/EncodeDefaults.h"
 #include "io/OutputFormat.h"
+#include "passes/ScenesPass.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "stages/ParamSchema.h"
@@ -171,6 +173,7 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     layout->addLayout(stagesHead);
     for (const std::string& stage : PipelineStageNames()) {  // the run order, one table (PR-13)
         auto* card = new StageCard(model_, stage, content);
+        if (stage == kScenesPass) card->setExtra(new SceneCutsView(model_, card));  // the list: chips to check it (PR-13)
         connect(card, &StageCard::runRequested, this, &ProjectPanel::runStage);
         connect(card, &StageCard::patchDllRequested, this, &ProjectPanel::patchDll);
         layout->addWidget(card);

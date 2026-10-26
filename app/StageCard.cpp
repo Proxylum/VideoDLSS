@@ -259,6 +259,10 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     stateRow->addWidget(state_, 1);
     side->addLayout(stateRow);
     side->addWidget(sub_);
+    scenes_ = new QLabel(this);
+    scenes_->setWordWrap(true);
+    SetRole(scenes_, "hint");
+    side->addWidget(scenes_);
     warning_ = new QLabel(this);
     warning_->setWordWrap(true);
     SetRole(warning_, "warn");
@@ -277,6 +281,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     state_->setMinimumWidth(120);
     sub_->setMinimumWidth(120);
     warning_->setMinimumWidth(120);
+    scenes_->setMinimumWidth(120);
 
     // engineer mode: the JSON of all parameters and the stage alone as a process
     engineer_ = new QWidget(this);
@@ -611,6 +616,11 @@ bool StageCard::changed(const ParamSpec& spec) const {
     return v != spec.def;
 }
 
+void StageCard::setExtra(QWidget* extra) {
+    extra->setParent(form_);
+    if (auto* column = qobject_cast<QVBoxLayout*>(form_->layout())) column->addWidget(extra);
+}
+
 void StageCard::refresh() {
     updating_ = true;
     const StageEntry* e = model_.stageEntry(stage_);
@@ -680,6 +690,8 @@ void StageCard::refresh() {
     version_->setVisible(!st.version.isEmpty());
     warning_->setText(st.warning);
     warning_->setVisible(!st.warning.isEmpty());
+    scenes_->setText(st.scenes);
+    scenes_->setVisible(!st.scenes.isEmpty());
     force_->setChecked(model_.forced(stage_));
     force_->setVisible(e && e->enabled);
     engineer_->setVisible(model_.engineerMode());

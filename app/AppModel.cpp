@@ -299,6 +299,11 @@ void AppModel::stepFrame(int delta) {
     setTime(store_->TimeOfFrame(base, store_->FrameAt(base, time()) + delta));
 }
 
+void AppModel::seekToSourceFrame(int64_t frame) {
+    const double fps = sourceInfo_.fps > 0 ? sourceInfo_.fps : 24.0;
+    setTime((static_cast<double>(std::max<int64_t>(frame, 0)) + 0.5) / fps);
+}
+
 void AppModel::setTimelineFps(Rational fps) {
     timelineFps_ = fps;
     emit timelineFpsChanged();
@@ -731,6 +736,12 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     if (!entry || !entry->enabled) {
         st.state = tr("выключена");
         st.tone = "off";
+        if (stage == kScenesPass) {  // PR-13: a list on disk is read all the same (the cache's convention); threshold 0 turns it off
+            const auto& disk = plan_.scenesOnDisk;
+            if (disk && !disk->off && disk->count > 0)
+                st.sub = tr("действует список с диска: %1 · без сброса — порог 0").arg(Plural(static_cast<int>(disk->count), tr("склейка"), tr("склейки"), tr("склеек")));
+            else st.sub = tr("стадии не сбрасывают историю на склейках");
+        }
         return st;
     }
     const StageDecision* d = nullptr;
@@ -794,6 +805,18 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
                     parts << QString("%1 %2 → %3").arg(label, was, now);
                 }
             st.state = tr("пересчёт: %1").arg(parts.isEmpty() ? QString::fromStdString(d->detail) : parts.join(", "));
+        } else if (d->kind == "input_changed" && d->pending) {  // PR-13: the list is analysed first; no cut - the pass is reused
+            st.state = tr("пересчёт, если найдутся склейки");
+            st.sub = tr("список склеек посчитается первым");
+        } else if (d->kind == "input_changed" && d->diff.contains("inputs") && d->diff["inputs"] == nlohmann::json::array({kScenesPass})) {
+            st.state = tr("пересчёт: изменились склейки");
+            const ViewportSource* src = store_->FindSource(primary);
+            const int64_t was = src && src->manifest ? src->manifest->stageParams.value("scene_cut_count", int64_t{0}) : 0;
+            int64_t now = 0;
+            for (const auto& s : plan_.stages)
+                if (s.name == kScenesPass) now = s.sceneCuts.count;
+            if (!d->inputs.count(kScenesPass)) now = 0;
+            st.sub = QString("%1 → %2").arg(was).arg(now);
         } else if (d->kind == "input_changed") {
             st.state = tr("пересчёт: изменился вход");
             QStringList names;
@@ -827,6 +850,38 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
         if (d->retire) sub << tr("v%1 останется на диске").arg(d->current ? history + 1 : 1);
         st.sub = sub.join(" · ");
     }
+    if (stage == kScenesPass) {  // PR-13: the card of the list - how many cuts, and what a new threshold costs
+        const SceneCutsPlan& sc = d->sceneCuts;
+        const QString n = Plural(static_cast<int>(sc.count), tr("склейка"), tr("склейки"), tr("склеек"));
+        if (sc.known && sc.off) {
+            st.state = tr("выкл: без сброса");
+        } else if (d->action != "run") {
+            if (sc.known) st.sub += (st.sub.isEmpty() ? "" : " · ") + n;
+        } else if (sc.rederive) {
+            QStringList parts{tr("без декодирования"), sc.before >= 0 && sc.before != sc.count ? tr("станет %1 (было %2)").arg(n).arg(sc.before) : n};
+            if (d->retire) parts << tr("v%1 останется на диске").arg(d->current ? history + 1 : 1);
+            st.sub = parts.join(" · ");
+        } else {
+            st.sub += (st.sub.isEmpty() ? "" : " · ") + tr("один проход декодирования исходника");
+        }
+    } else if (StageReadsSceneCuts(stage, d->params)) {  // PR-13: what the cuts do to a stage that reads them
+        const auto it = d->inputs.find(kScenesPass);
+        int64_t count = 0;
+        for (const auto& s : plan_.stages)
+            if (s.name == kScenesPass && s.sceneCuts.known) count = s.sceneCuts.count;
+        if (it != d->inputs.end() && count == 0 && plan_.scenesOnDisk) count = plan_.scenesOnDisk->count;  // the stage off: the list on disk
+        if (d->pending || (it != d->inputs.end() && it->second == kScenesPendingId)) {
+            st.scenes = tr("склейки найдутся перед этой стадией");
+        } else if (it != d->inputs.end() && count > 0) {
+            const std::string backend = StageBackend(stage, d->params);
+            const QString what = stage == "flow"                         ? tr("векторы на них нулевые")
+                                 : stage == "upscale" && backend == "worker" ? tr("окна RealBasicVSR через них не переходят")
+                                 : stage == "upscale"                     ? tr("история DLSS начинается заново")
+                                 : stage == "nr"                          ? tr("история модели и подавления мерцания сбрасывается")
+                                                                          : tr("вместо промежуточных кадров повтор последнего кадра сцены");
+            st.scenes = tr("склейки: %1 — %2").arg(count).arg(what);
+        }
+    }
     // upscale: only DLSS reads the guides (PR-13) - nis, bicubic, trt and worker without them is no loss
     if (schema && !schema->guides.empty() && (stage == "nr" || stage == "fg" || (stage == "upscale" && UpscaleReadsGuides(d->params)))) {
         bool any = false;
@@ -843,7 +898,8 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     if (!d->error.empty()) warn << QString::fromStdString(d->error);
     for (const auto& w : d->warnings) warn << QString::fromStdString(w);
     st.warning = warn.join("\n");
-    if (st.runs && !d->info.empty()) st.sub = st.sub.isEmpty() ? QString::fromStdString(d->info) : st.sub + " · " + QString::fromStdString(d->info);
+    // the advice of the stage; the list's card says it its own way (above)
+    if (st.runs && !d->info.empty() && stage != kScenesPass) st.sub = st.sub.isEmpty() ? QString::fromStdString(d->info) : st.sub + " · " + QString::fromStdString(d->info);
     return st;
 }
 
