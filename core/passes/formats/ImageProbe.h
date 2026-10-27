@@ -15,8 +15,9 @@ namespace dlssvid {
 struct ImageProbe {
     enum class Format : uint8_t { Unknown, Png, Tiff, Exr } format = Format::Unknown;
     uint32_t width = 0, height = 0;  // EXR: the display window
-    uint32_t channels = 0;           // what the reader returns: PNG after its expansions (palette -> RGB, tRNS -> alpha); EXR: the top layer
-    PixelType type = PixelType::U8;  // the reader's sample type (EXR: F32 when any channel is FLOAT / UINT, else F16)
+    uint32_t channels = 0;           // what the reader returns: PNG after its expansions (palette -> RGB, tRNS -> alpha); EXR: the layer
+                                     // ReadExr returns (the top-level one, else the first by name)
+    PixelType type = PixelType::U8;  // the reader's sample type (EXR: of that layer - F32 when a channel of it is FLOAT / UINT, else F16)
     // TIFF: photometric (MINISWHITE 0, MINISBLACK 1, RGB 2, PALETTE 3, ...; a missing tag is guessed from the samples, as libtiff
     // does), tiles, separate planes, whether ReadTiff takes the samples (1-4 of 8 / 16 bit unsigned, 16 / 32 bit float) and whether this
     // build of libtiff decodes the compression (JPEG is not built in)

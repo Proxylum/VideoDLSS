@@ -397,6 +397,20 @@ bool NrMaskSizesDiffer(const std::filesystem::path& root, const std::map<std::st
     return false;
 }
 
+// An NR pass that read a protect mask (ui / ignore) and a skin mask (face / skin): stage_params.masks, written by NR since before PR-8.
+bool NrReadBothMaskGroups(const Manifest& m) {
+    const nlohmann::json& sp = m.stageParams;
+    if (!sp.is_object() || (sp.contains("bypass") && sp["bypass"] == true) || !sp.contains("masks") || !sp["masks"].is_array()) return false;
+    bool protect = false, skin = false;
+    for (const auto& n : sp["masks"]) {
+        if (!n.is_string()) continue;
+        const std::string s = n.get<std::string>();
+        protect = protect || s == "ui" || s == "ignore";
+        skin = skin || s == "face" || s == "skin";
+    }
+    return protect && skin;
+}
+
 StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, const PlanState& state) {
     const std::string& name = stage.name;
     const nlohmann::json p = EffectiveStageParams(name, stage.params);  // schema defaults filled in: the run's real parameters
@@ -568,6 +582,14 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             d.diff["inputs"] = nlohmann::json::array({kControlMaskPass});
             run("input_changed", made.empty() ? "made without the control mask" : controlWant.empty() ? "made with a control mask" : "made with another control mask",
                 true);
+        } else if (name == "nr" && NrMaskSizesDiffer(ctx.root, d.inputs) && !NrReadBothMaskGroups(m)) {
+            // made without the protect or the skin masks NR reads now (bypass, --no-auto, another --masks-dir): the C0 defect could not
+            // touch it, and adopted it would carry the masks' fingerprint
+            nlohmann::json masks = nlohmann::json::array();
+            for (const char* pass : {"mask_ui", "mask_ignore", "mask_face", "mask_skin"})
+                if (d.inputs.count(pass)) masks.push_back(pass);
+            d.diff["inputs"] = masks;
+            run("input_changed", "made without the protect or skin masks NR reads now", true);
         } else if (name == "nr" && NrMaskSizesDiffer(ctx.root, d.inputs) && !(m.stageParams.is_object() && m.stageParams.contains("mask_textures"))) {
             // TASK-0060 (C0): a standalone NR pass made before the fix, with protect and skin masks of different sizes, left the UI
             // unprotected - adopted it would carry the +nr.msize fingerprint of the fixed picture

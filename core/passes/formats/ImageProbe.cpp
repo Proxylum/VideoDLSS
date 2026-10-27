@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <memory>
 
 #include "passes/formats/ExrIO.h"
@@ -106,16 +107,21 @@ void ProbeExr(const std::filesystem::path& path, ImageProbe& p) {
         p.exrDataMinY = data.min.y - display.min.y;
         p.exrDataWidth = static_cast<uint32_t>(std::max(0, data.max.x - data.min.x + 1));
         p.exrDataHeight = static_cast<uint32_t>(std::max(0, data.max.y - data.min.y + 1));
-        bool wide = false;
-        uint32_t top = 0;
+        // what ReadExr returns: one layer (ReadExrLayers splits a name at its last '.'), the top-level one or else the first by name -
+        // in a std::map "" sorts first; its type F32 when a channel of it is FLOAT or UINT
+        std::map<std::string, std::pair<uint32_t, bool>> layers;  // layer -> channels, wide
         for (auto it = header.channels().begin(); it != header.channels().end(); ++it) {
             const std::string name = it.name();
             p.exrChannels.push_back(name);
-            if (name.find('.') == std::string::npos) ++top;
-            if (it.channel().type != Imf::HALF) wide = true;
+            const size_t dot = name.rfind('.');
+            auto& layer = layers[dot == std::string::npos ? std::string() : name.substr(0, dot)];
+            ++layer.first;
+            if (it.channel().type != Imf::HALF) layer.second = true;
         }
-        p.channels = top ? top : static_cast<uint32_t>(p.exrChannels.size());
-        p.type = wide ? PixelType::F32 : PixelType::F16;
+        if (!layers.empty()) {
+            p.channels = layers.begin()->second.first;
+            p.type = layers.begin()->second.second ? PixelType::F32 : PixelType::F16;
+        }
     } catch (const std::exception& e) {
         Throw("EXR header does not read (" + ExrFileName(path) + "): " + e.what());
     }

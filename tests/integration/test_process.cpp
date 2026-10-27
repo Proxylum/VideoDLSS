@@ -398,6 +398,21 @@ TEST_CASE("RunProcess: an nr pass with protect and skin masks of different sizes
     const ProcessResult fixed = RunProcess(o);
     CHECK(Report(fixed, "nr").status == "reused");
     CHECK(Report(fixed, "nr").reason.find("adopted") != std::string::npos);
+    // review of PR-8: a standalone pass that read no masks (--no-auto, another --masks-dir, the bypass) was not touched by the defect -
+    // recomputed for the masks it lacks, not as «made before the fix»
+    for (const bool bypass : {false, true}) {
+        INFO("bypass " << bypass);
+        Manifest nr = Manifest::Load(o.passesRoot / "color_nr");
+        nr.fingerprint.clear();
+        nr.stageParams.erase("mask_textures");
+        nr.stageParams["masks"] = bypass ? nlohmann::json::array({"ui", "skin"}) : nlohmann::json::array();
+        if (bypass) nr.stageParams["bypass"] = true;
+        nr.Save(o.passesRoot / "color_nr");
+        const ProcessResult maskless = RunProcess(o);
+        CHECK(Report(maskless, "nr").status == "ran");
+        CHECK(Report(maskless, "nr").reason.find("without the protect or skin masks") != std::string::npos);
+        CHECK(Report(maskless, "nr").reason.find("TASK-0060") == std::string::npos);
+    }
 }
 
 // PR-8 (regression of the race the design closes): a mask replaced from the CLI while process runs. Between the plan and NR's Init the

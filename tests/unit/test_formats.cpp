@@ -279,6 +279,20 @@ TEST_CASE("ProbeImage reads size, channels, sample type and TIFF photometric and
     CHECK(p.type == PixelType::F16);
     WriteExr(Tmp("probe_f32.exr"), Pattern(3, 3, PixelType::F32, {"Y"}));
     CHECK(ProbeImage(Tmp("probe_f32.exr")).type == PixelType::F32);
+    // review of PR-8: a multi-layer EXR - the type and the channels of the layer ReadExr returns, not of the whole file (the provenance
+    // of the control mask said f32 x4 for a mask read from half R, G, B)
+    WriteExrLayers(Tmp("probe_layers.exr"), {{"", Pattern(3, 3, PixelType::F16, {"R", "G", "B"})}, {"depth", Pattern(3, 3, PixelType::F32, {"Z"})}});
+    WriteExrLayers(Tmp("probe_nested.exr"), {{"a", Pattern(3, 3, PixelType::F16, {"R", "G", "B"})}, {"b", Pattern(3, 3, PixelType::F32, {"Y", "Z"})}});
+    for (const char* name : {"probe_layers.exr", "probe_nested.exr"}) {
+        INFO(name);
+        p = ProbeImage(Tmp(name));
+        const PassImage read = ReadExr(Tmp(name));
+        CHECK(p.channels == 3);
+        CHECK(p.type == PixelType::F16);
+        CHECK(p.channels == read.channels.size());
+        CHECK(p.type == read.type);
+        CHECK(p.exrChannels.size() > 3);  // every channel of the file is still listed
+    }
 
     // the kind from the signature, not the extension
     std::filesystem::copy_file(Tmp("probe_white.tif"), Tmp("probe_tiff_named.png"), std::filesystem::copy_options::overwrite_existing);
