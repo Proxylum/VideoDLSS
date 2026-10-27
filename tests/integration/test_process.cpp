@@ -452,6 +452,13 @@ TEST_CASE("a control mask replaced after the plan fails the stage instead of sta
     const Manifest nr = Manifest::Load(o.passesRoot / "color_nr");
     CHECK(nr.inputs.at("mask_control") == bFp);  // planned and applied: b
     CHECK(ControlMaskLabelOf(nr) == bFp);
+    // review of PR-8: a hand-edited manifest - a label of another type is none (NR recomputed), not a JSON exception out of the plan
+    Manifest odd = nr;
+    for (const nlohmann::json& v : {nlohmann::json{{"fingerprint", 5}}, nlohmann::json{{"fingerprint", nullptr}}, nlohmann::json("x")}) {
+        INFO(v.dump());
+        odd.stageParams["control_mask"] = v;
+        CHECK(ControlMaskLabelOf(odd).empty());
+    }
 }
 
 TEST_CASE("RunProcess adopts a pass without a fingerprint only when it was made with the current scene list", "[integration][process][regression]") {

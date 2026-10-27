@@ -250,6 +250,11 @@ TEST_CASE("FrameStore: a static pass is ready at every time from one resident fr
     CHECK(store.Duration() == Approx(1.0));  // the colour's 10 frames at 10 fps, not shortened or lengthened by the mask
     CHECK(store.ExpectedFrames("mask_control") == 1);
     CHECK(store.ExpectedFrames("color_sr") == 10);
+    // review of PR-8: a cold store at a time past frame 0 (render at a later time) - WaitForCurrent waits for the mask's frame 0; keyed by
+    // the time's frame it skipped the mask as having no such frame and returned before it loaded
+    store.SetCurrentTime(0.5, {"mask_control"});
+    store.WaitForCurrent(10000);
+    CHECK(store.StatusAt(0.5, "mask_control") == FrameStore::Status::Ready);
     for (const double t : {0.0, 0.5, 0.9, 0.3}) {
         INFO("t " << t);
         store.SetCurrentTime(t, {"color_sr", "mask_control"});

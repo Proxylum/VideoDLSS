@@ -442,7 +442,18 @@ TEST_CASE("ReadControlMaskInfo: a frame file another program holds open is not r
         CloseHandle(held);
     }
     CHECK_THAT(why, Catch::Matchers::StartsWith("frame not readable"));
-    CHECK(ReadControlMaskInfo(cur));  // let go: the mask as it was
+    {  // review of PR-8: opens, but its bytes do not read (a byte-range lock) - not readable as well, and no hash of a part is cached
+        const HANDLE locker = CreateFileW(frame.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        REQUIRE(locker != INVALID_HANDLE_VALUE);
+        OVERLAPPED at{};
+        REQUIRE(LockFileEx(locker, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 4, 0, &at));
+        why.clear();
+        CHECK(!ReadControlMaskInfo(cur, &why));
+        UnlockFileEx(locker, 0, 4, 0, &at);
+        CloseHandle(locker);
+    }
+    CHECK_THAT(why, Catch::Matchers::StartsWith("frame not readable"));
+    CHECK(ReadControlMaskInfo(cur));  // let go: the mask as it was (the failed reads left no hash behind)
     fs::remove(frame);
     CHECK(!ReadControlMaskInfo(cur, &why));
     CHECK(why == "changed outside dlssvid");

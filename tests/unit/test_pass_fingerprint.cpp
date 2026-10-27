@@ -3,6 +3,11 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -259,4 +264,28 @@ TEST_CASE("Sha256FileCached matches Sha256File and follows the file", "[unit][fi
     CHECK(h2 == Sha256File(file));
     CHECK(h2 != h1);
     CHECK_THROWS(Sha256FileCached(dir / "missing.bin"));
+}
+
+// Review of PR-8: a failed read ended the stream as the end of the file does - the hash of a part came back as the file's and stayed in
+// Sha256FileCached under the file's size and time, so a mask frame read under a byte-range lock stayed «changed outside dlssvid» after it.
+TEST_CASE("Sha256File and Sha256FileCached throw on a file whose bytes do not read and cache nothing of it", "[unit][fingerprint][regression]") {
+    const std::filesystem::path dir = std::filesystem::path(DLSSVID_TEST_TMP) / "fingerprint_locked";
+    std::filesystem::create_directories(dir);
+    const auto file = dir / "locked.bin";
+    {
+        std::ofstream out(file, std::ios::binary);
+        const std::string block(1 << 20, 'x');
+        for (int i = 0; i < 3; ++i) out << block << i;  // more than one read buffer: the first one reads, a later one does not
+    }
+    const std::string whole = Sha256File(file);
+    const HANDLE locker = CreateFileW(file.wstring().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    REQUIRE(locker != INVALID_HANDLE_VALUE);
+    OVERLAPPED at{};
+    at.Offset = (1u << 20) + 100;  // inside the second megabyte
+    REQUIRE(LockFileEx(locker, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 4, 0, &at));
+    CHECK_THROWS(Sha256File(file));
+    CHECK_THROWS(Sha256FileCached(file));
+    UnlockFileEx(locker, 0, 4, 0, &at);
+    CloseHandle(locker);
+    CHECK(Sha256FileCached(file) == whole);  // nothing of the failed read was kept
 }

@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "passes/formats/ExrIO.h"
 #include "util/Error.h"
 #include "util/Half.h"
 
@@ -123,7 +124,7 @@ inline void WriteExrWindows(const std::filesystem::path& path, uint32_t displayW
         char* base = reinterpret_cast<char*>(planes[c].data()) - (static_cast<ptrdiff_t>(dataY) * dataW + dataX) * 2;
         fb.insert(channels[c], Imf::Slice(Imf::HALF, base, 2, static_cast<size_t>(dataW) * 2));
     }
-    Imf::OutputFile file(path.string().c_str(), header);
+    Imf::OutputFile file(ExrFileName(path).c_str(), header);  // UTF-8, as OpenEXR reads a char* name on Windows
     file.setFrameBuffer(fb);
     file.writePixels(static_cast<int>(dataH));
 }

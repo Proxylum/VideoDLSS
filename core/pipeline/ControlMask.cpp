@@ -556,9 +556,12 @@ ControlMaskTexels LoadControlMaskForFrame(const fs::path& dir, uint32_t w, uint3
 }
 
 std::string ControlMaskLabelOf(const Manifest& nrPass) {
-    const nlohmann::json& sp = nrPass.stageParams;
-    if (sp.is_object() && sp.contains("control_mask") && sp["control_mask"].is_object()) return sp["control_mask"].value("fingerprint", "");
-    return {};
+    const nlohmann::json& sp = nrPass.stageParams;  // a hand-edited manifest: a value of another type is no label (NR recomputed)
+    if (!sp.is_object()) return {};
+    const auto c = sp.find("control_mask");
+    if (c == sp.end() || !c->is_object()) return {};
+    const auto f = c->find("fingerprint");
+    return f != c->end() && f->is_string() ? f->get<std::string>() : std::string();
 }
 
 }  // namespace dlssvid
