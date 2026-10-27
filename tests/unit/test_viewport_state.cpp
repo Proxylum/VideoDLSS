@@ -42,6 +42,13 @@ TEST_CASE("LayerState::DefaultDisplayFor follows the pass kind", "[viewport][sta
     CHECK(LayerState::DefaultDisplayFor("whatever") == DisplayMode::Color);
 }
 
+// PR-8: R, G and B of the control mask mean something - it shows as colour (grey as grey), not as a mask fill
+TEST_CASE("Default display: mask_control and its versions show in colour", "[unit][viewport][mask]") {
+    CHECK(LayerState::DefaultDisplayFor("mask_control") == DisplayMode::Color);
+    CHECK(LayerState::DefaultDisplayFor("mask_control@20261027-120000_ab12cd34") == DisplayMode::Color);
+    CHECK(LayerState::DefaultDisplayFor("mask_skin") == DisplayMode::MaskFill);  // the other masks as before
+}
+
 TEST_CASE("ViewportState layer stack helpers", "[viewport][state]") {
     ViewportState s;
     REQUIRE(s.layers.size() == 1);

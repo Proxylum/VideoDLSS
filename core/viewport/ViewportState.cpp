@@ -6,6 +6,7 @@
 
 #include <algorithm>
 
+#include "passes/ControlMaskPass.h"
 #include "passes/PassImage.h"
 #include "util/Error.h"
 
@@ -52,6 +53,7 @@ DisplayMode LayerState::DefaultDisplayFor(const std::string& sourceName) {
             default: return DisplayMode::Color;
         }
     }
+    if (source == kControlMaskPass) return DisplayMode::Color;  // PR-8: R, G, B mean something - shown as colour, grey as grey
     if (source.rfind("mask", 0) == 0) return DisplayMode::MaskFill;
     if (source.rfind("mv", 0) == 0) return DisplayMode::MvHsv;
     if (source.rfind("depth", 0) == 0) return DisplayMode::Turbo;

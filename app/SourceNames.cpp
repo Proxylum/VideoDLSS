@@ -52,7 +52,8 @@ QString HumanSourceName(const std::string& source) {
 QString SourceTooltip(const ViewportSource& s) {
     QString t = QString::fromStdString(s.name);
     if (s.width && s.height) t += QString("  %1x%2").arg(s.width).arg(s.height);
-    if (s.lastFrame >= 0) t += Tr("  %1 кадров").arg(s.lastFrame - s.firstFrame + 1);
+    if (s.isStatic) t += Tr("  статичная маска: один кадр на всё время");  // PR-8
+    else if (s.lastFrame >= 0) t += Tr("  %1 кадров").arg(s.lastFrame - s.firstFrame + 1);
     if (s.fps.num > 0) t += QString("  %1 fps").arg(QString::number(s.fps.ToDouble(), 'g', 5));
     if (s.manifest && s.manifest->paramsCanonical.is_object() && !s.manifest->paramsCanonical.empty())
         t += "\n" + QString::fromStdString(s.manifest->paramsCanonical.dump());
