@@ -149,7 +149,7 @@ private:
     std::unique_ptr<NrCompose> compose_;
     ComPtr<ID3D12Resource> input_, proxy_, work_, output_, prev_, protect_, skin_;
     std::vector<ComPtr<ID3D12Resource>> modelOut_;
-    uint32_t inW_ = 0, inH_ = 0, workW_ = 0, workH_ = 0, maskW_ = 0, maskH_ = 0;
+    uint32_t inW_ = 0, inH_ = 0, workW_ = 0, workH_ = 0, protectW_ = 0, protectH_ = 0, skinW_ = 0, skinH_ = 0;
     bool reduced_ = false, first_ = true, hasPrev_ = false, setup_ = false, disabled_ = false, warnedDisabled_ = false;
     std::optional<PassReader> colorReader_, depthReader_, mvReader_;
     std::map<std::string, PassReader> maskReaders_;

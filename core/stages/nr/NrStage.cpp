@@ -342,22 +342,23 @@ void NrStage::LoadMasks(int64_t frame) {
         std::optional<PassImage>& dst = (name == "ui" || name == "ignore") ? protect : skin;
         dst = dst ? MaskMax(*dst, m) : std::move(m);
     }
-    auto upload = [&](const PassImage& img, ComPtr<ID3D12Resource>& tex) {
-        if (maskW_ != img.width || maskH_ != img.height) {  // one size for both masks: a change re-creates them
-            protect_.Reset();
-            skin_.Reset();
-            maskW_ = img.width;
-            maskH_ = img.height;
+    // each texture its own size (the resolve samples them by uv): a shared one dropped protect_ when the skin mask had another size,
+    // and the UI went unprotected on every frame (TASK-0060)
+    auto upload = [&](const PassImage& img, ComPtr<ID3D12Resource>& tex, uint32_t& texW, uint32_t& texH) {
+        if (texW != img.width || texH != img.height) {
+            tex.Reset();
+            texW = img.width;
+            texH = img.height;
         }
         if (!tex) tex = device_->CreateTexture2D(img.width, img.height, DXGI_FORMAT_R32_FLOAT);
         device_->UploadTexture2D(tex.Get(), img.data.data(), img.RowBytes());
     };
     if (protect) {
-        upload(*protect, protect_);
+        upload(*protect, protect_, protectW_, protectH_);
         protectFrame_ = true;
     }
     if (skin) {
-        upload(*skin, skin_);
+        upload(*skin, skin_, skinW_, skinH_);
         skinFrame_ = true;
     }
 }
@@ -572,7 +573,7 @@ void NrStage::Shutdown() {
     protect_.Reset();
     skin_.Reset();
     modelOut_.clear();
-    maskW_ = maskH_ = 0;
+    protectW_ = protectH_ = skinW_ = skinH_ = 0;
     initialized_ = false;
     setup_ = false;
 }

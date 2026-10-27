@@ -396,6 +396,47 @@ TEST_CASE("NrStage: color_sr input, guides through the slot, masks, two passes, 
     CHECK(PassReader::Open(r2.outDir).Man().stageParams["guides"] == false);
 }
 
+// TASK-0060 (C0): the protection and the skin masks have a texture each. With one size shared by both, a skin mask of another size
+// than the UI mask dropped the protection texture after its upload and the resolve ran without it on every frame.
+TEST_CASE("NrStage keeps the UI protection when mask_ui and mask_skin differ in size", "[integration][nr][regression]") {
+    const uint32_t w = 64, h = 32;
+    const int frames = 3;
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("mask_sizes");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const auto passes = dir / "passes";
+    WritePass(passes / "color_sr", PassKind::ColorSr, w, h, frames, FileFormat::Exr, [&](int64_t i, PassImage& img) { img = ColorFrame(i, w, h); });
+    WritePass(passes / "mask_ui", PassKind::Mask, w, h, frames, FileFormat::Png, [&](int64_t, PassImage& img) {
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x) img.Set(x, y, 0, x < w / 2 ? 255.f : 0.f);  // left half protected
+    });
+    WritePass(passes / "mask_skin", PassKind::Mask, w / 2, h / 2, frames, FileFormat::Png, [&](int64_t, PassImage&) {});  // no skin, half the size
+
+    D3D12Device dev({true, false});
+    NrStageOptions o;
+    o.backend = "stub";
+    o.colorDir = passes / "color_sr";
+    o.masksDir = passes;
+    o.outputDir = dir / "out";
+    VideoDecoder dec(clip);
+    const NrRunResult r = RunNr(dec, dev, o);
+    REQUIRE(r.stats.frames == frames);
+    CHECK(r.stats.masks == std::vector<std::string>{"ui", "skin"});
+    const PassReader rd = PassReader::Open(r.outDir);
+    for (int i = 0; i < frames; ++i) {
+        const PassImage in = ColorFrame(i, w, h), out = rd.ReadFrame(i);
+        double protectedDiff = 0.0, editedDiff = 0.0;
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x) (x < w / 2 ? protectedDiff : editedDiff) += std::fabs(out.Get(x, y, 1) - in.Get(x, y, 1));
+        INFO("frame " << i);
+        CHECK(protectedDiff / (w / 2 * h) < 2e-3);  // the UI half passes through on every frame
+        CHECK(editedDiff / (w / 2 * h) > 0.01);     // the rest is edited
+    }
+}
+
 // PR-7 (spec §2b): the edit strength is NrCompose's, once after the last model pass - two stub passes are not linear, so a gain inside
 // the backend or per pass would not give twice the edit of one at s = 2.
 // PR-5 (spec §2c): passes 1..4 - one backend (one feature, one history) each, in a chain: the next reads the last one's output. The
