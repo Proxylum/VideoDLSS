@@ -156,7 +156,9 @@ std::vector<ViewportSource> FrameStore::DiscoverPasses(const std::filesystem::pa
             ViewportSource s;
             s.manifest = std::make_shared<const Manifest>(Manifest::Load(entry.path()));
             if (s.manifest->IsDataPass()) continue;  // a data pass (scenes, PR-13): no frames to show
-            s.name = s.manifest->pass.empty() ? entry.path().filename().string() : s.manifest->pass;
+            // the folder, as the versions (PassVersions.h) and the pipeline name it; by the manifest's pass the NR masks mask_ui /
+            // mask_ignore / mask_face / mask_skin (all "mask") were one source and exported from <root>/mask (TASK-0063)
+            s.name = entry.path().filename().string();
             s.pass = s.name;
             s.path = entry.path();
             s.kind = KindForManifest(*s.manifest);

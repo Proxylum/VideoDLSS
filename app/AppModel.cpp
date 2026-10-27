@@ -1090,13 +1090,17 @@ QString AppModel::resultSummary() const {
 std::vector<std::string> AppModel::exportablePasses() const {
     std::vector<std::string> out;
     for (const auto& s : store_->Sources())
-        if (!s.isVideo && s.version.empty() && s.manifest && !s.pass.empty()) out.push_back(s.pass);
+        if (!s.isVideo && s.version.empty() && s.manifest && !s.pass.empty()) out.push_back(s.pass);  // folder names: no duplicates
     std::sort(out.begin(), out.end(), [](const std::string& a, const std::string& b) {
         const int ra = SourceRank(a), rb = SourceRank(b);
         return ra != rb ? ra < rb : a < b;
     });
-    out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
+}
+
+QStringList AppModel::exportPassArgs(const std::string& pass, const QString& dir) const {
+    const QString from = QString::fromStdWString((project_.passesRoot / pass).wstring());
+    return {"export", "--from-dir", from, "-o", QDir(dir).filePath(QString::fromStdString(pass)), "--format", "exr"};
 }
 
 unsigned long long AppModel::freeSpace() const {
