@@ -2,10 +2,12 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <functional>
 #include <string>
 
 #include "TestClips.h"
@@ -77,6 +79,84 @@ TEST_CASE("dlssvid upscale --backend nis writes color_sr and a preview; compare 
 }
 
 #ifdef DLSSVID_WITH_TENSORRT
+namespace {
+// A colour pass of frames [first, first + count): grey value(frame, x, y) in all three channels.
+void GreyPass(const std::filesystem::path& dir, uint32_t w, uint32_t h, int64_t first, int64_t count, const std::function<float(int64_t, uint32_t, uint32_t)>& value) {
+    PassWriter writer(dir, Manifest::ForPass(PassKind::ColorSr, w, h, FileFormat::Exr));
+    for (int64_t f = first; f < first + count; ++f) {
+        PassImage img = MakePassImage(PassKind::ColorSr, w, h, PixelType::F32);
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+                for (size_t c = 0; c < 3; ++c) img.Set(x, y, c, value(f, x, y));
+        writer.WriteFrame(f, img);
+    }
+    writer.Finish();
+}
+nlohmann::json ReadJson(const std::filesystem::path& p) {
+    std::ifstream in(p);
+    nlohmann::json j;
+    in >> j;
+    return j;
+}
+}  // namespace
+
+// PR-8 (E10): the low-band share of a difference and the PSNR of the low and the high part of an edit, measured on the CPU with the
+// product's own filter (NrLowpassCpu). Ref and test start at frame 6, the edit's input I at 0: I is taken by the reference's frame
+// number - by index its frames would be 0.12 darker and the high part far from the reference.
+TEST_CASE("dlssvid compare --bands: a smooth difference is low band, a checkerboard high; --edit-from gives the low and high PSNR, takes the frames of I by the reference's frame numbers and refuses a frame I does not have", "[integration][cli]") {
+    const uint32_t w = 64, h = 16;
+    const auto dir = TempDir() / "cli_compare_bands";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    auto input = [](int64_t f) { return 0.3f + 0.02f * static_cast<float>(f); };
+    auto smooth = [](uint32_t x) { return 0.1f * std::cos(static_cast<float>(x) * 6.2831853f / 64.f); };
+    auto checker = [](uint32_t x, uint32_t y) { return ((x + y) % 2) ? 0.125f : -0.125f; };
+    GreyPass(dir / "flat", w, h, 6, 4, [](int64_t, uint32_t, uint32_t) { return 0.5f; });
+    GreyPass(dir / "smooth", w, h, 6, 4, [&](int64_t, uint32_t x, uint32_t) { return 0.5f + smooth(x); });
+    GreyPass(dir / "checker", w, h, 6, 4, [&](int64_t, uint32_t x, uint32_t y) { return 0.5f + checker(x, y); });
+    // the edit of I: a smooth part and a checkerboard; the references are I with only one of them
+    GreyPass(dir / "I", w, h, 0, 12, [&](int64_t f, uint32_t, uint32_t) { return input(f); });
+    GreyPass(dir / "edited", w, h, 6, 4, [&](int64_t f, uint32_t x, uint32_t y) { return input(f) + smooth(x) + checker(x, y); });
+    GreyPass(dir / "low_only", w, h, 6, 4, [&](int64_t f, uint32_t x, uint32_t) { return input(f) + smooth(x); });
+    GreyPass(dir / "high_only", w, h, 6, 4, [&](int64_t f, uint32_t x, uint32_t y) { return input(f) + checker(x, y); });
+
+    REQUIRE(Run("compare --ref " + Q(dir / "flat") + " --test " + Q(dir / "smooth") + " --bands 2,4 -q --json " + Q(dir / "smooth.json")) == 0);
+    const nlohmann::json s = ReadJson(dir / "smooth.json");
+    REQUIRE(s["summary"]["frames"] == 4);
+    REQUIRE(s["summary"]["bands"].size() == 2);
+    CHECK(s["summary"]["bands"][0]["d"] == 2);
+    CHECK(s["summary"]["bands"][1]["d"] == 4);
+    CHECK(s["summary"]["bands"][0]["low_energy_y"].get<double>() > 0.8);
+    CHECK(s["summary"]["bands"][0]["low_energy_rgb"].get<double>() > 0.8);
+    CHECK(!s["summary"]["bands"][0].contains("psnr_y_low"));  // without --edit-from only the shares
+    REQUIRE(s["frames"].size() == 4);
+    CHECK(s["frames"][0]["bands"].size() == 2);
+
+    REQUIRE(Run("compare --ref " + Q(dir / "flat") + " --test " + Q(dir / "checker") + " --bands 2,4 -q --json " + Q(dir / "checker.json")) == 0);
+    const nlohmann::json c = ReadJson(dir / "checker.json");
+    for (const auto& b : c["summary"]["bands"]) CHECK(b["low_energy_y"].get<double>() < 1e-9);
+
+    // the low part of the edit alone reproduces I + smooth, the high part alone I + checkerboard
+    REQUIRE(Run("compare --ref " + Q(dir / "low_only") + " --test " + Q(dir / "edited") + " --edit-from " + Q(dir / "I") + " --bands 2 -q --json " +
+                Q(dir / "low.json")) == 0);
+    const nlohmann::json lo = ReadJson(dir / "low.json");
+    REQUIRE(lo["summary"]["frames"] == 4);
+    CHECK(lo["summary"]["bands"][0]["psnr_y_low"].get<double>() > 35.0);
+    CHECK(lo["summary"]["bands"][0]["psnr_y_high"].get<double>() < 25.0);
+    REQUIRE(Run("compare --ref " + Q(dir / "high_only") + " --test " + Q(dir / "edited") + " --edit-from " + Q(dir / "I") + " --bands 2 -q --json " +
+                Q(dir / "high.json")) == 0);
+    const nlohmann::json hi = ReadJson(dir / "high.json");
+    CHECK(hi["summary"]["bands"][0]["psnr_y_high"].get<double>() > 35.0);  // I by index would leave it 0.12 off: ~18 dB
+    CHECK(hi["summary"]["bands"][0]["psnr_y_low"].get<double>() < 25.0);
+
+    // I without the reference's frames 8, 9: an error, not a silent end; --edit-from needs --bands; bad cell sizes
+    GreyPass(dir / "I_short", w, h, 0, 8, [&](int64_t f, uint32_t, uint32_t) { return input(f); });
+    CHECK(Run("compare --ref " + Q(dir / "low_only") + " --test " + Q(dir / "edited") + " --edit-from " + Q(dir / "I_short") + " --bands 2 -q") != 0);
+    CHECK(Run("compare --ref " + Q(dir / "low_only") + " --test " + Q(dir / "edited") + " --edit-from " + Q(dir / "I") + " -q") != 0);
+    CHECK(Run("compare --ref " + Q(dir / "flat") + " --test " + Q(dir / "smooth") + " --bands 1 -q") != 0);
+    CHECK(Run("compare --ref " + Q(dir / "flat") + " --test " + Q(dir / "smooth") + " --bands 2,x -q") != 0);
+}
+
 TEST_CASE("CLI upscale --backend trt runs a registry model from --models-dir", "[cli][upscale][trt][gpu]") {
     std::string reason;
     if (!trt::Available(&reason)) SKIP("TensorRT unavailable: " << reason);

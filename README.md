@@ -348,6 +348,7 @@ dlssvid upscale -i input.mp4 -o passes --scale 2                                
 dlssvid upscale -i input.mp4 -o passes --backend nis --no-scaling                      :: x1: NVSharpen (dlss: DLAA); not a compression-artifact filter
 dlssvid upscale -i input.mp4 -o passes --backend dlss --video sr.mp4 --codec hevc_nvenc  :: plus a preview video (no audio)
 dlssvid compare --ref reference.mp4 --test passes\color_sr --json ab.json              :: PSNR Y/RGB, SSIM, MAE (mean |difference|) per frame
+dlssvid compare --ref tone0\color_nr --test base\color_nr --edit-from passes\color_sr --bands 4,8,16  :: where an NR edit lies: low-band share, PSNR of its low / high part (E10)
 ```
 
 Neural Rendering (stage 6): `color_nr` from `color_sr` (or the video) with `depth_dlss` / `mv_dlss` guides and

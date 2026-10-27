@@ -45,6 +45,10 @@ public:
         int64_t step = 1;   // frame stride (1 = every frame; 2 with --start 1 = the generated frames of an x2 color_fg)      // test frame index offset relative to the reference
         std::string json;        // per-frame results
         bool quiet = false;
+        // PR-8 (E10): --bands d1,d2,...: the share of test - ref in the low band of the NR control mask's split at each d (NrLowShare);
+        // --edit-from <pass folder>: the input I of the edit (frames by the reference's frame numbers) - the PSNR of the low and the
+        // high part of test - I against the reference, what a mask G = 1, B = 0 and G = 0, B = 1 would give
+        std::string bands, editFrom;
     };
 
 private:

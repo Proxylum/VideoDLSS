@@ -116,6 +116,7 @@ add_library(dlssvid_core STATIC
   stages/nr/NgxNrBackend.h stages/nr/NgxNrBackend.cpp
   stages/nr/StubNrBackend.h stages/nr/StubNrBackend.cpp
   stages/nr/NrCompose.h stages/nr/NrCompose.cpp
+  stages/nr/NrLowpass.h stages/nr/NrLowpass.cpp
   stages/nr/NrStage.h stages/nr/NrStage.cpp
   stages/nr/NrPatch.h stages/nr/NrPatch.cpp
   stages/fg/IFrameGenerator.h stages/fg/IFrameGenerator.cpp

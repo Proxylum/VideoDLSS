@@ -1,5 +1,5 @@
 // Neural Rendering building blocks (stage 6): driver version decoding, architecture names, the patcher
-// command line, the forwarder module, masks and the resolve kernel on WARP.
+// command line, the forwarder module, masks, the resolve kernel on WARP and the CPU low band of the control mask (PR-8).
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -10,12 +10,14 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <vector>
 
 #include "GpuTextures.h"
 #include "gpu/D3D12Device.h"
 #include "stages/nr/INrBackend.h"
 #include "stages/nr/NrCompose.h"
+#include "stages/nr/NrLowpass.h"
 #include "stages/nr/NrPatch.h"
 #include "stages/nr/NrStage.h"
 #include "stages/nr/StubNrBackend.h"
@@ -211,6 +213,81 @@ TEST_CASE("Masks: 8-bit to float and per-pixel max", "[nr][unit]") {
     PassImage other;
     other.Allocate(2, 1, PixelType::F32, {"A"});
     CHECK_THROWS(MaskMax(f, other));
+}
+
+// PR-8: d of the control mask's G / B split is one share of the output frame's short side, at least 2 px.
+TEST_CASE("NrLowpassDivisor: d from the short side, at least 2, an override wins", "[nr][unit]") {
+    CHECK(NrLowpassDivisor(1280, 720) == 4);
+    CHECK(NrLowpassDivisor(1920, 1080) == 6);
+    CHECK(NrLowpassDivisor(2560, 1440) == 8);
+    CHECK(NrLowpassDivisor(3840, 2160) == 12);
+    CHECK(NrLowpassDivisor(720, 1280) == 4);  // the short side, whichever it is
+    CHECK(NrLowpassDivisor(8, 4) == 2);       // never below 2
+    CHECK(NrLowpassDivisor(1920, 1080, 5) == 5);
+    const NrLowGrid g = NrLowpassGrid(2560, 1440, 8);
+    CHECK(g.width == 320);
+    CHECK(g.height == 180);
+    CHECK(g.div == 8);
+    const NrLowGrid odd = NrLowpassGrid(61, 37, 4);  // the last cell of a row / column is partial
+    CHECK(odd.width == 16);
+    CHECK(odd.height == 10);
+    CHECK_THROWS(NrLowpassGrid(8, 8, 0));
+}
+
+namespace {
+PassImage Plane(uint32_t w, uint32_t h, size_t channels, const std::function<float(uint32_t, uint32_t, size_t)>& f) {
+    PassImage img;
+    img.Allocate(w, h, PixelType::F32, channels == 1 ? std::vector<std::string>{"Y"} : std::vector<std::string>{"R", "G", "B"});
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x)
+            for (size_t c = 0; c < channels; ++c) img.Set(x, y, c, f(x, y, c));
+    return img;
+}
+}  // namespace
+
+// The CPU twin of CSEditBox / CSEditGauss / LowUp: what the kernel tests and E10 measure against.
+TEST_CASE("NrLowpassCpu: a constant passes, a 2 px checkerboard has no low band, edge cells average only existing pixels, the upsample is centred", "[nr][unit]") {
+    // a constant at sides not divisible by d: the partial edge cells average the pixels they have (a d x d divisor would darken them)
+    const PassImage flat = Plane(61, 37, 3, [](uint32_t, uint32_t, size_t c) { return 0.25f + 0.1f * static_cast<float>(c); });
+    const PassImage flatLow = NrLowpassCpu(flat, 4);
+    REQUIRE(flatLow.width == 61);
+    REQUIRE(flatLow.height == 37);
+    REQUIRE(flatLow.channels.size() == 3);
+    double worst = 0.0;
+    for (uint32_t y = 0; y < 37; ++y)
+        for (uint32_t x = 0; x < 61; ++x)
+            for (size_t c = 0; c < 3; ++c) worst = std::max(worst, std::fabs(static_cast<double>(flatLow.Get(x, y, c)) - flat.Get(x, y, c)));
+    CHECK(worst < 1e-6);
+
+    // a 2 px checkerboard: every cell of an even d has as many +1 as -1 - no low band at all
+    const PassImage checker = Plane(64, 32, 1, [](uint32_t x, uint32_t y, size_t) { return ((x + y) % 2) ? 1.f : -1.f; });
+    const PassImage checkerLow = NrLowpassCpu(checker, 4);
+    for (uint32_t y = 0; y < 32; ++y)
+        for (uint32_t x = 0; x < 64; ++x) CHECK(checkerLow.Get(x, y, 0) == 0.f);
+    CHECK(NrLowShare(checker, 4) == 0.0);
+
+    // a ramp: box means sit at the cell centres (i + 0.5) d, so away from the clamped edges the band reproduces the ramp; centres a half
+    // pixel off would shift it by 0.005
+    const PassImage ramp = Plane(64, 32, 1, [](uint32_t x, uint32_t y, size_t) { return 0.01f * static_cast<float>(x) + 0.002f * static_cast<float>(y); });
+    const PassImage rampLow = NrLowpassCpu(ramp, 4);
+    double inner = 0.0;
+    for (uint32_t y = 8; y < 24; ++y)
+        for (uint32_t x = 8; x < 56; ++x) inner = std::max(inner, std::fabs(static_cast<double>(rampLow.Get(x, y, 0)) - ramp.Get(x, y, 0)));
+    CHECK(inner < 1e-5);
+
+    // a non-finite sample counts as 0 in its cell: the band stays finite everywhere
+    PassImage spot = Plane(16, 16, 1, [](uint32_t, uint32_t, size_t) { return 1.f; });
+    spot.Set(5, 5, 0, std::nanf(""));
+    const PassImage spotLow = NrLowpassCpu(spot, 4);
+    for (uint32_t y = 0; y < 16; ++y)
+        for (uint32_t x = 0; x < 16; ++x) CHECK(std::isfinite(spotLow.Get(x, y, 0)));
+    CHECK(spotLow.Get(15, 15, 0) == Catch::Approx(1.0).margin(1e-6));  // far from it the constant passes
+    CHECK(spotLow.Get(5, 5, 0) < 1.f);
+
+    // the low-band share: a smooth wave is almost all low band, nothing is nothing
+    const PassImage wave = Plane(256, 32, 3, [](uint32_t x, uint32_t, size_t) { return std::sin(static_cast<float>(x) * 6.2831853f / 128.f); });
+    CHECK(NrLowShare(wave, 4) > 0.9);
+    CHECK(NrLowShare(Plane(8, 8, 1, [](uint32_t, uint32_t, size_t) { return 0.f; }), 2) == 0.0);
 }
 
 TEST_CASE("NrCompose resolve on WARP: direct mode, masks, ratio transfer and the temporal filter", "[nr][unit][gpu]") {
