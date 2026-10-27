@@ -59,6 +59,15 @@ add_executable(dlssvid_unit_tests
   unit/test_repo_hygiene.cpp
 )
 target_link_libraries(dlssvid_unit_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
+# PR-8: the frozen PR-7 resolve (tests/unit/frozen), compiled like the product; the product's own headers come from core's folder
+if(NOT DIRECTX_DXC_TOOL)
+  set(DIRECTX_DXC_TOOL ${DLSSVID_DXC_TOOL})
+endif()
+set(DLSSVID_SHADER_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
+set(DLSSVID_SHADER_HEADERS "")
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/unit/frozen/NrCompose_pr7.hlsl CSMain cs_6_0 g_NrComposePr7CS frozen NrComposePr7_cs.h)
+target_sources(dlssvid_unit_tests PRIVATE ${DLSSVID_SHADER_HEADERS} unit/frozen/NrComposePr7Dispatch.h)
+target_include_directories(dlssvid_unit_tests PRIVATE ${DLSSVID_SHADER_GEN_DIR} ${DLSSVID_CORE_SHADER_GEN_DIR})
 target_compile_definitions(dlssvid_unit_tests PRIVATE
   DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
   DLSSVID_SOURCE_DIR="${CMAKE_SOURCE_DIR}")

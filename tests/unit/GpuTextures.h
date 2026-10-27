@@ -3,6 +3,7 @@
 // Small RGBA16F / R32F / RG32F texture helpers for the compute-kernel tests (WARP).
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "gpu/D3D12Device.h"
@@ -46,6 +47,15 @@ inline std::vector<float> ReadbackRgb(D3D12Device& dev, ID3D12Resource* tex, uin
         rgb[i * 3 + 2] = HalfToFloat(src[i * 4 + 2]);
     }
     return rgb;
+}
+
+// RGBA16F texture -> the raw half words, width * height * 4 (bit-exact comparisons)
+inline std::vector<uint16_t> ReadbackHalfBits(D3D12Device& dev, ID3D12Resource* tex) {
+    size_t pitch = 0;
+    const std::vector<uint8_t> bytes = dev.ReadbackTexture2D(tex, pitch);
+    std::vector<uint16_t> bits(bytes.size() / 2);
+    std::memcpy(bits.data(), bytes.data(), bits.size() * 2);
+    return bits;
 }
 
 inline ComPtr<ID3D12Resource> UploadR32f(D3D12Device& dev, uint32_t w, uint32_t h, const std::vector<float>& v) {

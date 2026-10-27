@@ -7,13 +7,16 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
 #include <vector>
 
 #include "GpuTextures.h"
+#include "frozen/NrComposePr7Dispatch.h"
 #include "gpu/D3D12Device.h"
 #include "stages/nr/INrBackend.h"
 #include "stages/nr/NrCompose.h"
@@ -21,6 +24,7 @@
 #include "stages/nr/NrPatch.h"
 #include "stages/nr/NrStage.h"
 #include "stages/nr/StubNrBackend.h"
+#include "stages/nr/shaders/NrCompose_cs.h"
 
 using namespace dlssvid;
 using namespace dlssvid::test;
@@ -547,6 +551,107 @@ TEST_CASE("NrCompose order of the strength controls: after the ratio transfer, b
         const std::vector<float> rgb = run(in);
         CHECK(rgb[0] == Approx(0.3975f).margin(2e-3));
     }
+}
+
+// PR-8: without a control mask NrCompose runs the resolve of PR-7 bit for bit. The default variant of the shader compiles from text
+// that the preprocessor turns into the PR-7 file token for token; the bytecode proves it (no debug info: line numbers do not count).
+TEST_CASE("NrCompose default variant compiles to the frozen PR-7 DXIL", "[nr][unit][regression]") {
+    REQUIRE(sizeof(g_NrComposeCS) == sizeof(g_NrComposePr7CS));
+    CHECK(std::memcmp(g_NrComposeCS, g_NrComposePr7CS, sizeof(g_NrComposeCS)) == 0);
+}
+
+namespace {
+float Noise(uint32_t x, uint32_t y, uint32_t salt) {
+    uint32_t h = x * 73856093u ^ y * 19349663u ^ (salt + 1) * 83492791u;
+    h ^= h >> 13;
+    h *= 0x5bd1e995u;
+    h ^= h >> 15;
+    return static_cast<float>(h & 0xFFFF) / 65535.f;
+}
+}  // namespace
+
+// The same resolve through today's C++ (constants, flags, the list of SRVs) and through the frozen copy of PR-7's: the raw half words
+// of every output agree over sizes, patterns, both modes, masks, the flicker filter and the edit strength.
+TEST_CASE("NrCompose without a control mask is bit-identical to the frozen PR-7 resolve (WARP battery)", "[nr][unit][gpu][regression]") {
+    D3D12Device dev({true, false});
+    NrCompose now(dev);
+    test::frozen::NrComposePr7 pr7(dev);
+    int configs = 0, mismatches = 0;
+    for (const auto& [w, h] : {std::pair<uint32_t, uint32_t>{61, 37}, std::pair<uint32_t, uint32_t>{96, 64}}) {
+        const uint32_t ww = w / 2 + 1, wh = h / 2 + 1;  // mode 1: a reduced model, odd sides for 61x37
+        const auto outNow = dev.CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        const auto outPr7 = dev.CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+        for (int pattern = 0; pattern < 3; ++pattern) {
+            auto value = [&](uint32_t x, uint32_t y, uint32_t c) {
+                if (pattern == 0) return 0.05f + 0.9f * static_cast<float>(x + 2 * y + c) / static_cast<float>(w + 2 * h + 2);  // gradient
+                if (pattern == 1) return ((x / 3 + y / 3 + c) % 2) ? 0.7f : 0.3f;                                               // checker
+                return Noise(x, y, c);                                                                                          // noise
+            };
+            auto image = [&](uint32_t tw, uint32_t th, uint32_t step, uint32_t salt, float edit) {
+                std::vector<float> v(static_cast<size_t>(tw) * th * 3);
+                for (uint32_t y = 0; y < th; ++y)
+                    for (uint32_t x = 0; x < tw; ++x)
+                        for (uint32_t c = 0; c < 3; ++c)
+                            v[(static_cast<size_t>(y) * tw + x) * 3 + c] =
+                                std::clamp(value(std::min(x * step, w - 1), std::min(y * step, h - 1), c) + edit * (Noise(x, y, c + salt) - 0.5f), 0.f, 1.f);
+                return v;
+            };
+            auto plane = [](uint32_t tw, uint32_t th, uint32_t salt, float lo, float hi) {
+                std::vector<float> v(static_cast<size_t>(tw) * th);
+                for (uint32_t y = 0; y < th; ++y)
+                    for (uint32_t x = 0; x < tw; ++x) v[static_cast<size_t>(y) * tw + x] = lo + (hi - lo) * Noise(x, y, salt);
+                return v;
+            };
+            const auto orig = UploadRgba16f(dev, w, h, image(w, h, 1, 0, 0.f));
+            const auto modelFull = UploadRgba16f(dev, w, h, image(w, h, 1, 10, 0.3f));
+            const auto proxy = UploadRgba16f(dev, ww, wh, image(ww, wh, 2, 0, 0.f));
+            const auto modelWork = UploadRgba16f(dev, ww, wh, image(ww, wh, 2, 20, 0.3f));
+            const auto prev = UploadRgba16f(dev, w, h, image(w, h, 1, 30, 0.2f));
+            std::vector<float> mvData(static_cast<size_t>(ww) * wh * 2);
+            for (size_t i = 0; i < mvData.size(); ++i) mvData[i] = 4.f * (Noise(static_cast<uint32_t>(i), 7, 40) - 0.5f);
+            const auto mv = UploadRg32f(dev, ww, wh, mvData);
+            const auto protect = UploadR32f(dev, w, h, plane(w, h, 50, -0.2f, 1.2f));  // outside [0, 1]: saturate in the shader
+            const auto skin = UploadR32f(dev, w, h, plane(w, h, 60, 0.f, 1.f));
+            for (int mode = 0; mode < 3; ++mode)
+                for (int masks = 0; masks < 2; ++masks)
+                    for (int temporal = 0; temporal < 3; ++temporal)
+                        for (const float gain : {0.f, 0.5f, 1.f, 2.f}) {
+                            NrResolveParams rp;
+                            rp.width = w;
+                            rp.height = h;
+                            rp.workWidth = mode ? ww : w;
+                            rp.workHeight = mode ? wh : h;
+                            rp.transfer = mode == 1 ? 0.5f : 1.f;
+                            rp.maxRatio = mode == 1 ? 1.5f : 4.f;
+                            rp.temporal = temporal ? 0.5f : 0.f;
+                            rp.temporalThreshold = temporal == 2 ? 1.f : 0.1f;
+                            rp.skinBlend = 0.5f;
+                            rp.gain = gain;
+                            rp.mvWidth = ww;
+                            rp.mvHeight = wh;
+                            NrResolveInputs ri;
+                            ri.original = orig.Get();
+                            ri.model = mode ? modelWork.Get() : modelFull.Get();
+                            ri.proxy = mode ? proxy.Get() : nullptr;
+                            ri.prev = temporal ? prev.Get() : nullptr;
+                            ri.mv = temporal ? mv.Get() : nullptr;
+                            ri.protect = masks ? protect.Get() : nullptr;
+                            ri.skin = masks ? skin.Get() : nullptr;
+                            dev.ExecuteAndWait([&](ID3D12GraphicsCommandList* cl) {
+                                now.Resolve(cl, ri, outNow.Get(), rp);
+                                pr7.Resolve(cl, ri, outPr7.Get(), rp);
+                            });
+                            ++configs;
+                            if (ReadbackHalfBits(dev, outNow.Get()) != ReadbackHalfBits(dev, outPr7.Get())) {
+                                ++mismatches;
+                                UNSCOPED_INFO(w << "x" << h << " pattern " << pattern << " mode " << mode << " masks " << masks << " temporal " << temporal
+                                                << " gain " << gain);
+                            }
+                        }
+        }
+    }
+    CHECK(configs == 2 * 3 * 3 * 2 * 3 * 4);
+    CHECK(mismatches == 0);
 }
 
 TEST_CASE("StubNrBackend edits deterministically at its own strength; local_structure scales the detail", "[nr][unit][gpu]") {
