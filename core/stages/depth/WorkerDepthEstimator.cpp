@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 
+#include "ml/ModelRegistry.h"
 #include "passes/formats/NpzIO.h"
 #include "stages/depth/DepthModels.h"
 #include "util/Error.h"
@@ -46,10 +47,14 @@ std::filesystem::path WorkerDepthEstimator::FindPython(const DepthEstimatorConfi
     return "python";
 }
 
+std::filesystem::path WorkerDepthEstimator::FindModelsDir(const DepthEstimatorConfig& config) {
+    return config.modelsDir.empty() ? ModelRegistry::DefaultModelsDir() : std::filesystem::path(config.modelsDir);
+}
+
 void WorkerDepthEstimator::Init(const DepthEstimatorConfig& config) {
     config_ = config;
     const auto root = FindProjectRoot();
-    const std::string modelsDir = config.modelsDir.empty() ? (root / "models").string() : config.modelsDir;
+    const std::string modelsDir = FindModelsDir(config).string();
     // the model and window before python starts (TASK-0039): the same rules and registry as the TensorRT path; the
     // worker gets the resolved window and overlap as numbers
     DepthModelChoice choice;

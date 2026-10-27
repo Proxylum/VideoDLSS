@@ -30,6 +30,9 @@ public:
     // Locates python: config.extra["python"], DLSSVID_PYTHON, models/export/.venv, then "python".
     static std::filesystem::path FindPython(const DepthEstimatorConfig& config, const std::filesystem::path& projectRoot);
     static std::filesystem::path FindProjectRoot();
+    // The worker's models_dir (registry.json + cache/): config.modelsDir, else the registry's folder (DLSSVID_MODELS_DIR
+    // first, as the TensorRT path and the fingerprints) - not <project root>/models.
+    static std::filesystem::path FindModelsDir(const DepthEstimatorConfig& config);
 
 private:
     nlohmann::json Call(const nlohmann::json& request, uint32_t timeoutMs);

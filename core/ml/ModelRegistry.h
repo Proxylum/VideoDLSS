@@ -29,6 +29,8 @@ public:
     static ModelRegistry Load(const std::filesystem::path& registryJson, const std::filesystem::path& cacheDir = {});
     // Locates models/registry.json: DLSSVID_MODELS_DIR, next to the executable (../../models), project root.
     static std::filesystem::path DefaultRegistryPath();
+    // Its folder (registry.json + cache/): the models_dir of the Python workers when the stage names none (TASK-0065).
+    static std::filesystem::path DefaultModelsDir() { return DefaultRegistryPath().parent_path(); }
 
     const std::vector<ModelEntry>& Entries() const { return entries_; }
     const ModelEntry* Find(const std::string& id) const;
