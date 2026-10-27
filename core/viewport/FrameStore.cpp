@@ -919,16 +919,23 @@ bool FrameStore::Update() {
 
 void FrameStore::Evict() {
     std::lock_guard<std::mutex> lock(mutex_);
+    // a static source no longer shown (PR-8: a mask version compared once): its one frame is «in the window» and «current» at any time,
+    // so it would stay resident until the next SetSources - it goes as a frame outside the window does
+    auto idleStatic = [&](const Key& k) {
+        const ViewportSource* s = FindSource(k.source);
+        return s && s->isStatic && std::find(needed_.begin(), needed_.end(), k.source) == needed_.end();
+    };
     while (residentBytes_ > options_.vramBudgetBytes && !entries_.empty()) {
         // least recently used entry outside the prefetch window; if all are inside, the oldest anyway
         auto victim = entries_.end();
         for (auto it = entries_.begin(); it != entries_.end(); ++it) {
-            if (InWindow(it->first)) continue;
+            if (InWindow(it->first) && !idleStatic(it->first)) continue;
             if (victim == entries_.end() || it->second.lastUse < victim->second.lastUse) victim = it;
         }
         if (victim == entries_.end()) {
             for (auto it = entries_.begin(); it != entries_.end(); ++it)
-                if (it->first.frame != KeyFrame(it->first.source, currentTime_) && (victim == entries_.end() || it->second.lastUse < victim->second.lastUse))
+                if ((it->first.frame != KeyFrame(it->first.source, currentTime_) || idleStatic(it->first)) &&
+                    (victim == entries_.end() || it->second.lastUse < victim->second.lastUse))
                     victim = it;
         }
         if (victim == entries_.end()) break;

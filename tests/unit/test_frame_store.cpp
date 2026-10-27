@@ -268,6 +268,16 @@ TEST_CASE("FrameStore: a static pass is ready at every time from one resident fr
         CHECK(store.Textures(store.FrameAt("color_sr", t)).count("mask_control") == 1);  // at any frame index
     }
     CHECK(store.FrameAt("mask_control", 0.5) != 0);  // FrameAt is the time's frame (stepping, «#N»); the load key is frame 0
+
+    // review of PR-8: no longer shown (a version compared once, then the usual view), the mask's frame goes under the budget as a frame
+    // outside the window does - kept «current» at any time, it stayed resident until the next SetSources
+    store.SetCurrentTime(0.7, {"color_sr"});
+    store.WaitForCurrent(10000);  // the upload of frame 7 evicts down to the budget
+    CHECK(store.StatusAt(0.7, "color_sr") == FrameStore::Status::Ready);
+    CHECK(store.StatusAt(0.7, "mask_control") != FrameStore::Status::Ready);
+    store.SetCurrentTime(0.7, {"color_sr", "mask_control"});  // shown again: loaded again
+    store.WaitForCurrent(10000);
+    CHECK(store.StatusAt(0.7, "mask_control") == FrameStore::Status::Ready);
 }
 
 TEST_CASE("FrameStore: mask_control is a colour texture; a grey U16 mask shows grey, not raw values", "[unit][viewport][store][gpu][regression]") {
