@@ -171,8 +171,6 @@ struct PlanState {
     std::string scenesNote;         // what the stages that read the scene list should know about it (unreadable, partial)
 };
 
-std::string LegacyId(const Manifest& m) { return LegacyPassId(m); }  // PassVersions.h
-
 void RefreshFromDisk(PlanState& s, const RunContext& ctx) {
     const std::filesystem::path& root = ctx.root;
     s.fp.clear();
@@ -197,7 +195,7 @@ void RefreshFromDisk(PlanState& s, const RunContext& ctx) {
                             m.firstFrame != 0 ? "frames " + std::to_string(m.firstFrame) + ".." + std::to_string(m.lastFrame) + " only" : std::string("A/B switches, stage_params.ab"));
                 continue;
             }
-            s.fp[name] = m.fingerprint.empty() ? LegacyId(m) : m.fingerprint;
+            s.fp[name] = PassInputId(m);  // PassVersions.h: also the id NR records of the masks it read (TASK-0064)
         } catch (const std::exception& e) {
             Log()->warn("process: {} skipped: {}", (root / name).string(), e.what());
         }
@@ -417,13 +415,23 @@ bool NrReadBothMaskGroups(const Manifest& m) {
     return (read.count("mask_ui") || read.count("mask_ignore")) && (read.count("mask_face") || read.count("mask_skin"));
 }
 
-// The protect and skin masks an NR pass read and the plan's NR does not, or the other way round: empty when the pass read the masks
-// NR reads now. By name: a standalone pass keeps no id of its masks
+// The protect and skin masks an NR pass read and the plan's NR does not, or the other way round, or read under another id than the
+// input's (stage_params.mask_ids, TASK-0064: another --masks-dir with masks of the same names): empty when the pass read the masks NR
+// reads now. A pass from before TASK-0064 has no ids and is judged by the names; an id missing or of another type is another mask
 nlohmann::json NrMasksDiffer(const Manifest& m, const std::map<std::string, std::string>& inputs) {
     const std::set<std::string> read = NrMasksRead(m);
+    const auto ids = m.stageParams.find("mask_ids");
+    const bool hasIds = ids != m.stageParams.end() && ids->is_object();
     nlohmann::json differ = nlohmann::json::array();
-    for (const char* pass : kNrMaskPasses)
-        if (read.count(pass) != inputs.count(pass)) differ.push_back(pass);
+    for (const char* pass : kNrMaskPasses) {
+        const bool wasRead = read.count(pass) > 0;
+        if (wasRead != (inputs.count(pass) > 0)) {
+            differ.push_back(pass);
+        } else if (wasRead && hasIds) {
+            const auto id = ids->find(pass);
+            if (id == ids->end() || !id->is_string() || id->get<std::string>() != inputs.at(pass)) differ.push_back(pass);
+        }
+    }
     return differ;
 }
 
