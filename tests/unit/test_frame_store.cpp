@@ -93,6 +93,53 @@ TEST_CASE("FrameStore discovers pass folders and their kinds", "[viewport][store
     CHECK(!FrameStore::VideoSource("source", root / "missing.mp4"));
 }
 
+// Regression (TASK-0063, review of PR-8): the NR masks mask_ui / mask_ignore / mask_face / mask_skin all have the manifest pass
+// "mask"; named by it they were four sources called "mask" - FindSource found one, the pickers could not tell them apart.
+TEST_CASE("FrameStore names pass folders by the folder: two mask folders are two sources", "[viewport][store][regression]") {
+    const auto root = Root("mask_folders");
+    WritePass(root / "mask_ui", PassKind::Mask, 8, 4, 0, 3, FileFormat::Png);
+    WritePass(root / "mask_skin", PassKind::Mask, 16, 8, 2, 5, FileFormat::Png);
+    const auto id = RetirePassVersion(root, "mask_ui");  // a previous version: its pass is the folder too
+    REQUIRE(id);
+    WritePass(root / "mask_ui", PassKind::Mask, 8, 4, 0, 3, FileFormat::Png);
+    const auto passes = FrameStore::DiscoverPasses(root);
+    REQUIRE(passes.size() == 2);
+    for (size_t i = 0; i < 2; ++i) {
+        const char* folder = i == 0 ? "mask_skin" : "mask_ui";
+        INFO(folder);
+        CHECK(passes[i].name == folder);
+        CHECK(passes[i].pass == folder);
+        CHECK(passes[i].path == root / folder);
+        CHECK(passes[i].manifest->pass == "mask");  // the kind stays the manifest's
+        CHECK(passes[i].kind == TextureKind::Mask);
+        CHECK(LayerState::DefaultDisplayFor(passes[i].name) == DisplayMode::MaskFill);
+    }
+    const auto versions = FrameStore::DiscoverPassVersions(root);
+    REQUIRE(versions.size() == 1);
+    CHECK(versions[0].name == "mask_ui@" + *id);
+    CHECK(versions[0].pass == passes[1].pass);  // the chip of mask_ui lists it
+
+    D3D12Device dev({true, false});
+    FrameStore store(dev);
+    store.SetSources(Project::Create(root / "missing.mp4", root).Sources());
+    CHECK(store.FindSource("mask") == nullptr);
+    REQUIRE(store.FindSource("mask_ui") != nullptr);
+    REQUIRE(store.FindSource("mask_skin") != nullptr);
+    CHECK(store.FindSource("mask_ui")->path == root / "mask_ui");
+    CHECK(store.FindSource("mask_skin")->path == root / "mask_skin");
+    store.SetCurrentFrame(2, {"mask_ui", "mask_skin"});
+    store.WaitForCurrent();
+    CHECK(store.GetStatus(2, "mask_ui") == FrameStore::Status::Ready);
+    CHECK(store.GetStatus(2, "mask_skin") == FrameStore::Status::Ready);
+    CHECK(store.GetStatus(0, "mask_skin") == FrameStore::Status::Missing);  // each its own frame range
+    CHECK(store.GetStatus(5, "mask_ui") == FrameStore::Status::Missing);
+    FrameTextures tex = store.Textures(2);
+    REQUIRE(tex.count("mask_ui") == 1);
+    REQUIRE(tex.count("mask_skin") == 1);
+    CHECK(tex["mask_ui"].width == 8);  // and its own frames
+    CHECK(tex["mask_skin"].width == 16);
+}
+
 TEST_CASE("FrameStore loads the current frame, reports statuses and prefetches", "[viewport][store][gpu]") {
     const auto root = Root("load");
     WritePass(root / "depth_raw", PassKind::DepthRaw, 8, 4, 0, 9);
