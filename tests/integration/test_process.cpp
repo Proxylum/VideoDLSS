@@ -415,6 +415,84 @@ TEST_CASE("RunProcess: an nr pass with protect and skin masks of different sizes
     }
 }
 
+// TASK-0062 (regression, review of PR-8): with masks of one size only the sizes were checked - a standalone pass that read no masks
+// (--no-auto, another --masks-dir, the bypass) was adopted under the fingerprint of the masks: the picture without the UI protection
+// reused as if made with them. The masks the pass read are compared with the inputs of the plan.
+TEST_CASE("RunProcess: an nr pass without a fingerprint is adopted only when it read the protect and skin masks nr reads now", "[integration][process][mask][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("mask_names_legacy");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    auto mask = [&](const char* name) {
+        PassWriter wr(dir / "passes" / name, Manifest::ForPass(PassKind::Mask, 48, 32, FileFormat::Png));
+        for (int64_t f = 0; f < 2; ++f) wr.WriteFrame(f, MakePassImage(PassKind::Mask, 48, 32, PixelType::U8));
+        wr.Finish();
+    };
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.codec = "ffv1";
+    o.warp = true;
+    o.stages = StubStages(2);
+    for (auto& s : o.stages) s.enabled = s.name == "nr";
+    mask("mask_ui");
+    mask("mask_skin");
+    REQUIRE(Report(RunProcess(o), "nr").status == "ran");
+    REQUIRE(Manifest::Load(o.passesRoot / "color_nr").stageParams["masks"] == nlohmann::json::array({"ui", "skin"}));
+    // the pass as a standalone `dlssvid nr` leaves it: no fingerprint, the masks it read
+    auto standalone = [&](const nlohmann::json& masks, bool bypass) {
+        Manifest nr = Manifest::Load(o.passesRoot / "color_nr");
+        nr.fingerprint.clear();
+        nr.stageParams["masks"] = masks;
+        if (bypass) nr.stageParams["bypass"] = true;
+        nr.Save(o.passesRoot / "color_nr");
+    };
+    auto diffInputs = [](const StageDecision& d) { return d.diff.contains("inputs") ? d.diff["inputs"] : nlohmann::json(); };
+    struct Case {
+        nlohmann::json masks;
+        bool bypass;
+        const char* reason;
+        nlohmann::json diff;
+    };
+    const nlohmann::json both = nlohmann::json::array({"mask_ui", "mask_skin"});
+    for (const Case& c : {Case{nlohmann::json::array(), false, "made without the masks NR reads now", both},
+                          Case{nlohmann::json::array(), true, "made without the masks NR reads now", both},  // NR writes [] in the bypass
+                          Case{nlohmann::json::array({"ui"}), false, "made with other masks", nlohmann::json::array({"mask_skin"})},
+                          Case{nlohmann::json::array({"ui", "ignore", "skin"}), false, "made with other masks", nlohmann::json::array({"mask_ignore"})},
+                          Case{nlohmann::json::array({"face", "control"}), false, "made with other masks",
+                               nlohmann::json::array({"mask_ui", "mask_face", "mask_skin"})}}) {
+        INFO(c.masks.dump() << " bypass " << c.bypass);
+        standalone(c.masks, c.bypass);
+        const StageDecision d = Decision(PlanProcess(o), "nr");
+        CHECK(d.action == "run");
+        CHECK(d.kind == "input_changed");
+        CHECK(diffInputs(d) == c.diff);
+        const ProcessResult r = RunProcess(o);
+        CHECK(Report(r, "nr").status == "ran");
+        CHECK_THAT(Report(r, "nr").reason, Catch::Matchers::ContainsSubstring(c.reason));
+        CHECK(!Report(r, "nr").retired.empty());  // a real picture of another run: kept in the history
+    }
+    // the masks the plan reads: adopted, as before
+    standalone(nlohmann::json::array({"ui", "skin"}), false);
+    CHECK(Decision(PlanProcess(o), "nr").action == "reuse");
+    const ProcessResult same = RunProcess(o);
+    CHECK(Report(same, "nr").status == "reused");
+    CHECK_THAT(Report(same, "nr").reason, Catch::Matchers::ContainsSubstring("adopted"));
+    // the masks are gone: a pass that read them is not the run without them
+    std::filesystem::remove_all(o.passesRoot / "mask_ui");
+    std::filesystem::remove_all(o.passesRoot / "mask_skin");
+    standalone(nlohmann::json::array({"ui", "skin"}), false);
+    CHECK(diffInputs(Decision(PlanProcess(o), "nr")) == both);
+    const ProcessResult gone = RunProcess(o);
+    CHECK(Report(gone, "nr").status == "ran");
+    CHECK_THAT(Report(gone, "nr").reason, Catch::Matchers::ContainsSubstring("made with other masks"));
+    standalone(nlohmann::json::array(), false);  // and one that read none is the same run
+    CHECK(Report(RunProcess(o), "nr").status == "reused");
+}
+
 // PR-8 (regression of the race the design closes): a mask replaced from the CLI while process runs. Between the plan and NR's Init the
 // pass would say it was made with the new mask under the old fingerprint: the stage fails after the run, before the stamp. Replaced after
 // the first NR frame (Init and Setup done) it changes nothing in this run: the mask is on the GPU, the pass gets the label of the one applied.
