@@ -2290,6 +2290,12 @@ TEST_CASE("The control mask from the card has the fingerprint ImportControlMask 
     REQUIRE(m.load(file));
     CHECK(m.row()->note()->text().contains(QString::fromUtf8("эта маска уже загружена")));
     CHECK(Manifest::Load(m.dir / "passes" / "mask_control").fingerprint == fp);
+    // review of PR-8: the note is about that mask - gone with the project (and with another version or project)
+    m.model->closeProject();
+    CHECK_FALSE(m.row()->note()->text().contains(QString::fromUtf8("эта маска уже загружена")));
+    m.model->openProject(Q(m.dir / "proj.dlssvid.json"));
+    CHECK(m.model->controlMask().status == AppModel::ControlMaskState::Status::Ready);
+    CHECK_FALSE(m.row()->note()->text().contains(QString::fromUtf8("эта маска уже загружена")));
 }
 
 TEST_CASE("A failed control mask import shows the Russian text of its kind and keeps the previous mask", "[app][card][mask]") {

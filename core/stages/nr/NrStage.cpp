@@ -333,6 +333,9 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["tonemap"] = {{"curve", options_.tonemap.curve}, {"input_transfer", options_.tonemap.inputTransfer}, {"exposure_ev", options_.tonemap.exposureEv}};
         m.stageParams["guides"] = options_.useGuides;
         m.stageParams["masks"] = stats_.masks;
+        // TASK-0060 (C0): each mask its own texture size - the mark that tells a standalone pass made after the fix (adoptable with masks
+        // of different sizes) from one made before it (the UI unprotected)
+        if (!maskReaders_.empty()) m.stageParams["mask_textures"] = "own_size";
         if (controlInfo_ && !bypass_) {
             // the label of the mask applied (ControlMaskLabelOf): the plan compares it with the input it planned; no path
             m.stageParams["control_mask"] = {{"fingerprint", controlInfo_->fingerprint},

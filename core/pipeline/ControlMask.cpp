@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <thread>
 #include <nlohmann/json.hpp>
 
 #include "passes/Manifest.h"
@@ -53,6 +54,18 @@ bool IsLocked(const std::error_code& ec) {
 }
 [[noreturn]] void FailFs(const std::error_code& ec, const std::string& what, bool previousKept = true) {
     throw ControlMaskError(ControlMaskIssue{IsLocked(ec) ? Kind::Locked : Kind::Write, what + ": " + ec.message(), 0, 0, previousKept});
+}
+
+// A rename or removal that met a file held by another handle is tried again for a moment: the GUI reads the mask's manifest for its
+// plan and versions panel, an antivirus opens a fresh PNG. A file held for good still fails as Locked.
+template <class Op>
+void Retrying(std::error_code& ec, Op op) {
+    for (int attempt = 0;; ++attempt) {
+        ec.clear();
+        op(ec);
+        if (!ec || !IsLocked(ec) || attempt >= 10) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
 }
 
 bool OlderThan(const fs::path& p, std::chrono::minutes age) {
@@ -211,18 +224,15 @@ Decoded DecodeMask(const fs::path& image) {
                     d.alphaIgnored = true;
                     break;
                 }
-    // grey: one value, or R = G = B exactly in the source's codes everywhere
+    // grey: one value, or R = G = B exactly in the source's codes everywhere - the bytes of the samples (a NaN of one code is one value)
     bool grey = pick.size() == 1;
     if (!grey) {
         grey = true;
-        for (uint32_t y = 0; y < h && grey; ++y)
-            for (uint32_t x = 0; x < w; ++x) {
-                const float r = src.Get(x, y, pick[0]);
-                if (!(r == src.Get(x, y, pick[1]) && r == src.Get(x, y, pick[2]))) {
-                    grey = false;
-                    break;
-                }
-            }
+        const size_t bps = BytesPer(src.type), px = src.PixelBytes();
+        for (size_t i = 0; i < static_cast<size_t>(w) * h && grey; ++i) {
+            const uint8_t* s = src.data.data() + i * px;
+            grey = std::memcmp(s + pick[0] * bps, s + pick[1] * bps, bps) == 0 && std::memcmp(s + pick[0] * bps, s + pick[2] * bps, bps) == 0;
+        }
     }
     d.grayscale = grey;
     auto toU16 = [&](float v) -> uint16_t {
@@ -376,16 +386,16 @@ ControlMaskImport ImportControlMask(const fs::path& image, const fs::path& root)
         r.outcome = ControlMaskImport::Outcome::Replaced;
         std::error_code rec;
         if (ManifestLoads(cur)) {
-            retired = RetirePassVersion(root, kControlMaskPass, rec).value_or("");
+            Retrying(rec, [&](std::error_code& e) { retired = RetirePassVersion(root, kControlMaskPass, e).value_or(""); });
             if (rec) FailFs(rec, "cannot move the current control mask into the history (it stays in place)");
         } else {  // no loadable manifest: the history would hide it (_broken / _partial), so it is deleted
-            fs::remove_all(cur, rec);
+            Retrying(rec, [&](std::error_code& e) { fs::remove_all(cur, e); });
             if (rec) FailFs(rec, "cannot remove the broken control mask folder " + Utf8(cur));
         }
     }
     if (ControlMaskHooksForTests().beforePlace) ControlMaskHooksForTests().beforePlace(tmp);
     std::error_code mv;
-    fs::rename(tmp, cur, mv);
+    Retrying(mv, [&](std::error_code& e) { fs::rename(tmp, cur, e); });
     if (mv) {
         if (!retired.empty()) {
             try {
@@ -414,12 +424,13 @@ std::optional<std::string> RemoveControlMask(const fs::path& root) {
     if (!fs::is_directory(cur, ec)) return std::nullopt;
     ImportLock lock(root);
     if (!ManifestLoads(cur)) {
-        fs::remove_all(cur, ec);
+        Retrying(ec, [&](std::error_code& e) { fs::remove_all(cur, e); });
         if (ec) FailFs(ec, "cannot remove the broken control mask folder " + Utf8(cur));
         Log()->info("mask_control: removed the folder without a loadable manifest {}", Utf8(cur));
         return std::nullopt;
     }
-    std::optional<std::string> id = RetirePassVersion(root, kControlMaskPass, ec);
+    std::optional<std::string> id;
+    Retrying(ec, [&](std::error_code& e) { id = RetirePassVersion(root, kControlMaskPass, e); });
     if (ec) FailFs(ec, "cannot move the control mask into the history");
     return id;
 }

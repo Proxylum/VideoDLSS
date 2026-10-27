@@ -88,7 +88,9 @@ C:\dlss-video\bin\dlssvid_golden_tests.exe "[golden]~[gpu]"   :: только д
    параметрах, иначе релиз обесценил бы все пассы пользователей. Когда меняется одна стадия, вместо глобальной версии
    поднимают её ревизию в `PassToolVersionFor` (`tool.app` = `<версия>+<стадия>.<ревизия>`, например `0.1.0+depth.2`):
    пассы остальных стадий остаются валидными. Ревизии сейчас: `depth.2`, `nr.ev`, `png.2`, `nr.gain` и `nr.i0` (PR-7: сила
-   правки NR после модели); карточка пересчёта называет добавленную ревизию (`AddedToolRevisions`).
+   правки NR после модели); карточка пересчёта называет добавленную ревизию (`AddedToolRevisions`). Ревизии, зависящие от
+   входов, добавляет `DecideStage` (`ProcessRunner`), а не `PassToolVersionFor`: `nr.msize` (TASK-0060) — у NR с масками защиты и
+   кожи разного размера, `kNrControlMaskRevision` — у NR с маской управления (пока пустая).
 2. Локально: сборка, `ctest`, `scripts\package.cmd` (и `full`), распаковать ZIP во временную папку, golden на распакованной
    копии (`DLSSVID_CLI`, `DLSSVID_GOLDEN_DIR`; для `[gpu]`-части положить DLL NVIDIA в её `bin\nvidia`).
 3. Pull request → CI → слияние в `main` → аннотированный тег `vX.Y.Z` на merge-коммите → push тега: workflow тега собирает

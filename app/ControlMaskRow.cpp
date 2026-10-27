@@ -53,10 +53,18 @@ ControlMaskRow::ControlMaskRow(AppModel& model, QWidget* parent) : QWidget(paren
     connect(&model_, &AppModel::controlMaskFinished, this, &ControlMaskRow::finished);
 }
 
+namespace {
+QString NoticeKey(AppModel& model) {
+    return QString::fromStdWString(model.project().passesRoot.wstring()) + QStringLiteral("|") + model.controlMask().fingerprint;
+}
+}  // namespace
+
 void ControlMaskRow::refresh(bool busy, bool bypass) {
     busy_ = busy;
     bypass_ = bypass;
     const AppModel::ControlMaskState& s = model_.controlMask();
+    // the notice is about one mask: another project, «Вернуть» of another version, a mask gone - it no longer holds
+    if (!notice_.isEmpty() && (s.status != AppModel::ControlMaskState::Status::Ready || NoticeKey(model_) != noticeKey_)) notice_.clear();
     const bool root = model_.hasProject() && !model_.project().passesRoot.empty();
     QString status, tip, note;
     const char* role = "muted";
@@ -137,7 +145,10 @@ void ControlMaskRow::finished(bool ok, bool changed, const QString& message) {
     if (!pending_) return;  // another row's import (a second card of the stage)
     pending_ = false;
     if (!ok) dialogs_.warn(window(), tr("Маска не загружена"), message);
-    else if (!changed) notice_ = message;  // «эта маска уже загружена»: the card shows it on controlMaskChanged, emitted next
+    else if (!changed) {  // «эта маска уже загружена»: the card shows it on controlMaskChanged, emitted next
+        notice_ = message;
+        noticeKey_ = NoticeKey(model_);  // the state was re-read before this signal
+    }
 }
 
 }  // namespace dlssvid

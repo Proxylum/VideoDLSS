@@ -40,7 +40,8 @@ private:
     QPushButton* show_;
     QPushButton* remove_;
     QLabel* note_;
-    QString notice_;        // «эта маска уже загружена»: until the next import
+    QString notice_;        // «эта маска уже загружена»: while the same mask of the same project stays loaded
+    QString noticeKey_;     // the passes root and the fingerprint it was said of
     bool pending_ = false;  // this row started the import in flight: it answers its end
     bool busy_ = false, bypass_ = false;
 };

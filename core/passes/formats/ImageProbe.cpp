@@ -121,6 +121,7 @@ void ProbeExr(const std::filesystem::path& path, ImageProbe& p) {
 
 ImageProbe::Format ImageFormatOf(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
+    if (!in.is_open()) Throw("cannot open " + Utf8(path));  // access denied, held without share-read: unreadable, not another kind
     unsigned char s[4] = {};
     if (!in.read(reinterpret_cast<char*>(s), 4)) return ImageProbe::Format::Unknown;
     if (s[0] == 0x89 && s[1] == 'P' && s[2] == 'N' && s[3] == 'G') return ImageProbe::Format::Png;

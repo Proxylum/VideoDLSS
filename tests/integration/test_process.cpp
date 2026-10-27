@@ -380,6 +380,24 @@ TEST_CASE("RunProcess: an nr pass with protect and skin masks of different sizes
     CHECK(Report(r, "nr").status == "ran");
     CHECK(Manifest::Load(o.passesRoot / "color_nr").tool.value("app", std::string()).find("+nr.msize") != std::string::npos);
     CHECK(Report(RunProcess(o), "nr").status == "reused");  // the revision is stable
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").stageParams["mask_textures"] == "own_size");  // the mark of the fixed upload
+
+    // review of PR-8: a standalone pass (no fingerprint) of an older build with these masks lost the UI protection - not adopted under
+    // +nr.msize; the same pass with the mark of the fix is adopted
+    auto standalone = [&](bool mark) {
+        Manifest nr = Manifest::Load(o.passesRoot / "color_nr");
+        nr.fingerprint.clear();
+        if (!mark) nr.stageParams.erase("mask_textures");
+        nr.Save(o.passesRoot / "color_nr");
+    };
+    standalone(false);
+    const ProcessResult old = RunProcess(o);
+    CHECK(Report(old, "nr").status == "ran");
+    CHECK(Report(old, "nr").reason.find("TASK-0060") != std::string::npos);
+    standalone(true);
+    const ProcessResult fixed = RunProcess(o);
+    CHECK(Report(fixed, "nr").status == "reused");
+    CHECK(Report(fixed, "nr").reason.find("adopted") != std::string::npos);
 }
 
 // PR-8 (regression of the race the design closes): a mask replaced from the CLI while process runs. Between the plan and NR's Init the

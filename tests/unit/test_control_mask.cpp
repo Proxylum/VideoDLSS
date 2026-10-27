@@ -2,13 +2,20 @@
 // replace), reading it back with the content check, removal and the texels NR uploads at the frame size.
 
 #include <catch2/catch_test_macros.hpp>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <thread>
 
 #include "MaskImages.h"
 #include "passes/ControlMaskPass.h"
@@ -173,6 +180,15 @@ TEST_CASE("ImportControlMask: 16 bit is kept bit for bit; float EXR and TIFF cla
         for (uint32_t x = 0; x < 8; ++x) CHECK(s.Get(x, 0, 0) == static_cast<float>(want[x]));
     }
 
+    // review of PR-8: R = G = B by the source's codes - NaN pixels of one code keep a float mask grey (as floats NaN != NaN made it RGB)
+    WriteExr(dir / "grey_nan.exr", Image(6, 2, PixelType::F32, {"R", "G", "B"}, [](uint32_t x, uint32_t, size_t) {
+                 return x == 3 ? std::numeric_limits<float>::quiet_NaN() : 0.5f;
+             }));
+    const ControlMaskImport gn = ImportControlMask(dir / "grey_nan.exr", dir / "grey_nan");
+    CHECK(gn.mask.grayscale);
+    CHECK(Manifest::Load(dir / "grey_nan" / kControlMaskPass).channels == std::vector<std::string>{"Y"});
+    CHECK(gn.mask.clamped == 2);  // the NaN pixels of both rows: one value each (stored grey)
+
     // a matte of 3x2 at (2, 1) in a 6x4 display window: zeros around it, the mask the display window's size
     WriteExrWindows(dir / "bbox.exr", 6, 4, 2, 1, 3, 2, {"R", "G", "B"}, [](int, int, size_t) { return 1.f; });
     const ControlMaskImport b = ImportControlMask(dir / "bbox.exr", dir / "bbox");
@@ -243,6 +259,12 @@ TEST_CASE("ImportControlMask: palette, tiled and planar TIFF refused, min-is-whi
     { std::ofstream(dir / "text.png") << "not an image"; }
     CHECK(KindOf([&] { ImportControlMask(dir / "text.png", dir / "passes"); }) == ControlMaskIssue::Kind::Unsupported);
     CHECK(KindOf([&] { ImportControlMask(dir / "missing.png", dir / "passes"); }) == ControlMaskIssue::Kind::NotAFile);
+    {  // review of PR-8: held by another program without share-read (or denied by its ACL) - «не читается», not «формат не поддерживается»
+        const HANDLE held = CreateFileW((dir / "white.tif").wstring().c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        REQUIRE(held != INVALID_HANDLE_VALUE);
+        CHECK(KindOf([&] { ImportControlMask(dir / "white.tif", dir / "held"); }) == ControlMaskIssue::Kind::Unreadable);
+        CloseHandle(held);
+    }
     CHECK(KindOf([&] { ImportControlMask(dir, dir / "passes"); }) == ControlMaskIssue::Kind::NotAFile);
     CHECK(KindOf([&] { ImportControlMask(dir / "white.tif", {}); }) == ControlMaskIssue::Kind::NoRoot);
 }
@@ -294,6 +316,22 @@ TEST_CASE("ImportControlMask: a file held at the retire fails as Locked and keep
     }
     CHECK(ReadControlMaskInfo(root / kControlMaskPass)->fingerprint == a.mask.fingerprint);
     CHECK(ListPassVersions(root, kControlMaskPass).size() == 1);  // the history untouched
+    {  // review of PR-8: held for a moment only (the GUI reading the manifest, an antivirus) - retried, imported
+        std::atomic<bool> opened{false};
+        std::thread reader([&] {
+            std::ifstream f(root / kControlMaskPass / m.FrameFileName(0), std::ios::binary);
+            opened = true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        });
+        while (!opened) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        const ControlMaskImport moment = ImportControlMask(dir / "b.png", root);
+        reader.join();
+        CHECK(moment.outcome == ControlMaskImport::Outcome::Replaced);
+        UsePassVersion(root, kControlMaskPass, moment.retiredVersion);  // a back as current for the rest of the test
+        REQUIRE(ReadControlMaskInfo(root / kControlMaskPass)->fingerprint == a.mask.fingerprint);
+        for (const auto& v : ListPassVersions(root, kControlMaskPass))
+            if (!v.current) std::filesystem::remove_all(v.dir);
+    }
 
     // the final rename fails (a file of the new folder held): the previous mask comes back from the history by its id
     std::unique_ptr<std::ifstream> held;

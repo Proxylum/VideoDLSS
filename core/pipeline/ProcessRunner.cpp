@@ -568,6 +568,11 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             d.diff["inputs"] = nlohmann::json::array({kControlMaskPass});
             run("input_changed", made.empty() ? "made without the control mask" : controlWant.empty() ? "made with a control mask" : "made with another control mask",
                 true);
+        } else if (name == "nr" && NrMaskSizesDiffer(ctx.root, d.inputs) && !(m.stageParams.is_object() && m.stageParams.contains("mask_textures"))) {
+            // TASK-0060 (C0): a standalone NR pass made before the fix, with protect and skin masks of different sizes, left the UI
+            // unprotected - adopted it would carry the +nr.msize fingerprint of the fixed picture
+            d.diff["tool"]["app"] = nlohmann::json::array({kPassToolVersion, fp.tool.app});
+            run("tool_changed", "nr made before the fix of protect and skin masks of different sizes (TASK-0060)", true);
         } else if (!complete) {
             run("incomplete", incomplete, false);
         } else {
