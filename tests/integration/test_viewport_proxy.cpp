@@ -88,6 +88,31 @@ TEST_CASE("ScanKeyframes: keyframes and the longest run with its tail; PlanProxy
     CHECK(p.estimatedBytes > 0);
 }
 
+// PR-10: dlssvid nr --start on the video path seeks by pts, which assumes a constant rate - the scan finds where a clip breaks that.
+TEST_CASE("ScanFrameIndex: a constant rate maps every frame to its index; a gap in the timestamps is found at its frame", "[integration][io]") {
+    const auto d = Dir("frame_index");
+    ClipSpec spec;
+    spec.frames = 90;
+    spec.width = 64;
+    spec.height = 32;
+    const auto cfr = WriteClip(d / "cfr.mkv", spec);
+    const FrameIndexScan c = ScanFrameIndex(cfr, 89);
+    CHECK(c.Consistent());
+    CHECK(c.frames == 90);
+    spec.pts = [](int64_t i) { return i < 61 ? i : i + 5; };  // five frames' time missing after frame 60
+    const auto vfr = WriteClip(d / "vfr.mkv", spec);
+    const FrameIndexScan v = ScanFrameIndex(vfr, 89);
+    CHECK_FALSE(v.Consistent());
+    CHECK(v.firstBad == 61);
+    CHECK(v.badIndex == 66);
+    CHECK(ScanFrameIndex(vfr, 60).Consistent());  // the frames before the gap are where a seek finds them
+    // a seek close ahead decodes forward and counts the frames: no pts involved
+    VideoDecoder dec(vfr, VideoDecoder::Probe());
+    CHECK(dec.SeekIsSequential(0));
+    CHECK(dec.SeekIsSequential(kSequentialSeekFrames));
+    CHECK_FALSE(dec.SeekIsSequential(kSequentialSeekFrames + 1));
+}
+
 TEST_CASE("BuildProxy: the same frames bit for bit under the same indices, for 8, 10 and 12 bits", "[integration][viewport][proxy]") {
     struct Case {
         const char* name;

@@ -31,6 +31,8 @@ struct ClipSpec {
     // layout (SyntheticFrame(index, desc) or WriteClipWith) and write them as they are — ffv1 and prores_ks keep them.
     std::string pixFmt = "yuv420p";
     int gop = 0;  // keyframe interval of the encoder (0 = its default: 12 for ffv1); 1 = intra only (TASK-0040)
+    // The pts of frame i in 1/fps units (empty: i). A gap makes a variable-frame-rate clip (PR-10: the preview refuses to seek into it).
+    std::function<int64_t(int64_t)> pts;
 };
 // The CpuFrame layout `WriteClip` feeds the encoder for a ClipSpec::pixFmt.
 FrameDesc FrameDescFor(const ClipSpec& spec);
