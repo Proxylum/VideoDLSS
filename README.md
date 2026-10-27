@@ -514,7 +514,9 @@ the preset changed nothing), intensity (our edit strength after the model: 0 = t
 DLL needed; 1 = the model's picture; above 1 extrapolates - brighter, possible clipped highlights and noise; the model
 always gets 1), passes (1..4: each pass is a model of its own that reworks the last one's output - its time and VRAM, about
 0.5 GB at 1440p and 0.9 GB at 4K; the plan notes 3 and 4 as markedly synthetic), local tone and structure, the flicker filter,
-the automatic skin mask, the skin structure (enabled with the mask; «отдельно» off = as the local structure) and the
+the automatic skin mask, the skin structure (enabled with the mask; «отдельно» off = as the local structure), the control mask
+(PR-8: «Загрузить…» one image - PNG, TIFF or EXR - over the edit: R its share, G / B its low / high frequencies, grey weakens it
+v times; «Показать» puts it on the viewport, «Убрать» moves it into the history; while it is loaded the automatic mask is off) and the
 strength on skin (shown when the plan has face / skin masks), and under «Ещё настройки» the flicker
 filter's threshold (with the filter on), the guides, the tonemap / input transfer / exposure in EV and the model
 resolution with the transfer strength and the ratio limit (at a resolution ≠ 1). A changed value whose row its

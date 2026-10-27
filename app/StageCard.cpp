@@ -22,11 +22,15 @@
 #include <set>
 
 #include "AppModel.h"
+#include "ControlMaskRow.h"
 #include "ParamText.h"
 #include "PresetMenu.h"
 #include "Theme.h"
 #include "stages/ParamSchema.h"
 #include "stages/StagePreset.h"
+#include "passes/ControlMaskPass.h"
+#include "pipeline/PassFingerprint.h"
+#include "stages/nr/INrBackend.h"
 
 namespace dlssvid {
 
@@ -220,6 +224,16 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
             f->addRow(row.label, cell);
             row.index = f->rowCount() - 1;
             rows_.push_back(row);
+            // PR-8: a pass the stage reads, after its row (nr: «Маска управления» after «Структура кожи»); no parameter, no ↺
+            for (const PassRowSpec& pr : schema_->passRows) {
+                if (pr.after != spec.key || pr.pass != kControlMaskPass || controlRow_) continue;
+                auto* label = new QLabel(QString::fromStdString(pr.label), f->parentWidget());
+                label->setToolTip(QString::fromStdString(pr.hint + " (" + pr.pass + ")"));
+                controlRow_ = new ControlMaskRow(model_, f->parentWidget());
+                controlRow_->setDialogs(dialogs_);
+                f->addRow(label, controlRow_);
+                passLabels_.push_back(label);
+            }
         }
     };
     if (schema_) {
@@ -248,9 +262,14 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
             // one label column for both forms: the rows of «Ещё настройки» line up with the basic ones
             int labelWidth = 0;
             for (const Row& r : rows_) labelWidth = std::max(labelWidth, r.label->sizeHint().width());
+            for (QLabel* l : passLabels_) labelWidth = std::max(labelWidth, l->sizeHint().width());
             for (const Row& r : rows_) {
                 r.label->setMinimumWidth(labelWidth);
                 r.label->setAlignment(Qt::AlignRight | Qt::AlignVCenter);  // the widened label keeps the text at the field
+            }
+            for (QLabel* l : passLabels_) {
+                l->setMinimumWidth(labelWidth);
+                l->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
             }
             const QString settingsKey = QString("card/%1/more").arg(QString::fromStdString(stage));
             const bool open = QSettings().value(settingsKey, false).toBool();
@@ -264,6 +283,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
         }
     }
     grid->addWidget(form_, 0, 2, 2, 1);
+    if (controlRow_) connect(&model_, &AppModel::controlMaskChanged, this, &StageCard::refresh);  // PR-8: an import's end, «Убрать»
 
     auto* side = new QVBoxLayout();
     side->setSpacing(3);
@@ -616,6 +636,7 @@ void StageCard::resetCard() {
 }
 
 void StageCard::setDialogs(PresetDialogs dialogs) {
+    if (controlRow_) controlRow_->setDialogs(dialogs);
     dialogs_ = dialogs;
     if (presetMenu_) presetMenu_->setDialogs(std::move(dialogs));
 }
@@ -646,6 +667,15 @@ void StageCard::refresh() {
     for (const auto& d : model_.plan().stages)
         if (d.name == stage_)
             for (const auto& [pass, fp] : d.inputs) inputs.insert(pass);
+    // PR-8: a control mask on disk is an input the moment the stage reads it and none the moment it does not (intensity 0) - by the
+    // core's rule (StageInputCandidates), without a video and before the plan is refreshed
+    if (schema_)
+        for (const PassRowSpec& pr : schema_->passRows) {
+            bool reads = false;
+            for (const auto& group : StageInputCandidates(stage_, effective)) reads = reads || std::find(group.begin(), group.end(), pr.pass) != group.end();
+            if (reads && model_.controlMask().status == AppModel::ControlMaskState::Status::Ready) inputs.insert(pr.pass);
+            else inputs.erase(pr.pass);
+        }
     const std::string backend = currentBackend();
     const nlohmann::json folded = NormalizeStageParams(stage_, params);
     QStringList moreChanged, hiddenChanged;
@@ -709,6 +739,9 @@ void StageCard::refresh() {
     force_->setVisible(e && e->enabled);
     engineer_->setVisible(model_.engineerMode());
     if (e && !json_->hasFocus()) json_->setPlainText(QString::fromStdString(e->params.dump()));
+    const bool busy = busy_ && busy_();
+    if (controlRow_) controlRow_->refresh(busy || model_.controlMaskBusy(), NrBypassParams(effective));
+    run_->setEnabled(!busy);
     updating_ = false;
 }
 

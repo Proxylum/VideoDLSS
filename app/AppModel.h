@@ -5,6 +5,7 @@
 #include <QProcess>
 #include <QString>
 #include <QStringList>
+#include <QThreadPool>
 #include <QTimer>
 #include <atomic>
 #include <cstdint>
@@ -236,6 +237,26 @@ public slots:
     // the GPU; logged as p50 / p90 every 30 jumps («viewport scrub» in the log). The samples since the last log line.
     const std::vector<double>& scrubLatencies() const { return scrubMs_; }
 
+public:  // no slots: a struct and plain methods
+    // ---- the control mask of NR (PR-8): one image under the passes root, imported off the GUI thread ----
+    struct ControlMaskState {
+        enum class Status { None, Importing, Ready, Unreadable } status = Status::None;
+        QString file;         // the source's name (Importing: the file being read)
+        QString problem;      // Unreadable: why, in Russian
+        QString fingerprint;  // 8 hex digits
+        uint32_t width = 0, height = 0;
+        bool grayscale = false, alphaIgnored = false;
+        bool broken = false;  // a folder without a loadable manifest: «Убрать» deletes it
+        int64_t clamped = 0;
+    };
+    const ControlMaskState& controlMask() const { return controlMask_; }  // re-read from disk by reloadSources (not while importing)
+    bool controlMaskBusy() const { return controlMaskBusy_; }              // an import runs: «Обработать», the versions panel wait
+    // The image -> <passes root>/mask_control (ImportControlMask) on the model's thread; the viewport lets go of the folder first. The
+    // end: controlMaskFinished, then controlMaskChanged (sources, plan and state reloaded).
+    void importControlMask(const QString& file);
+    // «Убрать»: into the history (a folder without a loadable manifest is deleted); false with the Russian text in `error`.
+    bool removeControlMask(QString* error = nullptr);
+
 signals:
     void projectChanged();
     void sourcesChanged();
@@ -252,8 +273,12 @@ signals:
     void recentsChanged();
     void resultChanged();
     void proxiesChanged();
+    void controlMaskChanged();
+    // ok: imported, replaced or the same pixels again (changed false; message «эта маска уже загружена»); else the refusal in Russian
+    void controlMaskFinished(bool ok, bool changed, const QString& message);
 
 private:
+    std::vector<ViewportSource> viewportSources(bool dropControlMask) const;  // the project's; dropped: without mask_control and its versions
     QString seedNewProject();  // openVideo of a video without a project: the preset marked for new projects; the message's tail
     nlohmann::json stageParamsOf(const std::string& stage) const;  // the project's, {} for a stage it lacks
     void noteScrubReady();  // a scrub jump's frames are all on the GPU: one latency sample
@@ -292,6 +317,9 @@ private:
     std::atomic<bool> currentLoadedQueued_{false};
     int64_t scrubStartNs_ = -1;
     std::vector<double> scrubMs_;
+    ControlMaskState controlMask_;
+    bool controlMaskBusy_ = false;
+    QThreadPool maskPool_;  // one thread: the control mask's import (decoding and a PNG16 write take seconds on 4K)
 };
 
 }  // namespace dlssvid

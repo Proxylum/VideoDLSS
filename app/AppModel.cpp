@@ -6,10 +6,13 @@
 #include <QSettings>
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
+#include "ControlMaskText.h"
 #include "ParamText.h"
 #include "PresetStore.h"
 #include "SourceNames.h"
+#include "passes/ControlMaskPass.h"
 #include "passes/ScenesPass.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
@@ -48,6 +51,7 @@ AppModel::AppModel(bool warp, QObject* parent) : QObject(parent) {
 }
 
 AppModel::~AppModel() {
+    maskPool_.waitForDone();  // an import in flight finishes (or leaves .import/ to the next one); its queued end is dropped with us
     cancelProxies();
     store_->SetOnCurrentLoaded({});  // loaders may still finish a frame while the store shuts down
     store_.reset();
@@ -122,8 +126,109 @@ bool AppModel::saveProjectAs(const QString& file) {
     }
 }
 
+namespace {
+// The control mask of a passes root as the card shows it.
+AppModel::ControlMaskState ReadControlMaskState(const std::filesystem::path& root) {
+    AppModel::ControlMaskState s;
+    if (root.empty() || !std::filesystem::is_directory(root / kControlMaskPass)) return s;
+    if (ControlMaskFolderBroken(root)) {
+        s.status = AppModel::ControlMaskState::Status::Unreadable;
+        s.problem = QCoreApplication::translate("ControlMask", "папка повреждена");
+        s.broken = true;
+        return s;
+    }
+    std::string why;
+    const auto info = ReadControlMaskInfo(root / kControlMaskPass, &why);
+    if (!info) {
+        s.status = AppModel::ControlMaskState::Status::Unreadable;
+        s.problem = ControlMaskWhyText(why);
+        return s;
+    }
+    s.status = AppModel::ControlMaskState::Status::Ready;
+    s.file = QString::fromStdString(info->sourceName);
+    s.fingerprint = QString::fromStdString(ShortFingerprint(info->fingerprint));
+    s.width = info->width;
+    s.height = info->height;
+    s.grayscale = info->grayscale;
+    s.alphaIgnored = info->alphaIgnored;
+    s.clamped = info->clamped;
+    return s;
+}
+}  // namespace
+
+std::vector<ViewportSource> AppModel::viewportSources(bool dropControlMask) const {
+    std::vector<ViewportSource> sources = project_.Sources();
+    if (dropControlMask)  // the import renames mask_control: an open file of the viewport would fail it on Windows (Locked)
+        sources.erase(std::remove_if(sources.begin(), sources.end(), [](const ViewportSource& s) { return s.pass == kControlMaskPass; }), sources.end());
+    return sources;
+}
+
+void AppModel::importControlMask(const QString& file) {
+    if (controlMaskBusy_) return;
+    if (!hasProject() || project_.passesRoot.empty()) {
+        emit controlMaskFinished(false, false, ControlMaskIssueText({ControlMaskIssue::Kind::NoRoot, {}, 0, 0}));
+        return;
+    }
+    controlMaskBusy_ = true;
+    rememberDir("mask", file);
+    store_->SetSources(viewportSources(true));  // waits for loads in flight: then the folder can be renamed
+    controlMask_.status = ControlMaskState::Status::Importing;
+    controlMask_.file = QFileInfo(file).fileName();
+    emit controlMaskChanged();
+    const std::filesystem::path image(file.toStdWString()), root = project_.passesRoot;
+    maskPool_.start([this, image, root] {
+        std::optional<ControlMaskImport> done;
+        std::optional<ControlMaskIssue> issue;
+        std::string other;
+        try {
+            done = ImportControlMask(image, root);  // no GPU, no Qt
+        } catch (const ControlMaskError& e) {
+            issue = e.issue;
+        } catch (const std::exception& e) {
+            other = e.what();
+        }
+        QMetaObject::invokeMethod(this, [this, done, issue, other, root] {
+            controlMaskBusy_ = false;
+            bool ok = false, changed = false;
+            QString message;
+            if (done) {
+                ok = true;
+                changed = done->outcome != ControlMaskImport::Outcome::Unchanged;
+                message = changed ? tr("Маска управления загружена: %1").arg(QString::fromStdString(done->mask.sourceName)) : tr("эта маска уже загружена");
+            } else if (issue) {
+                message = ControlMaskIssueText(*issue);
+            } else {
+                message = tr("Маска не загружена: %1").arg(QString::fromStdString(other));
+            }
+            if (ok) Log()->info("mask_control: {}", message.toStdString());
+            if (project_.passesRoot == root) reloadSources();  // also after a failure: the previous mask back on the viewport
+            emit controlMaskFinished(ok, changed, message);
+            emit controlMaskChanged();
+        }, Qt::QueuedConnection);
+    });
+}
+
+bool AppModel::removeControlMask(QString* error) {
+    if (controlMaskBusy_ || !hasProject() || project_.passesRoot.empty()) return false;
+    store_->SetSources(viewportSources(true));  // the viewport lets go of the folder before the rename
+    bool ok = true;
+    try {
+        RemoveControlMask(project_.passesRoot);
+    } catch (const ControlMaskError& e) {
+        ok = false;
+        if (error) *error = ControlMaskIssueText(e.issue);
+    } catch (const std::exception& e) {
+        ok = false;
+        if (error) *error = QString::fromStdString(e.what());
+    }
+    reloadSources();
+    emit controlMaskChanged();
+    return ok;
+}
+
 void AppModel::reloadSources() {
-    store_->SetSources(project_.Sources());
+    store_->SetSources(viewportSources(controlMaskBusy_));
+    if (!controlMaskBusy_) controlMask_ = ReadControlMaskState(project_.passesRoot);  // while importing it stays «Importing»
     scrubStartNs_ = -1;
     resultAudio_ = false;
     resultCodec_.clear();
@@ -1026,6 +1131,8 @@ bool AppModel::closeProject() {
     resultAudio_ = false;
     cancelProxies();
     store_->SetSources({});
+    if (!controlMaskBusy_) controlMask_ = {};
+    emit controlMaskChanged();
     dirty_ = false;
     emit dirtyChanged(false);
     emit sourcesChanged();

@@ -25,6 +25,7 @@ QString BaseName(const std::string& pass) {
     if (pass == "color_sr") return Tr("Апскейл");
     if (pass == "color_nr") return Tr("Улучшение");
     if (pass == "color_fg") return Tr("Генерация");
+    if (pass == "mask_control") return Tr("Маска управления");  // PR-8: before the rule of the imported masks
     if (pass.rfind("mask_", 0) == 0) return Tr("Маска %1").arg(QString::fromStdString(pass.substr(5)));
     return QString::fromStdString(pass);
 }
