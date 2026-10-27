@@ -292,6 +292,7 @@ dlssvid import  -i passes\depth_raw --expect-size 1920x1080 --expect-frames 300
 dlssvid convert -i passes\depth_raw -o passes\depth_dlss --to depth_dlss --near 0.1 --far 1000
 dlssvid convert -i passes\mv_raw -o passes\mv_dlss --to mv_dlss --target 3840x2160 --depth-dir passes\depth_raw
 dlssvid import  -i ext\mv --pass mv_raw --y-up --write-manifest     :: vectors from another tool with y up: read in the DLSS convention (y down)
+dlssvid import  -i mask.png --pass mask_control --static -o passes  :: the control mask of NR: R the edit's share, G / B its low / high frequencies (PNG, TIFF, EXR)
 dlssvid depth   -i input.mp4 -o passes --backend da3                     :: DA3METRIC-LARGE via TensorRT -> depth_raw + depth_dlss
 dlssvid depth   -i input.mp4 -o passes --backend vda                     :: Metric VDA Small (default), window 32
 dlssvid depth   -i input.mp4 -o passes --backend vda --model metric-vda-large   :: Large (CC-BY-NC-4.0), the registry's window
@@ -348,6 +349,7 @@ dlssvid upscale -i input.mp4 -o passes --scale 2                                
 dlssvid upscale -i input.mp4 -o passes --backend nis --no-scaling                      :: x1: NVSharpen (dlss: DLAA); not a compression-artifact filter
 dlssvid upscale -i input.mp4 -o passes --backend dlss --video sr.mp4 --codec hevc_nvenc  :: plus a preview video (no audio)
 dlssvid compare --ref reference.mp4 --test passes\color_sr --json ab.json              :: PSNR Y/RGB, SSIM, MAE (mean |difference|) per frame
+dlssvid compare --ref tone0\color_nr --test base\color_nr --edit-from passes\color_sr --bands 4,8,16  :: where an NR edit lies: low-band share, PSNR of its low / high part (E10)
 ```
 
 Neural Rendering (stage 6): `color_nr` from `color_sr` (or the video) with `depth_dlss` / `mv_dlss` guides and
@@ -512,7 +514,9 @@ the preset changed nothing), intensity (our edit strength after the model: 0 = t
 DLL needed; 1 = the model's picture; above 1 extrapolates - brighter, possible clipped highlights and noise; the model
 always gets 1), passes (1..4: each pass is a model of its own that reworks the last one's output - its time and VRAM, about
 0.5 GB at 1440p and 0.9 GB at 4K; the plan notes 3 and 4 as markedly synthetic), local tone and structure, the flicker filter,
-the automatic skin mask, the skin structure (enabled with the mask; «отдельно» off = as the local structure) and the
+the automatic skin mask, the skin structure (enabled with the mask; «отдельно» off = as the local structure), the control mask
+(PR-8: «Загрузить…» one image - PNG, TIFF or EXR - over the edit: R its share, G / B its low / high frequencies, grey weakens it
+v times; «Показать» puts it on the viewport, «Убрать» moves it into the history; while it is loaded the automatic mask is off) and the
 strength on skin (shown when the plan has face / skin masks), and under «Ещё настройки» the flicker
 filter's threshold (with the filter on), the guides, the tonemap / input transfer / exposure in EV and the model
 resolution with the transfer strength and the ratio limit (at a resolution ≠ 1). A changed value whose row its

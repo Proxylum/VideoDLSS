@@ -10,6 +10,8 @@
 
 #include "gpu/D3D12Device.h"
 #include "passes/PassSequence.h"
+#include "passes/formats/PngIO.h"
+#include "pipeline/ControlMask.h"
 #include "pipeline/PassVersions.h"
 #include "viewport/FrameStore.h"
 #include "viewport/Project.h"
@@ -41,6 +43,17 @@ void WritePass(const std::filesystem::path& dir, PassKind kind, uint32_t w, uint
         writer.WriteFrame(f, img);
     }
     writer.Finish();
+}
+
+// The control mask of a passes root from one grey U16 image (PR-8).
+void ControlMask(const std::filesystem::path& root, uint32_t w, uint32_t h, uint16_t v) {
+    PassImage img;
+    img.Allocate(w, h, PixelType::U16, {"A"});
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x) img.Set(x, y, 0, static_cast<float>(v));
+    const auto file = root.parent_path() / (root.filename().string() + "_mask.png");
+    WritePng(file, img);
+    ImportControlMask(file, root);
 }
 
 bool WaitUntil(const std::function<bool()>& pred, int ms = 5000) {
@@ -216,6 +229,74 @@ TEST_CASE("FrameStore keeps 24 and 48 fps sources in step over the whole clip (r
     CHECK(store.GetStatus(6, "color_sr") == FrameStore::Status::Missing);
     CHECK(store.StatusAt(0.25, "color_sr") == FrameStore::Status::Missing);  // past the end
     CHECK(store.TexturesAt(0.25).empty());
+}
+
+// PR-8: mask_control is one frame 0 for the whole clip - the key of its loads is that frame at any time, so it is ready everywhere,
+// stays resident as the current frame and gives the time line no length of its own.
+TEST_CASE("FrameStore: a static pass is ready at every time from one resident frame, is never evicted as current, WaitForCurrent returns, and it does not set the duration", "[unit][viewport][store][gpu][mask]") {
+    const auto root = Root("static");
+    WritePass(root / "color_sr", PassKind::ColorSr, 8, 4, 0, 9, FileFormat::Exr, 10);
+    ControlMask(root, 8, 4, 40000);
+    D3D12Device dev({true, false});
+    FrameStore::Options opt;
+    opt.prefetch = 2;
+    opt.vramBudgetBytes = 1;  // everything but the current frames goes
+    FrameStore store(dev, opt);
+    store.SetSources(FrameStore::DiscoverPasses(root));
+    const ViewportSource* mask = store.FindSource("mask_control");
+    REQUIRE(mask);
+    CHECK(mask->isStatic);
+    CHECK(!store.FindSource("color_sr")->isStatic);
+    CHECK(store.Duration() == Approx(1.0));  // the colour's 10 frames at 10 fps, not shortened or lengthened by the mask
+    CHECK(store.ExpectedFrames("mask_control") == 1);
+    CHECK(store.ExpectedFrames("color_sr") == 10);
+    // review of PR-8: a cold store at a time past frame 0 (render at a later time) - WaitForCurrent waits for the mask's frame 0; keyed by
+    // the time's frame it skipped the mask as having no such frame and returned before it loaded
+    store.SetCurrentTime(0.5, {"mask_control"});
+    store.WaitForCurrent(10000);
+    CHECK(store.StatusAt(0.5, "mask_control") == FrameStore::Status::Ready);
+    for (const double t : {0.0, 0.5, 0.9, 0.3}) {
+        INFO("t " << t);
+        store.SetCurrentTime(t, {"color_sr", "mask_control"});
+        store.WaitForCurrent(10000);  // returns: the mask's frame is the one it waits for
+        store.Update();
+        CHECK(store.StatusAt(t, "mask_control") == FrameStore::Status::Ready);
+        CHECK(!store.HeldFrameAt(t, "mask_control"));  // the exact frame, not a stand-in
+        const FrameTextures tex = store.TexturesAt(t);
+        REQUIRE(tex.count("mask_control") == 1);
+        CHECK(tex.at("mask_control").kind == TextureKind::Color);
+        CHECK(store.Textures(store.FrameAt("color_sr", t)).count("mask_control") == 1);  // at any frame index
+    }
+    CHECK(store.FrameAt("mask_control", 0.5) != 0);  // FrameAt is the time's frame (stepping, «#N»); the load key is frame 0
+
+    // review of PR-8: no longer shown (a version compared once, then the usual view), the mask's frame goes under the budget as a frame
+    // outside the window does - kept «current» at any time, it stayed resident until the next SetSources
+    store.SetCurrentTime(0.7, {"color_sr"});
+    store.WaitForCurrent(10000);  // the upload of frame 7 evicts down to the budget
+    CHECK(store.StatusAt(0.7, "color_sr") == FrameStore::Status::Ready);
+    CHECK(store.StatusAt(0.7, "mask_control") != FrameStore::Status::Ready);
+    store.SetCurrentTime(0.7, {"color_sr", "mask_control"});  // shown again: loaded again
+    store.WaitForCurrent(10000);
+    CHECK(store.StatusAt(0.7, "mask_control") == FrameStore::Status::Ready);
+}
+
+TEST_CASE("FrameStore: mask_control is a colour texture; a grey U16 mask shows grey, not raw values", "[unit][viewport][store][gpu][regression]") {
+    const auto root = Root("static_grey");
+    ControlMask(root, 8, 4, 32768);
+    D3D12Device dev({true, false});
+    FrameStore store(dev);
+    store.SetSources(FrameStore::DiscoverPasses(root));
+    REQUIRE(store.FindSource("mask_control"));
+    CHECK(store.FindSource("mask_control")->kind == TextureKind::Color);  // a one-channel U16 pass: Scalar with raw 0..65535 before
+    CHECK(store.Duration() == 0.0);  // alone it gives the time line no length (it would be one frame at 1 fps)
+    store.SetCurrentTime(0.0, {"mask_control"});
+    store.WaitForCurrent();
+    const FrameTextures tex = store.TexturesAt(0.0);
+    REQUIRE(tex.count("mask_control") == 1);
+    size_t pitch = 0;
+    const std::vector<uint8_t> bytes = dev.ReadbackTexture2D(tex.at("mask_control").texture, pitch);
+    const uint16_t* h = reinterpret_cast<const uint16_t*>(bytes.data());
+    for (size_t c = 0; c < 3; ++c) CHECK(HalfToFloat(h[c]) == Approx(32768.0 / 65535.0).margin(1e-3));  // grey: (v, v, v)
 }
 
 TEST_CASE("FrameStore discovers previous pass versions as sources named pass@id (stage 9)", "[viewport][store]") {

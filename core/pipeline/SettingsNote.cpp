@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "passes/Manifest.h"
+#include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 
 namespace dlssvid {
@@ -107,6 +108,9 @@ nlohmann::json Nr(const Manifest& m) {
             if (v.is_string()) masks += (masks.empty() ? "" : ",") + v.get<std::string>();
         s["masks"] = masks;
     }
+    // PR-8: the control mask by the first 8 hex digits of its fingerprint - no path, no file name
+    if (p.contains("control_mask") && p["control_mask"].is_object() && p["control_mask"].contains("fingerprint") && p["control_mask"]["fingerprint"].is_string())
+        s["control_mask"] = "on(sha256:" + ShortFingerprint(p["control_mask"]["fingerprint"].get<std::string>()) + ")";
     return s;
 }
 

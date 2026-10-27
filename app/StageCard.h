@@ -19,6 +19,7 @@
 namespace dlssvid {
 
 class AppModel;
+class ControlMaskRow;
 class PresetButton;
 class PresetMenu;
 struct ParamSpec;
@@ -39,6 +40,9 @@ public:
     // The dialogs of «Сбросить» and of the preset menu (PR-9); the tests put their own
     void setDialogs(PresetDialogs dialogs);
     PresetMenu* presetMenu() const { return presetMenu_; }  // nullptr for a card without presets
+    // Whether a task runs or a control mask is being imported (ProjectPanel): the mask's row and «Запустить отдельно» wait (PR-8)
+    void setBusyCheck(std::function<bool()> busy) { busy_ = std::move(busy); }
+    ControlMaskRow* controlMaskRow() const { return controlRow_; }  // nullptr for a card without the row
 
 public slots:
     void refresh();  // parameters from the project, the state from the plan, engineer widgets shown or hidden
@@ -100,6 +104,9 @@ private:
     QWidget* more_ = nullptr;
     std::vector<Row> rows_;
     std::vector<std::function<void()>> pull_;  // per form widget: show the project's value
+    std::vector<QLabel*> passLabels_;          // the labels of the schema's pass rows (PR-8): in the label column too
+    ControlMaskRow* controlRow_ = nullptr;
+    std::function<bool()> busy_;
 };
 
 }  // namespace dlssvid

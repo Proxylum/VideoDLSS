@@ -13,6 +13,8 @@ namespace dlssvid {
 // OpenEXR: F16 / F32 channels stored losslessly (ZIP compression). U8/U16 images are
 // written as F16/F32 (value-preserving) and read back as float.
 PassImage ReadExr(const std::filesystem::path& path);
+// The file name OpenEXR is given: UTF-8 (path.string() is the ANSI code page)
+std::string ExrFileName(const std::filesystem::path& path);
 void WriteExr(const std::filesystem::path& path, const PassImage& img);
 
 // Multi-layer EXR (Nuke / Resolve preset): each layer's channels are stored as

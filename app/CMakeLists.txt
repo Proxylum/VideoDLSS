@@ -11,6 +11,8 @@ qt_add_library(dlssvid_app STATIC
   PresetDialogs.h PresetDialogs.cpp
   PresetMenu.h PresetMenu.cpp
   StageCard.h StageCard.cpp
+  ControlMaskRow.h ControlMaskRow.cpp
+  ControlMaskText.h ControlMaskText.cpp
   SceneCutsView.h SceneCutsView.cpp
   StartPage.h StartPage.cpp
   RecentPreviews.h RecentPreviews.cpp

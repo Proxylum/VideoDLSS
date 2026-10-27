@@ -184,6 +184,27 @@ TEST_CASE("GcPassVersions keeps the newest N per pass, referenced versions and n
     CHECK(Ids(ListPassVersions(root, "color_sr")) == std::vector<std::string>{"20260922-151000_s2"});
 }
 
+// PR-8: mask_control is no stage's pass - gc keeps a version of it while a color_nr version names it among its inputs, and the removal of
+// that color_nr version releases it in the same call (passes outside the stages come last).
+TEST_CASE("gc keeps a mask_control version a color_nr version refers to", "[unit][versions][mask]") {
+    const auto root = Root("gc_mask");
+    const std::string m1 = "sha256:11111111m1", m2 = "sha256:22222222m2";
+    MakePass(root, "mask_control", m1, "2026-10-27T10:00:00Z", 1);
+    RetirePassVersion(root, "mask_control");
+    MakePass(root, "mask_control", m2, "2026-10-27T10:10:00Z", 1);
+    MakePass(root, "color_nr", "sha256:aaaaaaaan1", "2026-10-27T10:20:00Z", 2, {{"color_sr", "sha256:sr"}, {"mask_control", m1}});
+    CHECK(GcPassVersions(root, 1).removed.empty());  // the old mask: referenced by the current color_nr
+    CHECK(Ids(ListPassVersions(root, "mask_control")) == std::vector<std::string>{"current", "20261027-100000_11111111"});
+    RetirePassVersion(root, "color_nr");
+    MakePass(root, "color_nr", "sha256:bbbbbbbbn2", "2026-10-27T10:30:00Z", 2, {{"color_sr", "sha256:sr"}, {"mask_control", m2}});
+    const PassGcReport gc = GcPassVersions(root, 1);
+    REQUIRE(gc.removed.size() == 2);
+    CHECK(gc.removed[0].pass == "color_nr");  // first: it releases the mask it was made with
+    CHECK(gc.removed[1].pass == "mask_control");
+    CHECK(gc.removed[1].fingerprint == m1);
+    CHECK(Ids(ListPassVersions(root, "mask_control")) == std::vector<std::string>{"current"});
+}
+
 // Review of TASK-0038: two versions created within one second (`created` has whole seconds) were ordered by their id,
 // that is by the fingerprint - gc with keep 2 removed the newer one when its fingerprint sorted lower, and a switch back
 // recomputed instead of restoring (the y_up test failed in a fast run). The manifest's write time orders them now.

@@ -18,6 +18,7 @@
 #include <map>
 
 #include "AppModel.h"
+#include "ControlMaskText.h"
 #include "SceneCutsView.h"
 #include "SourceNames.h"
 #include "PresetMenu.h"
@@ -186,6 +187,7 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     for (const std::string& stage : PipelineStageNames()) {  // the run order, one table (PR-13)
         auto* card = new StageCard(model_, stage, content);
         if (stage == kScenesPass) card->setExtra(new SceneCutsView(model_, card));  // the list: chips to check it (PR-13)
+        card->setBusyCheck([this] { return tasks_.busy() || model_.controlMaskBusy(); });  // PR-8: the mask's row waits for both
         connect(card, &StageCard::runRequested, this, &ProjectPanel::runStage);
         connect(card, &StageCard::patchDllRequested, this, &ProjectPanel::patchDll);
         layout->addWidget(card);
@@ -324,6 +326,9 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     connect(&model_, &AppModel::planChanged, this, &ProjectPanel::refresh);
     connect(&model_, &AppModel::engineerModeChanged, this, [this](bool) { refresh(); });
     connect(&tasks_, &TaskQueue::taskStarted, this, [this](int) { refresh(); });  // «Обработать» waits for the running task
+    // PR-8: an import of the control mask - «Обработать», the folder of passes and the versions panel wait for it
+    connect(&model_, &AppModel::controlMaskChanged, this, &ProjectPanel::refresh);
+    connect(&model_, &AppModel::controlMaskFinished, this, [this](bool, bool, const QString&) { refresh(); });
     refresh();
 }
 
@@ -351,7 +356,7 @@ void ProjectPanel::refresh() {
     }
     sourceAudio_->setText(!hasSource ? "—" : src.audio ? tr("есть — будет скопирован") : tr("нет"));
     sourcePasses_->setText(hasSource ? QString::fromStdWString(p.passesRoot.wstring()) : "—");
-    changePasses_->setEnabled(hasSource && !tasks_.busy());
+    changePasses_->setEnabled(hasSource && !tasks_.busy() && !model_.controlMaskBusy());
     const std::string hash = model_.plan().sourceHash;
     sourceHash_->setText(hash.empty() ? "—" : ShortHash(hash) + " · " + model_.sourceHashStatus());
     sourceHash_->setToolTip(QString::fromStdString(hash));
@@ -381,7 +386,7 @@ void ProjectPanel::refresh() {
     outError_->setVisible(!model_.planError().isEmpty() && hasSource);
     const int toRun = std::max(0, out.stagesToRun - 1);  // the encode is not a «stage» for the button
     process_->setText(toRun > 0 ? tr("Обработать · %1").arg(Plural(toRun, tr("стадия"), tr("стадии"), tr("стадий"))) : tr("Обработать · только кодирование"));
-    process_->setEnabled(hasSource && model_.planError().isEmpty() && model_.planBlocker().isEmpty() && !tasks_.busy());
+    process_->setEnabled(hasSource && model_.planError().isEmpty() && model_.planBlocker().isEmpty() && !tasks_.busy() && !model_.controlMaskBusy());
     if (hasSource && model_.planError().isEmpty() && !model_.planBlocker().isEmpty()) {  // a stage the run would refuse
         outError_->setText(model_.planBlocker());
         outError_->setVisible(true);
@@ -479,7 +484,13 @@ void ProjectPanel::refreshVersions() {
                                             : tr("%1 · %2 на диске, %3 в предыдущих версиях · хранятся %4 на стадию")
                                                   .arg(QString::fromStdWString(p.passesRoot.wstring()), HumanBytes(total), HumanBytes(history),
                                                        Plural(p.passVersionsKeep, tr("последняя"), tr("последние"), tr("последних"))));
-    gc_->setEnabled(history > 0);
+    // PR-8: while a task runs or a mask is imported «Вернуть», «Удалить» and gc wait - one could swap the mask under a run or take
+    // mask_control before the import's rename, and the import's way back to the previous mask needs its version
+    const bool versionsBusy = tasks_.busy() || model_.controlMaskBusy();
+    const QString busyTip = tr("Недоступно во время обработки или загрузки маски");
+    gc_->setEnabled(history > 0 && !versionsBusy);
+    if (versionsBusy) gc_->setToolTip(busyTip);
+    else gc_->setToolTip(tr("Удалить предыдущие версии сверх хранимых (pass_versions_keep); версии, на которые ссылаются другие, остаются"));
     if (versions.empty()) return;
     int row = 0, col = 0;
     for (const QString& h : {tr("Стадия"), tr("Версия"), tr("Параметры"), tr("Когда"), tr("Размер"), tr("Состояние"), QString()}) versionsGrid_->addWidget(Muted(h, versionsRows_), row, col++);
@@ -497,8 +508,16 @@ void ProjectPanel::refreshVersions() {
         ver->setToolTip(v.current ? tr("текущая версия") : QString::fromStdString(v.id));
         versionsGrid_->addWidget(ver, row, 1);
         QString tip;
-        auto* params = Muted(stage.empty() ? QString::fromStdString(v.params.dump()) : HumanStageParams(stage, v.params, &tip), versionsRows_);
-        params->setToolTip(stage.empty() || tip.isEmpty() ? QString::fromStdString(v.params.dump()) : tip);
+        QString paramsText = stage.empty() ? QString::fromStdString(v.params.dump()) : HumanStageParams(stage, v.params, &tip);
+        if (v.pass == kControlMaskPass) {  // no stage, no parameters: the image (PR-8)
+            try {
+                paramsText = HumanControlMaskParams(Manifest::Load(v.dir).stageParams);
+                tip = paramsText;
+            } catch (const std::exception&) {
+            }
+        }
+        auto* params = Muted(paramsText, versionsRows_);
+        params->setToolTip(tip.isEmpty() ? QString::fromStdString(v.params.dump()) : tip);
         params->setWordWrap(true);
         params->setMinimumWidth(90);
         versionsGrid_->addWidget(params, row, 2);
@@ -541,7 +560,8 @@ void ProjectPanel::refreshVersions() {
             const std::string pass = v.pass, id = v.id;
             auto* use = new QPushButton(tr("Вернуть"), actions);
             SetRole(use, "small");
-            use->setToolTip(tr("Сделать эту версию текущей; нынешняя останется в истории"));
+            use->setToolTip(versionsBusy ? busyTip : tr("Сделать эту версию текущей; нынешняя останется в истории"));
+            use->setEnabled(!versionsBusy);
             connect(use, &QPushButton::clicked, this, [this, pass, id] {
                 try {
                     UsePassVersion(model_.project().passesRoot, pass, id);
@@ -554,6 +574,8 @@ void ProjectPanel::refreshVersions() {
             const auto dir = v.dir;
             auto* remove = new QPushButton(tr("Удалить"), actions);
             SetRole(remove, "small");
+            remove->setEnabled(!versionsBusy);
+            if (versionsBusy) remove->setToolTip(busyTip);
             connect(remove, &QPushButton::clicked, this, [this, dir, pass, id] {
                 if (QMessageBox::question(this, tr("Удалить версию"), tr("Удалить %1 (%2) с диска?").arg(HumanSourceName(pass), VersionLabel(id))) != QMessageBox::Yes) return;
                 std::error_code ec;
@@ -573,6 +595,7 @@ void ProjectPanel::refreshVersions() {
 void ProjectPanel::processAll() {
     Project& p = model_.project();
     if (p.sourceVideo.empty()) return;
+    if (model_.controlMaskBusy()) return;  // PR-8: Ctrl+Return too waits for the mask's import (its plan would read the folder being renamed)
     if (p.resultVideo.empty()) p.resultVideo = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + "_result" + ResultExtensionFor(p.codec));
     if (p.file.empty()) {
         const auto file = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + ".dlssvid.json");

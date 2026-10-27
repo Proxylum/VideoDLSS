@@ -1,5 +1,7 @@
 #include "stages/ParamSchema.h"
 
+#include "passes/ControlMaskPass.h"
+
 #include "util/Error.h"
 
 #include <algorithm>
@@ -98,6 +100,14 @@ ParamSpec EnableIf(ParamSpec s, const char* key, ParamCondition::Op op, J value,
 
 ParamSpec NeedsInputs(ParamSpec s, std::vector<std::string> inputs) {
     s.needsInputs = std::move(inputs);
+    return s;
+}
+
+// Disabled with `note` while one of these passes is an input of the plan (PR-8: the control mask replaces the automatic one); RowState
+// checks it before enableIf, so this note wins over the row's own condition.
+ParamSpec DisabledByInputs(ParamSpec s, std::vector<std::string> inputs, const char* note) {
+    s.disabledByInputs = std::move(inputs);
+    s.disabledByInputsNote = note;
     return s;
 }
 
@@ -277,7 +287,8 @@ std::vector<StageSchema> Build() {
                                "Профиль обработки модели (DLSSNR.Style). NVIDIA стили не документирует; номер в скобках совпадает со «Style N» в "
                                "Visual Enhancer. Сравните на превью.");
         ParamSpec skin = Number("skin_structure", "Структура кожи", ParamType::Float, -1.0, -1.0, 2.0, 0.05, ParamWidget::Slider,
-                                "Своя сила структуры на коже, найденной автомаской. Без флажка «отдельно» — как «Локальная структура».");
+                                "Своя сила структуры на коже, найденной автомаской. Без флажка «отдельно» — как «Локальная структура». "
+                                "Действует только с автомаской.");
         skin.sentinel = -1.0;
         skin.sentinelLabel = "как структура";
         skin.sentinelFollows = "local_structure";
@@ -316,8 +327,16 @@ std::vector<StageSchema> Build() {
                     "ниже согласованность во времени.",
                     false),
                "Временная стабильность", true),
-            In(Flag("auto_mask", "Автомаска кожи", false, "Модель сама находит кожу и применяет к ней «Структуру кожи».", false), "Маска"),
-            In(EnableIf(skin, "auto_mask", Op::Eq, true, "действует только с автомаской"), "Маска"),
+            // PR-8: the control mask replaces the automatic one (UseAutoMask 0) - both rows disabled with a note while it is an input
+            In(DisabledByInputs(Flag("auto_mask", "Автомаска кожи", false,
+                                     "Модель сама находит кожу и применяет к ней «Структуру кожи». Пока загружена маска управления, автомаска "
+                                     "выключена.",
+                                     false),
+                                {kControlMaskPass}, "выключена: её заменяет маска управления"),
+               "Маска"),
+            In(DisabledByInputs(EnableIf(skin, "auto_mask", Op::Eq, true, "действует только с автомаской"), {kControlMaskPass},
+                                "не действует при маске управления"),
+               "Маска"),
             In(NeedsInputs(Number("skin_blend", "Сила на коже (маски)", ParamType::Float, 1.0, 0.0, 1.0, 0.05, ParamWidget::Slider,
                                   "Доля правки внутри масок лица и кожи (импортированные пассы mask_face / mask_skin): 0 — исходник, 1 — полная правка."),
                            {"mask_face", "mask_skin"}),
@@ -351,6 +370,14 @@ std::vector<StageSchema> Build() {
             Tuning(Enum("format", "Формат пасса", "exr", Formats(true), ParamWidget::Select, "", true)),
         };
         s.cardPresets = true;  // PR-9: the card's «Пресет ▾»
+        // PR-8: the control mask - a pass, no parameter; its row after «Структура кожи» (E10: G / B are the low / high frequencies)
+        s.passRows = {{kControlMaskPass, "Маска управления",
+                       "Изображение-маска поверх правки: белый — правка как в карточке, чёрный — без правки. Серое изображение ослабляет правку "
+                       "ровно в v раз. В цветной маске R — общая сила, G — низкие частоты правки (крупные перепады света и тона), B — высокие "
+                       "(мелкая деталь); каналы перемножаются, поэтому цветной серый (v, v, v) ослабляет правку в v² раз. «Локальный тон» почти весь "
+                       "в низких частотах, «Локальная структура» — в обеих. Где правки нет, нет и подавления мерцания. Одна маска на все кадры, "
+                       "растягивается на кадр без сохранения пропорций; альфа не учитывается. Пока маска загружена, автомаска кожи выключена.",
+                       "skin_structure"}};
         out.push_back(std::move(s));
     }
     {

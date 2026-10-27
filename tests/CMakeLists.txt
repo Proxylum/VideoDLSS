@@ -44,6 +44,8 @@ add_executable(dlssvid_unit_tests
   unit/test_pipeline_preset.cpp
   unit/test_pass_fingerprint.cpp
   unit/test_pass_versions.cpp
+  unit/test_control_mask.cpp
+  unit/MaskImages.h
   unit/test_param_schema.cpp
   unit/test_stage_preset.cpp
   unit/test_estimates.cpp
@@ -59,6 +61,15 @@ add_executable(dlssvid_unit_tests
   unit/test_repo_hygiene.cpp
 )
 target_link_libraries(dlssvid_unit_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
+# PR-8: the frozen PR-7 resolve (tests/unit/frozen), compiled like the product; the product's own headers come from core's folder
+if(NOT DIRECTX_DXC_TOOL)
+  set(DIRECTX_DXC_TOOL ${DLSSVID_DXC_TOOL})
+endif()
+set(DLSSVID_SHADER_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
+set(DLSSVID_SHADER_HEADERS "")
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/unit/frozen/NrCompose_pr7.hlsl CSMain cs_6_0 g_NrComposePr7CS frozen NrComposePr7_cs.h)
+target_sources(dlssvid_unit_tests PRIVATE ${DLSSVID_SHADER_HEADERS} unit/frozen/NrComposePr7Dispatch.h)
+target_include_directories(dlssvid_unit_tests PRIVATE ${DLSSVID_SHADER_GEN_DIR} ${DLSSVID_CORE_SHADER_GEN_DIR})
 target_compile_definitions(dlssvid_unit_tests PRIVATE
   DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
   DLSSVID_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
@@ -150,8 +161,8 @@ catch_discover_tests(dlssvid_golden_tests TEST_PREFIX "golden." DISCOVERY_MODE P
 
 # ---- Performance (TASK-0040): scrubbing at >= 30 fps on 1080p, the p90 of random jumps into frames not resident; an
 # NVIDIA GPU (skipped otherwise), serially - parallel tests would time each other (`ctest -LE perf` leaves it out) ----
-add_executable(dlssvid_perf_tests perf/test_scrub_perf.cpp integration/TestClips.h integration/TestClips.cpp)
-target_include_directories(dlssvid_perf_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/integration)
+add_executable(dlssvid_perf_tests perf/test_scrub_perf.cpp perf/test_nr_mask_perf.cpp integration/TestClips.h integration/TestClips.cpp)
+target_include_directories(dlssvid_perf_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/integration ${CMAKE_CURRENT_SOURCE_DIR}/unit)
 target_link_libraries(dlssvid_perf_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 target_compile_definitions(dlssvid_perf_tests PRIVATE
   DLSSVID_CLI_PATH="$<TARGET_FILE:dlssvid>"
@@ -164,6 +175,9 @@ catch_discover_tests(dlssvid_perf_tests TEST_PREFIX "perf." DISCOVERY_MODE PRE_T
 if(CMAKE_GENERATOR MATCHES "Ninja")
   add_test(NAME build.ninja_header_deps
     COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DNINJA=${CMAKE_MAKE_PROGRAM} -P ${CMAKE_SOURCE_DIR}/tests/check_ninja_deps.cmake)
+  # PR-8: every shader include (the NR resolve's NrEdited.hlsli) is an input of the rule that compiles it
+  add_test(NAME build.shader_include_deps
+    COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DNINJA=${CMAKE_MAKE_PROGRAM} -P ${CMAKE_SOURCE_DIR}/tests/check_shader_deps.cmake)
 endif()
 
 # ---- release workflow: scripts/attach_release.cmd against a fake gh (incident TASK-0037: the attach step of release.yml

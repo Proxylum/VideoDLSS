@@ -2,17 +2,22 @@
 
 #include "ScenesArg.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <optional>
+#include <sstream>
 
 #include "convert/ColorConvert.h"
 #include "gpu/D3D12Device.h"
 #include "io/VideoDecoder.h"
 #include "passes/ImageMetrics.h"
 #include "passes/PassSequence.h"
+#include "stages/nr/NrLowpass.h"
 #include "pipeline/PassFingerprint.h"
 #include "stages/upscale/UpscaleStage.h"
 #include "util/Error.h"
@@ -114,6 +119,7 @@ public:
     uint32_t Width() const { return width_; }
     uint32_t Height() const { return height_; }
     int64_t Count() const { return count_; }
+    int64_t First() const { return first_; }  // the number of frame 0: a pass's first frame, 0 for a video
     // Sequential access: frame i of the source (pass frames by index, video frames in order).
     bool Next(int64_t index, PassImage& out) {
         if (reader_) {
@@ -138,6 +144,80 @@ private:
     uint32_t width_ = 0, height_ = 0;
 };
 
+std::vector<uint32_t> ParseBands(const std::string& s) {
+    std::vector<uint32_t> d;
+    std::stringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        size_t used = 0;
+        unsigned long v = 0;
+        try {
+            v = std::stoul(item, &used);
+        } catch (const std::exception&) {
+            used = 0;
+        }
+        if (item.empty() || used != item.size() || v < 2 || v > 4096) Throw("compare: --bands expects cell sizes 2..4096 separated by commas (got '" + s + "')");
+        d.push_back(static_cast<uint32_t>(v));
+    }
+    if (d.empty()) Throw("compare: --bands expects cell sizes 2..4096 separated by commas (got '" + s + "')");
+    return d;
+}
+
+// The colour of a frame as F32 RGB in [0, 1] (integers full range), the frame's own values for floats.
+PassImage Rgb32(const PassImage& img, const char* what) {
+    if (img.channels.size() < 3) Throw(std::string("compare: --bands needs colour frames (") + what + " has " + std::to_string(img.channels.size()) + " channel(s))");
+    const float s = img.type == PixelType::U8 ? 1.f / 255.f : img.type == PixelType::U16 ? 1.f / 65535.f : 1.f;
+    PassImage out;
+    out.Allocate(img.width, img.height, PixelType::F32, {"R", "G", "B"});
+    float* o = out.As<float>();
+    for (uint32_t y = 0; y < img.height; ++y)
+        for (uint32_t x = 0; x < img.width; ++x)
+            for (size_t c = 0; c < 3; ++c) o[(static_cast<size_t>(y) * img.width + x) * 3 + c] = img.Get(x, y, c) * s;
+    return out;
+}
+
+// PSNR (peak 1) of two luma planes of one size; infinity when they are equal.
+double PsnrOfLuma(const PassImage& a, const PassImage& b) {
+    const float *pa = a.As<float>(), *pb = b.As<float>();
+    const size_t n = static_cast<size_t>(a.width) * a.height;
+    double mse = 0.0;
+    for (size_t i = 0; i < n; ++i) mse += (static_cast<double>(pa[i]) - pb[i]) * (static_cast<double>(pa[i]) - pb[i]);
+    mse /= static_cast<double>(n);
+    return mse > 0.0 ? 10.0 * std::log10(1.0 / mse) : std::numeric_limits<double>::infinity();
+}
+
+// One frame at every d: the low-band share of D = test - ref, and with I the PSNR of saturate(I + LP(test - I)) (the low part of the
+// edit alone) and of saturate(test - LP(test - I)) (the high part alone).
+nlohmann::json FrameBands(const PassImage& ref, const PassImage& test, const PassImage* input, const std::vector<uint32_t>& divs) {
+    const PassImage r = Rgb32(ref, "--ref"), t = Rgb32(test, "--test");
+    PassImage diff = t;
+    for (size_t i = 0; i < diff.data.size() / sizeof(float); ++i) diff.As<float>()[i] -= r.As<float>()[i];
+    const PassImage diffY = LumaOf(diff), refY = LumaOf(r);
+    std::optional<PassImage> in, edit;
+    if (input) {
+        in = Rgb32(*input, "--edit-from");
+        edit = t;
+        for (size_t i = 0; i < edit->data.size() / sizeof(float); ++i) edit->As<float>()[i] -= in->As<float>()[i];
+    }
+    nlohmann::json out = nlohmann::json::array();
+    for (const uint32_t d : divs) {
+        nlohmann::json b = {{"d", d}, {"low_energy_rgb", NrLowShare(diff, d)}, {"low_energy_y", NrLowShare(diffY, d)}};
+        if (in) {
+            const PassImage lp = NrLowpassCpu(*edit, d);
+            PassImage low = *in, high = t;
+            const size_t n = low.data.size() / sizeof(float);
+            for (size_t i = 0; i < n; ++i) {
+                low.As<float>()[i] = std::clamp(low.As<float>()[i] + lp.As<float>()[i], 0.f, 1.f);
+                high.As<float>()[i] = std::clamp(high.As<float>()[i] - lp.As<float>()[i], 0.f, 1.f);
+            }
+            b["psnr_y_low"] = PsnrOfLuma(refY, LumaOf(low));
+            b["psnr_y_high"] = PsnrOfLuma(refY, LumaOf(high));
+        }
+        out.push_back(std::move(b));
+    }
+    return out;
+}
+
 int CmdCompare(const UpscaleCommands::CompareArgs& a) {
     FrameSource ref(a.ref), test(a.test);
     if (ref.Width() != test.Width() || ref.Height() != test.Height())
@@ -146,6 +226,17 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
     if (ref.IsVideo() && test.IsVideo() && (ref.Color().matrix != test.Color().matrix || ref.Color().range != test.Color().range))
         Log()->warn("compare: the videos decode with different colour matrices/ranges ({} {} vs {} {}) — tag both with the same colorspace, otherwise PSNR measures the mismatch",
                     ToString(ref.Color().matrix), ToString(ref.Color().range), ToString(test.Color().matrix), ToString(test.Color().range));
+    const std::vector<uint32_t> divs = a.bands.empty() ? std::vector<uint32_t>{} : ParseBands(a.bands);
+    std::optional<PassReader> input;
+    if (!a.editFrom.empty()) {
+        if (divs.empty()) Throw("compare: --edit-from needs --bands");
+        if (!std::filesystem::is_directory(a.editFrom)) Throw("compare: --edit-from must be a pass folder (the input of the edit, color_sr)");
+        input.emplace(PassReader::Open(a.editFrom));
+        if (input->Man().width != ref.Width() || input->Man().height != ref.Height())
+            Throw("compare: --edit-from is " + std::to_string(input->Man().width) + "x" + std::to_string(input->Man().height) + ", the reference " +
+                  std::to_string(ref.Width()) + "x" + std::to_string(ref.Height()));
+    }
+    std::vector<nlohmann::json> bandSum(divs.size(), nlohmann::json{{"low_energy_rgb", 0.0}, {"low_energy_y", 0.0}, {"psnr_y_low", 0.0}, {"psnr_y_high", 0.0}});
     nlohmann::json frames = nlohmann::json::array();
     double psnrY = 0, psnrRgb = 0, ssim = 0, mae = 0, maeY = 0, minPsnr = std::numeric_limits<double>::infinity(), minSsim = 1.0;
     int64_t n = 0;
@@ -158,6 +249,20 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
         const ImageMetrics m = CompareImages(r, t);
         if (!a.quiet) std::printf("frame %6lld  PSNR Y %7.3f dB  PSNR RGB %7.3f dB  SSIM %.4f\n", static_cast<long long>(ri), m.psnrY, m.psnrRgb, m.ssimY);
         frames.push_back({{"frame", ri}, {"psnr_y", m.psnrY}, {"psnr_rgb", m.psnrRgb}, {"ssim_y", m.ssimY}, {"mae_rgb", m.maeRgb}});
+        if (!divs.empty()) {
+            // I by the reference's frame number (ref and I need not start at the same frame); a missing one is an error, not the end
+            const int64_t number = ref.First() + ri;
+            std::optional<PassImage> in;
+            if (input) {
+                if (!input->HasFrame(number)) Throw("compare: --edit-from has no frame " + std::to_string(number));
+                in = input->ReadFrame(number);
+            }
+            nlohmann::json bands = FrameBands(r, t, in ? &*in : nullptr, divs);
+            for (size_t k = 0; k < divs.size(); ++k)
+                for (auto& [key, v] : bands[k].items())
+                    if (key != "d") bandSum[k][key] = bandSum[k][key].get<double>() + (std::isfinite(v.get<double>()) ? v.get<double>() : 100.0);
+            frames.back()["bands"] = std::move(bands);
+        }
         mae += m.maeRgb;
         maeY += m.maeY;
         psnrY += std::isfinite(m.psnrY) ? m.psnrY : 100.0;
@@ -177,8 +282,24 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
                               {"mae_rgb_mean", mae / n},  // mean |reference - test|: the size of an edit (NR A/B), not a quality score
                               {"mae_y_mean", maeY / n},
                               {"size", {ref.Width(), ref.Height()}}};
+    if (!divs.empty()) {
+        nlohmann::json bands = nlohmann::json::array();
+        for (size_t k = 0; k < divs.size(); ++k) {
+            nlohmann::json b = {{"d", divs[k]}};
+            for (const char* key : {"low_energy_rgb", "low_energy_y", "psnr_y_low", "psnr_y_high"})
+                if (input || std::string(key).rfind("low_energy", 0) == 0) b[key] = bandSum[k][key].get<double>() / static_cast<double>(n);
+            bands.push_back(std::move(b));
+        }
+        summary["bands"] = bands;
+    }
     std::printf("frames:      %lld\nPSNR Y:      %.3f dB (min %.3f)\nPSNR RGB:    %.3f dB\nSSIM Y:      %.4f (min %.4f)\nMAE RGB:     %.5f (Y %.5f)\n",
                 static_cast<long long>(n), psnrY / n, minPsnr, psnrRgb / n, ssim / n, minSsim, mae / n, maeY / n);
+    if (summary.contains("bands"))
+        for (const auto& b : summary["bands"]) {
+            std::printf("bands:       d=%u low %.3f (Y %.3f)", b["d"].get<uint32_t>(), b["low_energy_rgb"].get<double>(), b["low_energy_y"].get<double>());
+            if (b.contains("psnr_y_low")) std::printf("  PSNR Y low part %.3f dB, high part %.3f dB", b["psnr_y_low"].get<double>(), b["psnr_y_high"].get<double>());
+            std::printf("\n");
+        }
     if (!a.json.empty()) {
         std::ofstream out(a.json);
         out << nlohmann::json{{"reference", a.ref}, {"test", a.test}, {"summary", summary}, {"frames", frames}}.dump(2) << "\n";
@@ -230,6 +351,12 @@ void UpscaleCommands::Register(CLI::App& app) {
     compare_->add_option("--step", ca_.step, "frame stride (e.g. --start 1 --step 2 = only the generated frames of an x2 color_fg)")->default_val(1);
     compare_->add_option("--json", ca_.json, "write per-frame metrics to this JSON file");
     compare_->add_flag("-q,--quiet", ca_.quiet, "summary only");
+    compare_->add_option("--bands", ca_.bands,
+                         "d1,d2,...: the share of test - ref in the low band of the NR control mask's split at each cell size d (pixels), "
+                         "per frame and in the summary");
+    compare_->add_option("--edit-from,--edit_from", ca_.editFrom,
+                         "with --bands: the pass folder of the edit's input I (color_sr; frames by the reference's frame numbers): the PSNR Y "
+                         "of I + low(test - I) and of test - low(test - I) against the reference");
 }
 
 int UpscaleCommands::Dispatch() {

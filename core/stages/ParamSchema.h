@@ -83,6 +83,13 @@ struct ParamSpec {
     int decimals = -1;      // digits a value is stored with; -1: from the step
 };
 
+// A row of a card for a pass the stage reads that is no parameter (PR-8: nr's control mask): the texts live in the schema, the card
+// builds the widget after the row of `after`. Validation, the CLI's arguments, --help, the fingerprint and the presets go by
+// `params` and never see it.
+struct PassRowSpec {
+    std::string pass, label, hint, after;
+};
+
 struct StageSchema {
     std::string stage;     // scenes | depth | flow | upscale | nr | fg
     std::string title;     // «Глубина»
@@ -90,6 +97,7 @@ struct StageSchema {
     std::vector<ParamSpec> params;
     std::vector<std::string> guides;  // passes the stage reads as guides (its quality depends on them)
     bool cardPresets = false;         // the card offers presets of its own (PR-9: nr only; a pipeline preset takes every card)
+    std::vector<PassRowSpec> passRows;
     const ParamSpec* Find(const std::string& key) const;
 };
 

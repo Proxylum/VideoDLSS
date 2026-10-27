@@ -11,6 +11,8 @@
 
 #include "TestClips.h"
 #include "passes/PassSequence.h"
+#include "passes/formats/PngIO.h"
+#include "pipeline/ControlMask.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/ProcessRunner.h"
@@ -274,6 +276,206 @@ TEST_CASE("PlanProcess notes nr passes 3 and 4", "[integration][process]") {
 // PR-13 (regression, replaces the PR-6 check): a pass without a fingerprint (a standalone command, a build before PR-13) is adopted
 // only when it was made with the list the stage reads now - its label. Without one, with another one, or reset by NR's own detector of
 // PR-6, it is another picture: recomputed, the old one kept in the history. With no cut in the list a pass of before PR-13 is the same run.
+namespace {
+std::filesystem::path MaskFile(const std::filesystem::path& file, uint32_t w, uint32_t h, uint16_t v) {
+    PassImage img;
+    img.Allocate(w, h, PixelType::U16, {"A"});
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x) img.Set(x, y, 0, static_cast<float>(v));
+    WritePng(file, img);
+    return file;
+}
+// a copy: the plan is a temporary of the caller
+StageDecision Decision(const ProcessPlan& p, const std::string& name) {
+    for (const auto& d : p.stages)
+        if (d.name == name) return d;
+    throw std::runtime_error("no decision for " + name);
+}
+}  // namespace
+
+// PR-8: the plan reads the control mask NR will read - other proportions are a warning (the mask stretches), an unreadable one stops NR
+// before it runs, and a mask file edited in place stops it at reuse too (its stamp in the manifest is the old one).
+TEST_CASE("the plan warns about a control mask of other proportions and stops NR on an unreadable one; a mask file edited in place stops NR at run and at reuse", "[integration][process][mask]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("plan_mask");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.codec = "ffv1";
+    o.warp = true;
+    o.stages = StubStages(2);
+    for (auto& s : o.stages) s.enabled = s.name == "nr";
+    ImportControlMask(MaskFile(dir / "square.png", 32, 32, 30000), o.passesRoot);  // 1:1 for a 3:2 frame
+    const StageDecision d = Decision(PlanProcess(o), "nr");
+    REQUIRE(d.warnings.size() == 1);
+    CHECK_THAT(d.warnings[0], Catch::Matchers::ContainsSubstring("32×32 растянется на кадр 48×32"));
+    CHECK_THAT(d.warnings[0], Catch::Matchers::ContainsSubstring("33 %"));
+    ImportControlMask(MaskFile(dir / "near.png", 96, 65, 30000), o.passesRoot);  // 1.477 vs 1.5: 1.5 % off, still a warning
+    CHECK(Decision(PlanProcess(o), "nr").warnings.size() == 1);
+    ImportControlMask(MaskFile(dir / "same.png", 96, 64, 30000), o.passesRoot);  // the frame's proportions
+    CHECK(Decision(PlanProcess(o), "nr").warnings.empty());
+    CHECK(Decision(PlanProcess(o), "nr").error.empty());
+    const ProcessResult first = RunProcess(o);
+    CHECK(Report(first, "nr").status == "ran");
+
+    // unstamped (unreadable as a control mask): an error while NR would run, a warning while it is reused
+    const auto cur = o.passesRoot / kControlMaskPass;
+    Manifest m = Manifest::Load(cur);
+    const Manifest good = m;
+    m.stageParams["static"] = false;
+    m.Save(cur);
+    const StageDecision un = Decision(PlanProcess(o), "nr");
+    CHECK(un.action == "reuse");  // its fingerprint is the mask's manifest stamp: the same
+    REQUIRE(un.warnings.size() == 1);
+    CHECK_THAT(un.warnings[0], Catch::Matchers::ContainsSubstring("не читается (not static one-frame) и не применяется"));
+    ProcessOptions forced = o;
+    forced.forceStages = {"nr"};
+    CHECK_THAT(Decision(PlanProcess(forced), "nr").error, Catch::Matchers::ContainsSubstring("маска управления не читается (not static one-frame)"));
+    CHECK_THROWS_WITH(RunProcess(forced), Catch::Matchers::ContainsSubstring("маска управления не читается"));
+    good.Save(cur);
+
+    // the frame file edited in place: an error at reuse as well - the plan would reuse NR made with the old pixels
+    MaskFile(cur / good.FrameFileName(0), 96, 64, 60000);
+    const StageDecision edited = Decision(PlanProcess(o), "nr");
+    CHECK(edited.action == "reuse");
+    CHECK_THAT(edited.error, Catch::Matchers::ContainsSubstring("изменён вне программы"));
+    CHECK_THROWS_WITH(RunProcess(o), Catch::Matchers::ContainsSubstring("изменён вне программы"));
+    CHECK_THROWS_WITH(RunProcess(forced), Catch::Matchers::ContainsSubstring("изменён вне программы"));
+}
+
+// Review of PR-8: C0 changed the output of NR with protect and skin masks of different sizes (the UI was unprotected before) - such passes
+// carry +nr.msize and the old ones are recomputed; masks of one size keep the fingerprint of before.
+TEST_CASE("RunProcess: an nr pass with protect and skin masks of different sizes carries the revision of their fix; one size keeps its fingerprint", "[integration][process][mask][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("mask_sizes_revision");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    auto mask = [&](const char* name, uint32_t w, uint32_t h) {
+        PassWriter wr(dir / "passes" / name, Manifest::ForPass(PassKind::Mask, w, h, FileFormat::Png));
+        for (int64_t f = 0; f < 2; ++f) wr.WriteFrame(f, MakePassImage(PassKind::Mask, w, h, PixelType::U8));
+        wr.Finish();
+    };
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.codec = "ffv1";
+    o.warp = true;
+    o.stages = StubStages(2);
+    for (auto& s : o.stages) s.enabled = s.name == "nr";
+    mask("mask_ui", 48, 32);
+    mask("mask_skin", 48, 32);
+    REQUIRE(Report(RunProcess(o), "nr").status == "ran");
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").tool.value("app", std::string()).find("nr.msize") == std::string::npos);  // one size: as before
+    std::filesystem::remove_all(o.passesRoot / "mask_skin");
+    mask("mask_skin", 24, 16);
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").tool.value("app", std::string()).find("+nr.msize") != std::string::npos);
+    CHECK(Report(RunProcess(o), "nr").status == "reused");  // the revision is stable
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").stageParams["mask_textures"] == "own_size");  // the mark of the fixed upload
+
+    // review of PR-8: a standalone pass (no fingerprint) of an older build with these masks lost the UI protection - not adopted under
+    // +nr.msize; the same pass with the mark of the fix is adopted
+    auto standalone = [&](bool mark) {
+        Manifest nr = Manifest::Load(o.passesRoot / "color_nr");
+        nr.fingerprint.clear();
+        if (!mark) nr.stageParams.erase("mask_textures");
+        nr.Save(o.passesRoot / "color_nr");
+    };
+    standalone(false);
+    const ProcessResult old = RunProcess(o);
+    CHECK(Report(old, "nr").status == "ran");
+    CHECK(Report(old, "nr").reason.find("TASK-0060") != std::string::npos);
+    standalone(true);
+    const ProcessResult fixed = RunProcess(o);
+    CHECK(Report(fixed, "nr").status == "reused");
+    CHECK(Report(fixed, "nr").reason.find("adopted") != std::string::npos);
+    // review of PR-8: a standalone pass that read no masks (--no-auto, another --masks-dir, the bypass) was not touched by the defect -
+    // recomputed for the masks it lacks, not as «made before the fix»
+    for (const bool bypass : {false, true}) {
+        INFO("bypass " << bypass);
+        Manifest nr = Manifest::Load(o.passesRoot / "color_nr");
+        nr.fingerprint.clear();
+        nr.stageParams.erase("mask_textures");
+        nr.stageParams["masks"] = bypass ? nlohmann::json::array({"ui", "skin"}) : nlohmann::json::array();
+        if (bypass) nr.stageParams["bypass"] = true;
+        nr.Save(o.passesRoot / "color_nr");
+        const ProcessResult maskless = RunProcess(o);
+        CHECK(Report(maskless, "nr").status == "ran");
+        CHECK(Report(maskless, "nr").reason.find("without the protect or skin masks") != std::string::npos);
+        CHECK(Report(maskless, "nr").reason.find("TASK-0060") == std::string::npos);
+    }
+}
+
+// PR-8 (regression of the race the design closes): a mask replaced from the CLI while process runs. Between the plan and NR's Init the
+// pass would say it was made with the new mask under the old fingerprint: the stage fails after the run, before the stamp. Replaced after
+// the first NR frame (Init and Setup done) it changes nothing in this run: the mask is on the GPU, the pass gets the label of the one applied.
+TEST_CASE("a control mask replaced after the plan fails the stage instead of stamping a wrong fingerprint; replaced after the first nr frame it changes nothing in this run", "[integration][process][mask][regression]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("mask_race");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.codec = "ffv1";
+    o.warp = true;
+    o.stages = StubStages(2);
+    for (auto& s : o.stages) s.enabled = s.name == "nr";
+    const ControlMaskImport a = ImportControlMask(MaskFile(dir / "a.png", 48, 32, 10000), o.passesRoot);
+    MaskFile(dir / "b.png", 48, 32, 50000);
+    MaskFile(dir / "c.png", 48, 32, 30000);
+    ProcessOptions race = o;
+    race.beforeStage = [&](const std::string& stage) {
+        if (stage == "nr") ImportControlMask(dir / "b.png", o.passesRoot);
+    };
+    CHECK_THROWS_WITH(RunProcess(race), Catch::Matchers::ContainsSubstring("the control mask changed while nr ran"));
+    REQUIRE(Manifest::Exists(o.passesRoot / "color_nr"));
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").fingerprint.empty());  // not stamped
+    // the next run: the unstamped pass was made with the mask now there (b), complete - adopted under b, not under a
+    const ProcessResult next = RunProcess(o);
+    CHECK(Report(next, "nr").status == "reused");
+    CHECK(Report(next, "nr").reason.find("adopted") != std::string::npos);
+    const std::string bFp = ReadControlMaskInfo(o.passesRoot / kControlMaskPass)->fingerprint;
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").inputs.at("mask_control") == bFp);
+    CHECK(bFp != a.mask.fingerprint);
+
+    // after the first frame of nr: the run keeps the mask it uploaded and names it
+    ProcessOptions late = o;
+    late.forceStages = {"nr"};
+    bool replaced = false;
+    late.progress = [&](const std::string& stage, int64_t done, int64_t) {
+        if (stage == "nr" && done >= 1 && !replaced) {
+            replaced = true;
+            ImportControlMask(dir / "c.png", o.passesRoot);
+        }
+    };
+    const ProcessResult lr = RunProcess(late);
+    CHECK(replaced);
+    CHECK(Report(lr, "nr").status == "ran");
+    const Manifest nr = Manifest::Load(o.passesRoot / "color_nr");
+    CHECK(nr.inputs.at("mask_control") == bFp);  // planned and applied: b
+    CHECK(ControlMaskLabelOf(nr) == bFp);
+    // review of PR-8: a hand-edited manifest - a label of another type is none (NR recomputed), not a JSON exception out of the plan
+    Manifest odd = nr;
+    for (const nlohmann::json& v : {nlohmann::json{{"fingerprint", 5}}, nlohmann::json{{"fingerprint", nullptr}}, nlohmann::json("x")}) {
+        INFO(v.dump());
+        odd.stageParams["control_mask"] = v;
+        CHECK(ControlMaskLabelOf(odd).empty());
+    }
+}
+
 TEST_CASE("RunProcess adopts a pass without a fingerprint only when it was made with the current scene list", "[integration][process][regression]") {
     const uint32_t w = 48, h = 32;
     const int cutAt = 2;

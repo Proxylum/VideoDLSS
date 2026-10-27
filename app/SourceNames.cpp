@@ -25,6 +25,7 @@ QString BaseName(const std::string& pass) {
     if (pass == "color_sr") return Tr("Апскейл");
     if (pass == "color_nr") return Tr("Улучшение");
     if (pass == "color_fg") return Tr("Генерация");
+    if (pass == "mask_control") return Tr("Маска управления");  // PR-8: before the rule of the imported masks
     if (pass.rfind("mask_", 0) == 0) return Tr("Маска %1").arg(QString::fromStdString(pass.substr(5)));
     return QString::fromStdString(pass);
 }
@@ -52,7 +53,8 @@ QString HumanSourceName(const std::string& source) {
 QString SourceTooltip(const ViewportSource& s) {
     QString t = QString::fromStdString(s.name);
     if (s.width && s.height) t += QString("  %1x%2").arg(s.width).arg(s.height);
-    if (s.lastFrame >= 0) t += Tr("  %1 кадров").arg(s.lastFrame - s.firstFrame + 1);
+    if (s.isStatic) t += Tr("  статичная маска: один кадр на всё время");  // PR-8
+    else if (s.lastFrame >= 0) t += Tr("  %1 кадров").arg(s.lastFrame - s.firstFrame + 1);
     if (s.fps.num > 0) t += QString("  %1 fps").arg(QString::number(s.fps.ToDouble(), 'g', 5));
     if (s.manifest && s.manifest->paramsCanonical.is_object() && !s.manifest->paramsCanonical.empty())
         t += "\n" + QString::fromStdString(s.manifest->paramsCanonical.dump());

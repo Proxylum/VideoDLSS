@@ -9,6 +9,7 @@
 #include "gpu/GpuFrameCache.h"
 #include "pipeline/Pipeline.h"
 #include "stages/ParamSchema.h"
+#include "stages/nr/NrLowpass.h"
 #include "util/Error.h"
 #include "util/Log.h"
 
@@ -98,7 +99,7 @@ nlohmann::json NrParamsFromOptions(const NrStageOptions& o) {
             {"input_transfer", o.tonemap.inputTransfer}};
 }
 
-NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t workH) {
+NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t workH, bool controlMask) {
     NrConfig cfg;
     cfg.backend = o.backend;
     cfg.width = workW;
@@ -107,7 +108,7 @@ NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t w
     cfg.localTone = o.localTone;
     cfg.localStructure = o.localStructure;
     cfg.skinStructure = o.skinStructure;
-    cfg.autoMask = o.autoMask;
+    cfg.autoMask = o.autoMask && !controlMask;  // PR-8: the control mask replaces it
     cfg.useGuides = o.useGuides;
     cfg.dllDir = o.dllDir;
     cfg.paramsBlock = o.paramsBlock;
@@ -183,6 +184,17 @@ void NrStage::Init(const StageConfig& config, D3D12Device& device) {
             stats_.masks.push_back(name);
         }
     }
+    // PR-8: the static control mask - read once here (its fingerprint is what the pass will say it was made with), uploaded at Setup.
+    // A folder that is no control mask (unstamped, not static, edited in place) stops the stage: it would run without what was asked
+    controlInfo_.reset();
+    stats_.controlMask.reset();
+    if (!options_.masksDir.empty() && !bypass_ && Manifest::Exists(options_.masksDir / kControlMaskPass)) {
+        std::string why;
+        controlInfo_ = ReadControlMaskInfo(options_.masksDir / kControlMaskPass, &why);
+        if (!controlInfo_) Throw("nr: mask_control: " + why);
+        stats_.masks.push_back("control");
+        stats_.controlMask = controlInfo_;
+    }
     first_ = true;
     hasPrev_ = false;
     setup_ = false;
@@ -201,7 +213,8 @@ void NrStage::Disable(const std::string& reason) {
 }
 
 bool NrStage::CreateBackends(std::string& backend) {
-    NrConfig cfg = NrConfigFromOptions(options_, workW_, workH_);
+    NrConfig cfg = NrConfigFromOptions(options_, workW_, workH_, controlInfo_.has_value());
+    if (options_.autoMask && controlInfo_) Log()->info("nr: auto mask off: the control mask replaces it (UseAutoMask 0)");
     if (options_.createWithMv) {
         // Setup runs before the first frame's guides are bound (Process): the zero guides take the sizes of the pass folders, the
         // model's without one (slot guides of a pipeline: `process` never sets the switch)
@@ -282,6 +295,21 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         for (size_t p = 0; p < backends_.size(); ++p)
             modelOut_.push_back(device_->CreateTexture2D(workW_, workH_, DXGI_FORMAT_R16G16B16A16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
         if (options_.temporal > 0.f) prev_ = device_->CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        if (controlInfo_) {
+            // at the frame size once (each axis: area means / bilinear on the CPU); checked against the fingerprint Init read - a mask
+            // replaced between the two fails here instead of running under the old label
+            const auto t0 = std::chrono::steady_clock::now();
+            const ControlMaskTexels t = LoadControlMaskForFrame(options_.masksDir / kControlMaskPass, w, h, controlInfo_->fingerprint);
+            control_ = device_->CreateTexture2D(w, h, t.rgb ? DXGI_FORMAT_R16G16B16A16_UNORM : DXGI_FORMAT_R16_UNORM);
+            device_->UploadTexture2D(control_.Get(), reinterpret_cast<const uint8_t*>(t.data.data()), static_cast<size_t>(w) * (t.rgb ? 8 : 2));
+            controlRgb_ = t.rgb;
+            controlSplit_ = t.split;
+            stats_.controlSplit = t.split;
+            stats_.lowpassDivisor = t.split ? NrLowpassDivisor(w, h) : 0;
+            Log()->info("nr: control mask {} {}x{} -> {}x{} ({}{}) in {:.0f} ms", controlInfo_->sourceName, controlInfo_->width, controlInfo_->height, w, h,
+                        t.rgb ? "RGB" : "grey", t.split ? ", split, d " + std::to_string(stats_.lowpassDivisor) : std::string(),
+                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+        }
     }
 
     if (!options_.outputDir.empty()) {
@@ -305,6 +333,19 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["tonemap"] = {{"curve", options_.tonemap.curve}, {"input_transfer", options_.tonemap.inputTransfer}, {"exposure_ev", options_.tonemap.exposureEv}};
         m.stageParams["guides"] = options_.useGuides;
         m.stageParams["masks"] = stats_.masks;
+        // TASK-0060 (C0): each mask its own texture size - the mark that tells a standalone pass made after the fix (adoptable with masks
+        // of different sizes) from one made before it (the UI unprotected)
+        if (!maskReaders_.empty()) m.stageParams["mask_textures"] = "own_size";
+        if (controlInfo_ && !bypass_) {
+            // the label of the mask applied (ControlMaskLabelOf): the plan compares it with the input it planned; no path
+            m.stageParams["control_mask"] = {{"fingerprint", controlInfo_->fingerprint},
+                                             {"source_name", controlInfo_->sourceName},
+                                             {"size", {controlInfo_->width, controlInfo_->height}},
+                                             {"grayscale", controlInfo_->grayscale},
+                                             {"split", controlSplit_},
+                                             {"lowpass_d", stats_.lowpassDivisor}};
+            if (options_.autoMask) m.stageParams["auto_mask_requested"] = true;  // asked, and switched off by the mask (any backend)
+        }
         if (nlohmann::json ab = NrAbJson(options_); !ab.empty()) m.stageParams["ab"] = std::move(ab);  // process never adopts it
         passManifest_ = std::move(m);  // the writer opens at the first output frame (OpenOutputs)
     }
@@ -342,22 +383,23 @@ void NrStage::LoadMasks(int64_t frame) {
         std::optional<PassImage>& dst = (name == "ui" || name == "ignore") ? protect : skin;
         dst = dst ? MaskMax(*dst, m) : std::move(m);
     }
-    auto upload = [&](const PassImage& img, ComPtr<ID3D12Resource>& tex) {
-        if (maskW_ != img.width || maskH_ != img.height) {  // one size for both masks: a change re-creates them
-            protect_.Reset();
-            skin_.Reset();
-            maskW_ = img.width;
-            maskH_ = img.height;
+    // each texture its own size (the resolve samples them by uv): a shared one dropped protect_ when the skin mask had another size,
+    // and the UI went unprotected on every frame (TASK-0060)
+    auto upload = [&](const PassImage& img, ComPtr<ID3D12Resource>& tex, uint32_t& texW, uint32_t& texH) {
+        if (texW != img.width || texH != img.height) {
+            tex.Reset();
+            texW = img.width;
+            texH = img.height;
         }
         if (!tex) tex = device_->CreateTexture2D(img.width, img.height, DXGI_FORMAT_R32_FLOAT);
         device_->UploadTexture2D(tex.Get(), img.data.data(), img.RowBytes());
     };
     if (protect) {
-        upload(*protect, protect_);
+        upload(*protect, protect_, protectW_, protectH_);
         protectFrame_ = true;
     }
     if (skin) {
-        upload(*skin, skin_);
+        upload(*skin, skin_, skinW_, skinH_);
         skinFrame_ = true;
     }
 }
@@ -484,6 +526,9 @@ void NrStage::Process(FrameContext& ctx) {
         ri.mv = options_.temporal > 0.f ? in.mv : nullptr;
         ri.protect = protectFrame_ ? protect_.Get() : nullptr;
         ri.skin = skinFrame_ ? skin_.Get() : nullptr;
+        ri.control = control_.Get();  // PR-8: once, after the last pass, with the strength (rp.lowpassDivisor 0: d of the frame)
+        ri.controlRgb = controlRgb_;
+        ri.controlSplit = controlSplit_;
         compose_->Resolve(cl, ri, output_.Get(), rp);
         if (prev_) {
             ComputeKernel::Transition(cl, output_.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -571,8 +616,11 @@ void NrStage::Shutdown() {
     prev_.Reset();
     protect_.Reset();
     skin_.Reset();
+    control_.Reset();
+    controlInfo_.reset();
+    controlRgb_ = controlSplit_ = false;
     modelOut_.clear();
-    maskW_ = maskH_ = 0;
+    protectW_ = protectH_ = skinW_ = skinH_ = 0;
     initialized_ = false;
     setup_ = false;
 }

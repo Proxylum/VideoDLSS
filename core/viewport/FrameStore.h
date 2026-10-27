@@ -45,6 +45,8 @@ struct ViewportSource {
     bool hasColor = false;
     // Pass folders: shared, sources are copied around freely (Manifest is ~0.5 KB + JSON).
     std::shared_ptr<const Manifest> manifest;
+    // A static pass (PR-8: mask_control, Manifest::IsStatic): its one frame stands at every time - no duration of its own
+    bool isStatic = false;
     bool HasFrame(int64_t f) const { return f >= firstFrame && (lastFrame < 0 || f <= lastFrame); }
 };
 
@@ -130,8 +132,8 @@ public:
     void WaitForCurrent(uint32_t timeoutMs = 60000);
 
     Status GetStatus(int64_t frame, const std::string& source) const;
-    Status StatusAt(double time, const std::string& source) const { return GetStatus(FrameAt(source, time), source); }
-    // Textures resident right now: of one frame index in every source (uniform rates: tests, benchmarks) ...
+    Status StatusAt(double time, const std::string& source) const { return GetStatus(KeyFrame(source, time), source); }
+    // Textures resident right now: of one frame index in every source (uniform rates: tests, benchmarks; a static source at any) ...
     FrameTextures Textures(int64_t frame) const;
     // ... or of every source's frame at `time`. While a loadable frame is not resident yet, the source's nearest
     // resident frame stands in for it (earlier frames first): the viewport holds the last frame instead of flashing a
@@ -207,6 +209,9 @@ private:
     bool InWindow(const Key& key) const;              // within the prefetch window of its source (mutex_ held)
     int SpanOf(const std::string& source) const;      // prefetch frames of a source: window seconds × its rate
     double ReferenceLastTime() const;                 // time of the reference's last frame (ExpectedFrames)
+    // The frame a source loads and keeps for `time`: FrameAt, or the one frame of a static source (PR-8) - the key of every load,
+    // window and status; FrameAt itself stays the time's frame (stepping, the «#N» of a cell)
+    int64_t KeyFrame(const std::string& source, double time) const;
 
     D3D12Device& device_;
     Options options_;

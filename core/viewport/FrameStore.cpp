@@ -7,6 +7,7 @@
 #include <cmath>
 #include <limits>
 
+#include "passes/ControlMaskPass.h"
 #include "pipeline/PassVersions.h"
 #include "util/Error.h"
 #include "util/Half.h"
@@ -17,6 +18,9 @@ namespace dlssvid {
 namespace {
 
 TextureKind KindForManifest(const Manifest& m) {
+    // PR-8: the control mask is colour - ToRgba16f scales U16 to [0, 1] and shows one grey channel grey (as a Scalar it would be raw
+    // 0..65535, white everywhere); the general rule for mask_* stays
+    if (m.pass == kControlMaskPass) return TextureKind::Color;
     if (const auto k = m.Kind()) {
         switch (*k) {
             case PassKind::DepthRaw:
@@ -161,6 +165,7 @@ std::vector<ViewportSource> FrameStore::DiscoverPasses(const std::filesystem::pa
             s.width = s.manifest->width;
             s.height = s.manifest->height;
             s.fps = s.manifest->fps;
+            s.isStatic = s.manifest->IsStatic();
             out.push_back(std::move(s));
         } catch (const std::exception& e) {
             Log()->warn("pass folder {} skipped: {}", entry.path().string(), e.what());
@@ -189,6 +194,7 @@ std::vector<ViewportSource> FrameStore::DiscoverPassVersions(const std::filesyst
             s.width = s.manifest->width;
             s.height = s.manifest->height;
             s.fps = s.manifest->fps;
+            s.isStatic = s.manifest->IsStatic();
             out.push_back(std::move(s));
         } catch (const std::exception& e) {
             Log()->warn("pass version {} skipped: {}", v.dir.string(), e.what());
@@ -276,8 +282,8 @@ void FrameStore::SetSources(std::vector<ViewportSource> sources) {
             fps_ = s.fps;
         }
     }
-    for (const auto& s : sources_)
-        if (s.lastFrame >= 0) duration_ = std::max(duration_, static_cast<double>(s.lastFrame + 1) / FpsOf(s.name));
+    for (const auto& s : sources_)  // a static source has no length: one frame would not make the time line one frame long
+        if (s.lastFrame >= 0 && !s.isStatic) duration_ = std::max(duration_, static_cast<double>(s.lastFrame + 1) / FpsOf(s.name));
 }
 
 const ViewportSource* FrameStore::FindSource(const std::string& name) const {
@@ -321,13 +327,19 @@ double FrameStore::ReferenceLastTime() const {
     if (const ViewportSource* src = FindSource("source"); src && src->lastFrame >= 0) return TimeOfFrame("source", src->lastFrame);
     double last = 0.0;
     for (const auto& s : sources_)
-        if (s.lastFrame >= 0) last = std::max(last, TimeOfFrame(s.name, s.lastFrame));
+        if (s.lastFrame >= 0 && !s.isStatic) last = std::max(last, TimeOfFrame(s.name, s.lastFrame));
     return last;
 }
 
 int64_t FrameStore::ExpectedFrames(const std::string& source) const {
     if (sources_.empty()) return 0;
+    if (const ViewportSource* s = FindSource(source); s && s->isStatic) return 1;
     return FrameAt(source, ReferenceLastTime()) + 1;
+}
+
+int64_t FrameStore::KeyFrame(const std::string& source, double time) const {
+    if (const ViewportSource* s = FindSource(source); s && s->isStatic) return s->firstFrame;
+    return FrameAt(source, time);
 }
 
 int FrameStore::SpanOf(const std::string& source) const {
@@ -339,7 +351,7 @@ int64_t FrameStore::CurrentFrame() const { return FrameAt("", currentTime_); }
 
 // ---- scheduling -----------------------------------------------------------------------------------
 
-bool FrameStore::InWindow(const Key& key) const { return std::llabs(key.frame - FrameAt(key.source, currentTime_)) <= SpanOf(key.source); }
+bool FrameStore::InWindow(const Key& key) const { return std::llabs(key.frame - KeyFrame(key.source, currentTime_)) <= SpanOf(key.source); }
 
 void FrameStore::SetCurrentTime(double time, const std::vector<std::string>& neededSources) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -362,7 +374,7 @@ void FrameStore::SetCurrentTime(double time, const std::vector<std::string>& nee
     for (int d = 0; d <= maxSpan; ++d)
         for (const auto& name : needed_) {
             if (d > SpanOf(name)) continue;
-            const int64_t f0 = FrameAt(name, currentTime_);
+            const int64_t f0 = KeyFrame(name, currentTime_);  // a static source: its one frame; the neighbours are outside it
             push(name, f0 + d);
             if (d > 0 && f0 - d >= 0) push(name, f0 - d);
         }
@@ -407,7 +419,7 @@ FrameTextures FrameStore::Textures(int64_t frame) const {
     std::lock_guard<std::mutex> lock(mutex_);
     FrameTextures out;
     for (const auto& [key, e] : entries_) {
-        if (key.frame != frame) continue;
+        if (const ViewportSource* s = FindSource(key.source); key.frame != frame && !(s && s->isStatic)) continue;  // a static source: at any index
         out[key.source] = e.desc;
         const_cast<Entry&>(e).lastUse = ++const_cast<uint64_t&>(useCounter_);
     }
@@ -431,7 +443,7 @@ FrameTextures FrameStore::TexturesAt(double time) const {
     std::lock_guard<std::mutex> lock(mutex_);
     FrameTextures out;
     for (const auto& s : sources_) {
-        const Key key{FrameAt(s.name, time), s.name};
+        const Key key{KeyFrame(s.name, time), s.name};
         std::map<Key, Entry>::const_iterator it = entries_.find(key);
         if (it == entries_.end()) {
             if (StatusLocked(key) == Status::Missing) continue;  // nothing to show and nothing to hold
@@ -446,7 +458,7 @@ FrameTextures FrameStore::TexturesAt(double time) const {
 
 std::optional<int64_t> FrameStore::HeldFrameAt(double time, const std::string& source) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    const Key key{FrameAt(source, time), source};
+    const Key key{KeyFrame(source, time), source};
     if (entries_.count(key) || StatusLocked(key) == Status::Missing) return std::nullopt;
     const auto it = NearestResident(key.frame, source);
     if (it == entries_.end()) return std::nullopt;
@@ -801,7 +813,7 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
 
 bool FrameStore::CurrentPendingLocked() const {
     for (const auto& name : needed_) {
-        const Key k{FrameAt(name, currentTime_), name};
+        const Key k{KeyFrame(name, currentTime_), name};
         if (entries_.count(k) || missing_.count(k)) continue;
         if (!inFlight_.count(k) && !kept_.count(k)) continue;  // queued or not loadable: a loader takes it first anyway
         bool published = false;
@@ -812,7 +824,7 @@ bool FrameStore::CurrentPendingLocked() const {
 }
 
 bool FrameStore::IsCurrentLocked(const Key& key) const {
-    return std::find(needed_.begin(), needed_.end(), key.source) != needed_.end() && key.frame == FrameAt(key.source, currentTime_);
+    return std::find(needed_.begin(), needed_.end(), key.source) != needed_.end() && key.frame == KeyFrame(key.source, currentTime_);
 }
 
 bool FrameStore::Update() {
@@ -907,16 +919,23 @@ bool FrameStore::Update() {
 
 void FrameStore::Evict() {
     std::lock_guard<std::mutex> lock(mutex_);
+    // a static source no longer shown (PR-8: a mask version compared once): its one frame is «in the window» and «current» at any time,
+    // so it would stay resident until the next SetSources - it goes as a frame outside the window does
+    auto idleStatic = [&](const Key& k) {
+        const ViewportSource* s = FindSource(k.source);
+        return s && s->isStatic && std::find(needed_.begin(), needed_.end(), k.source) == needed_.end();
+    };
     while (residentBytes_ > options_.vramBudgetBytes && !entries_.empty()) {
         // least recently used entry outside the prefetch window; if all are inside, the oldest anyway
         auto victim = entries_.end();
         for (auto it = entries_.begin(); it != entries_.end(); ++it) {
-            if (InWindow(it->first)) continue;
+            if (InWindow(it->first) && !idleStatic(it->first)) continue;
             if (victim == entries_.end() || it->second.lastUse < victim->second.lastUse) victim = it;
         }
         if (victim == entries_.end()) {
             for (auto it = entries_.begin(); it != entries_.end(); ++it)
-                if (it->first.frame != FrameAt(it->first.source, currentTime_) && (victim == entries_.end() || it->second.lastUse < victim->second.lastUse))
+                if ((it->first.frame != KeyFrame(it->first.source, currentTime_) || idleStatic(it->first)) &&
+                    (victim == entries_.end() || it->second.lastUse < victim->second.lastUse))
                     victim = it;
         }
         if (victim == entries_.end()) break;
@@ -933,7 +952,7 @@ void FrameStore::WaitForCurrent(uint32_t timeoutMs) {
         std::unique_lock<std::mutex> lock(mutex_);
         bool pending = false;
         for (const auto& name : needed_) {
-            const Key k{FrameAt(name, currentTime_), name};
+            const Key k{KeyFrame(name, currentTime_), name};
             const ViewportSource* s = FindSource(name);
             if (!s || !s->HasFrame(k.frame) || missing_.count(k) || entries_.count(k)) continue;
             pending = true;

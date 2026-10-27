@@ -17,6 +17,8 @@
 #include "io/VideoDecoder.h"
 #include "passes/Manifest.h"
 #include "passes/PassSequence.h"
+#include "passes/formats/PngIO.h"
+#include "pipeline/ControlMask.h"
 #include "util/Subprocess.h"
 #include "viewport/Project.h"
 
@@ -221,6 +223,87 @@ TEST_CASE("dlssvid import --stamp: a mask re-imported with other content recompu
     const nlohmann::json j = ReadJson(dir / "r.json");
     CHECK(j["stages"][0]["status"] == "ran");
     CHECK(j["stages"][0]["reason"].get<std::string>().find("input") != std::string::npos);
+}
+
+namespace {
+std::filesystem::path GreyMask(const std::filesystem::path& file, uint16_t v) {
+    PassImage img;
+    img.Allocate(16, 8, PixelType::U16, {"A"});
+    for (uint32_t y = 0; y < 8; ++y)
+        for (uint32_t x = 0; x < 16; ++x) img.Set(x, y, 0, static_cast<float>(v));
+    WritePng(file, img);
+    return file;
+}
+}  // namespace
+
+// PR-8: the control mask is an input of NR's fingerprint - a new mask recomputes NR, the same pixels again reuse it, and with the mask
+// removed (into the history) the NR version made without it comes back from the history instead of a rerun.
+TEST_CASE("a changed mask_control recomputes NR; the same image again reuses it; removing it restores the NR version made without it", "[integration][process][mask]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("mask_control");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const auto passes = dir / "passes";
+    const std::vector<std::string> process{"process", "-i", clip.string(), "-o", (dir / "result.mkv").string(), "--passes", passes.string(), "--warp", "--codec", "ffv1",
+                                           "--stages", "nr", "--nr-backend", "stub", "--keep-versions", "0", "--json", (dir / "r.json").string()};
+    auto nr = [&] { return StageJson(ReadJson(dir / "r.json"), "nr"); };
+    REQUIRE(RunCli(process).code == 0);  // without a mask
+    CHECK(nr()["status"] == "ran");
+    const std::string plainFp = nr()["fingerprint"];
+    auto importMask = [&](const std::filesystem::path& file) {
+        return RunCli({"import", "-i", file.string(), "--pass", "mask_control", "--static", "-o", passes.string()}).code;
+    };
+    REQUIRE(importMask(GreyMask(dir / "a.png", 20000)) == 0);
+    REQUIRE(RunCli(process).code == 0);
+    CHECK(nr()["status"] == "ran");
+    CHECK(nr()["reason"].get<std::string>().find("mask_control") != std::string::npos);
+    const std::string maskedFp = nr()["fingerprint"];
+    CHECK(maskedFp != plainFp);
+    CHECK(Manifest::Load(passes / "color_nr").inputs.count("mask_control") == 1);
+    REQUIRE(importMask(GreyMask(dir / "a16.png", 20000)) == 0);  // the same pixels from another file: unchanged
+    REQUIRE(RunCli(process).code == 0);
+    CHECK(nr()["status"] == "reused");
+    REQUIRE(importMask(GreyMask(dir / "b.png", 40000)) == 0);
+    REQUIRE(RunCli(process).code == 0);
+    CHECK(nr()["status"] == "ran");
+    CHECK(nr()["fingerprint"] != maskedFp);
+    REQUIRE(RemoveControlMask(passes));  // «Убрать» of the GUI: into the history
+    REQUIRE(RunCli(process).code == 0);
+    CHECK(nr()["status"] == "reused");
+    CHECK(!nr()["restored"].get<std::string>().empty());  // the version without the mask, from the history
+    CHECK(nr()["fingerprint"] == plainFp);
+}
+
+// PR-8 (regression of the adoption gap for mask_control): a standalone `dlssvid nr --no-auto` pass made without the mask has no
+// fingerprint; adopted while the mask is an input it would carry the masked run's fingerprint for an unmasked picture.
+TEST_CASE("an NR pass made by dlssvid nr without the control mask is not adopted while one is an input", "[integration][process][mask][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("mask_control_adopt");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const auto passes = dir / "passes";
+    REQUIRE(RunCli({"import", "-i", GreyMask(dir / "a.png", 20000).string(), "--pass", "mask_control", "--static", "-o", passes.string()}).code == 0);
+    const std::vector<std::string> process{"process", "-i", clip.string(), "-o", (dir / "result.mkv").string(), "--passes", passes.string(), "--warp", "--codec", "ffv1",
+                                           "--stages", "nr", "--nr-backend", "stub", "--json", (dir / "r.json").string()};
+    REQUIRE(RunCli({"nr", "-i", clip.string(), "-o", passes.string(), "--backend", "stub", "--warp", "--no-auto"}).code == 0);
+    CHECK(!Manifest::Load(passes / "color_nr").stageParams.contains("control_mask"));
+    REQUIRE(RunCli(process).code == 0);
+    nlohmann::json nr = StageJson(ReadJson(dir / "r.json"), "nr");
+    CHECK(nr["status"] == "ran");
+    CHECK(nr["reason"].get<std::string>().find("made without the control mask") != std::string::npos);
+    // made with the mask (the root's, picked up by default): the same picture - adopted
+    std::filesystem::remove_all(passes / "color_nr");
+    std::filesystem::remove_all(passes / "color_nr.v");
+    REQUIRE(RunCli({"nr", "-i", clip.string(), "-o", passes.string(), "--backend", "stub", "--warp"}).code == 0);
+    CHECK(Manifest::Load(passes / "color_nr").stageParams.contains("control_mask"));
+    REQUIRE(RunCli(process).code == 0);
+    nr = StageJson(ReadJson(dir / "r.json"), "nr");
+    CHECK(nr["status"] == "reused");
+    CHECK(nr["reason"].get<std::string>().find("adopted") != std::string::npos);
 }
 
 // TASK-0045, review: `import --stamp` saved the manifest as the run saw it (--y-up / --near / --far / --relative are for

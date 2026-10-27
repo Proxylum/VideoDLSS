@@ -9,13 +9,19 @@ endif()
 message(STATUS "DXC: ${DIRECTX_DXC_TOOL}")
 set(DLSSVID_SHADER_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/gen)
 set(DLSSVID_SHADER_HEADERS "")
+# the tests compile a frozen copy of the NR resolve with the same function and compare its bytecode with the product's (PR-8)
+set(DLSSVID_CORE_SHADER_GEN_DIR ${DLSSVID_SHADER_GEN_DIR} CACHE INTERNAL "generated shader headers of dlssvid_core")
+set(DLSSVID_DXC_TOOL ${DIRECTX_DXC_TOOL} CACHE INTERNAL "dxc.exe found by core")
+# shared shader fragments (NR: NrEdited.hlsli): every rule depends on them, an edit rebuilds the bytecode (test build.shader_include_deps;
+# GLOB_RECURSE - the NR shaders lie two levels down)
+file(GLOB_RECURSE DLSSVID_SHADER_INCLUDES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.hlsli)
 function(dlssvid_compile_shader hlsl entry profile var out_name)
   set(out ${DLSSVID_SHADER_GEN_DIR}/viewport/shaders/${out_name})
   add_custom_command(
     OUTPUT ${out}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${DLSSVID_SHADER_GEN_DIR}/viewport/shaders
     COMMAND ${DIRECTX_DXC_TOOL} -nologo -T ${profile} -E ${entry} -O3 -Qstrip_debug -Qstrip_reflect -Fh ${out} -Vn ${var} ${hlsl}
-    DEPENDS ${hlsl}
+    DEPENDS ${hlsl} ${DLSSVID_SHADER_INCLUDES}
     COMMENT "DXC ${profile} ${hlsl}:${entry}"
     VERBATIM)
   set(DLSSVID_SHADER_HEADERS ${DLSSVID_SHADER_HEADERS} ${out} PARENT_SCOPE)
@@ -31,7 +37,7 @@ function(dlssvid_compile_shader_ex hlsl entry profile var subdir out_name)
     OUTPUT ${out}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${DLSSVID_SHADER_GEN_DIR}/${subdir}
     COMMAND ${DIRECTX_DXC_TOOL} -nologo -T ${profile} -E ${entry} -O3 -Qstrip_debug -Qstrip_reflect -Fh ${out} -Vn ${var} ${ARGN} ${hlsl}
-    DEPENDS ${hlsl} ${CMAKE_SOURCE_DIR}/third_party/nis/NIS_Scaler.h
+    DEPENDS ${hlsl} ${CMAKE_SOURCE_DIR}/third_party/nis/NIS_Scaler.h ${DLSSVID_SHADER_INCLUDES}
     COMMENT "DXC ${profile} ${hlsl}:${entry} ${ARGN}"
     VERBATIM)
   set(DLSSVID_SHADER_HEADERS ${DLSSVID_SHADER_HEADERS} ${out} PARENT_SCOPE)
@@ -45,6 +51,11 @@ dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/upscale/shaders/Nis
 dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/tonemap/shaders/Tonemap.hlsl CSMain cs_6_0 g_TonemapCS stages/tonemap/shaders Tonemap_cs.h)
 dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/StubNr.hlsl CSMain cs_6_0 g_StubNrCS stages/nr/shaders StubNr_cs.h)
 dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/NrCompose.hlsl CSMain cs_6_0 g_NrComposeCS stages/nr/shaders NrCompose_cs.h)
+# PR-8: the variant with the control mask and the low band of its G / B split (the default variant above stays the resolve of PR-7)
+set(NR_MASK -D NR_CONTROL_MASK=1)
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/NrCompose.hlsl CSMain cs_6_0 g_NrComposeMaskCS stages/nr/shaders NrComposeMask_cs.h ${NR_MASK})
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/NrCompose.hlsl CSEditBox cs_6_0 g_NrEditBoxCS stages/nr/shaders NrEditBox_cs.h ${NR_MASK})
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/NrCompose.hlsl CSEditGauss cs_6_0 g_NrEditGaussCS stages/nr/shaders NrEditGauss_cs.h ${NR_MASK})
 
 add_library(dlssvid_core STATIC
   util/Log.h util/Log.cpp
@@ -57,6 +68,7 @@ add_library(dlssvid_core STATIC
   pipeline/IStage.h
   pipeline/Pipeline.h pipeline/Pipeline.cpp
   pipeline/ProcessRunner.h pipeline/ProcessRunner.cpp
+  pipeline/ControlMask.h pipeline/ControlMask.cpp
   pipeline/FgProcess.h pipeline/FgProcess.cpp
   pipeline/PassFingerprint.h pipeline/PassFingerprint.cpp
   pipeline/PassVersions.h pipeline/PassVersions.cpp
@@ -83,6 +95,7 @@ add_library(dlssvid_core STATIC
   passes/formats/TiffIO.h passes/formats/TiffIO.cpp
   passes/formats/NpzIO.h passes/formats/NpzIO.cpp
   passes/formats/RawIO.h passes/formats/RawIO.cpp
+  passes/formats/ImageProbe.h passes/formats/ImageProbe.cpp
   convert/DepthConvert.h convert/DepthConvert.cpp
   convert/MvConvert.h convert/MvConvert.cpp
   convert/ColorConvert.h convert/ColorConvert.cpp
@@ -90,6 +103,7 @@ add_library(dlssvid_core STATIC
   convert/Warp.h convert/Warp.cpp
   convert/SceneCut.h convert/SceneCut.cpp
   passes/ScenesPass.h passes/ScenesPass.cpp
+  passes/ControlMaskPass.h
   gpu/GpuFrame.h
   stages/flow/IFlowEstimator.h
   stages/flow/StubFlowEstimator.h stages/flow/StubFlowEstimator.cpp
@@ -116,6 +130,7 @@ add_library(dlssvid_core STATIC
   stages/nr/NgxNrBackend.h stages/nr/NgxNrBackend.cpp
   stages/nr/StubNrBackend.h stages/nr/StubNrBackend.cpp
   stages/nr/NrCompose.h stages/nr/NrCompose.cpp
+  stages/nr/NrLowpass.h stages/nr/NrLowpass.cpp
   stages/nr/NrStage.h stages/nr/NrStage.cpp
   stages/nr/NrPatch.h stages/nr/NrPatch.cpp
   stages/fg/IFrameGenerator.h stages/fg/IFrameGenerator.cpp

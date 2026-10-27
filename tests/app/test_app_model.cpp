@@ -31,6 +31,9 @@
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <type_traits>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +53,8 @@
 #include <catch2/catch_approx.hpp>
 
 #include "AppModel.h"
+#include "ControlMaskRow.h"
+#include "ControlMaskText.h"
 #include "SourceNames.h"
 #include "PlaybackClock.h"
 #include "ParamText.h"
@@ -67,6 +72,9 @@
 #include "TestClips.h"
 #include "util/Subprocess.h"
 #include "pipeline/PassVersions.h"
+#include "pipeline/ControlMask.h"
+#include "pipeline/PassFingerprint.h"
+#include "passes/formats/PngIO.h"
 #include "viewport/ViewportState.h"
 #include "passes/PassSequence.h"
 #include "viewport/Project.h"
@@ -229,6 +237,54 @@ struct StubDialogs {
     }
 };
 
+}  // namespace
+
+namespace {
+// a control mask image: grey or RGB U16 of w x h
+QString MaskPng(const std::filesystem::path& file, uint32_t w, uint32_t h, bool rgb, uint16_t v = 40000) {
+    PassImage img;
+    img.Allocate(w, h, PixelType::U16, rgb ? std::vector<std::string>{"R", "G", "B"} : std::vector<std::string>{"A"});
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x)
+            for (size_t c = 0; c < img.channels.size(); ++c) img.Set(x, y, c, static_cast<float>(rgb ? (v + 3000 * c + x) % 65536 : v));
+    WritePng(file, img);
+    return Q(file);
+}
+// a project of the stub methods on a short clip, its NR card with the test's dialogs
+struct MaskCard {
+    std::filesystem::path dir;
+    std::unique_ptr<AppModel> model;
+    StubDialogs dialogs;
+    std::unique_ptr<dlssvid::StageCard> card;
+    MaskCard(const char* name) : dir(Dir(name)) {
+        ClipSpec spec;
+        spec.frames = 2;
+        spec.width = 48;
+        spec.height = 32;
+        Project p = Project::Create(WriteClip(dir / "clip.mkv", spec), dir / "passes");
+        for (auto& st : p.stages)
+            if (st.name == "nr") st.params["backend"] = "stub";
+        p.Save(dir / "proj.dlssvid.json");
+        model = std::make_unique<AppModel>(true);
+        model->openProject(Q(dir / "proj.dlssvid.json"));
+        card = std::make_unique<dlssvid::StageCard>(*model, "nr");
+        card->setDialogs(dialogs.Make());
+        card->refresh();
+    }
+    ControlMaskRow* row() const { return card->controlMaskRow(); }
+    bool load(const QString& file) {  // through the card's «Загрузить…»: the dialog, the thread, the end
+        dialogs.open = file;
+        QSignalSpy done(model.get(), &AppModel::controlMaskFinished);
+        row()->loadButton()->click();
+        if (done.isEmpty() && !done.wait(20000)) return false;
+        return done.last().at(0).toBool();
+    }
+    QLabel* label(const char* text) const {
+        for (QLabel* l : card->findChildren<QLabel*>())
+            if (l->text() == QString::fromUtf8(text)) return l;
+        return nullptr;
+    }
+};
 }  // namespace
 
 TEST_CASE("AppModel opens a project, navigates frames and saves the viewport state", "[app][model][gpu]") {
@@ -2029,7 +2085,339 @@ TEST_CASE("StageCard NR screenshots for a merge request", "[.shots]") {
     model.refreshPlan();
     shot("nr_changed", false);
     shot("nr_more", true);
+    {  // PR-8: the row «Маска управления» with a mask loaded: the automatic mask off with its note
+        QSignalSpy done(&model, &AppModel::controlMaskFinished);
+        model.setStageParam("nr", "auto_mask", true);
+        model.importControlMask(MaskPng(d / "portrait_mask.png", 48, 32, true));
+        REQUIRE(done.wait(20000));
+        shot("nr_control_mask", false);
+    }
     QSettings().remove("card/nr/more");
+}
+
+
+// PR-8: the row «Маска управления» of the NR card loads the mask through the dialog on the model's thread; with it the automatic mask
+// and «Структура кожи» are off with their notes; «Показать» puts it on the viewport; «Убрать» asks, moves it into the history.
+TEST_CASE("StageCard NR control mask row: load through the dialog, status, auto mask and skin structure disabled with notes, Show selects the source, Remove asks, retires and clears; a cancelled Remove keeps it", "[app][card][nr][mask]") {
+    App();
+    MaskCard m("card_mask");
+    REQUIRE(m.row());
+    CHECK(m.label("Маска управления"));
+    CHECK(m.row()->status()->text() == QString::fromUtf8("Не загружена"));
+    CHECK(m.row()->loadButton()->isEnabled());
+    CHECK(m.row()->loadButton()->text() == QString::fromUtf8("Загрузить…"));
+    CHECK_FALSE(m.row()->showButton()->isVisibleTo(m.card.get()));
+    CHECK_FALSE(m.label("выключена: её заменяет маска управления"));
+    m.dialogs.open.clear();  // a cancelled dialog: nothing happens
+    m.row()->loadButton()->click();
+    CHECK_FALSE(m.model->controlMaskBusy());
+
+    REQUIRE(m.load(MaskPng(m.dir / "mask.png", 16, 8, true)));
+    CHECK(m.model->controlMask().status == AppModel::ControlMaskState::Status::Ready);
+    CHECK(m.row()->status()->text() == QString::fromUtf8("Активна · RGB · 16×8\nmask.png"));
+    CHECK(m.row()->status()->toolTip().contains("sha256:"));
+    CHECK(m.row()->loadButton()->text() == QString::fromUtf8("Заменить…"));
+    CHECK(m.row()->showButton()->isVisibleTo(m.card.get()));
+    CHECK(m.row()->removeButton()->isVisibleTo(m.card.get()));
+    QLabel* autoNote = m.label("выключена: её заменяет маска управления");  // the automatic mask: off, said why
+    REQUIRE(autoNote);
+    CHECK(autoNote->isVisibleTo(m.card.get()));
+    REQUIRE(m.label("не действует при маске управления"));
+    CHECK(m.label("не действует при маске управления")->isVisibleTo(m.card.get()));
+    CHECK(m.model->sourceNames().contains("mask_control"));
+
+    m.row()->showButton()->click();
+    const auto needed = m.model->neededSources();
+    CHECK(std::find(needed.begin(), needed.end(), "mask_control") != needed.end());
+
+    m.dialogs.answer = false;  // «Убрать», cancelled: the mask stays
+    m.row()->removeButton()->click();
+    CHECK(m.dialogs.confirms == 1);
+    CHECK(m.dialogs.texts.last().contains(QString::fromUtf8("уйдёт в историю версий")));
+    CHECK(ReadControlMaskInfo(m.dir / "passes" / "mask_control"));
+    m.dialogs.answer = true;
+    m.row()->removeButton()->click();
+    CHECK(!std::filesystem::exists(m.dir / "passes" / "mask_control"));
+    CHECK(ListPassVersions(m.dir / "passes", "mask_control").size() == 1);  // in the history: «Вернуть» brings it back
+    CHECK(m.row()->status()->text() == QString::fromUtf8("Не загружена"));
+    CHECK_FALSE(autoNote->isVisibleTo(m.card.get()));
+}
+
+// PR-8: nothing can swap the mask under a run or take its folder in the middle of an import - the row, «Обработать», the folder of
+// passes and «Вернуть» / «Удалить» / gc of the versions panel wait; a reload meanwhile keeps the mask off the viewport.
+TEST_CASE("StageCard NR control mask row: buttons off while a task runs or an import is in progress; Process waits for the import; Use, Remove and gc in the versions panel are off meanwhile and a reload keeps the mask out of the viewport and Importing; the note at intensity 0; an unreadable folder offers Remove, a folder without a loadable manifest is deleted", "[app][card][mask]") {
+    App();
+    MaskCard m("card_mask_busy");
+    bool taskRuns = false;
+    m.card->setBusyCheck([&] { return taskRuns; });
+    REQUIRE(m.load(MaskPng(m.dir / "a.png", 16, 8, false)));
+    QPushButton* runAlone = nullptr;
+    for (QPushButton* b : m.card->findChildren<QPushButton*>())
+        if (b->text() == QString::fromUtf8("Запустить отдельно")) runAlone = b;
+    REQUIRE(runAlone);
+    taskRuns = true;  // a task of the queue
+    m.card->refresh();
+    CHECK(runAlone->isEnabled());  // a standalone run queues behind the task, as before PR-8
+    CHECK_FALSE(m.row()->loadButton()->isEnabled());
+    CHECK_FALSE(m.row()->removeButton()->isEnabled());
+    CHECK_FALSE(m.row()->showButton()->isEnabled());
+    CHECK(m.row()->loadButton()->toolTip() == QString::fromUtf8("Недоступно во время обработки"));
+    taskRuns = false;
+    m.card->refresh();
+    REQUIRE(m.row()->loadButton()->isEnabled());
+
+    // an import held at its last step (after the previous mask went to the history)
+    TaskQueue queue;
+    ProjectPanel panel(*m.model, queue);
+    std::atomic<bool> release{false}, reached{false};
+    ControlMaskHooksForTests().beforePlace = [&](const std::filesystem::path&) {
+        reached = true;
+        while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    };
+    QSignalSpy done(m.model.get(), &AppModel::controlMaskFinished);
+    m.dialogs.open = MaskPng(m.dir / "b.png", 16, 8, true);
+    m.row()->loadButton()->click();
+    Pump([&] { return reached.load(); }, 20000);
+    REQUIRE(reached);
+    CHECK(m.model->controlMaskBusy());
+    m.card->refresh();
+    CHECK(m.row()->status()->text() == QString::fromUtf8("Загружается…\nb.png"));
+    CHECK_FALSE(m.row()->loadButton()->isEnabled());
+    CHECK_FALSE(runAlone->isEnabled());  // the import is writing the folder NR would read
+    panel.refresh();
+    QPushButton* process = nullptr;
+    QPushButton* gc = nullptr;
+    for (QPushButton* b : panel.findChildren<QPushButton*>()) {
+        if (b->text().startsWith(QString::fromUtf8("Обработать"))) process = b;
+        if (b->toolTip() == QString::fromUtf8("Недоступно во время обработки или загрузки маски") && b->text() != QString::fromUtf8("Вернуть") &&
+            b->text() != QString::fromUtf8("Удалить"))
+            gc = b;
+    }
+    REQUIRE(process);
+    CHECK_FALSE(process->isEnabled());
+    CHECK(gc);  // the gc button says why it waits (the history holds a.png)
+    if (gc) CHECK_FALSE(gc->isEnabled());
+    int versionButtons = 0;
+    for (QPushButton* b : panel.findChildren<QPushButton*>())
+        if (b->text() == QString::fromUtf8("Вернуть") || b->text() == QString::fromUtf8("Удалить")) {
+            ++versionButtons;
+            CHECK_FALSE(b->isEnabled());
+        }
+    CHECK(versionButtons >= 2);
+    // review of PR-8: Ctrl+Return (processAll) waits for the import as the button does
+    for (QShortcut* s : panel.findChildren<QShortcut*>())
+        if (s->key() == QKeySequence("Ctrl+Return")) emit s->activated();
+    CHECK_FALSE(queue.busy());
+    m.model->reloadSources();  // another caller's reload meanwhile
+    CHECK_FALSE(m.model->sourceNames().contains("mask_control"));
+    for (const QString& s : m.model->sourceNames()) CHECK_FALSE(s.startsWith("mask_control@"));
+    CHECK(m.model->controlMask().status == AppModel::ControlMaskState::Status::Importing);
+    release = true;
+    REQUIRE(done.wait(20000));
+    ControlMaskHooksForTests().beforePlace = nullptr;
+    CHECK(done.last().at(0).toBool());
+    CHECK(m.model->controlMask().status == AppModel::ControlMaskState::Status::Ready);
+    CHECK(m.model->sourceNames().contains("mask_control"));
+    m.card->refresh();
+    CHECK(runAlone->isEnabled());
+
+    // intensity 0: loaded, not acting; the automatic mask is free again (no input)
+    m.model->setStageParam("nr", "intensity", 0.0);
+    m.card->refresh();
+    CHECK(m.row()->status()->text() == QString::fromUtf8("Загружена · RGB · 16×8\nb.png"));
+    CHECK(m.row()->note()->text() == QString::fromUtf8("не действует при интенсивности 0: модель не вызывается"));
+    CHECK_FALSE(m.label("выключена: её заменяет маска управления"));  // the row is enabled again: no note
+    m.model->setStageParam("nr", "intensity", 1.0);
+
+    // unreadable (not static): «Убрать» offered, «Показать» not
+    const auto cur = m.dir / "passes" / "mask_control";
+    Manifest man = Manifest::Load(cur);
+    man.stageParams["static"] = false;
+    man.Save(cur);
+    m.model->reloadSources();
+    m.card->refresh();
+    CHECK(m.row()->status()->text() == QString::fromUtf8("Не читается\nне статичная маска"));
+    CHECK(m.row()->status()->property("role").toString() == "warn");
+    CHECK(m.row()->removeButton()->isVisibleTo(m.card.get()));
+    CHECK_FALSE(m.row()->showButton()->isVisibleTo(m.card.get()));
+    m.dialogs.answer = false;  // the dialog names the mask from its manifest (review of PR-8: «Маска «» …»)
+    m.row()->removeButton()->click();
+    CHECK(m.dialogs.texts.last().contains(QString::fromUtf8("Маска «b.png» уйдёт в историю версий")));
+    // a folder without a loadable manifest: deleted, not kept in the history as _broken
+    { std::ofstream(cur / Manifest::kFileName) << "{ broken"; }
+    m.model->reloadSources();
+    m.card->refresh();
+    CHECK(m.row()->status()->text() == QString::fromUtf8("Не читается\nпапка повреждена"));
+    m.dialogs.answer = true;
+    const int confirms = m.dialogs.confirms;
+    const size_t history = ListPassVersions(m.dir / "passes", "mask_control").size();
+    m.row()->removeButton()->click();
+    CHECK(m.dialogs.confirms == confirms + 1);
+    CHECK(m.dialogs.texts.last().contains(QString::fromUtf8("повреждена и будет удалена")));
+    CHECK(!std::filesystem::exists(cur));
+    CHECK(ListPassVersions(m.dir / "passes", "mask_control").size() == history);
+}
+
+// Review of PR-8: an import that ends after another project was opened re-reads the mask of the project open now - not «Загружается…» for
+// good, and that project's mask back on the viewport.
+TEST_CASE("AppModel: a mask import that ends after another project was opened shows the mask of the open project", "[app][mask][regression]") {
+    App();
+    MaskCard a("card_mask_switch_a");
+    MaskCard b("card_mask_switch_b");
+    REQUIRE(b.load(MaskPng(b.dir / "b_mask.png", 16, 8, true)));  // project B has a mask of its own
+    std::atomic<bool> release{false}, reached{false};
+    ControlMaskHooksForTests().beforePlace = [&](const std::filesystem::path&) {
+        reached = true;
+        while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    };
+    QSignalSpy done(a.model.get(), &AppModel::controlMaskFinished);
+    a.dialogs.open = MaskPng(a.dir / "a_mask.png", 16, 8, false);
+    a.row()->loadButton()->click();
+    Pump([&] { return reached.load(); }, 20000);
+    REQUIRE(reached);
+    a.model->openProject(Q(b.dir / "proj.dlssvid.json"));  // another project while the import runs
+    release = true;
+    REQUIRE(done.wait(20000));
+    ControlMaskHooksForTests().beforePlace = nullptr;
+    CHECK(a.model->controlMask().status == AppModel::ControlMaskState::Status::Ready);
+    CHECK(a.model->controlMask().file == QString::fromUtf8("b_mask.png"));
+    CHECK(a.model->sourceNames().contains("mask_control"));
+    CHECK(ReadControlMaskInfo(a.dir / "passes" / "mask_control"));  // the import itself finished into project A
+}
+
+// Review of PR-8: the end of an import was shown against whichever project was open at its end - «эта маска уже загружена» under another
+// project's mask, a failure read as being about that project's mask.
+TEST_CASE("ControlMaskRow: an import that ends after another project was opened shows no note there, and its failure names the earlier project", "[app][mask][regression]") {
+    App();
+    MaskCard a("card_mask_note_a");
+    MaskCard b("card_mask_note_b");
+    const QString file = MaskPng(a.dir / "a_mask.png", 16, 8, false);
+    REQUIRE(a.load(file));
+    REQUIRE(b.load(MaskPng(b.dir / "b_mask.png", 16, 8, true)));
+    // the same file into A again (Unchanged); B is open before its end is delivered: the end is queued to this thread
+    QSignalSpy done(a.model.get(), &AppModel::controlMaskFinished);
+    a.dialogs.open = file;
+    a.row()->loadButton()->click();
+    a.model->openProject(Q(b.dir / "proj.dlssvid.json"));
+    REQUIRE(done.wait(20000));
+    CHECK(done.last().at(0).toBool());
+    CHECK_FALSE(done.last().at(1).toBool());  // Unchanged
+    CHECK(a.model->controlMask().file == QString::fromUtf8("b_mask.png"));
+    CHECK_FALSE(a.row()->note()->text().contains(QString::fromUtf8("эта маска уже загружена")));
+    // a failure into A ending while B is open: said, of the project opened before
+    { std::ofstream(a.dir / "text.png") << "not an image"; }
+    a.model->openProject(Q(a.dir / "proj.dlssvid.json"));
+    const int warnings = a.dialogs.warnings;
+    a.dialogs.open = Q(a.dir / "text.png");
+    a.row()->loadButton()->click();
+    a.model->openProject(Q(b.dir / "proj.dlssvid.json"));
+    REQUIRE(done.wait(20000));
+    CHECK_FALSE(done.last().at(0).toBool());
+    CHECK(a.dialogs.warnings == warnings + 1);
+    CHECK(a.dialogs.texts.last().startsWith(QString::fromUtf8("Маска для проекта, открытого раньше, не загружена: Формат не поддерживается")));
+    CHECK(a.model->controlMask().file == QString::fromUtf8("b_mask.png"));
+}
+
+// PR-8: one function behind the card and the CLI - one fingerprint for one file
+TEST_CASE("The control mask from the card has the fingerprint ImportControlMask gives for the same file", "[app][mask]") {
+    App();
+    MaskCard m("card_mask_fp");
+    const QString file = MaskPng(m.dir / "mask.png", 20, 10, true);
+    REQUIRE(m.load(file));
+    const std::string fp = Manifest::Load(m.dir / "passes" / "mask_control").fingerprint;
+    CHECK(ImportControlMask(std::filesystem::path(file.toStdWString()), m.dir / "other").mask.fingerprint == fp);
+    CHECK(m.model->controlMask().fingerprint == QString::fromStdString(ShortFingerprint(fp)));
+    // the same file again: nothing written, said in the note
+    REQUIRE(m.load(file));
+    CHECK(m.row()->note()->text().contains(QString::fromUtf8("эта маска уже загружена")));
+    CHECK(Manifest::Load(m.dir / "passes" / "mask_control").fingerprint == fp);
+    // review of PR-8: the note is about that mask - gone with the project (and with another version or project)
+    m.model->closeProject();
+    CHECK_FALSE(m.row()->note()->text().contains(QString::fromUtf8("эта маска уже загружена")));
+    m.model->openProject(Q(m.dir / "proj.dlssvid.json"));
+    CHECK(m.model->controlMask().status == AppModel::ControlMaskState::Status::Ready);
+    CHECK_FALSE(m.row()->note()->text().contains(QString::fromUtf8("эта маска уже загружена")));
+}
+
+TEST_CASE("A failed control mask import shows the Russian text of its kind and keeps the previous mask", "[app][card][mask]") {
+    App();
+    MaskCard m("card_mask_fail");
+    REQUIRE(m.load(MaskPng(m.dir / "mask.png", 16, 8, false)));
+    const std::string fp = Manifest::Load(m.dir / "passes" / "mask_control").fingerprint;
+    { std::ofstream(m.dir / "text.png") << "not an image"; }
+    CHECK_FALSE(m.load(Q(m.dir / "text.png")));
+    CHECK(m.dialogs.warnings == 1);
+    CHECK(m.dialogs.texts.last() == QString::fromUtf8("Формат не поддерживается. Подходят PNG, TIFF и EXR."));
+    CHECK(Manifest::Load(m.dir / "passes" / "mask_control").fingerprint == fp);  // the previous mask in place
+    CHECK(m.model->controlMask().status == AppModel::ControlMaskState::Status::Ready);
+    CHECK(m.model->sourceNames().contains("mask_control"));  // back on the viewport
+    // the other kinds' texts
+    using K = ControlMaskIssue::Kind;
+    CHECK(ControlMaskIssueText({K::TooLarge, "", 20000, 100}) == QString::fromUtf8("Изображение 20000×100 слишком большое: сторона — не больше 16384 точек, всего — не больше 67 Мп."));
+    CHECK(ControlMaskIssueText({K::Busy, "", 0, 0}).contains(QString::fromUtf8("другой импорт")));
+    CHECK(ControlMaskIssueText({K::Locked, "", 0, 0}).contains(QString::fromUtf8("Прежняя маска осталась на месте")));
+    CHECK(ControlMaskIssueText({K::Channels, "the EXR has no R, G, B, Y or a single channel (u, v)", 0, 0}).contains("(u, v)"));
+    CHECK(ControlMaskIssueText({K::NoRoot, "", 0, 0}).startsWith(QString::fromUtf8("Сначала откройте видео")));
+    CHECK(ControlMaskIssueText({K::Tiff, "", 0, 0}).contains(QString::fromUtf8("больше 4 каналов")));
+    ControlMaskIssue noAccess{K::Unreadable, "cannot open mask.png"};  // review of PR-8: held, no access - not «повреждён»
+    noAccess.noAccess = true;
+    CHECK(ControlMaskIssueText(noAccess) == QString::fromUtf8("Файл не открывается: его держит другая программа или к нему нет доступа."));
+    CHECK(ControlMaskIssueText({K::Unreadable, "libpng: IDAT: CRC error", 0, 0}) == QString::fromUtf8("Файл не читается: он повреждён или это не изображение."));
+    // the versions panel's line of a hand-made manifest: values of another type left out, no exception
+    CHECK(HumanControlMaskParams({{"source_name", nullptr}, {"grayscale", 1}, {"source_size", {16, 8}}}) == QString::fromUtf8("16×8 · RGB"));
+    CHECK(HumanControlMaskParams({{"source_name", "m.png"}, {"grayscale", true}}) == QString::fromUtf8("m.png · серая"));
+    CHECK(ControlMaskWhyText("frame not readable: cannot open for hashing") == QString::fromUtf8("файл не открывается (занят?)"));
+    CHECK(ControlMaskWhyText("unreadable: x") == QString::fromUtf8("манифест не читается"));
+}
+
+TEST_CASE("Source names, the static label and the versions panel name the control mask by file, size and kind", "[app][versions][mask]") {
+    App();
+    MaskCard m("card_mask_names");
+    REQUIRE(m.load(MaskPng(m.dir / "first.png", 16, 8, true)));
+    REQUIRE(m.load(MaskPng(m.dir / "second.png", 16, 8, false)));  // the first goes to the history
+    CHECK(HumanSourceName("mask_control") == QString::fromUtf8("Маска управления"));
+    CHECK(HumanSourceName("mask_control@20261027-120000_ab12cd34").startsWith(QString::fromUtf8("Маска управления · ")));
+    const ViewportSource* src = m.model->store().FindSource("mask_control");
+    REQUIRE(src);
+    CHECK(src->isStatic);
+    CHECK(SourceTooltip(*src).contains(QString::fromUtf8("статичная маска: один кадр на всё время")));
+    TaskQueue queue;
+    ProjectPanel panel(*m.model, queue);
+    panel.refresh();
+    QStringList texts;
+    for (QLabel* l : panel.findChildren<QLabel*>()) texts << l->text();
+    CHECK(texts.contains(QString::fromUtf8("second.png · 16×8 · серая")));
+    CHECK(texts.contains(QString::fromUtf8("first.png · 16×8 · RGB")));
+    CHECK(texts.contains(QString::fromUtf8("Маска управления")));
+}
+
+// PR-8: the mask is a pass, not a key - the card's reset, its presets and the pipeline presets neither drop nor hold it
+TEST_CASE("Card reset, card presets and pipeline presets keep the control mask; a saved preset holds no mask", "[app][presets][mask]") {
+    App();
+    ClearPresets();
+    MaskCard m("card_mask_presets");
+    REQUIRE(m.load(MaskPng(m.dir / "mask.png", 16, 8, true)));
+    const std::string fp = Manifest::Load(m.dir / "passes" / "mask_control").fingerprint;
+    m.model->setStageParam("nr", "intensity", 1.4);
+    const auto saved = m.model->saveStagePreset("nr", QString::fromUtf8("С маской"));
+    REQUIRE(saved.ok);
+    const std::string text = [&] {  // closed at once: ClearPresets removes the folder
+        std::ifstream in(std::filesystem::path(saved.file.toStdWString()));
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }();
+    CHECK(text.find("mask_control") == std::string::npos);
+    CHECK(text.find("mask.png") == std::string::npos);
+    REQUIRE(m.model->resetStageCard("nr").ok);
+    CHECK(ReadControlMaskInfo(m.dir / "passes" / "mask_control")->fingerprint == fp);
+    REQUIRE(m.model->applyStagePreset("nr", saved.file).ok);
+    CHECK(ReadControlMaskInfo(m.dir / "passes" / "mask_control")->fingerprint == fp);
+    const auto pipeline = m.model->savePipelinePreset(QString::fromUtf8("Всё с маской"));
+    REQUIRE(pipeline.ok);
+    m.model->setStageParam("nr", "intensity", 0.6);
+    REQUIRE(m.model->applyPipelinePreset(pipeline.file).ok);
+    CHECK(ReadControlMaskInfo(m.dir / "passes" / "mask_control")->fingerprint == fp);
+    CHECK(m.model->controlMask().status == AppModel::ControlMaskState::Status::Ready);
+    ClearPresets();
 }
 
 // PR-13: the card «Склейки» says what the list is and what a threshold costs (no decoding over the stored scores, «станет N (было M)»),

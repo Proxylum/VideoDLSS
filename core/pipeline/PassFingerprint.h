@@ -23,6 +23,9 @@ constexpr const char* kPassToolVersion = "0.1.0";
 // - nr.ev (TASK-0043): exposure in stops; png.2 (TASK-0042): PNG16 colour passes scaled;
 // - nr.gain / nr.i0 (PR-7): nr.intensity is the edit strength after the model (it went to NGX before) - any value but 1 is
 //   another picture; 0 does not call the model at all.
+// Two revisions of nr depend on the inputs and are added where the inputs are known (ProcessRunner, DecideStage): nr.msize (TASK-0060)
+// - protect and skin masks of different sizes, which lost the UI protection before PR-8; kNrControlMaskRevision (NrLowpass.h) - the
+// control mask's code, for passes with mask_control.
 std::string PassToolVersionFor(const std::string& stage, const nlohmann::json& params);
 // The revisions `newApp` has and `oldApp` lacks ("0.1.0", "0.1.0+nr.gain" -> {"nr.gain"}): what the card names on tool_changed.
 std::vector<std::string> AddedToolRevisions(const std::string& oldApp, const std::string& newApp);
@@ -103,8 +106,9 @@ std::vector<std::vector<std::string>> StageInputCandidates(const std::string& st
 // The fingerprint of an imported pass from its content (`dlssvid import --stamp`, TASK-0045): "sha256:" of the canonical
 // {"pass", "layout": the manifest without its provenance (size, format, channels, mv.y_up, depth range), "frames": [sha256
 // of each frame file]}. A pass without a fingerprint stands for its source and length only, so a mask re-imported with
-// other content and the same frame count reused the NR pass made from the old one.
-std::string ContentFingerprint(const std::filesystem::path& dir, const Manifest& manifest);
+// other content and the same frame count reused the NR pass made from the old one. cachedHash: the frame files through
+// Sha256FileCached (PR-8: the control mask is checked against its stamp on every plan) - the same value.
+std::string ContentFingerprint(const std::filesystem::path& dir, const Manifest& manifest, bool cachedHash = false);
 
 // Current UTC time as ISO-8601 ("2026-09-22T14:09:31Z") — the manifest's `created`.
 std::string NowIso8601();

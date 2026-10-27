@@ -13,6 +13,7 @@
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
 #include "passes/ScenesPass.h"
+#include "pipeline/ControlMask.h"
 #include "pipeline/IStage.h"
 #include "stages/nr/INrBackend.h"
 #include "stages/nr/NrCompose.h"
@@ -59,7 +60,8 @@ struct NrStageOptions {
     // inputs
     std::filesystem::path colorDir;     // color_sr pass folder (empty: slot color_sr when present, else the decoded frame)
     std::filesystem::path depthDir, mvDir;   // depth_dlss / mv_dlss pass folders (optional)
-    std::filesystem::path masksDir;     // root with mask_ui / mask_ignore / mask_face / mask_skin pass folders (optional)
+    // root with mask_ui / mask_ignore / mask_face / mask_skin pass folders and the static mask_control (PR-8), optional
+    std::filesystem::path masksDir;
     bool useCachePasses = true;         // take color_sr / depth_dlss / mv_dlss from the cache slot when present
     // outputs
     std::filesystem::path outputDir;    // pass root: <outputDir>/color_nr (empty: no files)
@@ -84,8 +86,9 @@ void ApplyNrParams(const nlohmann::json& params, NrStageOptions& o);
 // schema - one check for the standalone `dlssvid nr` and for `process` (TASK-0044: `--intensity 5` reached NGX).
 nlohmann::json NrParamsFromOptions(const NrStageOptions& o);
 // The backend's configuration for the options at the model's size: what NrStage creates its features with and what
-// `dlssvid nr --check` creates one with - the tuning NGX takes at CreateFeature is the same in both (TASK-0047).
-NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t workH);
+// `dlssvid nr --check` creates one with - the tuning NGX takes at CreateFeature is the same in both (TASK-0047). controlMask (PR-8,
+// no default: both callers say): a control mask replaces the model's automatic skin mask, UseAutoMask 0 whatever auto_mask says.
+NrConfig NrConfigFromOptions(const NrStageOptions& o, uint32_t workW, uint32_t workH, bool controlMask);
 // The model's resolution for a colour frame of w x h at `modelScale`: even sides, at least 2. NrStage::Setup and the estimates
 // (Estimates.cpp, D8) use this one formula, so a recorded work_size compares with the run's.
 std::pair<uint32_t, uint32_t> NrWorkSize(uint32_t w, uint32_t h, double modelScale);
@@ -122,6 +125,9 @@ public:
         bool bypass = false;  // intensity 0: the model was not called (PR-7)
         bool depthUsed = false, mvUsed = false;
         std::vector<std::string> masks;
+        std::optional<ControlMaskInfo> controlMask;  // the static mask_control applied (PR-8)
+        uint32_t lowpassDivisor = 0;                 // d of its G / B split; 0 without a split
+        bool controlSplit = false;
         bool disabled = false;
         std::string disabledReason;
     };
@@ -147,13 +153,15 @@ private:
     std::unique_ptr<Tonemapper> tonemapper_;
     std::unique_ptr<Resampler> resampler_;
     std::unique_ptr<NrCompose> compose_;
-    ComPtr<ID3D12Resource> input_, proxy_, work_, output_, prev_, protect_, skin_;
+    ComPtr<ID3D12Resource> input_, proxy_, work_, output_, prev_, protect_, skin_, control_;
     std::vector<ComPtr<ID3D12Resource>> modelOut_;
-    uint32_t inW_ = 0, inH_ = 0, workW_ = 0, workH_ = 0, maskW_ = 0, maskH_ = 0;
+    uint32_t inW_ = 0, inH_ = 0, workW_ = 0, workH_ = 0, protectW_ = 0, protectH_ = 0, skinW_ = 0, skinH_ = 0;
     bool reduced_ = false, first_ = true, hasPrev_ = false, setup_ = false, disabled_ = false, warnedDisabled_ = false;
     std::optional<PassReader> colorReader_, depthReader_, mvReader_;
     std::map<std::string, PassReader> maskReaders_;
     bool protectFrame_ = false, skinFrame_ = false;
+    std::optional<ControlMaskInfo> controlInfo_;  // read at Init (its fingerprint: the run's label), uploaded at Setup
+    bool controlRgb_ = false, controlSplit_ = false;
     std::unique_ptr<PassWriter> writer_;
     std::optional<Manifest> passManifest_;  // color_nr's manifest, built in Setup; the writer opens at the first output frame
     std::unique_ptr<VideoEncoder> encoder_;

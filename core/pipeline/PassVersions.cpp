@@ -178,7 +178,9 @@ std::vector<PassVersionInfo> ListPassVersions(const std::filesystem::path& root,
     return out;
 }
 
-std::optional<std::string> RetirePassVersion(const std::filesystem::path& root, const std::string& pass) {
+namespace {
+// Where RetirePassVersion moves <root>/<pass>/: <root>/<pass>.v/<id>[-n]; nothing when the folder does not exist.
+std::optional<std::filesystem::path> RetireTarget(const std::filesystem::path& root, const std::string& pass) {
     const auto dir = root / pass;
     std::error_code ec;
     if (!std::filesystem::is_directory(dir, ec)) return std::nullopt;
@@ -198,9 +200,36 @@ std::optional<std::string> RetirePassVersion(const std::filesystem::path& root, 
     std::filesystem::create_directories(hist);
     std::filesystem::path target = hist / id;
     for (int n = 2; std::filesystem::exists(target); ++n) target = hist / (id + "-" + std::to_string(n));
-    Rename(dir, target);
-    Log()->info("passes: {} -> {}", dir.string(), target.string());
-    return target.filename().string();
+    return target;
+}
+}  // namespace
+
+std::optional<std::string> RetirePassVersion(const std::filesystem::path& root, const std::string& pass) {
+    const auto target = RetireTarget(root, pass);
+    if (!target) return std::nullopt;
+    Rename(root / pass, *target);
+    Log()->info("passes: {} -> {}", (root / pass).string(), target->string());
+    return target->filename().string();
+}
+
+std::optional<std::string> RetirePassVersion(const std::filesystem::path& root, const std::string& pass, std::error_code& ec) {
+    ec.clear();
+    std::optional<std::filesystem::path> target;
+    try {
+        target = RetireTarget(root, pass);
+    } catch (const std::filesystem::filesystem_error& e) {
+        ec = e.code();
+        return std::nullopt;
+    }
+    if (!target) return std::nullopt;
+    std::filesystem::rename(root / pass, *target, ec);
+    if (ec) {
+        std::error_code e;
+        if (std::filesystem::is_empty(target->parent_path(), e)) std::filesystem::remove(target->parent_path(), e);  // the history it created
+        return std::nullopt;
+    }
+    Log()->info("passes: {} -> {}", (root / pass).string(), target->string());
+    return target->filename().string();
 }
 
 std::optional<std::string> UsePassVersion(const std::filesystem::path& root, const std::string& pass, const std::string& id) {

@@ -12,6 +12,7 @@
 #include "io/VideoDecoder.h"
 #include "ScenesArg.h"
 #include "passes/Manifest.h"
+#include "pipeline/ControlMask.h"
 #include "pipeline/PassFingerprint.h"
 #include "stages/nr/INrBackend.h"
 #include "stages/nr/NrPatch.h"
@@ -222,7 +223,16 @@ int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
     std::unique_ptr<INrBackend> backend = CreateNrBackend(o.backend);
     uint32_t w = 0, h = 0;
     ParseSize(a.checkSize, w, h);
-    NrConfig cfg = NrConfigFromOptions(o, w, h);
+    // PR-8: the automatic mask as the run would have it - a control mask under the masks' root replaces it. --check returns before the
+    // run derives that root, so the rule is applied here: --masks-dir, else -o unless --no-auto
+    const std::filesystem::path masksRoot = !a.masksDir.empty() ? std::filesystem::path(a.masksDir) : a.noAuto ? std::filesystem::path() : std::filesystem::path(a.output);
+    std::optional<ControlMaskInfo> control;
+    if (!masksRoot.empty() && o.intensity != 0.f && Manifest::Exists(masksRoot / kControlMaskPass)) {
+        std::string why;
+        control = ReadControlMaskInfo(masksRoot / kControlMaskPass, &why);
+        if (!control) Throw("nr: mask_control: " + why);
+    }
+    NrConfig cfg = NrConfigFromOptions(o, w, h, control.has_value());
     if (cfg.createWithMv) {  // no pass folders here: zero guides at the check size (E4: the create time and VRAM with guides bound)
         cfg.createMvWidth = w;
         cfg.createMvHeight = h;
@@ -239,6 +249,7 @@ int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
     }
     const NrDiagnostics d = backend->Diagnostics();
     PrintDiagnostics(d, error, deviceMs);
+    if (control) std::printf("auto_mask:    off (control mask %s, %ux%u)\n", ShortFingerprint(control->fingerprint).c_str(), control->width, control->height);
     auto usage = [&]() -> int64_t {
         const auto m = device.LocalVideoMemory();
         return m ? static_cast<int64_t>(m->currentUsage) : -1;
@@ -341,6 +352,8 @@ int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
         j["error"] = error;
         j["device_ms"] = deviceMs;
         j["ab"] = NrAbJson(o);
+        j["auto_mask"] = cfg.autoMask;  // what the feature was created with (PR-8: off under a control mask)
+        j["control_mask"] = control ? nlohmann::json(control->fingerprint) : nlohmann::json(nullptr);
         j["vram_usage_after_init_bytes"] = usageAfterInit < 0 ? nlohmann::json(nullptr) : nlohmann::json(usageAfterInit);
         if (a.checkFeatures > 0) {
             j["features"] = features;
@@ -366,9 +379,9 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     o.mvScale = a.mvScale;  // the A/B switches: options of the run, never settings (spec §2e)
     o.createWithMv = a.createWithMv;
     o.depthGuide = !a.noDepthGuide;
-    NrStageOptions ab = o;
-    if (a.check) ab.intensity = 1.f;  // --check always creates the feature: the refusal at --intensity 0 is the run's (review of PR-7)
-    if (const auto problems = NrAbProblems(ab); !problems.empty()) Throw("nr: " + Join(problems));
+    NrStageOptions abCheck = o;
+    if (a.check) abCheck.intensity = 1.f;  // --check always creates the feature: the refusal at --intensity 0 is the run's (review of PR-7)
+    if (const auto problems = NrAbProblems(abCheck); !problems.empty()) Throw("nr: " + Join(problems));
     if (a.checkRepeat > 0 && a.checkFeatures > 0)
         Throw("nr: --check-repeat and --check-features measure one thing each - give one of them per run");
     if ((a.checkRepeat > 0 || a.checkFeatures > 0) && !a.check) Throw("nr: --check-repeat and --check-features belong to --check");
@@ -431,6 +444,10 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     std::string masks;
     for (const auto& m : r.stats.masks) masks += (masks.empty() ? "" : ", ") + m;
     std::printf("masks:       %s\n", masks.empty() ? "none" : masks.c_str());
+    if (r.stats.controlMask)
+        std::printf("control:     %s %ux%u %s%s (%s)\n", r.stats.controlMask->sourceName.c_str(), r.stats.controlMask->width, r.stats.controlMask->height,
+                    r.stats.controlMask->grayscale ? "grey" : "RGB", r.stats.controlSplit ? (", split d " + std::to_string(r.stats.lowpassDivisor)).c_str() : "",
+                    ShortFingerprint(r.stats.controlMask->fingerprint).c_str());
     if (!r.stats.vramMibPerPass.empty()) {
         std::string vram;
         for (const double v : r.stats.vramMibPerPass) vram += (vram.empty() ? "" : " / ") + std::to_string(static_cast<int>(std::lround(v)));
@@ -469,6 +486,12 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
                               {"depth_used", r.stats.depthUsed},
                               {"mv_used", r.stats.mvUsed},
                               {"masks", r.stats.masks},
+                              {"control_mask", r.stats.controlMask ? nlohmann::json{{"fingerprint", r.stats.controlMask->fingerprint},
+                                                                                    {"size", {r.stats.controlMask->width, r.stats.controlMask->height}},
+                                                                                    {"grayscale", r.stats.controlMask->grayscale},
+                                                                                    {"split", r.stats.controlSplit},
+                                                                                    {"lowpass_d", r.stats.lowpassDivisor}}
+                                                                   : nlohmann::json(nullptr)},
                               {"color_source", r.stats.colorSource},
                               {"scenes_used", scenesUsed},  // the clip's list read (an empty one too) for a history to reset (PR-13)
                               {"scene_cuts_id", r.stats.sceneCutActive ? nlohmann::json(o.sceneCuts.id) : nlohmann::json(nullptr)},
@@ -514,11 +537,11 @@ int CmdPatch(const NrCommands::PatchArgs& a) {
 void NrCommands::Register(CLI::App& app) {
     nr_ = app.add_subcommand("nr", "DLSS 5 Neural Rendering (NGX Feature 18) -> color_nr; --check prints the GPU / driver / DLL diagnostics only");
     nr_->add_option("-i,--input", na_.input, "input video file")->check(CLI::ExistingFile);
-    nr_->add_option("-o,--output", na_.output, "pass root folder (writes color_nr/; color_sr, depth_dlss, mv_dlss and mask_* found here are used)");
+    nr_->add_option("-o,--output", na_.output, "pass root folder (writes color_nr/; color_sr, depth_dlss, mv_dlss, mask_* and mask_control found here are used)");
     nr_->add_option("--color-dir,--color_dir", na_.colorDir, "colour input pass folder (default: <output>/color_sr when present, else the video)");
     nr_->add_option("--depth-dir,--depth_dir", na_.depthDir, "depth_dlss pass folder (guide)");
     nr_->add_option("--mv-dir,--mv_dir", na_.mvDir, "mv_dlss pass folder (guide)");
-    nr_->add_option("--masks-dir,--masks_dir", na_.masksDir, "root with mask_ui / mask_ignore / mask_face / mask_skin pass folders (default: <output>)");
+    nr_->add_option("--masks-dir,--masks_dir", na_.masksDir, "root with mask_ui / mask_ignore / mask_face / mask_skin pass folders and the static control mask mask_control (default: <output>)");
     nr_->add_flag("--no-auto,--no_auto", na_.noAuto, "do not pick pass folders under --output automatically");
     nr_->add_option("--backend", na_.backend, "ngx (nvngx_dlssnr.dll) | stub (deterministic test edit)")->default_val("ngx");
     nr_->add_option("--intensity", na_.intensity,

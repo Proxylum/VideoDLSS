@@ -7,6 +7,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace dlssvid {
@@ -55,6 +56,9 @@ std::vector<PassVersionInfo> ListPassVersions(const std::filesystem::path& root,
 // Moves <root>/<pass>/ into the history; returns its id, or nothing when the folder does not exist. A folder without
 // a manifest (an interrupted run) is moved as "<time>_partial".
 std::optional<std::string> RetirePassVersion(const std::filesystem::path& root, const std::string& pass);
+// The same without throwing on the move (PR-8: the control mask's import tells a file held by another program, Locked, from other
+// failures by the error code): nullopt and `ec` set when the folder could not be moved.
+std::optional<std::string> RetirePassVersion(const std::filesystem::path& root, const std::string& pass, std::error_code& ec);
 // Makes history version `id` (or its unique prefix) the current one; the previous current version goes to the
 // history. Returns the id it was retired under. Throws when the version is unknown or ambiguous.
 std::optional<std::string> UsePassVersion(const std::filesystem::path& root, const std::string& pass, const std::string& id);

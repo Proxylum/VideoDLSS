@@ -64,11 +64,20 @@ std::string Sha256File(const std::filesystem::path& path) {
     if (!in) Throw("cannot open for hashing: " + path.string());
     Sha256 h;
     std::vector<char> buf(1 << 20);
+    uintmax_t total = 0;
     while (in) {
         in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
         const std::streamsize n = in.gcount();
-        if (n > 0) h.Update(buf.data(), static_cast<size_t>(n));
+        if (n > 0) {
+            h.Update(buf.data(), static_cast<size_t>(n));
+            total += static_cast<uintmax_t>(n);
+        }
     }
+    // a failed read ends the stream as the end of the file does (another program's byte-range lock, an offline cloud placeholder):
+    // the bytes read are the whole file, or the hash of a part would pass for it
+    std::error_code ec;
+    const uintmax_t size = std::filesystem::file_size(path, ec);
+    if (in.bad() || ec || total != size) Throw("cannot read for hashing: " + path.string());
     return h.Finish();
 }
 

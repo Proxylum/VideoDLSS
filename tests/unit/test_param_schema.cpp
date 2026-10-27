@@ -126,6 +126,39 @@ TEST_CASE("NR form: groups, levels, conditions of the rows", "[unit][schema][nr]
     CHECK(RowState(*nr->Find("transfer"), EffectiveStageParams("nr", {{"model_scale", 0.5}}), none).visible);
     CHECK(RowState(*nr->Find("max_ratio"), EffectiveStageParams("nr", {{"model_scale", 2}}), none).visible);
     CHECK(RowState(*nr->Find("intensity"), def, none).visible);
+    // PR-8: the control mask replaces the automatic one - both rows disabled with their notes, this one over the row's own condition
+    const std::set<std::string> controlMask{"color_sr", "mask_control"};
+    st = RowState(*nr->Find("auto_mask"), def, controlMask);
+    CHECK(st.visible);
+    CHECK_FALSE(st.enabled);
+    CHECK(st.note == "выключена: её заменяет маска управления");
+    st = RowState(*nr->Find("skin_structure"), EffectiveStageParams("nr", {{"auto_mask", true}}), controlMask);
+    CHECK_FALSE(st.enabled);
+    CHECK(st.note == "не действует при маске управления");
+    st = RowState(*nr->Find("skin_structure"), def, controlMask);  // without the automatic mask too: the mask's note wins
+    CHECK(st.note == "не действует при маске управления");
+    CHECK_FALSE(RowState(*nr->Find("skin_blend"), def, controlMask).visible);  // no face / skin mask
+    CHECK(RowState(*nr->Find("auto_mask"), def, none).enabled);
+}
+
+// PR-8: the control mask is a pass, not a parameter - a row of the card the schema describes; validation, the CLI's arguments, the
+// presets and the help go by the parameters and never see it.
+TEST_CASE("NR schema: the control mask is a pass row after skin_structure, no parameter (validation, CLI args, presets, help)", "[unit][schema][nr][mask]") {
+    const StageSchema* nr = FindStageSchema("nr");
+    REQUIRE(nr);
+    REQUIRE(nr->passRows.size() == 1);
+    const PassRowSpec& row = nr->passRows[0];
+    CHECK(row.pass == "mask_control");
+    CHECK(row.label == "Маска управления");
+    CHECK(row.after == "skin_structure");
+    CHECK(row.hint.find("низкие частоты") != std::string::npos);  // E10: «low / high frequencies of the edit», not «tone / structure»
+    CHECK(row.hint.find("v²") != std::string::npos);
+    CHECK(nr->Find("mask_control") == nullptr);
+    CHECK(nr->Find(row.after) != nullptr);
+    for (const auto& s : StageSchemas())
+        if (s.stage != "nr") CHECK(s.passRows.empty());
+    CHECK(ValidateStageParams("nr", {{"mask_control", "x"}}).empty());  // an unknown key passes as for every backend: no parameter
+    CHECK(!EffectiveStageParams("nr", nlohmann::json::object()).contains("mask_control"));
 }
 
 TEST_CASE("Parameter values: the special value, the zero label, the suffix, the decimals", "[unit][schema][nr][card]") {

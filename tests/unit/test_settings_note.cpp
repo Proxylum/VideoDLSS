@@ -118,6 +118,24 @@ TEST_CASE("Settings note: one segment per stage that ran, values from stageParam
 
 // review of PR-11: a color_fg kept while nr was recomputed under it (fg unchecked, then nr.intensity changed) - the result is made of
 // the nr version process recorded in its inputs, not of the current color_nr; that version from the history, or named as gone.
+// PR-8: the control mask is named by its fingerprint's first 8 hex digits - the file name and the path stay out.
+TEST_CASE("Settings note: a control mask reads control_mask=on(sha256:8 hex), masks=control and auto_mask=off; no path", "[unit][encode][mask]") {
+    const auto root = Root("control_mask");
+    Save(root, "color_nr", PassKind::ColorNr,
+         {{"backend", "ngx"}, {"auto_mask", false}, {"auto_mask_requested", true}, {"masks", {"control"}}, {"color_source", "video"},
+          {"control_mask", {{"fingerprint", "sha256:ab12cd34ef567890"}, {"source_name", "my mask.png"}, {"size", {1920, 1080}}, {"grayscale", false}, {"split", true}, {"lowpass_d", 8}}}});
+    const std::string note = BuildSettingsNote(root, "color_nr");
+    CHECK(note.find("control_mask=on(sha256:ab12cd34)") != std::string::npos);
+    CHECK(note.find("masks=control") != std::string::npos);
+    CHECK(note.find("auto_mask=off") != std::string::npos);
+    CHECK(note.find("my mask") == std::string::npos);
+    CHECK(note.find(":/") == std::string::npos);
+    const nlohmann::json j = BuildSettingsJson(root, "color_nr");
+    CHECK(j["stages"]["nr"]["control_mask"] == "on(sha256:ab12cd34)");
+    Save(root, "color_nr", PassKind::ColorNr, {{"backend", "ngx"}, {"color_source", "video"}});
+    CHECK(BuildSettingsNote(root, "color_nr").find("control_mask") == std::string::npos);  // none without a mask
+}
+
 TEST_CASE("Settings note follows the versions the encoded pass was made from", "[unit][encode][regression]") {
     const auto root = Root("versions");
     auto nr = [&](const char* fp, double intensity) {
