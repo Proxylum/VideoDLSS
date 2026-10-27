@@ -114,6 +114,36 @@ TEST_CASE("File formats parse and map to extensions", "[passes][manifest]") {
     CHECK(ToString(FileFormat::Png) == "png16");
 }
 
+// PR-8: mask_control is one frame 0 for every frame of the clip
+TEST_CASE("Manifest IsStatic: static one frame at 0 only", "[unit][manifest]") {
+    Manifest m;
+    m.frameCount = 1;
+    m.firstFrame = m.lastFrame = 0;
+    CHECK(!m.IsStatic());  // no stage_params.static
+    m.stageParams = {{"static", true}};
+    CHECK(m.IsStatic());
+    m.stageParams["static"] = false;
+    CHECK(!m.IsStatic());
+    m.stageParams["static"] = true;
+    m.frameCount = 2;
+    m.lastFrame = 1;
+    CHECK(!m.IsStatic());
+    m.frameCount = 1;
+    m.firstFrame = m.lastFrame = 1;
+    CHECK(!m.IsStatic());
+    m.firstFrame = m.lastFrame = 0;
+    m.stageParams = nlohmann::json::array();
+    CHECK(!m.IsStatic());
+    Manifest s;
+    s.pass = "mask_control";
+    s.width = 4;
+    s.height = 2;
+    s.frameCount = 1;
+    s.firstFrame = s.lastFrame = 0;
+    s.stageParams = {{"static", true}};
+    CHECK(Manifest::FromJson(s.ToJson()).IsStatic());  // survives the manifest file
+}
+
 TEST_CASE("Manifest::IsYUpMv only for motion-vector passes with mv.y_up", "[passes][manifest][mv][y_up]") {
     for (const PassKind k : {PassKind::MvRaw, PassKind::MvDlss}) {
         Manifest m = Manifest::ForPass(k, 8, 4, FileFormat::Exr);

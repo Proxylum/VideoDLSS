@@ -308,11 +308,11 @@ std::vector<std::vector<std::string>> StageInputCandidates(const std::string& st
     return {};
 }
 
-std::string ContentFingerprint(const std::filesystem::path& dir, const Manifest& manifest) {
+std::string ContentFingerprint(const std::filesystem::path& dir, const Manifest& manifest, bool cachedHash) {
     nlohmann::json frames = nlohmann::json::array();
     for (int64_t f = manifest.firstFrame; f <= manifest.lastFrame; ++f) {
         const auto file = dir / manifest.FrameFileName(f);
-        if (std::filesystem::exists(file)) frames.push_back({f, Sha256File(file)});
+        if (std::filesystem::exists(file)) frames.push_back({f, cachedHash ? Sha256FileCached(file) : Sha256File(file)});
     }
     if (frames.empty()) Throw("stamp: no frame files in " + dir.string());
     // how the files are read is part of the content: the manifest without its provenance (size, format, channels,

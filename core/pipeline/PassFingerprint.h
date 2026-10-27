@@ -103,8 +103,9 @@ std::vector<std::vector<std::string>> StageInputCandidates(const std::string& st
 // The fingerprint of an imported pass from its content (`dlssvid import --stamp`, TASK-0045): "sha256:" of the canonical
 // {"pass", "layout": the manifest without its provenance (size, format, channels, mv.y_up, depth range), "frames": [sha256
 // of each frame file]}. A pass without a fingerprint stands for its source and length only, so a mask re-imported with
-// other content and the same frame count reused the NR pass made from the old one.
-std::string ContentFingerprint(const std::filesystem::path& dir, const Manifest& manifest);
+// other content and the same frame count reused the NR pass made from the old one. cachedHash: the frame files through
+// Sha256FileCached (PR-8: the control mask is checked against its stamp on every plan) - the same value.
+std::string ContentFingerprint(const std::filesystem::path& dir, const Manifest& manifest, bool cachedHash = false);
 
 // Current UTC time as ISO-8601 ("2026-09-22T14:09:31Z") — the manifest's `created`.
 std::string NowIso8601();

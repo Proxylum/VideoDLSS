@@ -84,6 +84,8 @@ struct Manifest {
     std::optional<PassKind> Kind() const { return ParsePassKind(pass); }
     // A data pass (PR-13: scenes): the manifest is the content, there are no frame files - no viewport source, never read frame by frame.
     bool IsDataPass() const { return channels.empty(); }
+    // A static pass (PR-8: mask_control): one frame 0 that stands for every frame of the clip - stage_params.static.
+    bool IsStatic() const { return stageParams.is_object() && stageParams.value("static", false) && frameCount == 1 && firstFrame == 0; }
     // Motion vectors stored with y pointing up (mv.y_up on an mv_raw / mv_dlss pass): PassReader negates v on read
     // (docs/conventions.md §3).
     bool IsYUpMv() const {

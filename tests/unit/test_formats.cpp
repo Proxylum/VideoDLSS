@@ -6,7 +6,9 @@
 #include <fstream>
 
 #include "passes/PassFile.h"
+#include "MaskImages.h"
 #include "passes/formats/ExrIO.h"
+#include "passes/formats/ImageProbe.h"
 #include "passes/formats/NpzIO.h"
 #include "passes/formats/PngIO.h"
 #include "passes/formats/RawIO.h"
@@ -221,6 +223,68 @@ TEST_CASE("Colour and mask samples map [0,1] to the full integer range; depth an
     depth.Set(0, 0, 0, 3.f);
     depth.Set(1, 0, 0, 120.f);
     CHECK(PrepareForFormat(depth, FileFormat::Exr, PixelType::F16).Get(1, 0, 0) == 120.f);
+}
+
+// PR-8: the control mask's import refuses a file by its header before decoding it.
+TEST_CASE("ProbeImage reads size, channels, sample type and TIFF photometric and tiling of PNG, TIFF and EXR without decoding; EXR reports the display and the data window", "[unit][formats]") {
+    using test::TiffSpec;
+    const PassImage rgb8 = Pattern(5, 3, PixelType::U8, {"R", "G", "B"});
+    WritePng(Tmp("probe_rgb8.png"), rgb8);
+    WritePng(Tmp("probe_ya16.png"), Pattern(4, 2, PixelType::U16, {"Y", "A"}));
+    test::WritePngHeaderOnly(Tmp("probe_header.png"), 9000, 7000);
+    ImageProbe p = ProbeImage(Tmp("probe_rgb8.png"));
+    CHECK(p.format == ImageProbe::Format::Png);
+    CHECK(p.width == 5);
+    CHECK(p.height == 3);
+    CHECK(p.channels == 3);
+    CHECK(p.type == PixelType::U8);
+    p = ProbeImage(Tmp("probe_ya16.png"));
+    CHECK(p.channels == 2);
+    CHECK(p.type == PixelType::U16);
+    p = ProbeImage(Tmp("probe_header.png"));  // the pixels would not read: the header alone does
+    CHECK(p.width == 9000);
+    CHECK(p.height == 7000);
+
+    auto code = [](uint32_t x, uint32_t, uint32_t) { return static_cast<double>(x); };
+    test::WriteTiffWith(Tmp("probe_white.tif"), TiffSpec{6, 2, 1, 8, SAMPLEFORMAT_UINT, PHOTOMETRIC_MINISWHITE}, code);
+    test::WriteTiffWith(Tmp("probe_tiled.tif"), TiffSpec{20, 18, 1, 16, SAMPLEFORMAT_UINT, PHOTOMETRIC_MINISBLACK, true, false}, code);
+    test::WriteTiffWith(Tmp("probe_planar.tif"), TiffSpec{6, 2, 3, 32, SAMPLEFORMAT_IEEEFP, PHOTOMETRIC_RGB, false, true}, code);
+    p = ProbeImage(Tmp("probe_white.tif"));
+    CHECK(p.format == ImageProbe::Format::Tiff);
+    CHECK(p.tiffPhotometric == PHOTOMETRIC_MINISWHITE);
+    CHECK(!p.tiffTiled);
+    CHECK(p.type == PixelType::U8);
+    p = ProbeImage(Tmp("probe_tiled.tif"));
+    CHECK(p.tiffTiled);
+    CHECK(p.width == 20);
+    CHECK(p.height == 18);
+    CHECK(p.type == PixelType::U16);
+    p = ProbeImage(Tmp("probe_planar.tif"));
+    CHECK(p.tiffPlanarSeparate);
+    CHECK(p.tiffPhotometric == PHOTOMETRIC_RGB);
+    CHECK(p.channels == 3);
+    CHECK(p.type == PixelType::F32);
+
+    test::WriteExrWindows(Tmp("probe_bbox.exr"), 6, 4, 2, 1, 3, 2, {"R", "G", "B"}, [](int, int, size_t) { return 0.5f; });
+    p = ProbeImage(Tmp("probe_bbox.exr"));
+    CHECK(p.format == ImageProbe::Format::Exr);
+    CHECK(p.width == 6);
+    CHECK(p.height == 4);
+    CHECK(p.exrDataMinX == 2);
+    CHECK(p.exrDataMinY == 1);
+    CHECK(p.exrDataWidth == 3);
+    CHECK(p.exrDataHeight == 2);
+    CHECK(p.channels == 3);
+    CHECK(p.exrChannels.size() == 3);
+    CHECK(p.type == PixelType::F16);
+    WriteExr(Tmp("probe_f32.exr"), Pattern(3, 3, PixelType::F32, {"Y"}));
+    CHECK(ProbeImage(Tmp("probe_f32.exr")).type == PixelType::F32);
+
+    // the kind from the signature, not the extension
+    std::filesystem::copy_file(Tmp("probe_white.tif"), Tmp("probe_tiff_named.png"), std::filesystem::copy_options::overwrite_existing);
+    CHECK(ImageFormatOf(Tmp("probe_tiff_named.png")) == ImageProbe::Format::Tiff);
+    { std::ofstream(Tmp("probe_text.exr")) << "text"; }
+    CHECK(ProbeImage(Tmp("probe_text.exr")).format == ImageProbe::Format::Unknown);
 }
 
 TEST_CASE("PassFile dispatch by extension", "[formats]") {

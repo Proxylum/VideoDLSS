@@ -68,6 +68,7 @@ add_library(dlssvid_core STATIC
   pipeline/IStage.h
   pipeline/Pipeline.h pipeline/Pipeline.cpp
   pipeline/ProcessRunner.h pipeline/ProcessRunner.cpp
+  pipeline/ControlMask.h pipeline/ControlMask.cpp
   pipeline/FgProcess.h pipeline/FgProcess.cpp
   pipeline/PassFingerprint.h pipeline/PassFingerprint.cpp
   pipeline/PassVersions.h pipeline/PassVersions.cpp
@@ -94,6 +95,7 @@ add_library(dlssvid_core STATIC
   passes/formats/TiffIO.h passes/formats/TiffIO.cpp
   passes/formats/NpzIO.h passes/formats/NpzIO.cpp
   passes/formats/RawIO.h passes/formats/RawIO.cpp
+  passes/formats/ImageProbe.h passes/formats/ImageProbe.cpp
   convert/DepthConvert.h convert/DepthConvert.cpp
   convert/MvConvert.h convert/MvConvert.cpp
   convert/ColorConvert.h convert/ColorConvert.cpp
@@ -101,6 +103,7 @@ add_library(dlssvid_core STATIC
   convert/Warp.h convert/Warp.cpp
   convert/SceneCut.h convert/SceneCut.cpp
   passes/ScenesPass.h passes/ScenesPass.cpp
+  passes/ControlMaskPass.h
   gpu/GpuFrame.h
   stages/flow/IFlowEstimator.h
   stages/flow/StubFlowEstimator.h stages/flow/StubFlowEstimator.cpp
