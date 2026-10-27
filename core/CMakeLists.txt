@@ -69,6 +69,7 @@ add_library(dlssvid_core STATIC
   pipeline/Pipeline.h pipeline/Pipeline.cpp
   pipeline/ProcessRunner.h pipeline/ProcessRunner.cpp
   pipeline/ControlMask.h pipeline/ControlMask.cpp
+  pipeline/NrPreview.h pipeline/NrPreview.cpp
   pipeline/FgProcess.h pipeline/FgProcess.cpp
   pipeline/PassFingerprint.h pipeline/PassFingerprint.cpp
   pipeline/PassVersions.h pipeline/PassVersions.cpp
