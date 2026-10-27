@@ -306,6 +306,51 @@ TEST_CASE("an NR pass made by dlssvid nr without the control mask is not adopted
     CHECK(nr["reason"].get<std::string>().find("adopted") != std::string::npos);
 }
 
+// TASK-0064 (regression): `dlssvid nr --masks-dir other` read a mask_skin of the same name with another picture - the plan compared the
+// names only and adopted the pass under the skin mask of the passes root. The pass names the id of each mask it read.
+TEST_CASE("an NR pass made by dlssvid nr with another --masks-dir is not adopted under the masks of the passes root", "[integration][process][mask][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("mask_ids_adopt");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const auto passes = dir / "passes", other = dir / "other";
+    auto stampedMask = [&](const std::filesystem::path& root, uint8_t value) {
+        PassWriter w(root / "mask_skin", Manifest::ForPass(PassKind::Mask, 16, 8, FileFormat::Png));
+        for (int64_t f = 0; f < 2; ++f) {
+            PassImage m = MakePassImage(PassKind::Mask, 16, 8, PixelType::U8);
+            std::fill(m.data.begin(), m.data.end(), value);
+            w.WriteFrame(f, m);
+        }
+        w.Finish();
+        REQUIRE(RunCli({"import", "-i", (root / "mask_skin").string(), "--stamp"}).code == 0);
+        return Manifest::Load(root / "mask_skin").fingerprint;
+    };
+    const std::string root = stampedMask(passes, 255), elsewhere = stampedMask(other, 64);
+    REQUIRE(root != elsewhere);
+    const std::vector<std::string> process{"process", "-i", clip.string(), "-o", (dir / "result.mkv").string(), "--passes", passes.string(), "--warp", "--codec", "ffv1",
+                                           "--stages", "nr", "--nr-backend", "stub", "--json", (dir / "r.json").string()};
+    REQUIRE(RunCli({"nr", "-i", clip.string(), "-o", passes.string(), "--backend", "stub", "--warp", "--masks-dir", other.string()}).code == 0);
+    Manifest made = Manifest::Load(passes / "color_nr");  // not const: a missing key reads as null
+    CHECK(made.fingerprint.empty());
+    CHECK(made.stageParams["masks"] == nlohmann::json::array({"skin"}));
+    CHECK(made.stageParams["mask_ids"] == nlohmann::json{{"mask_skin", elsewhere}});
+    REQUIRE(RunCli(process).code == 0);
+    nlohmann::json nr = StageJson(ReadJson(dir / "r.json"), "nr");
+    CHECK(nr["status"] == "ran");
+    CHECK(nr["reason"].get<std::string>().find("made with other masks") != std::string::npos);
+    // made with the masks of the passes root (picked up by default): the same picture - adopted
+    std::filesystem::remove_all(passes / "color_nr");
+    std::filesystem::remove_all(passes / "color_nr.v");
+    REQUIRE(RunCli({"nr", "-i", clip.string(), "-o", passes.string(), "--backend", "stub", "--warp"}).code == 0);
+    CHECK(Manifest::Load(passes / "color_nr").stageParams["mask_ids"] == nlohmann::json{{"mask_skin", root}});
+    REQUIRE(RunCli(process).code == 0);
+    nr = StageJson(ReadJson(dir / "r.json"), "nr");
+    CHECK(nr["status"] == "reused");
+    CHECK(nr["reason"].get<std::string>().find("adopted") != std::string::npos);
+}
+
 // TASK-0045, review: `import --stamp` saved the manifest as the run saw it (--y-up / --near / --far / --relative are for
 // the run only), hashed the frames but not how they are read (the same files with mv.y_up are other vectors) and, with
 // --to-dlss, stamped the source instead of the converted pass the stages read.
