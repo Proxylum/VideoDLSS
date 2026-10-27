@@ -397,18 +397,34 @@ bool NrMaskSizesDiffer(const std::filesystem::path& root, const std::map<std::st
     return false;
 }
 
+// NR's protect masks (mask_ui, mask_ignore) and skin masks (mask_face, mask_skin), in the order NR reads them
+constexpr const char* kNrMaskPasses[] = {"mask_ui", "mask_ignore", "mask_face", "mask_skin"};
+
+// The protect and skin masks an NR pass read, as pass names: stage_params.masks (written by NR since stage 6), none in the bypass
+std::set<std::string> NrMasksRead(const Manifest& m) {
+    std::set<std::string> read;
+    const nlohmann::json& sp = m.stageParams;
+    if (!sp.is_object() || (sp.contains("bypass") && sp["bypass"] == true) || !sp.contains("masks") || !sp["masks"].is_array()) return read;
+    for (const auto& n : sp["masks"])
+        for (const char* pass : kNrMaskPasses)
+            if (n.is_string() && "mask_" + n.get<std::string>() == pass) read.insert(pass);
+    return read;
+}
+
 // An NR pass that read a protect mask (ui / ignore) and a skin mask (face / skin): stage_params.masks, written by NR since before PR-8.
 bool NrReadBothMaskGroups(const Manifest& m) {
-    const nlohmann::json& sp = m.stageParams;
-    if (!sp.is_object() || (sp.contains("bypass") && sp["bypass"] == true) || !sp.contains("masks") || !sp["masks"].is_array()) return false;
-    bool protect = false, skin = false;
-    for (const auto& n : sp["masks"]) {
-        if (!n.is_string()) continue;
-        const std::string s = n.get<std::string>();
-        protect = protect || s == "ui" || s == "ignore";
-        skin = skin || s == "face" || s == "skin";
-    }
-    return protect && skin;
+    const std::set<std::string> read = NrMasksRead(m);
+    return (read.count("mask_ui") || read.count("mask_ignore")) && (read.count("mask_face") || read.count("mask_skin"));
+}
+
+// The protect and skin masks an NR pass read and the plan's NR does not, or the other way round: empty when the pass read the masks
+// NR reads now. By name: a standalone pass keeps no id of its masks
+nlohmann::json NrMasksDiffer(const Manifest& m, const std::map<std::string, std::string>& inputs) {
+    const std::set<std::string> read = NrMasksRead(m);
+    nlohmann::json differ = nlohmann::json::array();
+    for (const char* pass : kNrMaskPasses)
+        if (read.count(pass) != inputs.count(pass)) differ.push_back(pass);
+    return differ;
 }
 
 StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, const PlanState& state) {
@@ -586,7 +602,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             // made without the protect or the skin masks NR reads now (bypass, --no-auto, another --masks-dir): the C0 defect could not
             // touch it, and adopted it would carry the masks' fingerprint
             nlohmann::json masks = nlohmann::json::array();
-            for (const char* pass : {"mask_ui", "mask_ignore", "mask_face", "mask_skin"})
+            for (const char* pass : kNrMaskPasses)
                 if (d.inputs.count(pass)) masks.push_back(pass);
             d.diff["inputs"] = masks;
             run("input_changed", "made without the protect or skin masks NR reads now", true);
@@ -595,6 +611,12 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             // unprotected - adopted it would carry the +nr.msize fingerprint of the fixed picture
             d.diff["tool"]["app"] = nlohmann::json::array({kPassToolVersion, fp.tool.app});
             run("tool_changed", "nr made before the fix of protect and skin masks of different sizes (TASK-0060)", true);
+        } else if (const nlohmann::json masks = name == "nr" ? NrMasksDiffer(m, d.inputs) : nlohmann::json::array(); !masks.empty()) {
+            // TASK-0062: a standalone NR pass made with other protect or skin masks than NR reads now (bypass, --no-auto, another
+            // --masks-dir, masks added or removed since) is another picture - the UI unprotected, say: kept in the history, not adopted
+            // under the masks' fingerprint. Masks of different sizes are judged above
+            d.diff["inputs"] = masks;
+            run("input_changed", NrMasksRead(m).empty() ? "made without the masks NR reads now" : "made with other masks", true);
         } else if (!complete) {
             run("incomplete", incomplete, false);
         } else {
