@@ -19,15 +19,19 @@ NrLowGrid NrLowpassGrid(uint32_t w, uint32_t h, uint32_t div) {
     return {(w + div - 1) / div, (h + div - 1) / div, div};
 }
 
-PassImage NrLowpassCpu(const PassImage& e, uint32_t div) {
-    if (e.Empty()) Throw("NrLowpassCpu: empty image");
+PassImage NrLowpassCpu(const PassImage& e, uint32_t div) { return NrLowpassUpCpu(NrLowBandCpu(e, div), e.width, e.height, div); }
+
+PassImage NrLowBandCpu(const PassImage& e, uint32_t div) {
+    if (e.Empty()) Throw("NrLowBandCpu: empty image");
     const uint32_t w = e.width, h = e.height;
     const size_t nc = e.channels.size();
     const NrLowGrid g = NrLowpassGrid(w, h, div);
     auto at = [nc](std::vector<float>& v, uint32_t gw, int x, int y) { return v.data() + (static_cast<size_t>(y) * gw + x) * nc; };
 
     // CSEditBox: the mean over the pixels of the cell that exist, row by row as the kernel sums
-    std::vector<float> box(static_cast<size_t>(g.width) * g.height * nc), low(box.size());
+    PassImage grid;
+    grid.Allocate(g.width, g.height, PixelType::F32, e.channels);
+    std::vector<float> box(static_cast<size_t>(g.width) * g.height * nc);
     std::vector<float> sum(nc), row(nc);
     for (uint32_t cy = 0; cy < g.height; ++cy)
         for (uint32_t cx = 0; cx < g.width; ++cx) {
@@ -50,9 +54,10 @@ PassImage NrLowpassCpu(const PassImage& e, uint32_t div) {
     // CSEditGauss: [1 2 1] x [1 2 1] / 16, edges clamped
     const int hx = static_cast<int>(g.width) - 1, hy = static_cast<int>(g.height) - 1;
     auto B = [&](int x, int y, size_t c) { return at(box, g.width, std::clamp(x, 0, hx), std::clamp(y, 0, hy))[c]; };
+    float* low = grid.As<float>();
     for (int cy = 0; cy <= hy; ++cy)
         for (int cx = 0; cx <= hx; ++cx) {
-            float* l = at(low, g.width, cx, cy);
+            float* l = low + (static_cast<size_t>(cy) * g.width + cx) * nc;
             for (size_t c = 0; c < nc; ++c) {
                 const float r0 = B(cx - 1, cy - 1, c) + 2.f * B(cx, cy - 1, c) + B(cx + 1, cy - 1, c);
                 const float r1 = B(cx - 1, cy, c) + 2.f * B(cx, cy, c) + B(cx + 1, cy, c);
@@ -60,10 +65,20 @@ PassImage NrLowpassCpu(const PassImage& e, uint32_t div) {
                 l[c] = (r0 + 2.f * r1 + r2) / 16.f;
             }
         }
+    return grid;
+}
+
+PassImage NrLowpassUpCpu(const PassImage& grid, uint32_t w, uint32_t h, uint32_t div) {
+    const NrLowGrid g = NrLowpassGrid(w, h, div);
+    if (grid.width != g.width || grid.height != g.height || grid.type != PixelType::F32) Throw("NrLowpassUpCpu: the grid is not the F32 grid of the frame at d");
+    const size_t nc = grid.channels.size();
+    const int hx = static_cast<int>(g.width) - 1, hy = static_cast<int>(g.height) - 1;
+    const float* low = grid.As<float>();
+    auto at = [&](int x, int y) { return low + (static_cast<size_t>(y) * g.width + x) * nc; };
 
     // LowUp: bilinear in fp32, cell centres at (i + 0.5) d
     PassImage out;
-    out.Allocate(w, h, PixelType::F32, e.channels);
+    out.Allocate(w, h, PixelType::F32, grid.channels);
     float* o = out.As<float>();
     const float fd = static_cast<float>(div);
     auto lerp = [](float a, float b, float t) { return a + t * (b - a); };
@@ -73,7 +88,7 @@ PassImage NrLowpassCpu(const PassImage& e, uint32_t div) {
         for (uint32_t x = 0; x < w; ++x) {
             const float sx = (static_cast<float>(x) + 0.5f) / fd - 0.5f, fx0 = std::floor(sx), fx = sx - fx0;
             const int ax = std::clamp(static_cast<int>(fx0), 0, hx), bx = std::clamp(static_cast<int>(fx0) + 1, 0, hx);
-            const float *a00 = at(low, g.width, ax, ay), *a10 = at(low, g.width, bx, ay), *a01 = at(low, g.width, ax, by), *a11 = at(low, g.width, bx, by);
+            const float *a00 = at(ax, ay), *a10 = at(bx, ay), *a01 = at(ax, by), *a11 = at(bx, by);
             float* d = o + (static_cast<size_t>(y) * w + x) * nc;
             for (size_t c = 0; c < nc; ++c) d[c] = lerp(lerp(a00[c], a10[c], fx), lerp(a01[c], a11[c], fx), fy);
         }

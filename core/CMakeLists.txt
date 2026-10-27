@@ -51,6 +51,11 @@ dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/upscale/shaders/Nis
 dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/tonemap/shaders/Tonemap.hlsl CSMain cs_6_0 g_TonemapCS stages/tonemap/shaders Tonemap_cs.h)
 dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/StubNr.hlsl CSMain cs_6_0 g_StubNrCS stages/nr/shaders StubNr_cs.h)
 dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/NrCompose.hlsl CSMain cs_6_0 g_NrComposeCS stages/nr/shaders NrCompose_cs.h)
+# PR-8: the variant with the control mask and the low band of its G / B split (the default variant above stays the resolve of PR-7)
+set(NR_MASK -D NR_CONTROL_MASK=1)
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/NrCompose.hlsl CSMain cs_6_0 g_NrComposeMaskCS stages/nr/shaders NrComposeMask_cs.h ${NR_MASK})
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/NrCompose.hlsl CSEditBox cs_6_0 g_NrEditBoxCS stages/nr/shaders NrEditBox_cs.h ${NR_MASK})
+dlssvid_compile_shader_ex(${CMAKE_CURRENT_SOURCE_DIR}/stages/nr/shaders/NrCompose.hlsl CSEditGauss cs_6_0 g_NrEditGaussCS stages/nr/shaders NrEditGauss_cs.h ${NR_MASK})
 
 add_library(dlssvid_core STATIC
   util/Log.h util/Log.cpp

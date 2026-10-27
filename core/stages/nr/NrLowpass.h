@@ -26,7 +26,12 @@ struct NrLowGrid {
 NrLowGrid NrLowpassGrid(uint32_t w, uint32_t h, uint32_t div);
 
 // The low band of e (any sample type and channel count, values as they are: no normalisation) at d: F32, the size and channels of e.
+// = NrLowpassUpCpu(NrLowBandCpu(e, d), e.width, e.height, d).
 PassImage NrLowpassCpu(const PassImage& e, uint32_t div);
+// Its two halves: the grid after the box means and the Gauss (what CSEditGauss writes, NrLowpassGrid's size, F32) and the bilinear
+// way back to a w x h frame (LowUp).
+PassImage NrLowBandCpu(const PassImage& e, uint32_t div);
+PassImage NrLowpassUpCpu(const PassImage& grid, uint32_t w, uint32_t h, uint32_t div);
 // The share of the energy of diff in its low band: sum |LowPass_d(diff)|^2 / sum |diff|^2 over every sample; 0 for a zero diff.
 double NrLowShare(const PassImage& diff, uint32_t div);
 

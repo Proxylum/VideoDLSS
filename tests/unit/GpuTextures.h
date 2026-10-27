@@ -58,6 +58,34 @@ inline std::vector<uint16_t> ReadbackHalfBits(D3D12Device& dev, ID3D12Resource* 
     return bits;
 }
 
+// UNORM16 textures (the control mask, PR-8): one channel, or RGBA
+inline ComPtr<ID3D12Resource> UploadR16Unorm(D3D12Device& dev, uint32_t w, uint32_t h, const std::vector<uint16_t>& v) {
+    auto tex = dev.CreateTexture2D(w, h, DXGI_FORMAT_R16_UNORM);
+    dev.UploadTexture2D(tex.Get(), reinterpret_cast<const uint8_t*>(v.data()), static_cast<size_t>(w) * 2);
+    return tex;
+}
+inline ComPtr<ID3D12Resource> UploadRgba16Unorm(D3D12Device& dev, uint32_t w, uint32_t h, const std::vector<uint16_t>& rgba) {
+    auto tex = dev.CreateTexture2D(w, h, DXGI_FORMAT_R16G16B16A16_UNORM);
+    dev.UploadTexture2D(tex.Get(), reinterpret_cast<const uint8_t*>(rgba.data()), static_cast<size_t>(w) * 8);
+    return tex;
+}
+
+// RGBA32F texture -> its floats, width * height * 4
+inline std::vector<float> ReadbackRgba32f(D3D12Device& dev, ID3D12Resource* tex) {
+    size_t pitch = 0;
+    const std::vector<uint8_t> bytes = dev.ReadbackTexture2D(tex, pitch);
+    std::vector<float> v(bytes.size() / 4);
+    std::memcpy(v.data(), bytes.data(), v.size() * 4);
+    return v;
+}
+
+// Steps between two halves on the ordered line (negative codes -> -(h & 0x7FFF): -0 and +0 are 0 apart).
+inline int HalfOrderedDistance(uint16_t a, uint16_t b) {
+    auto ordered = [](uint16_t h) { return (h & 0x8000) ? -static_cast<int>(h & 0x7FFF) : static_cast<int>(h); };
+    const int d = ordered(a) - ordered(b);
+    return d < 0 ? -d : d;
+}
+
 inline ComPtr<ID3D12Resource> UploadR32f(D3D12Device& dev, uint32_t w, uint32_t h, const std::vector<float>& v) {
     auto tex = dev.CreateTexture2D(w, h, DXGI_FORMAT_R32_FLOAT);
     dev.UploadTexture2D(tex.Get(), reinterpret_cast<const uint8_t*>(v.data()), static_cast<size_t>(w) * 4);
