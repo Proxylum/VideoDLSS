@@ -4,6 +4,7 @@
 #include <QPushButton>
 #include <QString>
 #include <QWidget>
+#include <filesystem>
 
 #include "PresetDialogs.h"
 
@@ -43,6 +44,7 @@ private:
     QString notice_;        // «эта маска уже загружена»: while the same mask of the same project stays loaded
     QString noticeKey_;     // the passes root and the fingerprint it was said of
     bool pending_ = false;  // this row started the import in flight: it answers its end
+    std::filesystem::path pendingRoot_;  // the passes root it was for: another project open at its end shows no note of it
     bool busy_ = false, bypass_ = false;
 };
 

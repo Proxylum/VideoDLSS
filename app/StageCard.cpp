@@ -741,7 +741,7 @@ void StageCard::refresh() {
     if (e && !json_->hasFocus()) json_->setPlainText(QString::fromStdString(e->params.dump()));
     const bool busy = busy_ && busy_();
     if (controlRow_) controlRow_->refresh(busy || model_.controlMaskBusy(), NrBypassParams(effective));
-    run_->setEnabled(!busy);
+    run_->setEnabled(!model_.controlMaskBusy());  // a queued standalone run waits behind a task; an import would read the folder
     updating_ = false;
 }
 

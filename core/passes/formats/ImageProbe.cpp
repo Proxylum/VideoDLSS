@@ -89,6 +89,7 @@ void ProbeTiff(const std::filesystem::path& path, ImageProbe& p) {
     else if (fmt == SAMPLEFORMAT_UINT && bits == 16) p.type = PixelType::U16;
     else if (fmt == SAMPLEFORMAT_UINT && bits == 8) p.type = PixelType::U8;
     else p.tiffSamplesSupported = false;
+    if (spp < 1 || spp > 4) p.tiffSamplesSupported = false;  // extra alpha channels beyond RGBA: ReadTiff takes 1-4 samples
 }
 
 void ProbeExr(const std::filesystem::path& path, ImageProbe& p) {

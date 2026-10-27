@@ -245,13 +245,29 @@ TEST_CASE("ImportControlMask: palette, tiled and planar TIFF refused, min-is-whi
     // review of PR-8: samples ReadTiff does not take (a bilevel mask of an editor, 32-bit integers) are «not supported», not «corrupted»
     WriteTiffWith(dir / "bilevel.tif", {6, 2, 1, 1, SAMPLEFORMAT_UINT, PHOTOMETRIC_MINISWHITE}, code);
     WriteTiffWith(dir / "int32.tif", {6, 2, 1, 32, SAMPLEFORMAT_UINT, PHOTOMETRIC_MINISBLACK}, code);
-    for (const char* name : {"palette.tif", "tiled.tif", "planar.tif", "bilevel.tif", "int32.tif"}) {
+    // review of PR-8: RGBA and a saved selection (5 samples) - «not supported, save as PNG», not «corrupted»
+    WriteTiffWith(dir / "rgba5.tif", {6, 2, 5, 8, SAMPLEFORMAT_UINT, PHOTOMETRIC_RGB}, code);
+    for (const char* name : {"palette.tif", "tiled.tif", "planar.tif", "bilevel.tif", "int32.tif", "rgba5.tif"}) {
         INFO(name);
         CHECK(KindOf([&] { ImportControlMask(dir / name, dir / "passes"); }) == ControlMaskIssue::Kind::Tiff);
     }
     ImportControlMask(dir / "white.tif", dir / "white");
     const PassImage w = Stored(dir / "white");
     for (uint32_t x = 0; x < 6; ++x) CHECK(w.Get(x, 0, 0) == static_cast<float>((255 - x * 50) * 257));  // what any viewer shows
+    // review of PR-8: a grey document with transparency and a saved selection (3 samples) is grey - sample 0 the value, inverted for
+    // min-is-white; sample 1 its alpha; read by count it was R, G, B of unrelated planes
+    auto planes = [](uint32_t x, uint32_t, uint32_t c) { return c == 0 ? static_cast<double>(x * 50) : c == 1 ? 100.0 : 255.0 - x * 7; };
+    for (const bool white : {false, true}) {
+        INFO("min-is-white " << white);
+        const std::string name = white ? "white3" : "black3";
+        WriteTiffWith(dir / (name + ".tif"), {6, 2, 3, 8, SAMPLEFORMAT_UINT, white ? uint16_t{PHOTOMETRIC_MINISWHITE} : uint16_t{PHOTOMETRIC_MINISBLACK}}, planes);
+        const ControlMaskImport g = ImportControlMask(dir / (name + ".tif"), dir / name);
+        CHECK(g.mask.grayscale);
+        CHECK(g.mask.alphaIgnored);  // sample 1 is not opaque
+        CHECK(Manifest::Load(dir / name / kControlMaskPass).channels == std::vector<std::string>{"Y"});
+        const PassImage s = Stored(dir / name);
+        for (uint32_t x = 0; x < 6; ++x) CHECK(s.Get(x, 1, 0) == static_cast<float>((white ? 255 - x * 50 : x * 50) * 257));
+    }
     // a TIFF named .png is read as the TIFF it is; text is no image
     fs::copy_file(dir / "white.tif", dir / "named.png");
     const ControlMaskImport n = ImportControlMask(dir / "named.png", dir / "named");
@@ -375,6 +391,29 @@ TEST_CASE("ImportControlMask: a file held at the retire fails as Locked and keep
     CHECK(!fs::exists(root / ".import" / "lock"));
     CHECK(!fs::exists(root / ".import" / "1-1"));
     CHECK(fs::exists(root / ".import" / "2-2"));
+}
+
+// Review of PR-8: a frame file held by another program (an editor, a sync client) was reported as edited in place - and `process` refused
+// to reuse NR over a mask whose content had not changed.
+TEST_CASE("ReadControlMaskInfo: a frame file another program holds open is not readable, not changed outside dlssvid; a missing one is", "[unit][mask][regression]") {
+    const auto dir = Dir("held_frame");
+    const auto root = dir / "passes";
+    const auto cur = root / kControlMaskPass;
+    WritePng(dir / "a.png", Image(4, 4, PixelType::U8, {"R", "G", "B"}, [](uint32_t x, uint32_t, size_t c) { return x * 60.f + c; }));
+    ImportControlMask(dir / "a.png", root);  // it hashed the folder it wrote under another name: no cached hash of this frame yet
+    const auto frame = cur / Manifest::Load(cur).FrameFileName(0);
+    std::string why;
+    {
+        const HANDLE held = CreateFileW(frame.wstring().c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        REQUIRE(held != INVALID_HANDLE_VALUE);
+        CHECK(!ReadControlMaskInfo(cur, &why));
+        CloseHandle(held);
+    }
+    CHECK_THAT(why, Catch::Matchers::StartsWith("frame not readable"));
+    CHECK(ReadControlMaskInfo(cur));  // let go: the mask as it was
+    fs::remove(frame);
+    CHECK(!ReadControlMaskInfo(cur, &why));
+    CHECK(why == "changed outside dlssvid");
 }
 
 TEST_CASE("RemoveControlMask retires the mask; a folder without a loadable manifest is deleted, not retired as _broken or _partial; ReadControlMaskInfo names why a folder is no control mask, a frame file edited in place reads as changed outside dlssvid and is not Unchanged on re-import", "[unit][mask]") {

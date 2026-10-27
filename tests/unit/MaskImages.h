@@ -41,6 +41,11 @@ inline void WriteTiffWith(const std::filesystem::path& path, const TiffSpec& s, 
     TIFFSetField(tif.get(), TIFFTAG_SAMPLEFORMAT, s.sampleFormat);
     TIFFSetField(tif.get(), TIFFTAG_PHOTOMETRIC, s.photometric);
     TIFFSetField(tif.get(), TIFFTAG_PLANARCONFIG, s.planarSeparate ? PLANARCONFIG_SEPARATE : PLANARCONFIG_CONTIG);
+    if (const uint16_t colour = s.photometric == PHOTOMETRIC_RGB ? 3 : 1; s.samples > colour) {  // Photoshop: transparency, saved selections
+        std::vector<uint16_t> extra(s.samples - colour, static_cast<uint16_t>(EXTRASAMPLE_UNSPECIFIED));
+        extra[0] = EXTRASAMPLE_UNASSALPHA;
+        TIFFSetField(tif.get(), TIFFTAG_EXTRASAMPLES, static_cast<uint16_t>(extra.size()), extra.data());
+    }
     if (s.photometric == PHOTOMETRIC_PALETTE) {
         std::vector<uint16_t> map(size_t{1} << s.bits);
         for (size_t i = 0; i < map.size(); ++i) map[i] = static_cast<uint16_t>(i * 257);

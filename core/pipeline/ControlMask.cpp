@@ -174,7 +174,7 @@ Decoded DecodeMask(const fs::path& image) {
          (p.tiffPhotometric != kMinIsWhite && p.tiffPhotometric != kMinIsBlack && p.tiffPhotometric != kRgb)))
         Fail(Kind::Tiff, "this TIFF is not supported (photometric " + std::to_string(p.tiffPhotometric) + (p.tiffTiled ? ", tiles" : "") +
                              (p.tiffPlanarSeparate ? ", separate planes" : "") +
-                             (p.tiffSamplesSupported ? "" : ", samples other than 8 / 16-bit unsigned or 16 / 32-bit float (1-bit, 32-bit integer)") +
+                             (p.tiffSamplesSupported ? "" : ", samples other than 1-4 of 8 / 16-bit unsigned or 16 / 32-bit float (1-bit, 32-bit integer, extra alpha channels)") +
                              "): save the mask as PNG");
     PassImage src;
     try {
@@ -204,7 +204,12 @@ Decoded DecodeMask(const fs::path& image) {
             for (const auto& c : src.channels) names += (names.empty() ? "" : ", ") + c;
             Fail(Kind::Channels, "the EXR has no R, G, B, Y or a single channel (" + names + ")");
         }
-    } else {  // PNG / TIFF: 1 value (PNG names it "A": not an alpha), 2 = value + alpha, 3 RGB, 4 RGBA
+    } else if (p.format == ImageProbe::Format::Tiff && (p.tiffPhotometric == kMinIsBlack || p.tiffPhotometric == kMinIsWhite)) {
+        // a grey TIFF is grey whatever its sample count: sample 0 the value, the next one an alpha (transparency, a saved selection);
+        // read by count, a grey document with an alpha channel became R, G, B of unrelated planes, and MINISWHITE went uninverted
+        pick = {0};
+        if (nc >= 2) alpha = 1;
+    } else {  // PNG / RGB TIFF: 1 value (PNG names it "A": not an alpha), 2 = value + alpha, 3 RGB, 4 RGBA
         if (nc == 1 || nc == 2) pick = {0};
         else if (nc >= 3) pick = {0, 1, 2};
         if (nc == 2) alpha = 1;
@@ -462,10 +467,12 @@ std::optional<ControlMaskInfo> ReadControlMaskInfo(const fs::path& dir, std::str
     if (m.format != FileFormat::Png || m.pixelType != PixelType::U16)
         return no("type " + std::string(ToString(m.format)) + " " + std::string(ToString(m.pixelType)) + " (needs png u16)");
     if (m.fingerprint.empty()) return no("not stamped");
+    std::error_code ec;
+    if (!fs::exists(dir / m.FrameFileName(0), ec)) return no("changed outside dlssvid");  // the frame file is gone
     try {
         if (ContentFingerprint(dir, m, true) != m.fingerprint) return no("changed outside dlssvid");
-    } catch (const std::exception&) {
-        return no("changed outside dlssvid");  // the frame file is gone
+    } catch (const std::exception& e) {
+        return no(std::string("frame not readable: ") + e.what());  // held by another program, no access: not edited
     }
     return InfoOf(m);
 }

@@ -29,6 +29,7 @@ namespace dlssvid {
 AppModel::AppModel(bool warp, QObject* parent) : QObject(parent) {
     device_ = std::make_unique<D3D12Device>(D3D12Device::Options{warp, false});
     store_ = std::make_unique<FrameStore>(*device_);
+    maskPool_.setMaxThreadCount(1);  // the control mask's import (PR-8)
     playTimer_.setTimerType(Qt::PreciseTimer);
     playTimer_.setSingleShot(true);
     connect(&playTimer_, &QTimer::timeout, this, &AppModel::onPlayTick);

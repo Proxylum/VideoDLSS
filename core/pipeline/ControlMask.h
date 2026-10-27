@@ -61,7 +61,8 @@ bool ControlMaskFolderBroken(const std::filesystem::path& passesRoot);
 
 // The folder as a control mask; «is there a mask» is ReadControlMaskInfo(dir).has_value(). why: "absent" (no manifest) | "not a
 // mask_control pass" | "not static one-frame" | "channels ..." | "type ..." | "not stamped" | "changed outside dlssvid" (the frame file
-// does not match the fingerprint: edited in place) | "unreadable: ...". The content check hashes the frame through Sha256FileCached.
+// does not match the fingerprint or is gone: edited in place) | "frame not readable: ..." (it does not open: held, no access) |
+// "unreadable: ..." (the manifest). The content check hashes the frame through Sha256FileCached.
 std::optional<ControlMaskInfo> ReadControlMaskInfo(const std::filesystem::path& dir, std::string* why = nullptr);
 
 // For NR: the mask at the frame size w x h, each axis on its own - area-averaged where it shrinks, bilinear (pixel centres as the GPU's)

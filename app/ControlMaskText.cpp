@@ -25,7 +25,9 @@ QString ControlMaskIssueText(const ControlMaskIssue& i) {
             const QString names = open >= 0 && close > open ? d.mid(open + 1, close - open - 1) : d;
             return Tr("Каналы изображения не подходят (%1): нужны R, G, B или один серый.").arg(names);
         }
-        case K::Tiff: return Tr("Этот TIFF не поддерживается (палитра, CMYK, 1 бит, 32-битные целые, плитки или раздельные плоскости). Сохраните маску как PNG.");
+        case K::Tiff:
+            return Tr("Этот TIFF не поддерживается (палитра, CMYK, 1 бит, 32-битные целые, больше 4 каналов, плитки или раздельные плоскости). "
+                      "Сохраните маску как PNG.");
         case K::Busy: return Tr("Идёт другой импорт маски в эту папку пассов — дождитесь его конца и повторите.");
         case K::Locked:
             return i.previousKept ? Tr("Папку маски держит другая программа — закройте её и повторите. Прежняя маска осталась на месте.")
@@ -46,6 +48,7 @@ QString ControlMaskWhyText(const std::string& why) {
     if (why.rfind("channels", 0) == 0) return Tr("не те каналы");
     if (why.rfind("type", 0) == 0) return Tr("файл не PNG16");
     if (why.rfind("unreadable", 0) == 0) return Tr("манифест не читается");
+    if (why.rfind("frame not readable", 0) == 0) return Tr("файл не открывается (занят?)");
     return QString::fromStdString(why);
 }
 

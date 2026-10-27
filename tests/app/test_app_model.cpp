@@ -2277,6 +2277,39 @@ TEST_CASE("AppModel: a mask import that ends after another project was opened sh
     CHECK(ReadControlMaskInfo(a.dir / "passes" / "mask_control"));  // the import itself finished into project A
 }
 
+// Review of PR-8: the end of an import was shown against whichever project was open at its end - «эта маска уже загружена» under another
+// project's mask, a failure read as being about that project's mask.
+TEST_CASE("ControlMaskRow: an import that ends after another project was opened shows no note there, and its failure names the earlier project", "[app][mask][regression]") {
+    App();
+    MaskCard a("card_mask_note_a");
+    MaskCard b("card_mask_note_b");
+    const QString file = MaskPng(a.dir / "a_mask.png", 16, 8, false);
+    REQUIRE(a.load(file));
+    REQUIRE(b.load(MaskPng(b.dir / "b_mask.png", 16, 8, true)));
+    // the same file into A again (Unchanged); B is open before its end is delivered: the end is queued to this thread
+    QSignalSpy done(a.model.get(), &AppModel::controlMaskFinished);
+    a.dialogs.open = file;
+    a.row()->loadButton()->click();
+    a.model->openProject(Q(b.dir / "proj.dlssvid.json"));
+    REQUIRE(done.wait(20000));
+    CHECK(done.last().at(0).toBool());
+    CHECK_FALSE(done.last().at(1).toBool());  // Unchanged
+    CHECK(a.model->controlMask().file == QString::fromUtf8("b_mask.png"));
+    CHECK_FALSE(a.row()->note()->text().contains(QString::fromUtf8("эта маска уже загружена")));
+    // a failure into A ending while B is open: said, of the project opened before
+    { std::ofstream(a.dir / "text.png") << "not an image"; }
+    a.model->openProject(Q(a.dir / "proj.dlssvid.json"));
+    const int warnings = a.dialogs.warnings;
+    a.dialogs.open = Q(a.dir / "text.png");
+    a.row()->loadButton()->click();
+    a.model->openProject(Q(b.dir / "proj.dlssvid.json"));
+    REQUIRE(done.wait(20000));
+    CHECK_FALSE(done.last().at(0).toBool());
+    CHECK(a.dialogs.warnings == warnings + 1);
+    CHECK(a.dialogs.texts.last().startsWith(QString::fromUtf8("Маска для проекта, открытого раньше, не загружена: Формат не поддерживается")));
+    CHECK(a.model->controlMask().file == QString::fromUtf8("b_mask.png"));
+}
+
 // PR-8: one function behind the card and the CLI - one fingerprint for one file
 TEST_CASE("The control mask from the card has the fingerprint ImportControlMask gives for the same file", "[app][mask]") {
     App();
@@ -2317,6 +2350,9 @@ TEST_CASE("A failed control mask import shows the Russian text of its kind and k
     CHECK(ControlMaskIssueText({K::Locked, "", 0, 0}).contains(QString::fromUtf8("Прежняя маска осталась на месте")));
     CHECK(ControlMaskIssueText({K::Channels, "the EXR has no R, G, B, Y or a single channel (u, v)", 0, 0}).contains("(u, v)"));
     CHECK(ControlMaskIssueText({K::NoRoot, "", 0, 0}).startsWith(QString::fromUtf8("Сначала откройте видео")));
+    CHECK(ControlMaskIssueText({K::Tiff, "", 0, 0}).contains(QString::fromUtf8("больше 4 каналов")));
+    CHECK(ControlMaskWhyText("frame not readable: cannot open for hashing") == QString::fromUtf8("файл не открывается (занят?)"));
+    CHECK(ControlMaskWhyText("unreadable: x") == QString::fromUtf8("манифест не читается"));
 }
 
 TEST_CASE("Source names, the static label and the versions panel name the control mask by file, size and kind", "[app][versions][mask]") {

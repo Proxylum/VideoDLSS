@@ -125,6 +125,7 @@ void ControlMaskRow::load() {
     if (file.isEmpty()) return;
     notice_.clear();
     pending_ = true;
+    pendingRoot_ = model_.project().passesRoot;
     model_.importControlMask(file);
 }
 
@@ -144,11 +145,15 @@ void ControlMaskRow::remove() {
 void ControlMaskRow::finished(bool ok, bool changed, const QString& message) {
     if (!pending_) return;  // another row's import (a second card of the stage)
     pending_ = false;
-    if (!ok) dialogs_.warn(window(), tr("Маска не загружена"), message);
-    else if (!changed) {  // «эта маска уже загружена»: the card shows it on controlMaskChanged, emitted next
-        notice_ = message;
-        noticeKey_ = NoticeKey(model_);  // the state was re-read before this signal
+    const bool sameProject = model_.hasProject() && model_.project().passesRoot == pendingRoot_;
+    if (!ok) {  // a failure is said in any case, of the project it was for when another one is open now
+        dialogs_.warn(window(), tr("Маска не загружена"),
+                      sameProject ? message : tr("Маска для проекта, открытого раньше, не загружена: %1").arg(message));
+        return;
     }
+    if (!sameProject || changed) return;  // «эта маска уже загружена» is about this project's mask
+    notice_ = message;               // the card shows it on controlMaskChanged, emitted next
+    noticeKey_ = NoticeKey(model_);  // the state was re-read before this signal
 }
 
 }  // namespace dlssvid
