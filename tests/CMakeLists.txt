@@ -161,8 +161,8 @@ catch_discover_tests(dlssvid_golden_tests TEST_PREFIX "golden." DISCOVERY_MODE P
 
 # ---- Performance (TASK-0040): scrubbing at >= 30 fps on 1080p, the p90 of random jumps into frames not resident; an
 # NVIDIA GPU (skipped otherwise), serially - parallel tests would time each other (`ctest -LE perf` leaves it out) ----
-add_executable(dlssvid_perf_tests perf/test_scrub_perf.cpp integration/TestClips.h integration/TestClips.cpp)
-target_include_directories(dlssvid_perf_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/integration)
+add_executable(dlssvid_perf_tests perf/test_scrub_perf.cpp perf/test_nr_mask_perf.cpp integration/TestClips.h integration/TestClips.cpp)
+target_include_directories(dlssvid_perf_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/integration ${CMAKE_CURRENT_SOURCE_DIR}/unit)
 target_link_libraries(dlssvid_perf_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 target_compile_definitions(dlssvid_perf_tests PRIVATE
   DLSSVID_CLI_PATH="$<TARGET_FILE:dlssvid>"

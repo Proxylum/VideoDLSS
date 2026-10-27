@@ -413,6 +413,7 @@ NrStage ── цвет: color_sr (папка / слот кэша) или дек
  proxy (полное разрешение) ──[model-scale ≠ 1: Resampler → work]──▶ INrBackend × passes ─▶ model out (work)
    ▼                                                                                   │
  NrCompose::Resolve(original = proxy, model, proxy-work, prev, mv_dlss, mask protect / skin, gain = intensity) ─▶ output RGBA16F
+   │  [mask_control (PR-8): вариант NR_CONTROL_MASK — w × R; G / B: CSEditBox → CSEditGauss (низкие частоты правки, сетка d×d)]
    ▼
  readback ─▶ color_nr (EXR half / PNG16) + слот кэша + [--video]
  intensity 0 (PR-7): proxy ─▶ readback — без бэкенда, DLL, guides и масок
@@ -454,7 +455,10 @@ INrBackend: ngx (nvngx_dlssnr.dll, NGX Feature 18) | stub (детерминир�
   сбрасывают историю. При пороге 0.24 список совпадает с тем, что находил детектор PR-6 (регрессия на 8 и 10 бит и вспышке).
 - `NrStage`: цвет из `--color-dir` (по умолчанию `<passes>/color_sr`, если есть), слота кэша (`color_sr`) или декодированного
   кадра; guides из папок → слот кэша → текстуры; маски `mask_{ui,ignore,face,skin}` (PNG 8-бит, ТЗ §5) → `protect = max(ui,
-  ignore)`, `skin = max(face, skin)`; `--passes 1…4` — N копий бэкенда цепочкой, каждая со своей фичей и историей поверх
+  ignore)`, `skin = max(face, skin)` (у каждой текстуры свой размер); статичная маска управления `mask_control` (PR-8, `ControlMask`):
+  читается в `Init` со сверкой отпечатка, в `Setup` растягивается под кадр на CPU и грузится один раз (R16 / RGBA16 UNORM), при ней
+  `UseAutoMask = 0`, она — вход отпечатка NR (`StageInputCandidates`), план предупреждает о пропорциях и останавливает NR на
+  нечитаемой; `--passes 1…4` — N копий бэкенда цепочкой, каждая со своей фичей и историей поверх
   результата предыдущей (одни guides и Reset); VRAM фичи каждой — `stage_params.vram_mib_per_pass`, при 3–4 план пишет
   подсказку (`AdviseStage`; PR-5);
   `--model-scale` — модель на уменьшенном/увеличенном прокси, `NrCompose` переносит правку на полный кадр. `intensity` — сила
