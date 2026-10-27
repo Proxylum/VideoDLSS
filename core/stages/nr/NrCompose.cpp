@@ -17,7 +17,7 @@ struct Constants {
     float mvScaleX, mvScaleY;
     uint32_t flags;
     float gain;
-    uint32_t pad[2];
+    uint32_t lowSizePacked, lowDiv;  // the mask variant's low band grid (PR-8); 0 in the default variant, as the padding was
 };
 static_assert(sizeof(Constants) == 64, "NrCompose.hlsl cbuffer: 4 registers");
 }  // namespace

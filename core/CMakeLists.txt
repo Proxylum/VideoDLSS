@@ -12,13 +12,16 @@ set(DLSSVID_SHADER_HEADERS "")
 # the tests compile a frozen copy of the NR resolve with the same function and compare its bytecode with the product's (PR-8)
 set(DLSSVID_CORE_SHADER_GEN_DIR ${DLSSVID_SHADER_GEN_DIR} CACHE INTERNAL "generated shader headers of dlssvid_core")
 set(DLSSVID_DXC_TOOL ${DIRECTX_DXC_TOOL} CACHE INTERNAL "dxc.exe found by core")
+# shared shader fragments (NR: NrEdited.hlsli): every rule depends on them, an edit rebuilds the bytecode (test build.shader_include_deps;
+# GLOB_RECURSE - the NR shaders lie two levels down)
+file(GLOB_RECURSE DLSSVID_SHADER_INCLUDES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.hlsli)
 function(dlssvid_compile_shader hlsl entry profile var out_name)
   set(out ${DLSSVID_SHADER_GEN_DIR}/viewport/shaders/${out_name})
   add_custom_command(
     OUTPUT ${out}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${DLSSVID_SHADER_GEN_DIR}/viewport/shaders
     COMMAND ${DIRECTX_DXC_TOOL} -nologo -T ${profile} -E ${entry} -O3 -Qstrip_debug -Qstrip_reflect -Fh ${out} -Vn ${var} ${hlsl}
-    DEPENDS ${hlsl}
+    DEPENDS ${hlsl} ${DLSSVID_SHADER_INCLUDES}
     COMMENT "DXC ${profile} ${hlsl}:${entry}"
     VERBATIM)
   set(DLSSVID_SHADER_HEADERS ${DLSSVID_SHADER_HEADERS} ${out} PARENT_SCOPE)
@@ -34,7 +37,7 @@ function(dlssvid_compile_shader_ex hlsl entry profile var subdir out_name)
     OUTPUT ${out}
     COMMAND ${CMAKE_COMMAND} -E make_directory ${DLSSVID_SHADER_GEN_DIR}/${subdir}
     COMMAND ${DIRECTX_DXC_TOOL} -nologo -T ${profile} -E ${entry} -O3 -Qstrip_debug -Qstrip_reflect -Fh ${out} -Vn ${var} ${ARGN} ${hlsl}
-    DEPENDS ${hlsl} ${CMAKE_SOURCE_DIR}/third_party/nis/NIS_Scaler.h
+    DEPENDS ${hlsl} ${CMAKE_SOURCE_DIR}/third_party/nis/NIS_Scaler.h ${DLSSVID_SHADER_INCLUDES}
     COMMENT "DXC ${profile} ${hlsl}:${entry} ${ARGN}"
     VERBATIM)
   set(DLSSVID_SHADER_HEADERS ${DLSSVID_SHADER_HEADERS} ${out} PARENT_SCOPE)

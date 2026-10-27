@@ -173,6 +173,9 @@ catch_discover_tests(dlssvid_perf_tests TEST_PREFIX "perf." DISCOVERY_MODE PRE_T
 if(CMAKE_GENERATOR MATCHES "Ninja")
   add_test(NAME build.ninja_header_deps
     COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DSOURCE_DIR=${CMAKE_SOURCE_DIR} -DNINJA=${CMAKE_MAKE_PROGRAM} -P ${CMAKE_SOURCE_DIR}/tests/check_ninja_deps.cmake)
+  # PR-8: every shader include (the NR resolve's NrEdited.hlsli) is an input of the rule that compiles it
+  add_test(NAME build.shader_include_deps
+    COMMAND ${CMAKE_COMMAND} -DBUILD_DIR=${CMAKE_BINARY_DIR} -DNINJA=${CMAKE_MAKE_PROGRAM} -P ${CMAKE_SOURCE_DIR}/tests/check_shader_deps.cmake)
 endif()
 
 # ---- release workflow: scripts/attach_release.cmd against a fake gh (incident TASK-0037: the attach step of release.yml

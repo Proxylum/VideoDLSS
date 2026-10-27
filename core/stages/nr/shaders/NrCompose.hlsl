@@ -12,6 +12,12 @@
 //           gate = 1 - |res - prev| / threshold; below 1 the filter fades with the edit, so gain 0 gives the original exactly
 // Order of the strength controls (spec §2b): ratio transfer -> masks (w) -> gain, once after the last model pass -> temporal filter ->
 // saturate. Output clamped to [0, 1], alpha 1.
+// The edited colour is NrEdited.hlsli, a block of statements: the default variant (NR_CONTROL_MASK 0) is token for token the resolve of
+// PR-7 (tests/unit/frozen/NrCompose_pr7.hlsl; the unit tests compare the bytecode and the output).
+
+#ifndef NR_CONTROL_MASK
+#define NR_CONTROL_MASK 0
+#endif
 
 cbuffer Constants : register(b0) {
     uint2 gSize;        // output size
@@ -25,7 +31,12 @@ cbuffer Constants : register(b0) {
     float2 gMvScale;    // guide px -> output px
     uint gFlags;        // 1 prev, 2 mv, 4 protect mask, 8 skin mask
     float gGain;        // nr.intensity: the edit strength after the model (PR-7); 1 = the model's picture
+#if NR_CONTROL_MASK
+    uint gLowSizePacked;  // the low band grid of the control mask's split: width | height << 16 (ceil(W/d) x ceil(H/d), sides <= 8192)
+    uint gLowDiv;         // d
+#else
     uint2 gPad;
+#endif
 };
 
 Texture2D<float4> gOriginal : register(t0);  // full-resolution tone-mapped frame
@@ -43,15 +54,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     if (id.x >= gSize.x || id.y >= gSize.y) return;
     const float2 uv = (float2(id.xy) + 0.5) / float2(gSize);
     const float3 orig = gOriginal[id.xy].rgb;
-    float3 edited;
-    if (gMode == 0) {
-        edited = gModel[id.xy].rgb;
-    } else {
-        const float3 m = gModel.SampleLevel(gLinear, uv, 0).rgb;
-        const float3 p = gProxy.SampleLevel(gLinear, uv, 0).rgb;
-        const float3 ratio = clamp(m / max(p, 1e-3), 1.0 / gMaxRatio, gMaxRatio);
-        edited = lerp(orig, orig * ratio, gTransfer);
-    }
+#include "NrEdited.hlsli"
     float w = 1.0;
     if (gFlags & 4) w *= 1.0 - saturate(gProtect.SampleLevel(gLinear, uv, 0));
     if (gFlags & 8) w *= lerp(1.0, gSkinBlend, saturate(gSkin.SampleLevel(gLinear, uv, 0)));
