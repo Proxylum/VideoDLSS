@@ -23,6 +23,9 @@ constexpr const char* kPassToolVersion = "0.1.0";
 // - nr.ev (TASK-0043): exposure in stops; png.2 (TASK-0042): PNG16 colour passes scaled;
 // - nr.gain / nr.i0 (PR-7): nr.intensity is the edit strength after the model (it went to NGX before) - any value but 1 is
 //   another picture; 0 does not call the model at all.
+// Two revisions of nr depend on the inputs and are added where the inputs are known (ProcessRunner, DecideStage): nr.msize (TASK-0060)
+// - protect and skin masks of different sizes, which lost the UI protection before PR-8; kNrControlMaskRevision (NrLowpass.h) - the
+// control mask's code, for passes with mask_control.
 std::string PassToolVersionFor(const std::string& stage, const nlohmann::json& params);
 // The revisions `newApp` has and `oldApp` lacks ("0.1.0", "0.1.0+nr.gain" -> {"nr.gain"}): what the card names on tool_changed.
 std::vector<std::string> AddedToolRevisions(const std::string& oldApp, const std::string& newApp);

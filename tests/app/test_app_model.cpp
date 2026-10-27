@@ -2198,6 +2198,10 @@ TEST_CASE("StageCard NR control mask row: buttons off while a task runs or an im
             CHECK_FALSE(b->isEnabled());
         }
     CHECK(versionButtons >= 2);
+    // review of PR-8: Ctrl+Return (processAll) waits for the import as the button does
+    for (QShortcut* s : panel.findChildren<QShortcut*>())
+        if (s->key() == QKeySequence("Ctrl+Return")) emit s->activated();
+    CHECK_FALSE(queue.busy());
     m.model->reloadSources();  // another caller's reload meanwhile
     CHECK_FALSE(m.model->sourceNames().contains("mask_control"));
     for (const QString& s : m.model->sourceNames()) CHECK_FALSE(s.startsWith("mask_control@"));
@@ -2228,6 +2232,9 @@ TEST_CASE("StageCard NR control mask row: buttons off while a task runs or an im
     CHECK(m.row()->status()->property("role").toString() == "warn");
     CHECK(m.row()->removeButton()->isVisibleTo(m.card.get()));
     CHECK_FALSE(m.row()->showButton()->isVisibleTo(m.card.get()));
+    m.dialogs.answer = false;  // the dialog names the mask from its manifest (review of PR-8: «Маска «» …»)
+    m.row()->removeButton()->click();
+    CHECK(m.dialogs.texts.last().contains(QString::fromUtf8("Маска «b.png» уйдёт в историю версий")));
     // a folder without a loadable manifest: deleted, not kept in the history as _broken
     { std::ofstream(cur / Manifest::kFileName) << "{ broken"; }
     m.model->reloadSources();
@@ -2241,6 +2248,33 @@ TEST_CASE("StageCard NR control mask row: buttons off while a task runs or an im
     CHECK(m.dialogs.texts.last().contains(QString::fromUtf8("повреждена и будет удалена")));
     CHECK(!std::filesystem::exists(cur));
     CHECK(ListPassVersions(m.dir / "passes", "mask_control").size() == history);
+}
+
+// Review of PR-8: an import that ends after another project was opened re-reads the mask of the project open now - not «Загружается…» for
+// good, and that project's mask back on the viewport.
+TEST_CASE("AppModel: a mask import that ends after another project was opened shows the mask of the open project", "[app][mask][regression]") {
+    App();
+    MaskCard a("card_mask_switch_a");
+    MaskCard b("card_mask_switch_b");
+    REQUIRE(b.load(MaskPng(b.dir / "b_mask.png", 16, 8, true)));  // project B has a mask of its own
+    std::atomic<bool> release{false}, reached{false};
+    ControlMaskHooksForTests().beforePlace = [&](const std::filesystem::path&) {
+        reached = true;
+        while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    };
+    QSignalSpy done(a.model.get(), &AppModel::controlMaskFinished);
+    a.dialogs.open = MaskPng(a.dir / "a_mask.png", 16, 8, false);
+    a.row()->loadButton()->click();
+    Pump([&] { return reached.load(); }, 20000);
+    REQUIRE(reached);
+    a.model->openProject(Q(b.dir / "proj.dlssvid.json"));  // another project while the import runs
+    release = true;
+    REQUIRE(done.wait(20000));
+    ControlMaskHooksForTests().beforePlace = nullptr;
+    CHECK(a.model->controlMask().status == AppModel::ControlMaskState::Status::Ready);
+    CHECK(a.model->controlMask().file == QString::fromUtf8("b_mask.png"));
+    CHECK(a.model->sourceNames().contains("mask_control"));
+    CHECK(ReadControlMaskInfo(a.dir / "passes" / "mask_control"));  // the import itself finished into project A
 }
 
 // PR-8: one function behind the card and the CLI - one fingerprint for one file

@@ -46,6 +46,12 @@ inline void WriteTiffWith(const std::filesystem::path& path, const TiffSpec& s, 
         for (size_t i = 0; i < map.size(); ++i) map[i] = static_cast<uint16_t>(i * 257);
         TIFFSetField(tif.get(), TIFFTAG_COLORMAP, map.data(), map.data(), map.data());
     }
+    if (s.bits < 8) {  // bilevel / packed: zero rows of the packed size (the import refuses them by the header anyway)
+        TIFFSetField(tif.get(), TIFFTAG_ROWSPERSTRIP, s.height);
+        std::vector<uint8_t> row((static_cast<size_t>(s.width) * s.samples * s.bits + 7) / 8, uint8_t{0});
+        for (uint32_t y = 0; y < s.height; ++y) TIFFWriteScanline(tif.get(), row.data(), y, 0);
+        return;
+    }
     const size_t bytes = s.bits / 8;
     auto store = [&](uint8_t* dst, double v) {
         if (s.sampleFormat == SAMPLEFORMAT_IEEEFP && s.bits == 32) {
@@ -54,6 +60,9 @@ inline void WriteTiffWith(const std::filesystem::path& path, const TiffSpec& s, 
         } else if (s.sampleFormat == SAMPLEFORMAT_IEEEFP && s.bits == 16) {
             const uint16_t h = FloatToHalf(static_cast<float>(v));
             std::memcpy(dst, &h, 2);
+        } else if (s.bits == 32) {
+            const uint32_t u = static_cast<uint32_t>(v);
+            std::memcpy(dst, &u, 4);
         } else if (s.bits == 16) {
             const uint16_t u = static_cast<uint16_t>(v);
             std::memcpy(dst, &u, 2);

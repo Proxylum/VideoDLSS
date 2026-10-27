@@ -23,6 +23,7 @@ struct ControlMaskIssue {
     Kind kind = Kind::Unreadable;
     std::string detail;               // English: what() of the error, the CLI's text
     uint32_t width = 0, height = 0;   // TooLarge: the image's size
+    bool previousKept = true;         // Locked / Write: the previous mask (if any) is still in place; false - there is no mask now
 };
 // what() is the English detail (CLI); the GUI writes its Russian text by issue.kind.
 class ControlMaskError : public std::runtime_error {

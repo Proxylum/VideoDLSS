@@ -348,6 +348,40 @@ TEST_CASE("the plan warns about a control mask of other proportions and stops NR
     CHECK_THROWS_WITH(RunProcess(forced), Catch::Matchers::ContainsSubstring("изменён вне программы"));
 }
 
+// Review of PR-8: C0 changed the output of NR with protect and skin masks of different sizes (the UI was unprotected before) - such passes
+// carry +nr.msize and the old ones are recomputed; masks of one size keep the fingerprint of before.
+TEST_CASE("RunProcess: an nr pass with protect and skin masks of different sizes carries the revision of their fix; one size keeps its fingerprint", "[integration][process][mask][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("mask_sizes_revision");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    auto mask = [&](const char* name, uint32_t w, uint32_t h) {
+        PassWriter wr(dir / "passes" / name, Manifest::ForPass(PassKind::Mask, w, h, FileFormat::Png));
+        for (int64_t f = 0; f < 2; ++f) wr.WriteFrame(f, MakePassImage(PassKind::Mask, w, h, PixelType::U8));
+        wr.Finish();
+    };
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.codec = "ffv1";
+    o.warp = true;
+    o.stages = StubStages(2);
+    for (auto& s : o.stages) s.enabled = s.name == "nr";
+    mask("mask_ui", 48, 32);
+    mask("mask_skin", 48, 32);
+    REQUIRE(Report(RunProcess(o), "nr").status == "ran");
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").tool.value("app", std::string()).find("nr.msize") == std::string::npos);  // one size: as before
+    std::filesystem::remove_all(o.passesRoot / "mask_skin");
+    mask("mask_skin", 24, 16);
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "ran");
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").tool.value("app", std::string()).find("+nr.msize") != std::string::npos);
+    CHECK(Report(RunProcess(o), "nr").status == "reused");  // the revision is stable
+}
+
 // PR-8 (regression of the race the design closes): a mask replaced from the CLI while process runs. Between the plan and NR's Init the
 // pass would say it was made with the new mask under the old fingerprint: the stage fails after the run, before the stamp. Replaced after
 // the first NR frame (Init and Setup done) it changes nothing in this run: the mask is on the GPU, the pass gets the label of the one applied.

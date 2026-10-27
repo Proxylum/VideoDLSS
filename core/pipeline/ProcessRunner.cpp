@@ -379,6 +379,24 @@ std::optional<PassVersionInfo> RestorableVersion(const RunContext& ctx, const st
     return std::nullopt;
 }
 
+// Whether NR's protect masks (mask_ui, mask_ignore) and skin masks (mask_face, mask_skin) among the inputs have different sizes: the case
+// the shared texture size of before PR-8 handled wrongly (the UI unprotected on every frame).
+bool NrMaskSizesDiffer(const std::filesystem::path& root, const std::map<std::string, std::string>& inputs) {
+    std::set<std::pair<uint32_t, uint32_t>> protect, skin;
+    for (const auto& [pass, group] : {std::pair<const char*, int>{"mask_ui", 0}, {"mask_ignore", 0}, {"mask_face", 1}, {"mask_skin", 1}}) {
+        if (!inputs.count(pass)) continue;
+        try {
+            const Manifest m = Manifest::Load(root / pass);
+            (group == 0 ? protect : skin).insert({m.width, m.height});
+        } catch (const std::exception&) {
+        }
+    }
+    for (const auto& p : protect)
+        for (const auto& s : skin)
+            if (p != s) return true;
+    return false;
+}
+
 StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, const PlanState& state) {
     const std::string& name = stage.name;
     const nlohmann::json p = EffectiveStageParams(name, stage.params);  // schema defaults filled in: the run's real parameters
@@ -405,6 +423,9 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     // PR-8: a revision of the control mask's code goes only into passes made with a mask - PassToolVersionFor sees the parameters,
     // not the inputs, and a token there would recompute every NR pass (and in the input's id gc would no longer match the mask)
     if (name == "nr" && d.inputs.count(kControlMaskPass)) stageTool.app += kNrControlMaskRevision;
+    // TASK-0060 (C0): protect and skin / face masks of different sizes lost the UI protection before PR-8 - those NR passes are another
+    // picture now; passes with masks of one size (or one group only) keep their fingerprint
+    if (name == "nr" && NrMaskSizesDiffer(ctx.root, d.inputs)) stageTool.app += "+nr.msize";
     const PassFingerprint fp = ComputeFingerprint(name, ctx.sourceHash, p, d.inputs, stageTool, ctx.sourceFormat);
     d.fingerprint = fp.value;
     d.sourceFormat = ctx.sourceFormat;

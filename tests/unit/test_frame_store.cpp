@@ -273,6 +273,7 @@ TEST_CASE("FrameStore: mask_control is a colour texture; a grey U16 mask shows g
     store.SetSources(FrameStore::DiscoverPasses(root));
     REQUIRE(store.FindSource("mask_control"));
     CHECK(store.FindSource("mask_control")->kind == TextureKind::Color);  // a one-channel U16 pass: Scalar with raw 0..65535 before
+    CHECK(store.Duration() == 0.0);  // alone it gives the time line no length (it would be one frame at 1 fps)
     store.SetCurrentTime(0.0, {"mask_control"});
     store.WaitForCurrent();
     const FrameTextures tex = store.TexturesAt(0.0);

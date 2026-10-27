@@ -142,6 +142,11 @@ AppModel::ControlMaskState ReadControlMaskState(const std::filesystem::path& roo
     if (!info) {
         s.status = AppModel::ControlMaskState::Status::Unreadable;
         s.problem = ControlMaskWhyText(why);
+        try {  // the name for the «Убрать» dialog when the manifest still reads
+            const Manifest m = Manifest::Load(root / kControlMaskPass);
+            if (m.stageParams.is_object()) s.file = QString::fromStdString(m.stageParams.value("source_name", std::string()));
+        } catch (const std::exception&) {
+        }
         return s;
     }
     s.status = AppModel::ControlMaskState::Status::Ready;
@@ -172,6 +177,7 @@ void AppModel::importControlMask(const QString& file) {
     controlMaskBusy_ = true;
     rememberDir("mask", file);
     store_->SetSources(viewportSources(true));  // waits for loads in flight: then the folder can be renamed
+    requestFrames();                             // the other sources again: SetSources cleared the cache
     controlMask_.status = ControlMaskState::Status::Importing;
     controlMask_.file = QFileInfo(file).fileName();
     emit controlMaskChanged();
@@ -201,7 +207,11 @@ void AppModel::importControlMask(const QString& file) {
                 message = tr("Маска не загружена: %1").arg(QString::fromStdString(other));
             }
             if (ok) Log()->info("mask_control: {}", message.toStdString());
-            if (project_.passesRoot == root) reloadSources();  // also after a failure: the previous mask back on the viewport
+            // the current project's mask and sources whichever project the import ran for (another one may have been opened meanwhile); after
+            // a failure the previous mask comes back on the viewport
+            (void)root;
+            if (hasProject()) reloadSources();
+            else controlMask_ = {};
             emit controlMaskFinished(ok, changed, message);
             emit controlMaskChanged();
         }, Qt::QueuedConnection);
@@ -961,6 +971,7 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
                 const auto added = AddedToolRevisions(app[0].get<std::string>(), app[1].get<std::string>());
                 auto has = [&](const char* r) { return std::find(added.begin(), added.end(), r) != added.end(); };
                 if (has("nr.i0")) st.state = tr("пересчёт: при силе 0 модель не вызывается");
+                else if (has("nr.msize")) st.state = tr("пересчёт: защита интерфейса при масках разного размера");
                 else if (has("nr.gain")) st.state = tr("пересчёт: сила правки теперь после модели");
                 else if (has("nr.ev")) st.state = tr("пересчёт: экспозиция в ступенях EV");
             }

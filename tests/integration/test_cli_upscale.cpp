@@ -78,7 +78,6 @@ TEST_CASE("dlssvid upscale --backend nis writes color_sr and a preview; compare 
     CHECK(Run("compare --ref " + Q(clip) + " --test " + Q(out / "color_sr")) != 0);  // sizes differ
 }
 
-#ifdef DLSSVID_WITH_TENSORRT
 namespace {
 // A colour pass of frames [first, first + count): grey value(frame, x, y) in all three channels.
 void GreyPass(const std::filesystem::path& dir, uint32_t w, uint32_t h, int64_t first, int64_t count, const std::function<float(int64_t, uint32_t, uint32_t)>& value) {
@@ -157,6 +156,7 @@ TEST_CASE("dlssvid compare --bands: a smooth difference is low band, a checkerbo
     CHECK(Run("compare --ref " + Q(dir / "flat") + " --test " + Q(dir / "smooth") + " --bands 2,x -q") != 0);
 }
 
+#ifdef DLSSVID_WITH_TENSORRT
 TEST_CASE("CLI upscale --backend trt runs a registry model from --models-dir", "[cli][upscale][trt][gpu]") {
     std::string reason;
     if (!trt::Available(&reason)) SKIP("TensorRT unavailable: " << reason);

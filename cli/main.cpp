@@ -585,6 +585,12 @@ int CmdImport(const ImportArgs& a) {
     }
     // after --write-manifest: a folder without one gets it (as scanned) with the fingerprint; with --to-dlss / --to-raw
     // the converted pass is stamped, it is what the stages read
+    // PR-8: a control mask is stamped by its import; --stamp over one edited in place would take the new file under the old pixels_sha256
+    // (a later import of the old image would then be «Unchanged») - it is loaded again instead
+    if (a.stamp && r.Man().pass == kControlMaskPass) {
+        std::string why;
+        if (!ReadControlMaskInfo(r.Dir(), &why)) Throw("import --stamp: " + r.Dir().string() + " is no control mask (" + why + "): load the image again with import --static");
+    }
     if (a.stamp && a.toDlss.empty() && a.toRaw.empty()) StampPass(r.Dir(), r.HadManifest() ? Manifest::Load(r.Dir()) : r.Man());
     const auto kind = r.Man().Kind();
     if (!a.toDlss.empty()) {

@@ -595,6 +595,7 @@ void ProjectPanel::refreshVersions() {
 void ProjectPanel::processAll() {
     Project& p = model_.project();
     if (p.sourceVideo.empty()) return;
+    if (model_.controlMaskBusy()) return;  // PR-8: Ctrl+Return too waits for the mask's import (its plan would read the folder being renamed)
     if (p.resultVideo.empty()) p.resultVideo = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + "_result" + ResultExtensionFor(p.codec));
     if (p.file.empty()) {
         const auto file = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + ".dlssvid.json");

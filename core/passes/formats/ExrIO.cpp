@@ -37,6 +37,17 @@ PassImage Storable(const PassImage& img) {
 
 std::string ChannelName(const std::string& layer, const std::string& ch) { return layer.empty() ? ch : layer + "." + ch; }
 
+}  // namespace
+
+// OpenEXR takes a file name as UTF-8 (on Windows it widens it from UTF-8): path.string() is the ANSI code page, which broke every path
+// with Cyrillic in it (PR-8 review: a mask from D:\Маски) and throws for characters outside the code page.
+std::string ExrFileName(const std::filesystem::path& path) {
+    const std::u8string u = path.u8string();
+    return std::string(u.begin(), u.end());
+}
+
+namespace {
+
 // Canonical channel order inside a layer so that R,G,B and u,v come back in the expected order.
 int ChannelRank(const std::string& c) {
     static const char* order[] = {"R", "G", "B", "A", "Z", "u", "v", "X", "Y"};
@@ -81,11 +92,11 @@ void WriteExrLayers(const std::filesystem::path& path, const ExrLayers& layers) 
         }
     }
     try {
-        Imf::OutputFile file(path.string().c_str(), header);
+        Imf::OutputFile file(ExrFileName(path).c_str(), header);
         file.setFrameBuffer(fb);
         file.writePixels(static_cast<int>(h));
     } catch (const std::exception& e) {
-        Throw("EXR write failed (" + path.string() + "): " + e.what());
+        Throw("EXR write failed (" + ExrFileName(path) + "): " + e.what());
     }
 }
 
@@ -95,7 +106,7 @@ std::map<std::string, PassImage> ReadExrLayers(const std::filesystem::path& path
     std::map<std::string, PassImage> out;
     EnsureExrThreads();
     try {
-        Imf::InputFile file(path.string().c_str());
+        Imf::InputFile file(ExrFileName(path).c_str());
         const Imf::Header& header = file.header();
         const Imath::Box2i dw = header.dataWindow();
         const uint32_t w = static_cast<uint32_t>(dw.max.x - dw.min.x + 1);
@@ -141,14 +152,14 @@ std::map<std::string, PassImage> ReadExrLayers(const std::filesystem::path& path
     } catch (const Error&) {
         throw;
     } catch (const std::exception& e) {
-        Throw("EXR read failed (" + path.string() + "): " + e.what());
+        Throw("EXR read failed (" + ExrFileName(path) + "): " + e.what());
     }
     return out;
 }
 
 PassImage ReadExr(const std::filesystem::path& path) {
     auto layers = ReadExrLayers(path);
-    if (layers.empty()) Throw("EXR has no channels: " + path.string());
+    if (layers.empty()) Throw("EXR has no channels: " + ExrFileName(path));
     if (layers.size() == 1) return std::move(layers.begin()->second);
     // Single-pass read of a multi-layer file: prefer the top-level layer.
     auto it = layers.find("");

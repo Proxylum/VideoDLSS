@@ -25,10 +25,14 @@ QString ControlMaskIssueText(const ControlMaskIssue& i) {
             const QString names = open >= 0 && close > open ? d.mid(open + 1, close - open - 1) : d;
             return Tr("Каналы изображения не подходят (%1): нужны R, G, B или один серый.").arg(names);
         }
-        case K::Tiff: return Tr("Этот TIFF не поддерживается (палитра, CMYK, плитки или раздельные плоскости). Сохраните маску как PNG.");
+        case K::Tiff: return Tr("Этот TIFF не поддерживается (палитра, CMYK, 1 бит, 32-битные целые, плитки или раздельные плоскости). Сохраните маску как PNG.");
         case K::Busy: return Tr("Идёт другой импорт маски в эту папку пассов — дождитесь его конца и повторите.");
-        case K::Locked: return Tr("Папку маски держит другая программа — закройте её и повторите. Прежняя маска осталась на месте.");
-        case K::Write: return Tr("Не удалось записать маску в папку пассов: %1").arg(QString::fromStdString(i.detail));
+        case K::Locked:
+            return i.previousKept ? Tr("Папку маски держит другая программа — закройте её и повторите. Прежняя маска осталась на месте.")
+                                  : Tr("Папку маски держит другая программа — закройте её и повторите. Маски сейчас нет.");
+        case K::Write:
+            return Tr("Не удалось записать маску в папку пассов: %1").arg(QString::fromStdString(i.detail)) +
+                   (i.previousKept ? QString() : Tr(" Маски сейчас нет."));
     }
     return QString::fromStdString(i.detail);
 }

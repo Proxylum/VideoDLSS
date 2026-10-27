@@ -14,6 +14,7 @@
 #include "passes/ControlMaskPass.h"
 #include "passes/Manifest.h"
 #include "passes/formats/ExrIO.h"
+#include "passes/formats/ImageProbe.h"
 #include "passes/formats/PngIO.h"
 #include "passes/formats/TiffIO.h"
 #include "pipeline/ControlMask.h"
@@ -185,6 +186,14 @@ TEST_CASE("ImportControlMask: 16 bit is kept bit for bit; float EXR and TIFF cla
             const bool inside = x >= 2 && x < 5 && y >= 1 && y < 3;
             CHECK(s.Get(x, y, 0) == (inside ? 65535.f : 0.f));
         }
+    // review of PR-8: an EXR from a folder with Cyrillic in its name (path.string() was the ANSI code page - «не читается»)
+    const auto cyr = dir / std::filesystem::path(u8"маски");
+    fs::create_directories(cyr);
+    WriteExr(cyr / "m.exr", Image(4, 2, PixelType::F16, {"R", "G", "B"}, [](uint32_t x, uint32_t, size_t c) { return 0.25f * static_cast<float>(x) + 0.1f * c; }));
+    CHECK(ProbeImage(cyr / "m.exr").format == ImageProbe::Format::Exr);
+    const ControlMaskImport u8mask = ImportControlMask(cyr / "m.exr", cyr / "passes");
+    CHECK(u8mask.mask.width == 4);
+    CHECK(u8mask.sourceFormat == "exr");
     // an EXR without R, G, B, Y or a single channel
     WriteExr(dir / "uv.exr", Image(2, 2, PixelType::F16, {"u", "v"}, [](uint32_t, uint32_t, size_t) { return 0.5f; }));
     CHECK(KindOf([&] { ImportControlMask(dir / "uv.exr", dir / "uv"); }) == ControlMaskIssue::Kind::Channels);
@@ -217,7 +226,10 @@ TEST_CASE("ImportControlMask: palette, tiled and planar TIFF refused, min-is-whi
     WriteTiffWith(dir / "tiled.tif", {20, 20, 1, 8, SAMPLEFORMAT_UINT, PHOTOMETRIC_MINISBLACK, true, false}, code);
     WriteTiffWith(dir / "planar.tif", {6, 2, 3, 8, SAMPLEFORMAT_UINT, PHOTOMETRIC_RGB, false, true}, code);
     WriteTiffWith(dir / "white.tif", {6, 2, 1, 8, SAMPLEFORMAT_UINT, PHOTOMETRIC_MINISWHITE}, code);
-    for (const char* name : {"palette.tif", "tiled.tif", "planar.tif"}) {
+    // review of PR-8: samples ReadTiff does not take (a bilevel mask of an editor, 32-bit integers) are «not supported», not «corrupted»
+    WriteTiffWith(dir / "bilevel.tif", {6, 2, 1, 1, SAMPLEFORMAT_UINT, PHOTOMETRIC_MINISWHITE}, code);
+    WriteTiffWith(dir / "int32.tif", {6, 2, 1, 32, SAMPLEFORMAT_UINT, PHOTOMETRIC_MINISBLACK}, code);
+    for (const char* name : {"palette.tif", "tiled.tif", "planar.tif", "bilevel.tif", "int32.tif"}) {
         INFO(name);
         CHECK(KindOf([&] { ImportControlMask(dir / name, dir / "passes"); }) == ControlMaskIssue::Kind::Tiff);
     }
@@ -295,6 +307,23 @@ TEST_CASE("ImportControlMask: a file held at the retire fails as Locked and keep
     REQUIRE(ReadControlMaskInfo(root / kControlMaskPass));
     CHECK(ReadControlMaskInfo(root / kControlMaskPass)->fingerprint == a.mask.fingerprint);
     CHECK(ListPassVersions(root, kControlMaskPass).size() == 1);  // brought back, not left in the history
+
+    // review of PR-8: the current folder broken (deleted at the replace step) and the final rename failing - there is no mask now
+    { std::ofstream(root / kControlMaskPass / Manifest::kFileName) << "{ broken"; }
+    ControlMaskHooksForTests().beforePlace = [&](const fs::path& newFolder) {
+        held = std::make_unique<std::ifstream>(newFolder / m.FrameFileName(0), std::ios::binary);
+    };
+    try {
+        ImportControlMask(dir / "b.png", root);
+        FAIL_CHECK("imported");
+    } catch (const ControlMaskError& e) {
+        CHECK(e.issue.kind == ControlMaskIssue::Kind::Locked);
+        CHECK_FALSE(e.issue.previousKept);
+    }
+    ControlMaskHooksForTests().beforePlace = nullptr;
+    held.reset();
+    CHECK(!fs::exists(root / kControlMaskPass));
+    REQUIRE(ImportControlMask(dir / "a.png", root).outcome == ControlMaskImport::Outcome::Imported);
 
     // a lock of another import is Busy; one older than 10 minutes is a crashed process's and is taken over
     fs::create_directories(root / ".import" / "lock");

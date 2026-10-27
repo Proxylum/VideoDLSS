@@ -39,7 +39,7 @@ constexpr uint16_t kMinIsWhite = 0, kMinIsBlack = 1, kRgb = 2;
 constexpr auto kStaleAfter = std::chrono::minutes(10);  // a lock or a working folder older than this is a crashed import's
 constexpr const char* kImportDir = ".import";           // no manifest, no ".v": no pass, no history, not seen by gc or the viewport
 
-[[noreturn]] void Fail(Kind k, std::string detail, uint32_t w = 0, uint32_t h = 0) { throw ControlMaskError(ControlMaskIssue{k, std::move(detail), w, h}); }
+[[noreturn]] void Fail(Kind k, std::string detail, uint32_t w = 0, uint32_t h = 0) { throw ControlMaskError(ControlMaskIssue{k, std::move(detail), w, h, true}); }
 
 std::string Utf8(const fs::path& p) {
     const std::u8string u = p.u8string();
@@ -51,7 +51,9 @@ bool IsLocked(const std::error_code& ec) {
     return ec.category() == std::system_category() &&
            (ec.value() == ERROR_ACCESS_DENIED || ec.value() == ERROR_SHARING_VIOLATION || ec.value() == ERROR_LOCK_VIOLATION);
 }
-[[noreturn]] void FailFs(const std::error_code& ec, const std::string& what) { Fail(IsLocked(ec) ? Kind::Locked : Kind::Write, what + ": " + ec.message()); }
+[[noreturn]] void FailFs(const std::error_code& ec, const std::string& what, bool previousKept = true) {
+    throw ControlMaskError(ControlMaskIssue{IsLocked(ec) ? Kind::Locked : Kind::Write, what + ": " + ec.message(), 0, 0, previousKept});
+}
 
 bool OlderThan(const fs::path& p, std::chrono::minutes age) {
     std::error_code ec;
@@ -155,10 +157,12 @@ Decoded DecodeMask(const fs::path& image) {
     CheckSize(p.width, p.height);
     if (p.format == ImageProbe::Format::Exr) CheckSize(p.exrDataWidth, p.exrDataHeight);
     if (p.format == ImageProbe::Format::Tiff &&
-        (p.tiffTiled || p.tiffPlanarSeparate ||
+        (p.tiffTiled || p.tiffPlanarSeparate || !p.tiffSamplesSupported ||
          (p.tiffPhotometric != kMinIsWhite && p.tiffPhotometric != kMinIsBlack && p.tiffPhotometric != kRgb)))
         Fail(Kind::Tiff, "this TIFF is not supported (photometric " + std::to_string(p.tiffPhotometric) + (p.tiffTiled ? ", tiles" : "") +
-                             (p.tiffPlanarSeparate ? ", separate planes" : "") + "): save the mask as PNG");
+                             (p.tiffPlanarSeparate ? ", separate planes" : "") +
+                             (p.tiffSamplesSupported ? "" : ", samples other than 8 / 16-bit unsigned or 16 / 32-bit float (1-bit, 32-bit integer)") +
+                             "): save the mask as PNG");
     PassImage src;
     try {
         src = p.format == ImageProbe::Format::Png ? ReadPng(image) : p.format == ImageProbe::Format::Tiff ? ReadTiff(image) : ReadExr(image);
@@ -387,11 +391,14 @@ ControlMaskImport ImportControlMask(const fs::path& image, const fs::path& root)
             try {
                 UsePassVersion(root, kControlMaskPass, retired);
             } catch (const std::exception&) {
-                Fail(Kind::Write, "cannot put the new control mask in place (" + mv.message() + ") nor bring the previous one back: there is no mask now, "
-                                  "the previous one is in the history " + retired);
+                throw ControlMaskError(ControlMaskIssue{Kind::Write,
+                                                        "cannot put the new control mask in place (" + mv.message() + ") nor bring the previous one back: there is "
+                                                        "no mask now, the previous one is in the history " + retired,
+                                                        0, 0, false});
             }
         }
-        FailFs(mv, "cannot put the new control mask in place");
+        // the previous mask is back in place - or there was none, or a broken folder was deleted at the replace step: no mask now
+        FailFs(mv, "cannot put the new control mask in place", !retired.empty());
     }
     r.retiredVersion = retired;
     r.mask = InfoOf(m);

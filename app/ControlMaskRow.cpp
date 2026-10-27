@@ -123,10 +123,10 @@ void ControlMaskRow::load() {
 void ControlMaskRow::remove() {
     const AppModel::ControlMaskState& s = model_.controlMask();
     const bool broken = s.broken;
-    const QString text = broken ? tr("Папка маски повреждена и будет удалена. Исходный файл не меняется.")
-                                : tr("Маска «%1» уйдёт в историю версий — вернуть её можно в панели версий. Исходный файл не меняется. «Улучшение» "
-                                     "посчитается заново без маски.")
-                                      .arg(s.file);
+    const QString tail = tr("вернуть её можно в панели версий. Исходный файл не меняется. «Улучшение» посчитается заново без маски.");
+    const QString text = broken           ? tr("Папка маски повреждена и будет удалена. Исходный файл не меняется.")
+                         : s.file.isEmpty() ? tr("Маска уйдёт в историю версий — %1").arg(tail)
+                                            : tr("Маска «%1» уйдёт в историю версий — %2").arg(s.file, tail);
     if (!dialogs_.confirm(window(), tr("Убрать маску управления?"), text, broken ? tr("Удалить") : tr("Убрать"))) return;
     notice_.clear();
     QString error;

@@ -156,6 +156,16 @@ TEST_CASE("dlssvid import --pass mask_control --static gives the fingerprint the
     REQUIRE(RunOut("import -i " + Q(dir / "mask.png") + " --pass mask_control --static -o " + Q(dir / "passes"), dir / "b.log", out) == 0);
     CHECK(out.find("unchanged") != std::string::npos);
     CHECK(!std::filesystem::exists(dir / "passes" / "mask_control.v"));
+
+    // review of PR-8: the frame file edited in place - --stamp would take it under the old pixels_sha256; refused, the image is loaded again
+    PassImage edited;
+    edited.Allocate(8, 6, PixelType::U16, {"R", "G", "B"});
+    WritePng(dir / "passes" / "mask_control" / m.FrameFileName(0), edited);
+    CHECK(RunOut("import -i " + Q(dir / "passes" / "mask_control") + " --stamp", dir / "c.log", out) != 0);
+    CHECK(out.find("load the image again") != std::string::npos);
+    CHECK(Manifest::Load(dir / "passes" / "mask_control").fingerprint == m.fingerprint);
+    REQUIRE(Run("import -i " + Q(dir / "mask.png") + " --pass mask_control --static -o " + Q(dir / "passes")) == 0);  // not «unchanged»
+    CHECK(ReadControlMaskInfo(dir / "passes" / "mask_control"));
 }
 
 TEST_CASE("dlssvid import --static refuses another pass, the conversion flags, an explicit --dilate, a folder as -i and a missing -o; --pass mask_control without --static explains", "[integration][cli][mask]") {

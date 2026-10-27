@@ -14,11 +14,15 @@
 #include <fstream>
 #include <memory>
 
+#include "passes/formats/ExrIO.h"
 #include "util/Error.h"
 
 namespace dlssvid {
 
 namespace {
+
+// the texts of the probe in UTF-8: path.string() throws for a character outside the ANSI code page
+std::string Utf8(const std::filesystem::path& p) { return ExrFileName(p); }
 
 void OnPngError(png_structp png, png_const_charp msg) {
     std::string* err = static_cast<std::string*>(png_get_error_ptr(png));
@@ -29,7 +33,7 @@ void OnPngWarning(png_structp, png_const_charp) {}
 
 void ProbePng(const std::filesystem::path& path, ImageProbe& p) {
     FILE* raw = _wfopen(path.wstring().c_str(), L"rb");
-    if (!raw) Throw("cannot open " + path.string());
+    if (!raw) Throw("cannot open " + Utf8(path));
     std::unique_ptr<FILE, int (*)(FILE*)> f(raw, &std::fclose);
     std::string err;
     png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, &err, OnPngError, OnPngWarning);
@@ -41,7 +45,7 @@ void ProbePng(const std::filesystem::path& path, ImageProbe& p) {
     }
     if (setjmp(png_jmpbuf(png))) {
         png_destroy_read_struct(&png, &info, nullptr);
-        Throw("PNG header does not read (" + path.string() + "): " + err);
+        Throw("PNG header does not read (" + Utf8(path) + "): " + err);
     }
     png_init_io(png, f.get());
     png_read_info(png, info);
@@ -64,7 +68,7 @@ void ProbePng(const std::filesystem::path& path, ImageProbe& p) {
 void ProbeTiff(const std::filesystem::path& path, ImageProbe& p) {
     TIFFSetWarningHandler(nullptr);
     std::unique_ptr<TIFF, void (*)(TIFF*)> tif(TIFFOpenW(path.wstring().c_str(), "r"), &TIFFClose);
-    if (!tif) Throw("TIFF header does not read: " + path.string());
+    if (!tif) Throw("TIFF header does not read: " + Utf8(path));
     uint32_t w = 0, h = 0;
     uint16_t bits = 0, spp = 1, fmt = SAMPLEFORMAT_UINT, planar = PLANARCONFIG_CONTIG, photometric = 0;
     TIFFGetField(tif.get(), TIFFTAG_IMAGEWIDTH, &w);
@@ -89,7 +93,7 @@ void ProbeTiff(const std::filesystem::path& path, ImageProbe& p) {
 
 void ProbeExr(const std::filesystem::path& path, ImageProbe& p) {
     try {
-        Imf::InputFile file(path.string().c_str());
+        Imf::InputFile file(ExrFileName(path).c_str());  // UTF-8: a mask from a Cyrillic folder
         const Imf::Header& header = file.header();
         const Imath::Box2i display = header.displayWindow(), data = header.dataWindow();
         p.width = static_cast<uint32_t>(std::max(0, display.max.x - display.min.x + 1));
@@ -109,7 +113,7 @@ void ProbeExr(const std::filesystem::path& path, ImageProbe& p) {
         p.channels = top ? top : static_cast<uint32_t>(p.exrChannels.size());
         p.type = wide ? PixelType::F32 : PixelType::F16;
     } catch (const std::exception& e) {
-        Throw("EXR header does not read (" + path.string() + "): " + e.what());
+        Throw("EXR header does not read (" + ExrFileName(path) + "): " + e.what());
     }
 }
 
