@@ -28,7 +28,7 @@ namespace dlssvid {
 
 // A pass folder or video that the viewport can show.
 struct ViewportSource {
-    std::string name;             // "source", "result", pass name
+    std::string name;             // "source", "result", pass folder name
     std::filesystem::path path;   // video file or pass folder
     bool isVideo = false;
     TextureKind kind = TextureKind::Color;
@@ -36,7 +36,9 @@ struct ViewportSource {
     int64_t lastFrame = -1;       // inclusive; video: frameCount - 1 (or -1 when unknown)
     uint32_t width = 0, height = 0;
     Rational fps{0, 1};
-    std::string pass;             // pass folders: the pass name (the current version and its previous versions share it)
+    // Pass folders: the folder name, as in PassVersions.h (the current version and its previous versions share it). The
+    // manifest's `pass` is the kind and may differ: mask_ui, mask_ignore, mask_face and mask_skin are all "mask".
+    std::string pass;
     std::string version;          // a previous version (PassVersions.h): its history id; empty for the current one
     // Videos: the scrubbing proxy (ViewportProxy.h, bit for bit the same frames, intra) - jumps decode one frame of it;
     // empty when there is none. The colour of the original (the proxy's tags are only a copy).
@@ -81,6 +83,7 @@ public:
     void SetSources(std::vector<ViewportSource> sources);
     const std::vector<ViewportSource>& Sources() const { return sources_; }
     const ViewportSource* FindSource(const std::string& name) const;
+    // Pass folders with a manifest directly under passesRoot, named by their folder (the texture kind comes from the manifest).
     static std::vector<ViewportSource> DiscoverPasses(const std::filesystem::path& passesRoot);
     // Previous versions under <pass>.v/ as sources named "<pass>@<id>" (stage 9: compare versions with the wipe).
     static std::vector<ViewportSource> DiscoverPassVersions(const std::filesystem::path& passesRoot);

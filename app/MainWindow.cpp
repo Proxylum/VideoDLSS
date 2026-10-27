@@ -566,11 +566,7 @@ void MainWindow::exportPasses() {
     const QString dir = QFileDialog::getExistingDirectory(this, tr("Папка для экспорта пассов (EXR-последовательности с manifest.json, по подпапке на пасс)"), model_.lastDir("export"));
     if (dir.isEmpty()) return;
     model_.rememberDir("export", QDir(dir).filePath("."));
-    for (const std::string& pass : passes) {
-        const QString from = QString::fromStdWString((model_.project().passesRoot / pass).wstring());
-        tasks_->enqueue(tr("Экспорт: %1").arg(HumanSourceName(pass)), model_.cliPath(),
-                        {"export", "--from-dir", from, "-o", QDir(dir).filePath(QString::fromStdString(pass)), "--format", "exr"});
-    }
+    for (const std::string& pass : passes) tasks_->enqueue(tr("Экспорт: %1").arg(HumanSourceName(pass)), model_.cliPath(), model_.exportPassArgs(pass, dir));
     tasksDock_->show();
     tasksDock_->raise();
     statusBar()->showMessage(tr("%1 в очереди → %2").arg(Plural(static_cast<int>(passes.size()), tr("задача экспорта"), tr("задачи экспорта"), tr("задач экспорта")), dir), 8000);

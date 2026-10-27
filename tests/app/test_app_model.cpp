@@ -1127,6 +1127,50 @@ TEST_CASE("AppModel result: summary and bar, export copy, exportable passes, chi
     CHECK(!model.closeProject());
 }
 
+// Regression (TASK-0063, review of PR-8): the NR mask folders (manifest pass "mask") were one source "mask"; «Экспорт пассов»
+// listed "mask" and queued `dlssvid export --from-dir <root>/mask`, a folder that does not exist - the task failed.
+TEST_CASE("AppModel: every NR mask folder is a chip and an exportable pass, and its export task runs", "[app][model][gpu][regression]") {
+    App();
+    const auto d = Dir("mask_folders");
+    WritePassFps(d / "passes" / "color_sr", PassKind::ColorSr, 4, 24);
+    for (const char* mask : {"mask_ui", "mask_skin"}) WritePassFps(d / "passes" / mask, PassKind::Mask, 4, 24);
+    Project p = Project::Create(d / "missing.mp4", d / "passes");
+    p.Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    REQUIRE(model.hasProject());
+
+    CHECK(model.exportablePasses() == std::vector<std::string>{"color_sr", "mask_skin", "mask_ui"});
+    const auto chips = model.chips();
+    REQUIRE(chips.size() == 3);
+    CHECK(chips[1].source == "mask_skin");
+    CHECK(chips[1].label == QString::fromUtf8("Маска skin"));
+    CHECK(chips[2].source == "mask_ui");
+    CHECK(chips[2].label == QString::fromUtf8("Маска ui"));
+    // the versions panel names a current pass by its folder: «Сравнить» shows that source
+    for (const auto& v : ListPassVersions(d / "passes")) CHECK(model.store().FindSource(v.pass) != nullptr);
+    model.showSource("mask_ui");
+    model.store().WaitForCurrent();
+    CHECK(model.frameStateOf("mask_ui") == FrameState::Ready);
+
+    // the tasks «Экспорт пассов» queues, one per folder: each runs
+    for (const std::string pass : {"mask_ui", "mask_skin"}) {
+        INFO(pass);
+        const QStringList args = model.exportPassArgs(pass, Q(d / "export"));
+        const qsizetype from = args.indexOf("--from-dir");
+        REQUIRE(from >= 0);
+        CHECK(std::filesystem::equivalent(std::filesystem::path(args[from + 1].toStdWString()), d / "passes" / pass));
+        std::vector<std::string> cmd{DLSSVID_CLI_PATH};
+        for (const QString& a : args) cmd.push_back(a.toStdString());
+        std::string out;
+        REQUIRE(Subprocess::Run(cmd, &out) == 0);
+        const Manifest m = Manifest::Load(d / "export" / pass);
+        CHECK(m.pass == "mask");
+        CHECK(m.format == FileFormat::Exr);
+        CHECK(m.frameCount == 4);
+    }
+}
+
 // Regression (TASK-0017): a wheel over the project panel used to change the backend of a stage when the pointer happened
 // to be over a combo box; unfocused value controls now pass the wheel on to the page.
 TEST_CASE("Theme: the wheel over a combo box in a scrolling page scrolls the page; outside it changes the value", "[app][theme]") {

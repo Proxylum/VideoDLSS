@@ -174,7 +174,9 @@ public:
     QString resultSummary() const;                      // «3840×1600 · 48 fps · 479 кадров · HEVC 10 бит 4:2:0 · со звуком · обновлён сегодня 19:23 · готов за 11:22»; empty without a result
     // «HEVC 10 бит 4:2:0», «ProRes 10 бит 4:2:2»: a codec name and a frame layout in the words of the GUI (empty codec: the layout alone).
     static QString formatLabel(const std::string& codec, const FrameDesc& format);
-    std::vector<std::string> exportablePasses() const;  // current pass folders with a manifest, pipeline order
+    std::vector<std::string> exportablePasses() const;  // current pass folders with a manifest (folder names), pipeline order
+    // «Экспорт пассов», one task per folder: dlssvid export --from-dir <passes root>/<pass> -o <dir>/<pass> --format exr
+    QStringList exportPassArgs(const std::string& pass, const QString& dir) const;
     unsigned long long freeSpace() const;               // bytes free on the volume of the passes root (0 when unknown)
 
 public slots:
