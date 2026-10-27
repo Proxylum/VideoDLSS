@@ -51,6 +51,8 @@ struct ProcessOptions {
     bool gpuRoundtrip = true;          // passthrough: upload / readback each frame
     int keepVersions = 2;              // pass versions kept per pass after the run, the current one included; 0 = keep all
     bool settingsNote = true;          // the result carries what made it (PR-11, SettingsNote): `comment`, in .mkv also DLSSVID_SETTINGS
+    bool encode = true;                // false (process --no-encode, PR-10: the stages before NR for the preview): the passes only, the
+                                       // result is neither written nor created; -o then only locates the passes
     std::set<std::string> forceStages;  // recompute these stages even when their pass matches (a per-stage --no-skip-existing)
     std::string sourceHash;             // "sha256:<hex>" of the input when the caller knows it (Project::SourceHash); empty = hash the file
     uint64_t vramBytes = 0;             // GPU memory for the VRAM advice of the plan (TASK-0039); 0: RunProcess takes the device's, a
@@ -67,7 +69,7 @@ struct ProcessOptions {
 
 struct ProcessStageReport {
     std::string name;
-    std::string status;  // ran | reused | disabled | failed (fg: its process failed, the run went on) | passthrough
+    std::string status;  // ran | reused | disabled | failed (fg: its process failed, the run went on) | passthrough | skipped (encode, --no-encode)
     std::string reason;  // why it ran or was reused ("params_changed: intensity: 1 -> 1.4"), or why it is disabled
     std::filesystem::path outDir;
     int64_t frames = 0;

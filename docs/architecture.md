@@ -645,7 +645,8 @@ PlanProcess / RunProcess ── для каждой включённой ста�
 - Манифест: блок `fingerprint`, `inputs`, `tool`, `params_canonical`, `created` (`docs/conventions.md` §6),
   schema_version прежняя; блок пишет только `dlssvid process`. Отчёт `process --json`: `fingerprint`, `retired`,
   `restored`, `decision` у каждой стадии; `process --plan --json` — план целиком.
-- CLI: `process --plan`, `--keep-versions N` (проект: `pass_versions_keep`, по умолчанию 2, 0 = хранить всё);
+- CLI: `process --plan`, `--no-encode` (PR-10: только пассы, результат не пишется и не создаётся — этапы до NR для превью),
+  `--keep-versions N` (проект: `pass_versions_keep`, по умолчанию 2, 0 = хранить всё);
   `passes list|use|gc` (`cli/PassesCommands`). GUI подключается в MR D (карточки стадий показывают решения плана).
 - Границы: версии итогового видео не ведутся; хэш DLL — той, что найдена в момент плана. (С MR D параметры хэшируются с
   умолчаниями схемы: явное умолчание и отсутствующий ключ — один прогон.)

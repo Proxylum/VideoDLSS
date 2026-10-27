@@ -246,9 +246,13 @@ void PrintReport(const ProcessResult& r) {
         std::printf("%-12s %-12s %8lld %10.1f %12.1f  %s%s%s%s\n", s.name.c_str(), s.status.c_str(), static_cast<long long>(s.frames), s.seconds, s.msPerFrame,
                     s.outDir.string().c_str(), s.fingerprint.empty() ? "" : (" [" + ShortFingerprint(s.fingerprint) + "]").c_str(), s.reason.empty() ? "" : " — ",
                     s.reason.c_str());
-    std::printf("result:      %s (%lld frames at %.3f fps%s) in %.1f s\n", r.output.string().c_str(), static_cast<long long>(r.framesOut), r.outputFps.ToDouble(),
-                r.audio ? ", audio copied" : "", r.seconds);
-    std::printf("format:      %s %s (%s)\n", r.codec.c_str(), r.outputFormat.Describe().c_str(), r.outputPixelFormat.c_str());
+    if (r.output.empty()) {  // --no-encode
+        std::printf("result:      not encoded (--no-encode) in %.1f s\n", r.seconds);
+    } else {
+        std::printf("result:      %s (%lld frames at %.3f fps%s) in %.1f s\n", r.output.string().c_str(), static_cast<long long>(r.framesOut), r.outputFps.ToDouble(),
+                    r.audio ? ", audio copied" : "", r.seconds);
+        std::printf("format:      %s %s (%s)\n", r.codec.c_str(), r.outputFormat.Describe().c_str(), r.outputPixelFormat.c_str());
+    }
     for (const auto& w : r.warnings) std::printf("warning:     %s\n", w.c_str());
 }
 
@@ -311,6 +315,8 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     o.frames = a.frames;
     o.warp = a.warp;
     o.passthrough = a.passthrough;
+    if (a.noEncode && a.passthrough) Throw("process: --no-encode and --passthrough exclude each other");
+    o.encode = !a.noEncode;
     o.gpuRoundtrip = !a.noGpuRoundTrip;
     o.progress = &Progress;
     o.fgExecutable = a.fgInProcess ? std::filesystem::path{} : CurrentExecutable();  // audit fg-2: FG in its own process
@@ -440,6 +446,7 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_option("--frames", pa_.frames, "process at most N source frames")->default_val(-1);
     process_->add_flag("--warp", pa_.warp, "use the WARP software adapter");
     process_->add_flag("--passthrough", pa_.passthrough, "decode -> GPU -> encode without processing (stage 0)");
+    process_->add_flag("--no-encode,--no_encode", pa_.noEncode, "run the stages, do not encode the result (the result file is not touched)");
     process_->add_flag("--no-gpu-roundtrip", pa_.noGpuRoundTrip, "passthrough: skip the GPU upload/readback");
     process_->add_flag("--plan", pa_.plan, "decide which stages would run or be reused (fingerprints, versions) and exit without processing");
     process_->add_option("--force", pa_.force, "comma list of stages to recompute even when their pass matches (nr,fg)");
