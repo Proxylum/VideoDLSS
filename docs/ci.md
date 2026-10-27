@@ -37,7 +37,7 @@ labels `windows`, `rtx`. Работает как **процесс в сесси�
 | `VSLANG` | `1033` | английские сообщения MSVC → ninja видит зависимости от заголовков (инцидент этапа 8) |
 | `VCPKG_ROOT`, `TENSORRT_ROOT`, `NV_OPTICAL_FLOW_SDK_ROOT`, `QT_ROOT`, `DLSS_SDK_ROOT`, `DLSSNR_PATCHER_ROOT`, `VDA_REPO`, `SEARAFT_REPO` | `C:\vcpkg`, `<SDK>\...` — то, что пишет `scripts\setup_sdk.py` в `<SDK>\env.cmd` | configure и экспорт моделей (`docs/dll-setup.md`) |
 | `DLSSVID_NVIDIA_DLL_DIR` | `...\dlss-video\build\release\bin\nvidia` дерева разработчика | `nvngx_dlss.dll`, `nvngx_dlssg.dll`, `nvngx_dlssnr.dll` — иначе GPU-тесты SR/FG/NR были бы SKIP |
-| `DLSSVID_MODELS_DIR` | `...\dlss-video\models` дерева разработчика | `registry.json` + `cache/` с весами, ONNX и TensorRT-движками — CI не качает модели и не собирает движки заново |
+| `DLSSVID_MODELS_DIR` | `...\dlss-video\models` дерева разработчика | `registry.json` + `cache/` с весами, ONNX и TensorRT-движками — CI не качает модели и не собирает движки заново. Python-воркеры апскейла и глубины без `models_dir` стадии берут ту же папку (`ModelRegistry::DefaultModelsDir`; до TASK-0065 — `models/` чистого клона, и RealBasicVSR качался с HF Hub на каждом прогоне) |
 | `DLSSVID_PYTHON` | `...\models\export\.venv\Scripts\python.exe` | воркеры/экспорт, если тесту всё же понадобится Python |
 | `DLSSVID_TENSORRT_DIR` | `...\models\export\.venv\Lib\site-packages\tensorrt_libs` | рантайм TensorRT (`nvinfer_10.dll` и др.): в `TENSORRT_ROOT` только заголовки, DLL ставит `pip install tensorrt-cu12` в venv |
 
