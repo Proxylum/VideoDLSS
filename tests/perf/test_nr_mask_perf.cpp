@@ -148,7 +148,7 @@ TEST_CASE("NrCompose control mask cost at 2560x1440 (GPU timestamps)", "[perf][n
         }
     }
 
-    // CPU: the resize at Setup (once per run) and the import (the GUI's thread, the CLI)
+    // CPU: the resize at Setup (once per run) and the import (the GUI's worker thread, the CLI)
     const auto dir = TempDir() / "perf_nr_mask";
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);

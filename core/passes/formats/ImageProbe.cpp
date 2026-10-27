@@ -48,6 +48,7 @@ void ProbePng(const std::filesystem::path& path, ImageProbe& p) {
         Throw("PNG header does not read (" + Utf8(path) + "): " + err);
     }
     png_init_io(png, f.get());
+    png_set_user_limits(png, PNG_UINT_31_MAX, PNG_UINT_31_MAX);  // the caller's limits decide (the mask: TooLarge), not libpng's 10^6
     png_read_info(png, info);
     p.width = png_get_image_width(png, info);
     p.height = png_get_image_height(png, info);
@@ -77,6 +78,8 @@ void ProbeTiff(const std::filesystem::path& path, ImageProbe& p) {
     TIFFGetFieldDefaulted(tif.get(), TIFFTAG_SAMPLESPERPIXEL, &spp);
     TIFFGetFieldDefaulted(tif.get(), TIFFTAG_SAMPLEFORMAT, &fmt);
     TIFFGetFieldDefaulted(tif.get(), TIFFTAG_PLANARCONFIG, &planar);
+    TIFFGetFieldDefaulted(tif.get(), TIFFTAG_COMPRESSION, &p.tiffCompression);
+    p.tiffCodecSupported = TIFFIsCODECConfigured(p.tiffCompression) != 0;  // the file opens either way; its rows then do not decode
     if (!TIFFGetField(tif.get(), TIFFTAG_PHOTOMETRIC, &photometric)) photometric = spp >= 3 ? PHOTOMETRIC_RGB : PHOTOMETRIC_MINISBLACK;
     p.width = w;
     p.height = h;

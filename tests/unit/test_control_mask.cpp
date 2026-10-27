@@ -230,7 +230,8 @@ TEST_CASE("ImportControlMask refuses a side above 16384 or more than 2^26 pixels
     WritePngHeaderOnly(dir / "wide.png", 16385, 1);
     WritePngHeaderOnly(dir / "huge.png", 8193, 8193);  // 67 125 249 > 2^26
     WritePngHeaderOnly(dir / "fits.png", 16384, 4096);  // exactly 2^26: passes the header, fails decoding
-    for (const char* name : {"wide.png", "huge.png"}) {
+    WritePngHeaderOnly(dir / "strip.png", 1000001, 1);  // review of PR-8: above libpng's user limit (10^6): its header read failed
+    for (const char* name : {"wide.png", "huge.png", "strip.png"}) {
         INFO(name);
         try {
             ImportControlMask(dir / name, dir / "passes");
@@ -256,7 +257,14 @@ TEST_CASE("ImportControlMask: palette, tiled and planar TIFF refused, min-is-whi
     WriteTiffWith(dir / "int32.tif", {6, 2, 1, 32, SAMPLEFORMAT_UINT, PHOTOMETRIC_MINISBLACK}, code);
     // review of PR-8: RGBA and a saved selection (5 samples) - «not supported, save as PNG», not «corrupted»
     WriteTiffWith(dir / "rgba5.tif", {6, 2, 5, 8, SAMPLEFORMAT_UINT, PHOTOMETRIC_RGB}, code);
-    for (const char* name : {"palette.tif", "tiled.tif", "planar.tif", "bilevel.tif", "int32.tif", "rgba5.tif"}) {
+    // review of PR-8: a compression this libtiff does not decode (JPEG of an editor; JPEG 2000 here: never built into libtiff) - the file
+    // opens, its rows do not decode: «not supported», not «corrupted»
+    WriteTiffWith(dir / "codec.tif", {6, 2, 1, 8, SAMPLEFORMAT_UINT, PHOTOMETRIC_MINISBLACK}, code);
+    PatchTiffShortTag(dir / "codec.tif", TIFFTAG_COMPRESSION, COMPRESSION_JP2000);
+    CHECK(ProbeImage(dir / "codec.tif").tiffCompression == COMPRESSION_JP2000);
+    CHECK_FALSE(ProbeImage(dir / "codec.tif").tiffCodecSupported);
+    CHECK(ProbeImage(dir / "white.tif").tiffCodecSupported);
+    for (const char* name : {"palette.tif", "tiled.tif", "planar.tif", "bilevel.tif", "int32.tif", "rgba5.tif", "codec.tif"}) {
         INFO(name);
         CHECK(KindOf([&] { ImportControlMask(dir / name, dir / "passes"); }) == ControlMaskIssue::Kind::Tiff);
     }

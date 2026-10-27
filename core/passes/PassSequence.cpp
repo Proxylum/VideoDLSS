@@ -5,6 +5,7 @@
 #include <map>
 #include <sstream>
 
+#include "passes/ControlMaskPass.h"
 #include "passes/PassFile.h"
 #include "passes/formats/ExrIO.h"
 #include "util/Error.h"
@@ -21,9 +22,10 @@ PassWriter::PassWriter(const std::filesystem::path& dir, Manifest manifest) : di
         manifest_.filePattern = manifest_.pass + "_%06d" + ExtensionFor(manifest_.format, manifest_.pixelType, manifest_.channels.size());
     if (manifest_.format == FileFormat::Png && manifest_.pixelType != PixelType::U8 && manifest_.pixelType != PixelType::U16)
         Throw("PassWriter: PNG cannot store " + std::string(ToString(manifest_.pixelType)));
-    // A pass name we do not know is colour when its manifest says so (an imported sRGB sequence).
+    // A pass name we do not know is colour when its manifest says so (an imported sRGB sequence); the control mask's samples mean
+    // [0, 1] as well (PR-8: its export as floats).
     const auto kind = manifest_.Kind();
-    normalized_ = kind ? NormalizedSamples(*kind) : manifest_.colorspace == "srgb";
+    normalized_ = kind ? NormalizedSamples(*kind) : manifest_.colorspace == "srgb" || manifest_.pass == kControlMaskPass;
     // Frames reaching a writer are in the project convention (PassReader negates y-up motion vectors on read), so a pass
     // written by dlssvid never carries mv.y_up - even when its manifest was copied from a y-up reader.
     manifest_.mv.yUp = false;

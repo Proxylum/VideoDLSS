@@ -18,9 +18,10 @@ struct ImageProbe {
     uint32_t channels = 0;           // what the reader returns: PNG after its expansions (palette -> RGB, tRNS -> alpha); EXR: the top layer
     PixelType type = PixelType::U8;  // the reader's sample type (EXR: F32 when any channel is FLOAT / UINT, else F16)
     // TIFF: photometric (MINISWHITE 0, MINISBLACK 1, RGB 2, PALETTE 3, ...; a missing tag is guessed from the samples, as libtiff
-    // does), tiles, separate planes, and whether ReadTiff takes the samples (8 / 16 bit unsigned, 16 / 32 bit float)
-    uint16_t tiffPhotometric = 0;
-    bool tiffTiled = false, tiffPlanarSeparate = false, tiffSamplesSupported = true;
+    // does), tiles, separate planes, whether ReadTiff takes the samples (1-4 of 8 / 16 bit unsigned, 16 / 32 bit float) and whether this
+    // build of libtiff decodes the compression (JPEG is not built in)
+    uint16_t tiffPhotometric = 0, tiffCompression = 1;
+    bool tiffTiled = false, tiffPlanarSeparate = false, tiffSamplesSupported = true, tiffCodecSupported = true;
     std::vector<std::string> exrChannels;  // every channel of an EXR, layers included
     // EXR: the data window relative to the display window's origin (ReadExr returns the data window)
     int32_t exrDataMinX = 0, exrDataMinY = 0;

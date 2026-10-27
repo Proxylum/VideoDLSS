@@ -177,10 +177,11 @@ Decoded DecodeMask(const fs::path& image) {
     CheckSize(p.width, p.height);
     if (p.format == ImageProbe::Format::Exr) CheckSize(p.exrDataWidth, p.exrDataHeight);
     if (p.format == ImageProbe::Format::Tiff &&
-        (p.tiffTiled || p.tiffPlanarSeparate || !p.tiffSamplesSupported ||
+        (p.tiffTiled || p.tiffPlanarSeparate || !p.tiffSamplesSupported || !p.tiffCodecSupported ||
          (p.tiffPhotometric != kMinIsWhite && p.tiffPhotometric != kMinIsBlack && p.tiffPhotometric != kRgb)))
         Fail(Kind::Tiff, "this TIFF is not supported (photometric " + std::to_string(p.tiffPhotometric) + (p.tiffTiled ? ", tiles" : "") +
                              (p.tiffPlanarSeparate ? ", separate planes" : "") +
+                             (p.tiffCodecSupported ? "" : ", compression " + std::to_string(p.tiffCompression) + " not built in (JPEG)") +
                              (p.tiffSamplesSupported ? "" : ", samples other than 1-4 of 8 / 16-bit unsigned or 16 / 32-bit float (1-bit, 32-bit integer, extra alpha channels)") +
                              "): save the mask as PNG");
     PassImage src;

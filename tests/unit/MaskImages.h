@@ -109,6 +109,30 @@ inline void WriteTiffWith(const std::filesystem::path& path, const TiffSpec& s, 
     }
 }
 
+// Sets a SHORT tag of the first IFD of a little-endian classic TIFF in place: a compression this build of libtiff cannot write.
+inline void PatchTiffShortTag(const std::filesystem::path& path, uint16_t tag, uint16_t value) {
+    std::fstream f(path, std::ios::in | std::ios::out | std::ios::binary);
+    char head[8] = {};
+    f.read(head, 8);
+    if (!f || head[0] != 'I' || head[1] != 'I') Throw("PatchTiffShortTag: not a little-endian TIFF: " + path.string());
+    uint32_t ifd = 0;
+    std::memcpy(&ifd, head + 4, 4);
+    f.seekg(ifd);
+    uint16_t count = 0;
+    f.read(reinterpret_cast<char*>(&count), 2);
+    for (uint16_t i = 0; i < count; ++i) {
+        char entry[12] = {};
+        f.read(entry, 12);
+        uint16_t t = 0;
+        std::memcpy(&t, entry, 2);
+        if (t != tag) continue;
+        f.seekp(static_cast<std::streamoff>(ifd) + 2 + static_cast<std::streamoff>(i) * 12 + 8);  // a SHORT's value sits in the entry
+        f.write(reinterpret_cast<const char*>(&value), 2);
+        return;
+    }
+    Throw("PatchTiffShortTag: no tag " + std::to_string(tag) + " in " + path.string());
+}
+
 // An EXR of HALF channels with a display window displayW x displayH at (0, 0) and a data window of dataW x dataH at (dataX, dataY).
 inline void WriteExrWindows(const std::filesystem::path& path, uint32_t displayW, uint32_t displayH, int dataX, int dataY, uint32_t dataW, uint32_t dataH,
                             const std::vector<std::string>& channels, const std::function<float(int, int, size_t)>& value) {

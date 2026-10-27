@@ -380,6 +380,27 @@ struct ExportArgs {
     bool yUp = false;                        // --from-dir motion vectors point y up (sets mv.y_up)
 };
 
+// PR-8: the control mask has no PassKind - it exports as its one static frame 0, its channels (Y or R, G, B) meaning [0, 1]: EXR as
+// 32-bit floats (the 16-bit codes / 65535, read back exactly), PNG16 / TIFF as the stored codes. No preset, no sample type of choice.
+int ExportControlMask(const ExportArgs& a, const Manifest& base, const PassReader& reader, ExportPreset preset) {
+    if (preset != ExportPreset::None) Throw("the control mask exports without a preset: --format exr|png16|tiff");
+    if (!a.pixelType.empty()) Throw("the control mask exports at its own sample type (EXR f32, PNG16 / TIFF u16): no --pixel-type");
+    Manifest m = base;
+    m.format = FileFormat::Exr;
+    if (!a.format.empty()) {
+        const auto f = ParseFileFormat(a.format);
+        if (!f || (*f != FileFormat::Exr && *f != FileFormat::Png && *f != FileFormat::Tiff)) Throw("the control mask exports as --format exr|png16|tiff");
+        m.format = *f;
+    }
+    m.pixelType = m.format == FileFormat::Exr ? PixelType::F32 : PixelType::U16;
+    m.filePattern = m.pass + "_%06d" + ExtensionFor(m.format, m.pixelType, m.channels.size());
+    m.fingerprint.clear();  // the stamp of the PNG16 folder: these files are others
+    const int64_t n = ExportPass(a.output, m, SourceFromReader(reader), FrameRange{0, 0}, PrintProgress);
+    std::fprintf(stderr, "\n");
+    Log()->info("exported the control mask ({} frame) as {} -> {}", n, ToString(m.format), a.output);
+    return 0;
+}
+
 int CmdExport(const ExportArgs& a) {
     if (a.input.empty() == a.fromDir.empty()) Throw("export: give exactly one of --input <video> or --from-dir <pass folder>");
     if (a.yUp && a.fromDir.empty()) Throw("export: --y-up applies to a --from-dir motion-vector folder");
@@ -429,6 +450,7 @@ int CmdExport(const ExportArgs& a) {
         ApplyYUp(*reader, a.yUp);
         base = reader->FrameManifest();  // frames come back y down (PassReader applies mv.y_up): the export must not carry the flag
         const auto k = base.Kind();
+        if (!k && base.pass == kControlMaskPass && base.IsStatic()) return ExportControlMask(a, base, *reader, *preset);
         if (!k) Throw("cannot re-export custom pass '" + base.pass + "'");
         kind = *k;
         source = SourceFromReader(*reader);

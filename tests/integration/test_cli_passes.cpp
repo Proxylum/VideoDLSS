@@ -13,6 +13,7 @@
 #include "convert/DepthConvert.h"
 #include "convert/MvConvert.h"
 #include "passes/PassSequence.h"
+#include "passes/formats/ExrIO.h"
 #include "passes/formats/PngIO.h"
 #include "pipeline/ControlMask.h"
 
@@ -166,6 +167,50 @@ TEST_CASE("dlssvid import --pass mask_control --static gives the fingerprint the
     CHECK(Manifest::Load(dir / "passes" / "mask_control").fingerprint == m.fingerprint);
     REQUIRE(Run("import -i " + Q(dir / "mask.png") + " --pass mask_control --static -o " + Q(dir / "passes")) == 0);  // not «unchanged»
     CHECK(ReadControlMaskInfo(dir / "passes" / "mask_control"));
+}
+
+// Review of PR-8: design §4 - «Экспорт пассов» exports mask_control as its one frame; the CLI refused it as a custom pass, so the GUI's
+// export task of the mask always failed.
+TEST_CASE("dlssvid export of mask_control writes its one static frame: EXR as the codes / 65535 in f32, PNG16 as the stored codes; presets refused", "[integration][cli][mask][regression]") {
+    const auto dir = Dir("mask_export");
+    std::filesystem::create_directories(dir);
+    PassImage img;
+    img.Allocate(8, 6, PixelType::U16, {"R", "G", "B"});
+    for (uint32_t y = 0; y < 6; ++y)
+        for (uint32_t x = 0; x < 8; ++x)
+            for (size_t c = 0; c < 3; ++c) img.Set(x, y, c, static_cast<float>((x * 7919 + y * 104729 + c * 31337) % 65536));
+    WritePng(dir / "mask.png", img);
+    REQUIRE(Run("import -i " + Q(dir / "mask.png") + " --pass mask_control --static -o " + Q(dir / "passes")) == 0);
+    const auto cur = dir / "passes" / "mask_control";
+    const Manifest src = Manifest::Load(cur);
+    const PassImage stored = ReadPng(cur / src.FrameFileName(0));
+
+    std::string out;
+    REQUIRE(RunOut("export --from-dir " + Q(cur) + " -o " + Q(dir / "exr") + " --format exr", dir / "exr.log", out) == 0);  // the GUI's call
+    const Manifest em = Manifest::Load(dir / "exr");
+    CHECK(em.pass == "mask_control");
+    CHECK(em.IsStatic());
+    CHECK(em.channels == src.channels);
+    CHECK(em.format == FileFormat::Exr);
+    CHECK(em.pixelType == PixelType::F32);
+    CHECK(em.fingerprint.empty());  // the stamp was of the PNG16 folder
+    const PassImage e = ReadExr(dir / "exr" / em.FrameFileName(0));
+    REQUIRE(e.width == stored.width);
+    REQUIRE(e.height == stored.height);
+    int off = 0;
+    for (uint32_t y = 0; y < e.height; ++y)
+        for (uint32_t x = 0; x < e.width; ++x)
+            for (size_t c = 0; c < 3; ++c)
+                if (std::lround(e.Get(x, y, c) * 65535.0) != std::lround(stored.Get(x, y, c))) ++off;
+    CHECK(off == 0);
+
+    REQUIRE(Run("export --from-dir " + Q(cur) + " -o " + Q(dir / "png") + " --format png16") == 0);
+    const Manifest pm = Manifest::Load(dir / "png");
+    CHECK(pm.pixelType == PixelType::U16);
+    CHECK(ReadPng(dir / "png" / pm.FrameFileName(0)).data == stored.data);
+    CHECK(RunOut("export --from-dir " + Q(cur) + " -o " + Q(dir / "nuke") + " --preset nuke", dir / "nuke.log", out) != 0);
+    CHECK(out.find("without a preset") != std::string::npos);
+    CHECK(RunOut("export --from-dir " + Q(cur) + " -o " + Q(dir / "npz") + " --format npz", dir / "npz.log", out) != 0);
 }
 
 TEST_CASE("dlssvid import --static refuses another pass, the conversion flags, an explicit --dilate, a folder as -i and a missing -o; --pass mask_control without --static explains", "[integration][cli][mask]") {
