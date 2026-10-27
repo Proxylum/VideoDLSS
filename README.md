@@ -292,6 +292,7 @@ dlssvid import  -i passes\depth_raw --expect-size 1920x1080 --expect-frames 300
 dlssvid convert -i passes\depth_raw -o passes\depth_dlss --to depth_dlss --near 0.1 --far 1000
 dlssvid convert -i passes\mv_raw -o passes\mv_dlss --to mv_dlss --target 3840x2160 --depth-dir passes\depth_raw
 dlssvid import  -i ext\mv --pass mv_raw --y-up --write-manifest     :: vectors from another tool with y up: read in the DLSS convention (y down)
+dlssvid import  -i mask.png --pass mask_control --static -o passes  :: the control mask of NR: R the edit's share, G / B its low / high frequencies (PNG, TIFF, EXR)
 dlssvid depth   -i input.mp4 -o passes --backend da3                     :: DA3METRIC-LARGE via TensorRT -> depth_raw + depth_dlss
 dlssvid depth   -i input.mp4 -o passes --backend vda                     :: Metric VDA Small (default), window 32
 dlssvid depth   -i input.mp4 -o passes --backend vda --model metric-vda-large   :: Large (CC-BY-NC-4.0), the registry's window

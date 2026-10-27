@@ -5,12 +5,16 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include "TestClips.h"
 #include "convert/DepthConvert.h"
 #include "convert/MvConvert.h"
 #include "passes/PassSequence.h"
+#include "passes/formats/PngIO.h"
+#include "pipeline/ControlMask.h"
 
 using namespace dlssvid;
 using namespace dlssvid::test;
@@ -23,6 +27,17 @@ int Run(const std::string& args) {
 }
 
 std::string Q(const std::filesystem::path& p) { return "\"" + p.string() + "\""; }
+
+// The exit code and what the command printed (stdout and stderr).
+int RunOut(const std::string& args, const std::filesystem::path& log, std::string& out) {
+    const std::string cmd = "\"\"" DLSSVID_CLI_PATH "\" " + args + " > \"" + log.string() + "\" 2>&1\"";
+    const int rc = std::system(cmd.c_str());
+    std::ifstream in(log);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    out = ss.str();
+    return rc;
+}
 
 std::filesystem::path Dir(const char* name) {
     const auto d = TempDir() / "cli_passes" / name;
@@ -110,6 +125,68 @@ TEST_CASE("dlssvid import validates a pass folder", "[integration][cli][passes]"
     CHECK(Manifest::Exists(bare));
     CHECK(PassReader::Open(bare).Man().frameCount == 3);
     CHECK(Run("import -i " + Q(Dir("nonexistent"))) != 0);
+}
+
+// PR-8: the control mask from one image. The CLI and «Загрузить…» of the GUI call the same core function: one fingerprint for one file.
+TEST_CASE("dlssvid import --pass mask_control --static gives the fingerprint the GUI path gives for the same file; import --stamp of the folder keeps it", "[integration][cli][nr][mask]") {
+    const auto dir = Dir("mask_static");
+    std::filesystem::create_directories(dir);
+    PassImage img;
+    img.Allocate(8, 6, PixelType::U8, {"R", "G", "B", "A"});
+    for (uint32_t y = 0; y < 6; ++y)
+        for (uint32_t x = 0; x < 8; ++x)
+            for (size_t c = 0; c < 4; ++c) img.Set(x, y, c, c == 3 ? (x ? 255.f : 128.f) : static_cast<float>((x * 30 + y * 5 + c * 60) % 256));
+    WritePng(dir / "mask.png", img);
+    std::string out;
+    REQUIRE(RunOut("import -i " + Q(dir / "mask.png") + " --pass mask_control --static -o " + Q(dir / "passes"), dir / "a.log", out) == 0);
+    CHECK(out.find("(imported)") != std::string::npos);
+    CHECK(out.find("alpha ignored") != std::string::npos);
+    CHECK(out.find("x3 (R, G, B)") != std::string::npos);
+    const Manifest m = Manifest::Load(dir / "passes" / "mask_control");
+    CHECK(out.find(m.fingerprint) != std::string::npos);
+    const ControlMaskImport gui = ImportControlMask(dir / "mask.png", dir / "gui_passes");  // the GUI's path
+    CHECK(gui.mask.fingerprint == m.fingerprint);
+
+    // the folder as a pass: import validates it, --stamp writes the same fingerprint (the same function)
+    REQUIRE(Run("import -i " + Q(dir / "passes" / "mask_control") + " --stamp") == 0);
+    CHECK(Manifest::Load(dir / "passes" / "mask_control").fingerprint == m.fingerprint);
+    CHECK(ReadControlMaskInfo(dir / "passes" / "mask_control"));
+
+    // the same image again: unchanged, nothing written
+    REQUIRE(RunOut("import -i " + Q(dir / "mask.png") + " --pass mask_control --static -o " + Q(dir / "passes"), dir / "b.log", out) == 0);
+    CHECK(out.find("unchanged") != std::string::npos);
+    CHECK(!std::filesystem::exists(dir / "passes" / "mask_control.v"));
+}
+
+TEST_CASE("dlssvid import --static refuses another pass, the conversion flags, an explicit --dilate, a folder as -i and a missing -o; --pass mask_control without --static explains", "[integration][cli][mask]") {
+    const auto dir = Dir("mask_static_refuse");
+    std::filesystem::create_directories(dir);
+    PassImage img;
+    img.Allocate(4, 4, PixelType::U8, {"A"});
+    WritePng(dir / "mask.png", img);
+    const std::string base = "import -i " + Q(dir / "mask.png") + " --static -o " + Q(dir / "passes");
+    std::string out;
+    CHECK(RunOut(base, dir / "1.log", out) != 0);  // no --pass
+    CHECK(out.find("--pass mask_control") != std::string::npos);
+    CHECK(Run(base + " --pass mask_skin") != 0);
+    for (const char* flag : {"--to-dlss x", "--to-raw x", "--write-manifest", "--stamp", "--y-up", "--expect-frames 1", "--expect-size 4x4", "--convention raw",
+                             "--size 4x4", "--near 0.1", "--far 10", "--relative", "--depth-dir x", "--target 4x4", "--dilate 1"}) {
+        INFO(flag);
+        CHECK(RunOut(base + " --pass mask_control " + flag, dir / "2.log", out) != 0);
+        CHECK(out.find("does not apply to a static mask") != std::string::npos);
+    }
+    CHECK(RunOut("import -i " + Q(dir) + " --static --pass mask_control -o " + Q(dir / "passes"), dir / "3.log", out) != 0);
+    CHECK(out.find("must be an image file") != std::string::npos);
+    CHECK(RunOut("import -i " + Q(dir / "mask.png") + " --static --pass mask_control", dir / "4.log", out) != 0);
+    CHECK(out.find("-o <passes root> is required") != std::string::npos);
+    CHECK(RunOut("import -i " + Q(dir / "mask.png") + " --pass mask_control", dir / "5.log", out) != 0);
+    CHECK(out.find("add --static") != std::string::npos);
+    CHECK(!std::filesystem::exists(dir / "passes" / "mask_control"));
+    // and the refusals of the core reach the exit code with their English text
+    { std::ofstream(dir / "text.png") << "not an image"; }
+    CHECK(RunOut("import -i " + Q(dir / "text.png") + " --static --pass mask_control -o " + Q(dir / "passes"), dir / "6.log", out) != 0);
+    CHECK(out.find("is not a PNG, TIFF or EXR image") != std::string::npos);
+    CHECK(Run("import -i " + Q(dir / "mask.png") + " --static --pass mask_control -o " + Q(dir / "passes")) == 0);  // the valid call works
 }
 
 TEST_CASE("dlssvid convert depth_raw -> depth_dlss -> depth_raw", "[integration][cli][passes]") {

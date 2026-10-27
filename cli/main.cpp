@@ -23,6 +23,7 @@
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
+#include "pipeline/ControlMask.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/Pipeline.h"
 #include "ml/ModelRegistry.h"
@@ -503,6 +504,10 @@ struct ImportArgs {
     bool writeManifest = false;
     bool yUp = false;  // the folder's motion vectors point y up (sets mv.y_up; read with v negated)
     bool stamp = false;  // fingerprint the content into the manifest (masks: a re-import with other content recomputes NR)
+    // PR-8: --static -i <image> --pass mask_control -o <passes root> - the control mask of NR from one image
+    bool isStatic = false;
+    std::string output;
+    std::vector<std::string> given;  // options given on the command line that --static refuses (--dilate has a default: by count)
 };
 
 int ConvertFolder(const PassReader& in, const std::string& outDir, PassKind toKind, const ImportArgs& a);
@@ -515,7 +520,47 @@ void StampPass(const std::filesystem::path& dir, Manifest m) {
     std::printf("fingerprint: %s\n", m.fingerprint.c_str());
 }
 
+// `import --static` (PR-8): the image becomes <output>/mask_control through ImportControlMask - the function «Загрузить…» of the
+// GUI calls, so both give one fingerprint (docs/conventions.md §6.2).
+int CmdImportStatic(const ImportArgs& a) {
+    if (a.pass != kControlMaskPass) Throw("import --static: the only static pass is mask_control: add --pass mask_control" + (a.pass.empty() ? std::string() : " (got '" + a.pass + "')"));
+    if (a.output.empty()) Throw("import --static: -o <passes root> is required: the mask_control pass goes under it");
+    if (!a.given.empty()) {
+        std::string all;
+        for (const auto& g : a.given) all += (all.empty() ? "" : ", ") + g;
+        Throw("import --static: " + all + " does not apply to a static mask");
+    }
+    if (std::filesystem::is_directory(a.dir)) Throw("import --static: -i must be an image file (PNG, TIFF or EXR), not a folder");
+    const ControlMaskImport r = ImportControlMask(a.dir, a.output);
+    const std::filesystem::path dir = std::filesystem::path(a.output) / kControlMaskPass;
+    const std::string name = std::filesystem::path(a.dir).filename().string();
+    switch (r.outcome) {
+        case ControlMaskImport::Outcome::Imported: std::printf("mask_control: %s (imported)\n", dir.string().c_str()); break;
+        case ControlMaskImport::Outcome::Replaced:
+            std::printf("mask_control: %s (replaced%s)\n", dir.string().c_str(),
+                        r.retiredVersion.empty() ? ": a folder without a manifest was removed" : (": previous -> mask_control.v/" + r.retiredVersion).c_str());
+            break;
+        case ControlMaskImport::Outcome::Unchanged:
+            std::printf("mask_control: %s (unchanged: these pixels are loaded, from %s)\n", dir.string().c_str(), r.mask.sourceName.c_str());
+            break;
+    }
+    std::string notes;
+    if (r.outcome != ControlMaskImport::Outcome::Unchanged) {
+        if (r.mask.alphaIgnored) notes += ", alpha ignored";
+        if (r.mask.clamped > 0) notes += ", " + std::to_string(r.mask.clamped) + " value(s) clamped into 0..1";
+        if (r.exrPadded) notes += ", data window padded to the display window";
+    }
+    std::printf("source:      %s %ux%u %s %s x%u%s\n", name.c_str(), r.mask.width, r.mask.height, r.sourceFormat.c_str(), r.sourceType.c_str(), r.sourceChannels,
+                notes.c_str());
+    std::printf("stored:      png16 u16 x%d (%s)\n", r.mask.grayscale ? 1 : 3, r.mask.grayscale ? "grey: the edit x v" : "R, G, B");
+    std::printf("fingerprint: %s\n", r.mask.fingerprint.c_str());
+    return 0;
+}
+
 int CmdImport(const ImportArgs& a) {
+    if (a.isStatic) return CmdImportStatic(a);
+    if (a.pass == kControlMaskPass && !Manifest::Exists(a.dir))
+        Throw("import: mask_control is imported from one image: add --static -i <image> -o <passes root>");
     if (Manifest::Exists(a.dir) && Manifest::Load(a.dir).IsDataPass())  // PR-13: scenes - a list, not frames to check or convert
         Throw("import: " + a.dir + " is a data pass (scenes) with no frames: make it with dlssvid scenes");
     PassReader r = OpenReader(a.dir, a.pass, a.convention, a.size);
@@ -740,6 +785,12 @@ int main(int argc, char** argv) {
     imp->add_flag("--stamp", ia.stamp,
                   "fingerprint the frames' content into the manifest (re-import of a mask with other content recomputes the stages that read it); "
                   "with --to-dlss / --to-raw the converted pass");
+    // PR-8: only import has --static and -o (convert has its own -o); -i is shared, its help changes here only
+    imp->get_option("--input")->description("pass folder (--static: the mask image, PNG / TIFF / EXR)");
+    imp->add_flag("--static", ia.isStatic,
+                  "one image -> the static pass mask_control under -o: the control mask of NR (R the edit's share, G / B its low / high "
+                  "frequencies; docs/conventions.md 6.2); needs --pass mask_control");
+    imp->add_option("-o,--output", ia.output, "--static: the passes root the mask_control pass goes into");
 
     ConvertArgs ca;
     auto* conv = app.add_subcommand("convert", "convert a pass between raw and DLSS conventions");
@@ -827,7 +878,12 @@ int main(int argc, char** argv) {
         if (const int rc = passesCommands.Dispatch(); rc >= 0) return rc;
         if (const int rc = scenesCommands.Dispatch(); rc >= 0) return rc;
         if (exp->parsed()) return CmdExport(ea);
-        if (imp->parsed()) return CmdImport(ia);
+        if (imp->parsed()) {
+            for (const char* name : {"--to-dlss", "--to-raw", "--write-manifest", "--stamp", "--y-up", "--expect-frames", "--expect-size", "--convention", "--size",
+                                     "--near", "--far", "--relative", "--depth-dir", "--target", "--dilate"})
+                if (imp->get_option(name)->count() > 0) ia.given.push_back(name);
+            return CmdImport(ia);
+        }
         if (conv->parsed()) return CmdConvert(ca);
         if (depth->parsed()) return CmdDepth(da);
         if (flow->parsed()) return CmdFlow(fa);

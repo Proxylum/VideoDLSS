@@ -269,6 +269,7 @@ dlssvid import  -i out/depth_raw [--expect-size 1920x1080 --expect-frames 300] [
 dlssvid convert -i out/mv_raw -o out/mv_dlss --to mv_dlss --target 3840x2160 --depth-dir out/depth_raw --dilate 1
 dlssvid import  -i ext/mv --pass mv_raw --y-up --write-manifest           (векторы другого инструмента с осью y вверх)
 dlssvid import  -i out/mask_skin --stamp                                  (отпечаток содержимого: новая маска пересчитывает NR)
+dlssvid import  -i mask.png --pass mask_control --static -o out          (маска управления NR из одного изображения, §6.2; снять — удалить out/mask_control)
 dlssvid passes  list|use <pass|stage> <version>|gc [--keep N] [--dry-run]  --passes out | --project clip.dlssvid.json   (этап 9: версии пассов)
 dlssvid process -i clip.mp4 --param-file anime.json [--param-file nr=soft.json] [--param nr.intensity=0.9]   (PR-9: пресеты, §8)
 dlssvid nr      -i clip.mp4 -o out --params-file soft.json                  (объект ключей nr или dlssvid-preset)
