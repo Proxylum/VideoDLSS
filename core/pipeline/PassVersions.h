@@ -19,6 +19,10 @@ struct Manifest;
 // such a pass has among the `inputs` of the passes made from it (process; the settings note follows them, PR-11).
 std::string LegacyPassId(const Manifest& m);
 
+// The id a pass has among the `inputs` of the passes made from it: its fingerprint, else LegacyPassId. Also what NR records of the
+// protect and skin masks it read (stage_params.mask_ids): the plan compares a standalone pass's masks with its inputs (TASK-0064).
+std::string PassInputId(const Manifest& m);
+
 // Pass versions (stage 9, MR A — docs/architecture.md «Отпечатки и версии пассов»). The current version of a pass
 // lives in <root>/<pass>/ so every reader keeps working; when a run with another fingerprint replaces it, the folder
 // is moved aside to <root>/<pass>.v/<YYYYMMDD-HHMMSS_<fp8>>/. Switching a version swaps the folders. `gc` keeps the

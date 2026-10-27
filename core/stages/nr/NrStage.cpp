@@ -7,6 +7,7 @@
 
 #include "gpu/ComputeKernel.h"
 #include "gpu/GpuFrameCache.h"
+#include "pipeline/PassVersions.h"
 #include "pipeline/Pipeline.h"
 #include "stages/ParamSchema.h"
 #include "stages/nr/NrLowpass.h"
@@ -336,6 +337,13 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         // TASK-0060 (C0): each mask its own texture size - the mark that tells a standalone pass made after the fix (adoptable with masks
         // of different sizes) from one made before it (the UI unprotected)
         if (!maskReaders_.empty()) m.stageParams["mask_textures"] = "own_size";
+        // TASK-0064: which protect and skin masks, not only their names - the id the plan gives each as an input (PassInputId). A
+        // standalone pass made with another --masks-dir is not adopted under the masks of the passes root
+        if (!maskReaders_.empty()) {
+            nlohmann::json ids = nlohmann::json::object();
+            for (const auto& [name, reader] : maskReaders_) ids["mask_" + name] = PassInputId(reader.Man());
+            m.stageParams["mask_ids"] = std::move(ids);
+        }
         if (controlInfo_ && !bypass_) {
             // the label of the mask applied (ControlMaskLabelOf): the plan compares it with the input it planned; no path
             m.stageParams["control_mask"] = {{"fingerprint", controlInfo_->fingerprint},

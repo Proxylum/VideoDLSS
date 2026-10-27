@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -491,6 +492,87 @@ TEST_CASE("RunProcess: an nr pass without a fingerprint is adopted only when it 
     CHECK_THAT(Report(gone, "nr").reason, Catch::Matchers::ContainsSubstring("made with other masks"));
     standalone(nlohmann::json::array(), false);  // and one that read none is the same run
     CHECK(Report(RunProcess(o), "nr").status == "reused");
+}
+
+// TASK-0064 (regression): the names alone let a standalone pass made with another --masks-dir - masks of the same names, other pictures
+// - be adopted under the masks of the passes root. NR records the id of each mask it read (the one the plan gives the input).
+TEST_CASE("RunProcess: an nr pass without a fingerprint is adopted only under the ids of the masks it read", "[integration][process][mask][regression]") {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("mask_ids_legacy");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    auto mask = [&](const char* name, uint8_t value) {  // stamped as `import --stamp` does: the fingerprint of its content
+        const auto d = dir / "passes" / name;
+        PassWriter wr(d, Manifest::ForPass(PassKind::Mask, 48, 32, FileFormat::Png));
+        for (int64_t f = 0; f < 2; ++f) {
+            PassImage img = MakePassImage(PassKind::Mask, 48, 32, PixelType::U8);
+            std::fill(img.data.begin(), img.data.end(), value);
+            wr.WriteFrame(f, img);
+        }
+        wr.Finish();
+        Manifest m = Manifest::Load(d);
+        m.fingerprint = ContentFingerprint(d, m);
+        m.Save(d);
+        return m.fingerprint;
+    };
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.codec = "ffv1";
+    o.warp = true;
+    o.stages = StubStages(2);
+    for (auto& s : o.stages) s.enabled = s.name == "nr";
+    const std::string ui = mask("mask_ui", 255), skin = mask("mask_skin", 128);
+    REQUIRE(ui != skin);
+    REQUIRE(Report(RunProcess(o), "nr").status == "ran");
+    Manifest made = Manifest::Load(o.passesRoot / "color_nr");  // not const: a missing key reads as null
+    CHECK(made.stageParams["mask_ids"] == nlohmann::json{{"mask_ui", ui}, {"mask_skin", skin}});
+    CHECK(made.inputs.at("mask_ui") == ui);  // the id the plan gave the input
+    CHECK(made.inputs.at("mask_skin") == skin);
+    // the pass as a standalone `dlssvid nr` leaves it, with these ids
+    auto standalone = [&](const std::function<void(nlohmann::json&)>& ids) {
+        Manifest nr = Manifest::Load(o.passesRoot / "color_nr");
+        nr.fingerprint.clear();
+        nr.stageParams["masks"] = nlohmann::json::array({"ui", "skin"});
+        nr.stageParams["mask_ids"] = nlohmann::json{{"mask_ui", ui}, {"mask_skin", skin}};
+        ids(nr.stageParams);
+        nr.Save(o.passesRoot / "color_nr");
+    };
+    auto diffInputs = [](const StageDecision& d) { return d.diff.contains("inputs") ? d.diff["inputs"] : nlohmann::json(); };
+    standalone([](nlohmann::json&) {});
+    CHECK(Decision(PlanProcess(o), "nr").action == "reuse");
+    CHECK(Report(RunProcess(o), "nr").status == "reused");
+    struct Case {
+        const char* what;
+        std::function<void(nlohmann::json&)> ids;
+        nlohmann::json diff;
+    };
+    for (const Case& c : {Case{"another skin mask", [](nlohmann::json& p) { p["mask_ids"]["mask_skin"] = "sha256:another"; }, nlohmann::json::array({"mask_skin"})},
+                          Case{"the ui mask unstamped", [](nlohmann::json& p) { p["mask_ids"]["mask_ui"] = "legacy::2"; }, nlohmann::json::array({"mask_ui"})},
+                          Case{"no id of the skin mask", [](nlohmann::json& p) { p["mask_ids"].erase("mask_skin"); }, nlohmann::json::array({"mask_skin"})},
+                          Case{"an id of another type", [](nlohmann::json& p) { p["mask_ids"]["mask_ui"] = 5; }, nlohmann::json::array({"mask_ui"})}}) {
+        INFO(c.what);
+        standalone(c.ids);
+        const StageDecision d = Decision(PlanProcess(o), "nr");
+        CHECK(d.kind == "input_changed");
+        CHECK(diffInputs(d) == c.diff);
+        const ProcessResult r = RunProcess(o);
+        CHECK(Report(r, "nr").status == "ran");
+        CHECK_THAT(Report(r, "nr").reason, Catch::Matchers::ContainsSubstring("made with other masks"));
+        CHECK(!Report(r, "nr").retired.empty());  // a real picture of another run: kept in the history
+    }
+    // a pass from before TASK-0064 names its masks only: judged by the names, as then; mask_ids of another type is no list of ids
+    for (const nlohmann::json& ids : {nlohmann::json(), nlohmann::json("x")}) {
+        INFO(ids.dump());
+        standalone([&](nlohmann::json& p) {
+            if (ids.is_null()) p.erase("mask_ids");
+            else p["mask_ids"] = ids;
+        });
+        CHECK(Report(RunProcess(o), "nr").status == "reused");
+    }
 }
 
 // PR-8 (regression of the race the design closes): a mask replaced from the CLI while process runs. Between the plan and NR's Init the

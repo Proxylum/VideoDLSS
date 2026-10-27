@@ -23,12 +23,10 @@ std::optional<Manifest> Load(const std::filesystem::path& dir) {
     }
 }
 
-std::string IdOf(const Manifest& m) { return m.fingerprint.empty() ? LegacyPassId(m) : m.fingerprint; }
-
 // `m` is the version recorded as `rec`: its id, or - a pass recorded while legacy and adopted since (process stamped a fingerprint
 // on the same files) - its legacy id (review round 2 of PR-11)
 bool Matches(const Manifest& m, const std::string& rec) {
-    return IdOf(m) == rec || (m.stageParams.value("adopted", false) && LegacyPassId(m) == rec);
+    return PassInputId(m) == rec || (m.stageParams.value("adopted", false) && LegacyPassId(m) == rec);
 }
 
 // The version of `pass` the pass `down` was made from: process records it among `inputs` - the current folder when it matches,

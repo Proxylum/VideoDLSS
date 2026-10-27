@@ -15,6 +15,8 @@ std::string LegacyPassId(const Manifest& m) {
     return id;
 }
 
+std::string PassInputId(const Manifest& m) { return m.fingerprint.empty() ? LegacyPassId(m) : m.fingerprint; }
+
 namespace {
 
 constexpr const char* kHistorySuffix = ".v";
