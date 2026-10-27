@@ -220,6 +220,29 @@ TEST_CASE("Masks: 8-bit to float and per-pixel max", "[nr][unit]") {
 }
 
 // PR-8: d of the control mask's G / B split is one share of the output frame's short side, at least 2 px.
+// PR-8: the control mask replaces the model's automatic skin mask - UseAutoMask 0 - and changes nothing else of what NGX is created with.
+TEST_CASE("NrConfigFromOptions: a control mask turns the automatic mask off, nothing else", "[nr][unit][mask]") {
+    NrStageOptions o;
+    o.autoMask = true;
+    o.style = "cinematic";
+    o.localTone = 0.4f;
+    o.localStructure = 1.7f;
+    o.skinStructure = 0.3f;
+    o.useGuides = false;
+    const NrConfig without = NrConfigFromOptions(o, 640, 360, false), with = NrConfigFromOptions(o, 640, 360, true);
+    CHECK(without.autoMask);
+    CHECK(!with.autoMask);
+    CHECK(with.style == without.style);
+    CHECK(with.localTone == without.localTone);
+    CHECK(with.localStructure == without.localStructure);
+    CHECK(with.skinStructure == without.skinStructure);  // sent as it is: the key is inert without the automatic mask (E11)
+    CHECK(with.useGuides == without.useGuides);
+    CHECK(with.width == 640);
+    CHECK(with.height == 360);
+    o.autoMask = false;
+    CHECK(!NrConfigFromOptions(o, 640, 360, false).autoMask);  // off stays off
+}
+
 TEST_CASE("NrLowpassDivisor: d from the short side, at least 2, an override wins", "[nr][unit]") {
     CHECK(NrLowpassDivisor(1280, 720) == 4);
     CHECK(NrLowpassDivisor(1920, 1080) == 6);

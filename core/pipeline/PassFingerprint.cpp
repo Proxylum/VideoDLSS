@@ -10,6 +10,7 @@
 #include <mutex>
 
 #include "ml/ModelRegistry.h"
+#include "passes/ControlMaskPass.h"
 #include "passes/Manifest.h"
 #include "passes/ScenesPass.h"
 #include "stages/depth/DepthModels.h"
@@ -296,7 +297,7 @@ std::vector<std::vector<std::string>> StageInputCandidates(const std::string& st
         std::vector<std::vector<std::string>> groups{{"color_sr"}};
         if (!(params.is_object() && params.contains("guides") && params["guides"].is_boolean() && !params["guides"].get<bool>()))
             groups.insert(groups.end(), {{"depth_dlss"}, {"mv_dlss"}});
-        groups.insert(groups.end(), {{"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}});
+        groups.insert(groups.end(), {{"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}, {kControlMaskPass}});  // PR-8: the static control mask
         if (StageReadsSceneCuts(stage, params)) groups.push_back({kScenesPass});  // the list's id (PR-13): none while it is empty
         return groups;
     }

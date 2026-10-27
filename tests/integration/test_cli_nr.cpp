@@ -14,6 +14,8 @@
 #include "TestClips.h"
 #include "passes/Manifest.h"
 #include "passes/PassSequence.h"
+#include "passes/formats/PngIO.h"
+#include "pipeline/ControlMask.h"
 #include "util/Sha256.h"
 #include "util/Subprocess.h"
 
@@ -159,6 +161,33 @@ TEST_CASE("dlssvid nr --check reports the diagnostics: stub ok, ngx on WARP fail
 }
 
 // TASK-0053: the plumbing of the E8 / E6 measurements on the stub (WARP); the NGX numbers come from nr_ab.py on the GPU (PR-2)
+// PR-8: --check creates the feature as the run would - a control mask under -o switches the automatic mask off there too.
+TEST_CASE("dlssvid nr --check with a control mask under -o creates the feature with the auto mask off", "[integration][cli][nr][mask]") {
+    const auto dir = Dir("check_control_mask");
+    PassImage img;
+    img.Allocate(8, 8, PixelType::U16, {"A"});
+    WritePng(dir / "mask.png", img);
+    const auto json = dir / "check.json";
+    REQUIRE(RunCli({"nr", "--check", "--warp", "--backend", "stub", "--auto-mask", "-o", (dir / "passes").string(), "--json", json.string()}).code == 0);
+    CHECK(ReadJson(json)["auto_mask"] == true);  // no mask yet
+    CHECK(ReadJson(json)["control_mask"].is_null());
+    const ControlMaskImport m = ImportControlMask(dir / "mask.png", dir / "passes");
+    const CliResult r = RunCli({"nr", "--check", "--warp", "--backend", "stub", "--auto-mask", "-o", (dir / "passes").string(), "--json", json.string()});
+    REQUIRE(r.code == 0);
+    CHECK(r.out.find("auto_mask:    off (control mask") != std::string::npos);
+    CHECK(ReadJson(json)["auto_mask"] == false);
+    CHECK(ReadJson(json)["control_mask"] == m.mask.fingerprint);
+    REQUIRE(RunCli({"nr", "--check", "--warp", "--backend", "stub", "--auto-mask", "-o", (dir / "passes").string(), "--no-auto", "--json", json.string()}).code == 0);
+    CHECK(ReadJson(json)["auto_mask"] == true);  // --no-auto: no masks from -o
+    // an unreadable mask fails as the run's Init would
+    Manifest man = Manifest::Load(dir / "passes" / "mask_control");
+    man.fingerprint.clear();
+    man.Save(dir / "passes" / "mask_control");
+    const CliResult bad = RunCli({"nr", "--check", "--warp", "--backend", "stub", "-o", (dir / "passes").string()});
+    CHECK(bad.code != 0);
+    CHECK(bad.out.find("mask_control: not stamped") != std::string::npos);
+}
+
 TEST_CASE("dlssvid nr --check --check-repeat re-creates the feature N times and --check-features keeps N alive", "[integration][cli][nr]") {
     const auto dir = Dir("check_repeat");
     const auto json = dir / "repeat.json";

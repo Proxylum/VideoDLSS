@@ -199,15 +199,15 @@ TEST_CASE("Stage pass tables and timestamps", "[unit][fingerprint]") {
     CHECK(StageInputCandidates("depth").empty());
     CHECK(StageInputCandidates("flow") == std::vector<std::vector<std::string>>{{"depth_raw"}, {"scenes"}});  // + the list (PR-13)
     CHECK(StageInputCandidates("fg").front() == std::vector<std::string>{"color_nr", "color_sr"});
-    CHECK(StageInputCandidates("nr").size() == 8);  // + the scene list (PR-13)
+    CHECK(StageInputCandidates("nr").size() == 9);  // + the scene list (PR-13), + the control mask (PR-8)
     CHECK(StageInputCandidates("nr").back() == std::vector<std::string>{"scenes"});
     // TASK-0045: nr with the guides off reads no depth / mv - they are no inputs of its fingerprint; nor the list without the filter
-    CHECK(StageInputCandidates("nr", {{"guides", false}}) == std::vector<std::vector<std::string>>{{"color_sr"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}});
-    CHECK(StageInputCandidates("nr", {{"guides", false}, {"temporal", 0.4}}).size() == 6);  // the filter keeps a history: the list
-    CHECK(StageInputCandidates("nr", {{"guides", true}}).size() == 8);
+    CHECK(StageInputCandidates("nr", {{"guides", false}}) == std::vector<std::vector<std::string>>{{"color_sr"}, {"mask_ui"}, {"mask_ignore"}, {"mask_face"}, {"mask_skin"}, {"mask_control"}});
+    CHECK(StageInputCandidates("nr", {{"guides", false}, {"temporal", 0.4}}).size() == 7);  // the filter keeps a history: the list
+    CHECK(StageInputCandidates("nr", {{"guides", true}}).size() == 9);
     // PR-7: intensity 0 reads only the colour - the model, its guides, the masks and the list are not used
     CHECK(StageInputCandidates("nr", {{"intensity", 0.0}}) == std::vector<std::vector<std::string>>{{"color_sr"}});
-    CHECK(StageInputCandidates("nr", {{"intensity", 1.0}}).size() == 8);
+    CHECK(StageInputCandidates("nr", {{"intensity", 1.0}}).size() == 9);
     // PR-13: the one gate of the list
     CHECK(StageReadsSceneCuts("nr", nlohmann::json::object()));
     CHECK_FALSE(StageReadsSceneCuts("nr", {{"intensity", 0.0}}));

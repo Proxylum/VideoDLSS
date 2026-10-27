@@ -60,6 +60,9 @@ struct ProcessOptions {
     int64_t fgCrashAfter = -1;           // test hooks of the fg process (isolation tests): die after N real frames,
     bool fgCrashOnExit = false;          // die after printing its result,
     bool fgStall = false;                // hang before reading the input
+    // test hook (PR-8): called with a stage's name after its plan (AdviseStage) and before it retires its pass and runs - a mask replaced
+    // here is one replaced between the plan and the stage
+    std::function<void(const std::string& stage)> beforeStage;
 };
 
 struct ProcessStageReport {

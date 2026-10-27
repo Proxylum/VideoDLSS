@@ -9,7 +9,10 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
+#include <functional>
+#include <tuple>
 
 #include "TestClips.h"
 #include "convert/ColorConvert.h"
@@ -20,7 +23,10 @@
 #include "passes/ImageMetrics.h"
 #include "passes/PassSequence.h"
 #include "passes/ScenesPass.h"
+#include "passes/formats/PngIO.h"
+#include "pipeline/ControlMask.h"
 #include "pipeline/Pipeline.h"
+#include "stages/nr/NrLowpass.h"
 #include "stages/nr/NrStage.h"
 #include "stages/nr/StubNrBackend.h"
 
@@ -46,6 +52,22 @@ PassImage ColorFrame(int64_t i, uint32_t w, uint32_t h) {
             for (size_t c = 0; c < 3; ++c) img.Set(x, y, c, std::clamp(checker * (1.f - 0.05f * static_cast<float>(i)) + 0.1f * static_cast<float>(c) * x / w, 0.f, 1.f));
         }
     return img;
+}
+
+// A control mask image (U16 RGB) of w x h: value(x, y, c).
+std::filesystem::path MaskImage(const std::filesystem::path& file, uint32_t w, uint32_t h, const std::function<float(uint32_t, uint32_t, size_t)>& value) {
+    PassImage img;
+    img.Allocate(w, h, PixelType::U16, {"R", "G", "B"});
+    for (uint32_t y = 0; y < h; ++y)
+        for (uint32_t x = 0; x < w; ++x)
+            for (size_t c = 0; c < 3; ++c) img.Set(x, y, c, value(x, y, c));
+    WritePng(file, img);
+    return file;
+}
+
+int HalfSteps(uint16_t a, uint16_t b) {
+    auto ordered = [](uint16_t v) { return (v & 0x8000) ? -static_cast<int>(v & 0x7FFF) : static_cast<int>(v); };
+    return std::abs(ordered(a) - ordered(b));
 }
 
 void WritePass(const std::filesystem::path& dir, PassKind kind, uint32_t w, uint32_t h, int frames, FileFormat fmt, const std::function<void(int64_t, PassImage&)>& fill) {
@@ -435,6 +457,184 @@ TEST_CASE("NrStage keeps the UI protection when mask_ui and mask_skin differ in 
         CHECK(protectedDiff / (w / 2 * h) < 2e-3);  // the UI half passes through on every frame
         CHECK(editedDiff / (w / 2 * h) > 0.01);     // the rest is edited
     }
+}
+
+// PR-8: one static mask over every frame, stretched to the frame. Where it is 0 the output is the frame NR got (the proxy, as at
+// intensity 0, bit for bit); where it is white, the edit without a mask within 1 F16 ulp. Columns at the 0/1 seam are not compared.
+TEST_CASE("NrStage applies a static mask_control to every frame", "[integration][nr][mask]") {
+    const uint32_t w = 64, h = 32;
+    const int frames = 6;
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("control_mask");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    WritePass(dir / "src" / "color_sr", PassKind::ColorSr, w, h, frames, FileFormat::Exr, [&](int64_t i, PassImage& img) { img = ColorFrame(i, w, h); });
+    // 20x10 for a 64x32 frame: the left half 0, the right half white
+    ImportControlMask(MaskImage(dir / "mask.png", 20, 10, [](uint32_t x, uint32_t, size_t) { return x < 10 ? 0.f : 65535.f; }), dir / "masks");
+    D3D12Device dev({true, false});
+    auto run = [&](const char* name, float intensity, const std::filesystem::path& masks) {
+        NrStageOptions o;
+        o.backend = "stub";
+        o.colorDir = dir / "src" / "color_sr";
+        o.outputDir = dir / name;
+        o.intensity = intensity;
+        o.masksDir = masks;
+        VideoDecoder dec(clip);
+        return RunNr(dec, dev, o);
+    };
+    const NrRunResult masked = run("masked", 1.f, dir / "masks"), bypass = run("bypass", 0.f, dir / "masks"), plain = run("plain", 1.f, {});
+    REQUIRE(masked.stats.frames == frames);
+    CHECK(masked.stats.masks == std::vector<std::string>{"control"});
+    REQUIRE(masked.stats.controlMask);
+    CHECK(masked.stats.controlMask->grayscale);  // R = G = B: stored grey
+    CHECK(!masked.stats.controlSplit);
+    CHECK(bypass.stats.masks.empty());  // intensity 0 does not read it
+    const PassReader rm = PassReader::Open(masked.outDir), rb = PassReader::Open(bypass.outDir), rp = PassReader::Open(plain.outDir);
+    const nlohmann::json& cm = rm.Man().stageParams["control_mask"];
+    CHECK(cm["fingerprint"] == masked.stats.controlMask->fingerprint);
+    CHECK(cm["size"] == nlohmann::json::array({20, 10}));
+    CHECK(cm["grayscale"] == true);
+    CHECK(cm["split"] == false);
+    CHECK(rm.Man().stageParams["masks"] == nlohmann::json::array({"control"}));
+    CHECK(!rb.Man().stageParams.contains("control_mask"));
+    for (int f = 0; f < frames; ++f) {
+        INFO("frame " << f);
+        const PassImage m = rm.ReadFrame(f), b = rb.ReadFrame(f), p = rp.ReadFrame(f);
+        REQUIRE(m.type == PixelType::F16);
+        const uint16_t *pm = m.As<uint16_t>(), *pb = b.As<uint16_t>(), *pp = p.As<uint16_t>();
+        int leftOff = 0, rightOff = 0;
+        double edit = 0.0;
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+                for (size_t c = 0; c < 3; ++c) {
+                    const size_t i = (static_cast<size_t>(y) * w + x) * 3 + c;
+                    if (x < 24 && pm[i] != pb[i]) ++leftOff;
+                    if (x >= 40) {
+                        if (HalfSteps(pm[i], pp[i]) > 1) ++rightOff;
+                        edit = std::max(edit, std::fabs(static_cast<double>(p.Get(x, y, c)) - b.Get(x, y, c)));
+                    }
+                }
+        CHECK(leftOff == 0);
+        CHECK(rightOff == 0);
+        CHECK(edit > 0.01);  // the stub edits there: the right half is a real comparison
+    }
+}
+
+TEST_CASE("NrStage with mask_control creates the model with the auto mask off and names it in stage_params", "[integration][nr][mask]") {
+    const uint32_t w = 64, h = 32;
+    const int frames = 2;
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("control_mask_auto");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    WritePass(dir / "src" / "color_sr", PassKind::ColorSr, w, h, frames, FileFormat::Exr, [&](int64_t i, PassImage& img) { img = ColorFrame(i, w, h); });
+    // colour with G != B: the split runs
+    ImportControlMask(MaskImage(dir / "mask.png", w, h, [](uint32_t x, uint32_t, size_t c) { return c == 2 ? 0.f : x * 1000.f; }), dir / "masks");
+    D3D12Device dev({true, false});
+    auto run = [&](const std::filesystem::path& masks, const char* name) {
+        NrStageOptions o;
+        o.backend = "stub";
+        o.autoMask = true;
+        o.colorDir = dir / "src" / "color_sr";
+        o.outputDir = dir / name;
+        o.masksDir = masks;
+        Pipeline pipeline(dev, 4);
+        auto stage = std::make_unique<NrStage>(o);
+        NrStage* raw = stage.get();
+        pipeline.AddStage(std::move(stage));
+        pipeline.Init();
+        VideoDecoder dec(clip);
+        CpuFrame f;
+        while (dec.NextFrame(f)) {
+            pipeline.Cache().Acquire(f.index, f.desc);
+            pipeline.ProcessFrame(f);
+        }
+        pipeline.Finish();
+        const auto* stub = dynamic_cast<const StubNrBackend*>(raw->Backend(0));
+        REQUIRE(stub);
+        const bool autoMask = stub->Config().autoMask;
+        const NrStage::Stats st = raw->GetStats();
+        pipeline.Shutdown();
+        return std::make_tuple(autoMask, st, Manifest::Load(dir / name / "color_nr").stageParams);
+    };
+    const auto [autoWith, stWith, spWith] = run(dir / "masks", "with");
+    CHECK(!autoWith);  // UseAutoMask 0: the control mask replaces it
+    CHECK(spWith["auto_mask_requested"] == true);
+    CHECK(spWith["control_mask"]["split"] == true);
+    CHECK(spWith["control_mask"]["lowpass_d"] == NrLowpassDivisor(w, h));
+    CHECK(stWith.controlSplit);
+    CHECK(stWith.lowpassDivisor == NrLowpassDivisor(w, h));
+    const auto [autoWithout, stWithout, spWithout] = run({}, "without");
+    CHECK(autoWithout);
+    CHECK(!spWithout.contains("auto_mask_requested"));
+    CHECK(!spWithout.contains("control_mask"));
+}
+
+TEST_CASE("NrStage at intensity 0 neither reads nor needs mask_control; a malformed or unstamped mask_control is refused at Init", "[integration][nr][mask]") {
+    const uint32_t w = 32, h = 16;
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("control_mask_refused");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ImportControlMask(MaskImage(dir / "mask.png", w, h, [](uint32_t, uint32_t, size_t) { return 30000.f; }), dir / "masks");
+    const auto cur = dir / "masks" / kControlMaskPass;
+    Manifest m = Manifest::Load(cur);
+    m.fingerprint.clear();  // unstamped: hand-made or from before the import
+    m.Save(cur);
+    D3D12Device dev({true, false});
+    auto run = [&](float intensity) {
+        NrStageOptions o;
+        o.backend = "stub";
+        o.outputDir = dir / "out";
+        o.intensity = intensity;
+        o.masksDir = dir / "masks";
+        VideoDecoder dec(clip);
+        return RunNr(dec, dev, o);
+    };
+    const NrRunResult bypass = run(0.f);
+    CHECK(bypass.stats.frames == 2);
+    CHECK(bypass.stats.masks.empty());
+    CHECK_THROWS_WITH(run(1.f), Catch::Matchers::ContainsSubstring("mask_control: not stamped"));
+    m = Manifest::Load(cur);
+    m.channels = {"R", "G"};
+    m.Save(cur);
+    CHECK_THROWS_WITH(run(1.f), Catch::Matchers::ContainsSubstring("mask_control: channels"));
+    CHECK(run(0.f).stats.frames == 2);
+}
+
+// PR-8 (regression of the design's second race window): Init read the mask's fingerprint, Setup uploads its pixels at the first frame.
+// A mask replaced between the two would get the old label; the pixels are checked against it and the stage fails instead.
+TEST_CASE("NrStage refuses a control mask replaced between Init and the first frame", "[integration][nr][mask][regression]") {
+    const uint32_t w = 32, h = 16;
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = w;
+    spec.height = h;
+    const auto dir = Dir("control_mask_race");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ImportControlMask(MaskImage(dir / "a.png", w, h, [](uint32_t, uint32_t, size_t) { return 10000.f; }), dir / "masks");
+    MaskImage(dir / "b.png", w, h, [](uint32_t, uint32_t, size_t) { return 50000.f; });
+    D3D12Device dev({true, false});
+    NrStageOptions o;
+    o.backend = "stub";
+    o.outputDir = dir / "out";
+    o.masksDir = dir / "masks";
+    Pipeline pipeline(dev, 4);
+    pipeline.AddStage(std::make_unique<NrStage>(o));
+    pipeline.Init();
+    REQUIRE(ImportControlMask(dir / "b.png", dir / "masks").outcome == ControlMaskImport::Outcome::Replaced);
+    VideoDecoder dec(clip);
+    CpuFrame f;
+    REQUIRE(dec.NextFrame(f));
+    pipeline.Cache().Acquire(f.index, f.desc);
+    CHECK_THROWS_WITH(pipeline.ProcessFrame(f), Catch::Matchers::ContainsSubstring("the control mask changed while nr started"));
+    pipeline.Shutdown();
 }
 
 // PR-7 (spec §2b): the edit strength is NrCompose's, once after the last model pass - two stub passes are not linear, so a gain inside

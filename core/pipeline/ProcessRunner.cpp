@@ -13,6 +13,7 @@
 #include "io/OutputFormat.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
+#include "pipeline/ControlMask.h"
 #include "pipeline/FgProcess.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
@@ -26,6 +27,7 @@
 #include "stages/depth/DepthStage.h"
 #include "stages/fg/FgStage.h"
 #include "stages/flow/FlowStage.h"
+#include "stages/nr/NrLowpass.h"
 #include "stages/nr/NrStage.h"
 #include "stages/passthrough/PassthroughStage.h"
 #include "stages/scenes/ScenesStage.h"
@@ -399,7 +401,11 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     std::vector<std::string> inputsStale;  // inputs rerun in this plan because they were stale (PlanState::staleRan)
     for (const auto& [input, inputFp] : d.inputs)
         if (state.staleRan.count(input)) inputsStale.push_back(input);
-    const PassFingerprint fp = ComputeFingerprint(name, ctx.sourceHash, p, d.inputs, ToolForStage(name, p), ctx.sourceFormat);
+    ToolInfo stageTool = ToolForStage(name, p);
+    // PR-8: a revision of the control mask's code goes only into passes made with a mask - PassToolVersionFor sees the parameters,
+    // not the inputs, and a token there would recompute every NR pass (and in the input's id gc would no longer match the mask)
+    if (name == "nr" && d.inputs.count(kControlMaskPass)) stageTool.app += kNrControlMaskRevision;
+    const PassFingerprint fp = ComputeFingerprint(name, ctx.sourceHash, p, d.inputs, stageTool, ctx.sourceFormat);
     d.fingerprint = fp.value;
     d.sourceFormat = ctx.sourceFormat;
     d.params = fp.params;
@@ -493,6 +499,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     }
     const std::string madeFrom = m.sourceFormat.empty() ? kLegacySourceFormat : m.sourceFormat;
     const std::string sceneWant = d.inputs.count(kScenesPass) ? d.inputs.at(kScenesPass) : std::string();  // the list this run reads (PR-13)
+    const std::string controlWant = d.inputs.count(kControlMaskPass) ? d.inputs.at(kControlMaskPass) : std::string();  // the mask NR reads (PR-8)
     if (m.fingerprint.empty()) {  // made before fingerprints (or by a standalone `dlssvid <stage>`)
         if (!inputsRan.empty()) {
             d.diff["inputs"] = inputsRan;
@@ -532,6 +539,13 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
                                  : made == "pr6"              ? "nr made with its own scene-cut detector (PR-6)"
                                  : made.empty()               ? "made without the scene list"
                                                               : "made with another scene list",
+                true);
+        } else if (name == "nr" && ControlMaskLabelOf(m) != controlWant) {
+            // PR-8: a standalone NR pass made without the control mask NR reads now (or with another, or with one that is gone) is
+            // another picture: kept in the history, not adopted under this fingerprint
+            const std::string made = ControlMaskLabelOf(m);
+            d.diff["inputs"] = nlohmann::json::array({kControlMaskPass});
+            run("input_changed", made.empty() ? "made without the control mask" : controlWant.empty() ? "made with a control mask" : "made with another control mask",
                 true);
         } else if (!complete) {
             run("incomplete", incomplete, false);
@@ -775,6 +789,39 @@ std::optional<ScenesSource> ProjectScenes(const RunContext& ctx, StageDecision& 
     return std::nullopt;
 }
 
+// PR-8: the control mask NR will read. Unreadable stops NR before it runs (the plan would otherwise reuse a pass of the old stamp: the
+// mask's fingerprint comes from its manifest, RefreshFromDisk does not reread the file); a mask file edited in place stops it at reuse
+// too. Proportions more than 1 % off the frame: a warning - the mask stretches. Texts in Russian: they go to the card as they are.
+void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
+    std::string why;
+    const auto info = ReadControlMaskInfo(ctx.root / kControlMaskPass, &why);
+    if (!info) {
+        if (why == "changed outside dlssvid")
+            d.error = "файл маски управления изменён вне программы: загрузите маску заново или уберите её";
+        else if (d.action == "run")
+            d.error = "маска управления не читается (" + why + "): загрузите её заново или уберите";
+        else
+            d.warnings.push_back("маска управления не читается (" + why + ") и не применяется");
+        return;
+    }
+    // the frame NR runs at: color_sr of the clip (the upscale's --target included), else the source
+    uint32_t fw = ctx.sourceWidth, fh = ctx.sourceHeight;
+    try {
+        if (Manifest::Exists(ctx.root / "color_sr"))
+            if (const Manifest sr = Manifest::Load(ctx.root / "color_sr"); PassOfClip(sr)) {
+                fw = sr.width;
+                fh = sr.height;
+            }
+    } catch (const std::exception&) {
+    }
+    if (fw == 0 || fh == 0 || info->width == 0 || info->height == 0) return;
+    const double off = (static_cast<double>(info->width) / info->height) / (static_cast<double>(fw) / fh) - 1.0;
+    if (std::fabs(off) > 0.01)
+        d.warnings.push_back("Маска управления " + std::to_string(info->width) + "×" + std::to_string(info->height) + " растянется на кадр " +
+                             std::to_string(fw) + "×" + std::to_string(fh) + " без сохранения пропорций (разница " +
+                             std::to_string(static_cast<int>(std::lround(std::fabs(off) * 100.0))) + " %)");
+}
+
 void AdviseStage(const RunContext& ctx, StageDecision& d) {
     if (d.name == kScenesPass) {
         const SceneCutsPlan& sc = d.sceneCuts;
@@ -802,6 +849,7 @@ void AdviseStage(const RunContext& ctx, StageDecision& d) {
         if (passes >= 3 && !NrBypassParams(d.params))
             d.info = std::to_string(passes) + " прохода: модель повторно обрабатывает свой результат — картинка заметно синтетичнее; каждый проход — "
                      "своя копия модели (≈ 0.5 ГБ видеопамяти на 1440p, 0.9 ГБ на 4K) и её время";
+        if (!NrBypassParams(d.params) && Manifest::Exists(ctx.root / kControlMaskPass)) AdviseControlMask(ctx, d);
         return;
     }
     if (d.name != "depth") return;
@@ -1134,6 +1182,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         const std::optional<ScenesSource> sceneScores = ProjectScenes(ctx, d);  // read before the current pass is retired
         AdviseStage(ctx, d);
         if (!d.error.empty()) Throw("process: " + d.error);  // before anything is retired
+        if (options.beforeStage) options.beforeStage(name);
         for (const auto& w : d.warnings) {
             Log()->warn("process: {}", w);
             result.warnings.push_back(w);
@@ -1433,6 +1482,14 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                         Log()->warn("process: {}", w);
                         result.warnings.push_back(w);
                     }
+        }
+        if (rep.status.empty() && name == "nr") {
+            // PR-8: the pass names the control mask NR read at Init; another one than planned (replaced from the CLI between the plan and
+            // the stage) would be stamped under a wrong fingerprint - the stage fails before the stamp, the next run recomputes NR
+            const std::string want = d.inputs.count(kControlMaskPass) ? d.inputs.at(kControlMaskPass) : std::string();
+            auto label = [](const std::string& fp) { return fp.empty() ? std::string("none") : ShortFingerprint(fp); };
+            if (const std::string made = ControlMaskLabelOf(Manifest::Load(d.outDir)); made != want)
+                Throw("process: the control mask changed while nr ran (planned " + label(want) + ", read " + label(made) + "): run process again");
         }
         if (rep.status.empty()) {
             rep.status = "ran";
