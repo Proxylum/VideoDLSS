@@ -633,8 +633,10 @@ void NrStage::Shutdown() {
     setup_ = false;
 }
 
-NrRunResult RunNr(VideoDecoder& decoder, D3D12Device& device, NrStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params) {
-    const auto& info = decoder.Info();
+namespace {
+
+NrRunResult RunNrFrames(const VideoStreamInfo& info, D3D12Device& device, NrStageOptions options, const std::function<bool(CpuFrame&)>& next,
+                        int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params) {
     options.color = ColorInfoFromStream(info);
     options.fps = info.frameRate;
     options.uploadToGpu = false;  // single-stage run: nothing reads the slot
@@ -649,7 +651,7 @@ NrRunResult RunNr(VideoDecoder& decoder, D3D12Device& device, NrStageOptions opt
     CpuFrame frame;
     int64_t n = 0;
     while (maxFrames < 0 || n < maxFrames) {
-        if (!decoder.NextFrame(frame)) break;
+        if (!next(frame)) break;
         pipeline.Cache().Acquire(frame.index, frame.desc);
         pipeline.ProcessFrame(frame);
         ++n;
@@ -665,6 +667,27 @@ NrRunResult RunNr(VideoDecoder& decoder, D3D12Device& device, NrStageOptions opt
     r.diagnostics = raw->Diagnostics() ? raw->Diagnostics()->ToJson() : nlohmann::json::object();
     pipeline.Shutdown();
     return r;
+}
+
+}  // namespace
+
+NrRunResult RunNr(VideoDecoder& decoder, D3D12Device& device, NrStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params) {
+    return RunNrFrames(decoder.Info(), device, std::move(options), [&decoder](CpuFrame& f) { return decoder.NextFrame(f); }, maxFrames, progress, params);
+}
+
+NrRunResult RunNrFromPasses(const VideoStreamInfo& info, D3D12Device& device, NrStageOptions options, int64_t from, int64_t count,
+                            const std::function<void(int64_t)>& progress, const nlohmann::json& params) {
+    if (options.colorDir.empty()) Throw("nr: a range from the passes needs the colour pass (--color-dir)");
+    int64_t index = from;
+    auto next = [&](CpuFrame& f) {
+        f.data.clear();  // no pixels: the stage takes the colour from the pass by this index
+        f.desc = info.decoded;
+        f.index = index;
+        f.pts = index;
+        ++index;
+        return true;
+    };
+    return RunNrFrames(info, device, std::move(options), next, count, progress, params);
 }
 
 }  // namespace dlssvid

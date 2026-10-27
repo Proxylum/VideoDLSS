@@ -37,6 +37,7 @@ public:
         int64_t frames = -1;     // written frames from --start (-1: to the end)
         int64_t start = 0;       // first written frame, as the pass folders and the viewport count (from 0)
         int64_t warmup = 0;      // frames before --start through the model for its history, not written
+        std::string sourceHash;  // sha256:<hex> of the input, instead of hashing it again (the GUI's preview; hidden)
         std::string paramsFile;  // JSON object of nr settings; options given on the command line win
         bool warp = false;
         std::string dllDir, paramsBlock = "capability";

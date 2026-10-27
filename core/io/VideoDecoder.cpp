@@ -13,7 +13,9 @@ extern "C" {
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <optional>
+#include <vector>
 
 #ifdef DLSSVID_WITH_CUDA
 #include <cuda_runtime.h>
@@ -162,7 +164,7 @@ FrameIndexScan ScanFrameIndex(const std::filesystem::path& path, int64_t upTo, R
         const Rational tb{st->time_base.num, st->time_base.den};
         const int64_t start = st->start_time != AV_NOPTS_VALUE ? st->start_time : 0;
         // the reordering of B-frames moves a frame by a few packets: 64 more than needed put every frame up to upTo in its place
-        const int64_t wanted = std::max<int64_t>(upTo, 0) + 1 + 64;
+        const int64_t wanted = upTo >= std::numeric_limits<int64_t>::max() - 65 ? std::numeric_limits<int64_t>::max() : std::max<int64_t>(upTo, 0) + 1 + 64;
         std::vector<int64_t> times;
         bool missing = false;
         while (static_cast<int64_t>(times.size()) < wanted && av_read_frame(fmt, pkt) >= 0) {
