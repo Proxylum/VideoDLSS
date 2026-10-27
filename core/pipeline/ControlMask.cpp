@@ -161,6 +161,13 @@ PassImage PadToDisplay(const PassImage& data, const ImageProbe& p) {
 Decoded DecodeMask(const fs::path& image) {
     Decoded d;
     try {
+        (void)ImageFormatOf(image);  // the file opens and reads: what fails after this is its content
+    } catch (const std::exception& e) {
+        ControlMaskIssue i{Kind::Unreadable, e.what()};
+        i.noAccess = true;
+        throw ControlMaskError(std::move(i));
+    }
+    try {
         d.probe = ProbeImage(image);
     } catch (const std::exception& e) {
         Fail(Kind::Unreadable, e.what());
@@ -280,12 +287,21 @@ ControlMaskInfo InfoOf(const Manifest& m) {
     i.width = m.width;
     i.height = m.height;
     i.grayscale = m.channels.size() == 1;
-    if (sp.is_object()) {
-        i.sourceName = sp.value("source_name", "");
-        i.pixelsSha256 = sp.value("pixels_sha256", "");
-        i.bandsDiffer = sp.value("bands_differ", false);
-        i.alphaIgnored = sp.value("alpha_ignored", false);
-        i.clamped = sp.value("clamped", int64_t{0});
+    if (sp.is_object()) {  // stage_params are outside the fingerprint: a value of another type reads as absent, not as an exception
+        auto text = [&](const char* k) {
+            const auto it = sp.find(k);
+            return it != sp.end() && it->is_string() ? it->get<std::string>() : std::string();
+        };
+        auto flag = [&](const char* k) {
+            const auto it = sp.find(k);
+            return it != sp.end() && it->is_boolean() && it->get<bool>();
+        };
+        i.sourceName = text("source_name");
+        i.pixelsSha256 = text("pixels_sha256");
+        i.bandsDiffer = flag("bands_differ");
+        i.alphaIgnored = flag("alpha_ignored");
+        const auto clamped = sp.find("clamped");
+        if (clamped != sp.end() && clamped->is_number_integer()) i.clamped = clamped->get<int64_t>();
     }
     return i;
 }

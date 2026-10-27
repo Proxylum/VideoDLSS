@@ -28,7 +28,7 @@ struct ImageProbe {
 };
 
 // PNG 89 50 4E 47, TIFF "II*\0" / "MM\0*", EXR 76 2F 31 01; Unknown otherwise (a file shorter than 4 bytes too). Throws when the file
-// does not open.
+// does not open or its first bytes do not read.
 ImageProbe::Format ImageFormatOf(const std::filesystem::path& path);
 std::string_view ToString(ImageProbe::Format f);  // png | tiff | exr | unknown
 // The header; Format::Unknown for another kind of file. Throws when the header of a PNG, TIFF or EXR does not read.

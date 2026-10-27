@@ -208,6 +208,7 @@ void AppModel::importControlMask(const QString& file) {
                 message = tr("Маска не загружена: %1").arg(QString::fromStdString(other));
             }
             if (ok) Log()->info("mask_control: {}", message.toStdString());
+            else Log()->warn("mask_control: not imported: {}", issue ? issue->detail : other);  // the English detail the dialog does not show
             // the current project's mask and sources whichever project the import ran for (another one may have been opened meanwhile); after
             // a failure the previous mask comes back on the viewport
             (void)root;

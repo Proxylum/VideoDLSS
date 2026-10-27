@@ -2151,8 +2151,13 @@ TEST_CASE("StageCard NR control mask row: buttons off while a task runs or an im
     bool taskRuns = false;
     m.card->setBusyCheck([&] { return taskRuns; });
     REQUIRE(m.load(MaskPng(m.dir / "a.png", 16, 8, false)));
+    QPushButton* runAlone = nullptr;
+    for (QPushButton* b : m.card->findChildren<QPushButton*>())
+        if (b->text() == QString::fromUtf8("Запустить отдельно")) runAlone = b;
+    REQUIRE(runAlone);
     taskRuns = true;  // a task of the queue
     m.card->refresh();
+    CHECK(runAlone->isEnabled());  // a standalone run queues behind the task, as before PR-8
     CHECK_FALSE(m.row()->loadButton()->isEnabled());
     CHECK_FALSE(m.row()->removeButton()->isEnabled());
     CHECK_FALSE(m.row()->showButton()->isEnabled());
@@ -2178,6 +2183,7 @@ TEST_CASE("StageCard NR control mask row: buttons off while a task runs or an im
     m.card->refresh();
     CHECK(m.row()->status()->text() == QString::fromUtf8("Загружается…\nb.png"));
     CHECK_FALSE(m.row()->loadButton()->isEnabled());
+    CHECK_FALSE(runAlone->isEnabled());  // the import is writing the folder NR would read
     panel.refresh();
     QPushButton* process = nullptr;
     QPushButton* gc = nullptr;
@@ -2212,6 +2218,8 @@ TEST_CASE("StageCard NR control mask row: buttons off while a task runs or an im
     CHECK(done.last().at(0).toBool());
     CHECK(m.model->controlMask().status == AppModel::ControlMaskState::Status::Ready);
     CHECK(m.model->sourceNames().contains("mask_control"));
+    m.card->refresh();
+    CHECK(runAlone->isEnabled());
 
     // intensity 0: loaded, not acting; the automatic mask is free again (no input)
     m.model->setStageParam("nr", "intensity", 0.0);
@@ -2351,6 +2359,13 @@ TEST_CASE("A failed control mask import shows the Russian text of its kind and k
     CHECK(ControlMaskIssueText({K::Channels, "the EXR has no R, G, B, Y or a single channel (u, v)", 0, 0}).contains("(u, v)"));
     CHECK(ControlMaskIssueText({K::NoRoot, "", 0, 0}).startsWith(QString::fromUtf8("Сначала откройте видео")));
     CHECK(ControlMaskIssueText({K::Tiff, "", 0, 0}).contains(QString::fromUtf8("больше 4 каналов")));
+    ControlMaskIssue noAccess{K::Unreadable, "cannot open mask.png"};  // review of PR-8: held, no access - not «повреждён»
+    noAccess.noAccess = true;
+    CHECK(ControlMaskIssueText(noAccess) == QString::fromUtf8("Файл не открывается: его держит другая программа или к нему нет доступа."));
+    CHECK(ControlMaskIssueText({K::Unreadable, "libpng: IDAT: CRC error", 0, 0}) == QString::fromUtf8("Файл не читается: он повреждён или это не изображение."));
+    // the versions panel's line of a hand-made manifest: values of another type left out, no exception
+    CHECK(HumanControlMaskParams({{"source_name", nullptr}, {"grayscale", 1}, {"source_size", {16, 8}}}) == QString::fromUtf8("16×8 · RGB"));
+    CHECK(HumanControlMaskParams({{"source_name", "m.png"}, {"grayscale", true}}) == QString::fromUtf8("m.png · серая"));
     CHECK(ControlMaskWhyText("frame not readable: cannot open for hashing") == QString::fromUtf8("файл не открывается (занят?)"));
     CHECK(ControlMaskWhyText("unreadable: x") == QString::fromUtf8("манифест не читается"));
 }

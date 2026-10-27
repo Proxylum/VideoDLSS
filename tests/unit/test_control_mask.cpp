@@ -55,6 +55,15 @@ PassImage Stored(const fs::path& root) {
     return ReadPng(root / kControlMaskPass / m.FrameFileName(0));
 }
 
+ControlMaskIssue IssueOf(const std::function<void()>& f) {
+    try {
+        f();
+    } catch (const ControlMaskError& e) {
+        return e.issue;
+    }
+    FAIL_CHECK("no ControlMaskError");
+    return {ControlMaskIssue::Kind::Write, {}};
+}
 ControlMaskIssue::Kind KindOf(const std::function<void()>& f) {
     try {
         f();
@@ -278,9 +287,32 @@ TEST_CASE("ImportControlMask: palette, tiled and planar TIFF refused, min-is-whi
     {  // review of PR-8: held by another program without share-read (or denied by its ACL) - «не читается», not «формат не поддерживается»
         const HANDLE held = CreateFileW((dir / "white.tif").wstring().c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         REQUIRE(held != INVALID_HANDLE_VALUE);
-        CHECK(KindOf([&] { ImportControlMask(dir / "white.tif", dir / "held"); }) == ControlMaskIssue::Kind::Unreadable);
+        const ControlMaskIssue i = IssueOf([&] { ImportControlMask(dir / "white.tif", dir / "held"); });
         CloseHandle(held);
+        CHECK(i.kind == ControlMaskIssue::Kind::Unreadable);
+        CHECK(i.noAccess);  // the GUI says it does not open, not that it is corrupted
     }
+    {  // review of PR-8: opens, but its first bytes do not read (another program's byte-range lock; an offline cloud placeholder)
+        const HANDLE locker = CreateFileW((dir / "white.tif").wstring().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        REQUIRE(locker != INVALID_HANDLE_VALUE);
+        OVERLAPPED at{};
+        REQUIRE(LockFileEx(locker, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 4, 0, &at));
+        const ControlMaskIssue i = IssueOf([&] { ImportControlMask(dir / "white.tif", dir / "locked"); });
+        UnlockFileEx(locker, 0, 4, 0, &at);
+        CloseHandle(locker);
+        CHECK(i.kind == ControlMaskIssue::Kind::Unreadable);
+        CHECK(i.noAccess);
+        CHECK(!fs::exists(dir / "locked" / kControlMaskPass));
+    }
+    { std::ofstream(dir / "short.png") << "abc"; }  // shorter than any signature: no format, as before
+    CHECK(KindOf([&] { ImportControlMask(dir / "short.png", dir / "passes"); }) == ControlMaskIssue::Kind::Unsupported);
+    {  // a PNG signature with nothing readable after it: corrupted (its content), not a matter of access
+        std::ofstream f(dir / "cut.png", std::ios::binary);
+        f.write("\x89PNG\r\n\x1a\n", 8);
+    }
+    const ControlMaskIssue cut = IssueOf([&] { ImportControlMask(dir / "cut.png", dir / "passes"); });
+    CHECK(cut.kind == ControlMaskIssue::Kind::Unreadable);
+    CHECK_FALSE(cut.noAccess);
     CHECK(KindOf([&] { ImportControlMask(dir, dir / "passes"); }) == ControlMaskIssue::Kind::NotAFile);
     CHECK(KindOf([&] { ImportControlMask(dir / "white.tif", {}); }) == ControlMaskIssue::Kind::NoRoot);
 }
@@ -455,6 +487,33 @@ TEST_CASE("RemoveControlMask retires the mask; a folder without a loadable manif
     edit([](Manifest& m) { m.fingerprint.clear(); });
     CHECK(!ReadControlMaskInfo(cur, &why));
     CHECK(why == "not stamped");
+    good.Save(cur);
+    REQUIRE(ReadControlMaskInfo(cur));
+    // review of PR-8: values of another type (a hand-made or script-written manifest) - a reason or an absent value, not a JSON exception
+    for (const nlohmann::json& v : {nlohmann::json(1), nlohmann::json("true"), nlohmann::json(nullptr)}) {
+        INFO(v.dump());
+        edit([&](Manifest& m) { m.stageParams["static"] = v; });
+        CHECK_NOTHROW(ReadControlMaskInfo(cur, &why));
+        CHECK(!ReadControlMaskInfo(cur, &why));
+        CHECK(why == "not static one-frame");
+        CHECK_NOTHROW(ImportControlMask(dir / "a.png", root));  // loading the image again repairs it
+        CHECK(ReadControlMaskInfo(cur));
+    }
+    edit([](Manifest& m) {  // outside the fingerprint: the stamp holds, the values read as absent
+        m.stageParams["source_name"] = nullptr;
+        m.stageParams["pixels_sha256"] = 7;
+        m.stageParams["bands_differ"] = "yes";
+        m.stageParams["alpha_ignored"] = 1;
+        m.stageParams["clamped"] = "many";
+    });
+    std::optional<ControlMaskInfo> odd;
+    CHECK_NOTHROW(odd = ReadControlMaskInfo(cur, &why));
+    REQUIRE(odd);
+    CHECK(odd->sourceName.empty());
+    CHECK(odd->pixelsSha256.empty());
+    CHECK_FALSE(odd->bandsDiffer);
+    CHECK_FALSE(odd->alphaIgnored);
+    CHECK(odd->clamped == 0);
     good.Save(cur);
     REQUIRE(ReadControlMaskInfo(cur));
 

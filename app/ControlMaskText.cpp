@@ -18,7 +18,9 @@ QString ControlMaskIssueText(const ControlMaskIssue& i) {
         case K::TooLarge:
             return Tr("Изображение %1×%2 слишком большое: сторона — не больше 16384 точек, всего — не больше 67 Мп.").arg(i.width).arg(i.height);
         case K::Empty: return Tr("В изображении нет точек.");
-        case K::Unreadable: return Tr("Файл не читается: он повреждён или это не изображение.");
+        case K::Unreadable:
+            return i.noAccess ? Tr("Файл не открывается: его держит другая программа или к нему нет доступа.")
+                              : Tr("Файл не читается: он повреждён или это не изображение.");
         case K::Channels: {
             const QString d = QString::fromStdString(i.detail);
             const int open = d.lastIndexOf('('), close = d.lastIndexOf(')');
@@ -55,11 +57,13 @@ QString ControlMaskWhyText(const std::string& why) {
 QString HumanControlMaskParams(const nlohmann::json& p) {
     if (!p.is_object()) return {};
     QStringList parts;
-    const std::string name = p.value("source_name", std::string());
+    const auto n = p.find("source_name");  // a hand-made manifest: values of another type are left out
+    const std::string name = n != p.end() && n->is_string() ? n->get<std::string>() : std::string();
     if (!name.empty()) parts << QString::fromStdString(name);
     if (p.contains("source_size") && p["source_size"].is_array() && p["source_size"].size() == 2 && p["source_size"][0].is_number() && p["source_size"][1].is_number())
         parts << QString("%1×%2").arg(p["source_size"][0].get<int64_t>()).arg(p["source_size"][1].get<int64_t>());
-    parts << (p.value("grayscale", false) ? Tr("серая") : QStringLiteral("RGB"));
+    const auto g = p.find("grayscale");
+    parts << (g != p.end() && g->is_boolean() && g->get<bool>() ? Tr("серая") : QStringLiteral("RGB"));
     return parts.join(QStringLiteral(" · "));
 }
 

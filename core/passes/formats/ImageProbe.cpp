@@ -124,7 +124,12 @@ ImageProbe::Format ImageFormatOf(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::binary);
     if (!in.is_open()) Throw("cannot open " + Utf8(path));  // access denied, held without share-read: unreadable, not another kind
     unsigned char s[4] = {};
-    if (!in.read(reinterpret_cast<char*>(s), 4)) return ImageProbe::Format::Unknown;
+    if (!in.read(reinterpret_cast<char*>(s), 4)) {
+        std::error_code ec;
+        const uintmax_t size = std::filesystem::file_size(path, ec);
+        if (ec || size >= 4) Throw("cannot read " + Utf8(path));  // a byte-range lock, an offline cloud placeholder: unreadable, not another kind
+        return ImageProbe::Format::Unknown;                       // shorter than any signature
+    }
     if (s[0] == 0x89 && s[1] == 'P' && s[2] == 'N' && s[3] == 'G') return ImageProbe::Format::Png;
     if ((s[0] == 'I' && s[1] == 'I' && s[2] == '*' && s[3] == 0) || (s[0] == 'M' && s[1] == 'M' && s[2] == 0 && s[3] == '*')) return ImageProbe::Format::Tiff;
     if (s[0] == 0x76 && s[1] == 0x2F && s[2] == 0x31 && s[3] == 0x01) return ImageProbe::Format::Exr;
