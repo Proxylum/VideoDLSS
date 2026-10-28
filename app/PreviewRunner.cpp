@@ -173,8 +173,9 @@ NrPreviewEnv PreviewRunner::env() const {
     e.freeBytes = freeBytes();
     e.clipFrames = model_.sourceInfo().frames > 0 ? model_.sourceInfo().frames : -1;
     e.fps = model_.sourceInfo().fps > 0 ? model_.sourceInfo().fps : 24.0;
-    e.colorW = model_.sourceInfo().width;
-    e.colorH = model_.sourceInfo().height;
+    // the colour NR reads: the result frame's size (the upscale's, else the source's), as the plan's estimate and the calibration key
+    e.colorW = model_.outcome().width > 0 ? model_.outcome().width : model_.sourceInfo().width;
+    e.colorH = model_.outcome().height > 0 ? model_.outcome().height : model_.sourceInfo().height;
     for (const auto& s : model_.outcome().stages)
         if (s.stage == "nr") e.msPerFrame = s.msPerFrame;
     // the start: the process, the device, NGX and the feature (E8 ≈ 1.6-2 s), the stub's or the bypass's much less; then what the
@@ -315,13 +316,17 @@ bool PreviewRunner::start(Request r) {
         return true;
     }
     if (const auto hit = FindNrPreview(job)) {  // computed before: shown at once, no task
+        const bool onScreen = autoStart_ && model_.nrPreview() && model_.nrPreview()->dir == hit->dir;
+        if (onScreen && job_ && !dying &&
+            PrepareNrPreview(model_.previewPlan(), job_->mode, job_->first, jobRequest_.seconds, env()).key == job_->key)
+            return true;  // an edit that changed neither the preview shown nor the run in flight: both stay
         if (job_) {
             jobSuperseded_ = true;  // the run in flight is an older request: it fills the cache, it is not shown (the last one wins)
             if (jobRequest_.kind == Kind::Segment && !dying) tasks_.cancel(taskId_);
         }
         pending_.reset();
         shownRequest_ = r;
-        if (autoStart_ && model_.nrPreview() && model_.nrPreview()->dir == hit->dir) {  // an edit that left the key: nothing to show anew
+        if (onScreen) {  // an edit that left the key: nothing to show anew
             if (job_) setStatus(shownStatus_, "ok", shownTip_);                       // the superseded run's progress had the status
         } else {
             show(*hit, job, true, true);
@@ -537,6 +542,7 @@ void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, b
     }
     text += NrPreviewDroppedText(job.gate.dropped);
     const QString tip = entry.cacheable ? QString() : uncachedTip_;
+    if (!entry.cacheable && model_.engineerMode()) text += Tr(" · ") + tip;  // the engineer mode says it in the line (design §5)
     if (cached && !upstreamNote_.isEmpty()) text = upstreamNote_ + Tr(" — ") + text;  // the stages done, the preview from the cache
     upstreamNote_.clear();
     shownStatus_ = text;
@@ -556,32 +562,7 @@ void PreviewRunner::updateStale() {
         return;
     }
     const NrPreviewJob now = PrepareNrPreview(model_.previewPlan(), shownJob_->mode, shownJob_->first, shownRequest_.seconds, env());
-    QString reason;
-    if (!now.gate.ok() && now.gate.why != NrPreviewBlock::Disk) {  // the disk budget changes nothing of the preview shown
-        switch (now.gate.why) {
-            case NrPreviewBlock::Upstream:
-            case NrPreviewBlock::Restore:
-            case NrPreviewBlock::Pending: reason = Tr("этапы до улучшения нужно пересчитать"); break;
-            case NrPreviewBlock::NrOff: reason = Tr("улучшение выключено"); break;
-            case NrPreviewBlock::NoDll: reason = Tr("нет nvngx_dlssnr.dll"); break;
-            case NrPreviewBlock::ControlMask: reason = Tr("маска управления не читается"); break;
-            case NrPreviewBlock::NrError: reason = Tr("в плане ошибка"); break;
-            default: reason = Tr("входы пересчитаны"); break;  // PastEnd: the clip is shorter now
-        }
-    } else if (now.keyJson != shownJob_->keyJson) {
-        const nlohmann::json a = nlohmann::json::parse(shownJob_->keyJson, nullptr, false), b = nlohmann::json::parse(now.keyJson, nullptr, false);
-        auto differs = [&](const char* k) { return a.is_object() && b.is_object() && a.value(k, nlohmann::json()) != b.value(k, nlohmann::json()); };
-        bool dropsMore = false;
-        for (const auto& d : now.gate.dropped)
-            dropsMore = dropsMore || std::find(shownJob_->gate.dropped.begin(), shownJob_->gate.dropped.end(), d) == shownJob_->gate.dropped.end();
-        if (differs("params")) reason = Tr("настройки изменились");
-        else if (dropsMore) reason = Tr("этапы до улучшения нужно пересчитать");
-        else if (differs("inputs") || differs("source") || differs("source_format")) reason = Tr("входы пересчитаны");
-        else if (differs("masks")) reason = Tr("маски изменились");
-        else if (a.is_object() && b.is_object() && a.value("tool", nlohmann::json()).value("dll", std::string()) != b.value("tool", nlohmann::json()).value("dll", std::string()))
-            reason = Tr("сменилась nvngx_dlssnr.dll");
-        else reason = Tr("программа обновлена");
-    }
+    const QString reason = NrPreviewStaleReason(*shownJob_, now, !model_.planError().isEmpty() && !Decision(model_.previewPlan(), "nr"));
     if (reason == stale_) return;
     stale_ = reason;
     if (!stale_.isEmpty()) setStatus(Tr("Показано превью для прежних настроек — %1").arg(stale_), "warn");
@@ -768,6 +749,34 @@ void PreviewRunner::saveFrame(const QString& file) {
 void PreviewRunner::setBefore(const QString& which) { model_.setNrPreviewBefore(which.toStdString()); }
 
 QString PreviewDuration(double seconds) { return seconds < 0.5 ? Tr("< 1 с") : FormatDuration(seconds); }
+
+QString NrPreviewStaleReason(const NrPreviewJob& shown, const NrPreviewJob& now, bool planFailed) {
+    if (!now.gate.ok() && now.gate.why != NrPreviewBlock::Disk) {  // the disk budget changes nothing of the preview shown
+        if (planFailed) return Tr("в плане ошибка");                  // an empty plan has no nr decision: it reads as NR off
+        switch (now.gate.why) {
+            case NrPreviewBlock::Upstream:
+            case NrPreviewBlock::Restore:
+            case NrPreviewBlock::Pending: return Tr("этапы до улучшения нужно пересчитать");
+            case NrPreviewBlock::NrOff: return Tr("улучшение выключено");
+            case NrPreviewBlock::NoDll: return Tr("нет nvngx_dlssnr.dll");
+            case NrPreviewBlock::ControlMask: return Tr("маска управления не читается");
+            case NrPreviewBlock::NrError: return Tr("в плане ошибка");
+            default: return Tr("входы пересчитаны");  // PastEnd: the clip is shorter now
+        }
+    }
+    if (now.keyJson == shown.keyJson) return {};
+    const nlohmann::json a = nlohmann::json::parse(shown.keyJson, nullptr, false), b = nlohmann::json::parse(now.keyJson, nullptr, false);
+    auto differs = [&](const char* k) { return a.is_object() && b.is_object() && a.value(k, nlohmann::json()) != b.value(k, nlohmann::json()); };
+    bool dropsMore = false;  // a guide the frame now goes without: its stage would run, nothing was recomputed
+    for (const auto& d : now.gate.dropped) dropsMore = dropsMore || std::find(shown.gate.dropped.begin(), shown.gate.dropped.end(), d) == shown.gate.dropped.end();
+    if (differs("params")) return Tr("настройки изменились");
+    if (dropsMore) return Tr("этапы до улучшения нужно пересчитать");
+    if (differs("inputs") || differs("source") || differs("source_format")) return Tr("входы пересчитаны");
+    if (differs("masks")) return Tr("маски изменились");
+    if (a.is_object() && b.is_object() && a.value("tool", nlohmann::json()).value("dll", std::string()) != b.value("tool", nlohmann::json()).value("dll", std::string()))
+        return Tr("сменилась nvngx_dlssnr.dll");
+    return Tr("программа обновлена");
+}
 
 QString NrPreviewDroppedText(const std::vector<std::string>& dropped) {
     const bool mv = std::find(dropped.begin(), dropped.end(), "mv_dlss") != dropped.end();

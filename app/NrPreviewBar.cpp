@@ -142,7 +142,10 @@ void NrPreviewBar::refresh() {
     const PreviewRunner::Availability frame = runner_.availability({PreviewRunner::Kind::Frame, 0});
     const PreviewRunner::Availability history = runner_.availability({PreviewRunner::Kind::FrameHistory, 0});
     const QString p = tr("P");
-    frame_->setEnabled(frame.ok);
+    const NrPreviewUsage usage = runner_.usage();
+    const bool clearable = usage.entries > 0 && !runner_.running() && !runner_.housekeeping();
+    // the menu («Кадр с историей», «Очистить превью…») stays reachable while the frame itself is refused (a click says why)
+    frame_->setEnabled(frame.ok || history.ok || clearable);
     frame_->setToolTip(frame.ok ? tr("Посчитать улучшение только для кадра под курсором с текущими настройками, без истории модели, и показать «До | После». "
                                      "Пассы и версии не меняются. %1 · %2")
                                       .arg(frame.cached ? tr("уже посчитан") : PreviewDuration(frame.seconds), p)
@@ -152,10 +155,9 @@ void NrPreviewBar::refresh() {
         h->setToolTip(history.ok ? tr("Тот же кадр, но модель сначала проходит 6 предыдущих кадров — так он выйдет при обработке. %1").arg(PreviewDuration(history.seconds))
                                  : history.text);
     }
-    const NrPreviewUsage usage = runner_.usage();
     if (QAction* c = frameMenu_->actions().value(2)) {
         c->setText(usage.entries > 0 ? tr("Очистить превью (%1)…").arg(HumanBytes(usage.bytes)) : tr("Очистить превью…"));
-        c->setEnabled(usage.entries > 0 && !runner_.running() && !runner_.housekeeping());
+        c->setEnabled(clearable);
         c->setToolTip(tr("Удалить с диска все посчитанные превью этого проекта; пассы и версии не трогаются"));
     }
     bool anySegment = false;

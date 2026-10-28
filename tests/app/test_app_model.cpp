@@ -4624,6 +4624,142 @@ TEST_CASE("CompareBar: with no current color_nr the preview has a chip of its ow
     for (const auto& c : model.chips()) CHECK(c.source != kNrPreviewSource);
 }
 
+TEST_CASE("NrPreviewStaleReason names what changed; the disk budget changes nothing; a failed plan is not NR off", "[app][preview][regression]") {
+    NrPreviewJob shown;
+    shown.keyJson = R"({"inputs":{"color_sr":"a"},"masks":{},"params":{"intensity":1},"tool":{"dll":"d1"}})";
+    NrPreviewJob now = shown;
+    CHECK(NrPreviewStaleReason(shown, now, false).isEmpty());
+    now.gate.why = NrPreviewBlock::Disk;
+    CHECK(NrPreviewStaleReason(shown, now, false).isEmpty());
+    now.gate.why = NrPreviewBlock::NrOff;
+    CHECK(NrPreviewStaleReason(shown, now, false) == QString::fromUtf8("улучшение выключено"));
+    CHECK(NrPreviewStaleReason(shown, now, true) == QString::fromUtf8("в плане ошибка"));  // an empty plan has no nr decision
+    now.gate.why = NrPreviewBlock::Upstream;
+    CHECK(NrPreviewStaleReason(shown, now, false) == QString::fromUtf8("этапы до улучшения нужно пересчитать"));
+    now = shown;
+    now.keyJson = R"({"inputs":{"color_sr":"a"},"masks":{},"params":{"intensity":1.3},"tool":{"dll":"d1"}})";
+    CHECK(NrPreviewStaleReason(shown, now, false) == QString::fromUtf8("настройки изменились"));
+    now = shown;
+    now.gate.dropped = {"depth_dlss"};
+    now.keyJson = R"({"inputs":{},"masks":{},"params":{"intensity":1},"tool":{"dll":"d1"}})";
+    CHECK(NrPreviewStaleReason(shown, now, false) == QString::fromUtf8("этапы до улучшения нужно пересчитать"));
+    now.gate.dropped.clear();
+    CHECK(NrPreviewStaleReason(shown, now, false) == QString::fromUtf8("входы пересчитаны"));
+    now = shown;
+    now.keyJson = R"({"inputs":{"color_sr":"a"},"masks":{"mask_ui":"m"},"params":{"intensity":1},"tool":{"dll":"d1"}})";
+    CHECK(NrPreviewStaleReason(shown, now, false) == QString::fromUtf8("маски изменились"));
+    now.keyJson = R"({"inputs":{"color_sr":"a"},"masks":{},"params":{"intensity":1},"tool":{"dll":"d2"}})";
+    CHECK(NrPreviewStaleReason(shown, now, false) == QString::fromUtf8("сменилась nvngx_dlssnr.dll"));
+}
+
+TEST_CASE("NR preview bar: the frame button's menu stays reachable while the frame is refused - the cache can be cleared from it", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_bar_menu");
+    AppModel& model = *m.model;
+    const auto e = m.FakeEntry("abcdef012345", 0, 0);
+    std::ofstream(e / "preview.json") << nlohmann::json{{"format", "dlssvid-nr-preview"}, {"key", "abcdef012345"}, {"bytes", 100}}.dump();
+    model.setStageParam("upscale", "scale", 1.5);  // the frame stops at the upscale, and so does the history
+    model.refreshPlan();
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    REQUIRE(runner.usage().entries == 1);
+    NrPreviewBar bar(model, runner);
+    QToolButton* frame = nullptr;
+    for (QToolButton* b : bar.findChildren<QToolButton*>())
+        if (b->text() == QString::fromUtf8("Превью кадра")) frame = b;
+    REQUIRE(frame);
+    REQUIRE(frame->menu());
+    REQUIRE_FALSE(runner.availability({PreviewRunner::Kind::Frame, 0}).ok);
+    CHECK(frame->isEnabled());  // its menu opens
+    const QList<QAction*> items = frame->menu()->actions();
+    REQUIRE(items.size() >= 3);
+    CHECK_FALSE(items.value(0)->isEnabled());  // «Кадр с историей» refused too
+    CHECK(items.value(2)->isEnabled());        // «Очистить превью (…)…»
+    frame->click();                            // the default action says why
+    CHECK_FALSE(runner.running());
+    CHECK(runner.statusText().startsWith(QString::fromUtf8("Сначала посчитайте этапы до улучшения")));
+}
+
+TEST_CASE("NR preview: the time calibration is kept per size NR runs at, not per source size", "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_calibration_size");
+    AppModel& model = *m.model;
+    QSettings().remove("preview/nr");
+    const Manifest sr = Manifest::Load(m.root() / "color_sr");
+    REQUIRE(static_cast<int>(sr.width) != static_cast<int>(model.sourceInfo().width));  // the upscale: NR runs at another size
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.seekToSourceFrame(4);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    QSettings s;
+    CHECK(s.contains(QString("preview/nr/other/%1x%2/frame_ms").arg(sr.width).arg(sr.height)));
+    CHECK_FALSE(s.contains(QString("preview/nr/other/%1x%2/frame_ms").arg(model.sourceInfo().width).arg(model.sourceInfo().height)));
+    QSettings().remove("preview/nr");
+}
+
+TEST_CASE("NR preview: auto update after an edit that changes no key leaves a running segment alone", "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_auto_segment");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    runner.setPointerHeldForTests([] { return false; });
+    runner.setDebounceMsForTests(100);
+    model.seekToSourceFrame(3);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    runner.setAutoUpdate(true);
+    Pump([] { return false; }, 1600);
+    runner.setCommandForTests(LongCommand);
+    REQUIRE(runner.start({PreviewRunner::Kind::Segment, 1}));  // from the same cursor
+    REQUIRE(runner.running());
+    const int segment = runner.runningTaskId();
+    model.setStageEnabled("fg", true);  // a stage after NR: neither key changes
+    model.setStageEnabled("fg", false);
+    Pump([] { return false; }, 1000);
+    CHECK(runner.running());
+    CHECK_FALSE(queue.cancelled(segment));
+    runner.setAutoUpdate(false);
+    runner.cancel();
+    Pump([&] { return !queue.previewBusy(); }, 20000);
+}
+
+TEST_CASE("NR preview: a preview the cache could not take says why - in the tooltip, and in the line in the engineer mode", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_uncached");
+    AppModel& model = *m.model;
+    model.setEngineerMode(true);
+    struct EngineerOff {
+        AppModel& model;
+        ~EngineerOff() { model.setEngineerMode(false); }  // remembered in QSettings: not for the other tests
+    } engineerOff{model};
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    const Manifest sr = Manifest::Load(m.root() / "color_sr");
+    std::unique_ptr<std::ifstream> held;
+    runner.setCommandForTests([&](const NrPreviewJob& job) {  // the run's output written here; a file of it held open
+        PassWriter w(job.workDir / "color_nr", Manifest::ForPass(PassKind::ColorNr, sr.width, sr.height, FileFormat::Exr));
+        for (int64_t f = job.first; f < job.first + job.frames; ++f) w.WriteFrame(f, MakePassImage(PassKind::ColorNr, sr.width, sr.height));
+        w.Finish();
+        const nlohmann::json stats = {{"frames", job.warmup + job.frames}, {"frames_written", job.frames}, {"warmup_frames", job.warmup},
+                                      {"ms_per_frame_wall", 10.0}, {"control_mask", nullptr}};
+        std::ofstream(job.workDir / "nr.json") << nlohmann::json{{"stats", stats}, {"diagnostics", nlohmann::json::object()}}.dump();
+        held = std::make_unique<std::ifstream>(job.workDir / "nr.json");  // the folder cannot be renamed into the cache meanwhile
+        return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "1/1 frames"}};
+    });
+    model.seekToSourceFrame(4);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    held.reset();
+    REQUIRE(model.nrPreview());
+    INFO(runner.statusText().toStdString() << " | " << runner.statusTip().toStdString());
+    CHECK(runner.statusTip().contains(QString::fromUtf8("папку превью не удалось переименовать")));  // not «другая nvngx_dlssnr.dll»
+    CHECK(runner.statusText().contains(QString::fromUtf8("не сохранено в кэш")));
+}
+
 TEST_CASE("NR preview: a request made during a save while a segment runs is taken up when the save ends - a cached frame shows and the segment goes",
           "[app][preview][gpu][regression]") {
     App();

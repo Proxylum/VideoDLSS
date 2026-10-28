@@ -176,6 +176,11 @@ QString PreviewDuration(double seconds);
 // « · без векторов движения», « · без глубины», « · без векторов движения и глубины»: the guides a frame preview went without (empty: none)
 QString NrPreviewDroppedText(const std::vector<std::string>& dropped);
 
+// Why the preview shown (`shown`) is not what the plan would give now (`now`, the same mode and frame): «настройки изменились»,
+// «этапы до улучшения нужно пересчитать», «входы пересчитаны», ...; empty when it is current. `planFailed`: the plan has an error and
+// no nr decision (an empty plan reads as NR off).
+QString NrPreviewStaleReason(const NrPreviewJob& shown, const NrPreviewJob& now, bool planFailed);
+
 // The Disk refusal: over the preview budget (kNrPreviewMaxBytes) or short of free space
 QString NrPreviewDiskText(uint64_t estimatedBytes, uint64_t freeBytes);
 

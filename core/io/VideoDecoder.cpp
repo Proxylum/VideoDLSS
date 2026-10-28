@@ -174,14 +174,15 @@ FrameIndexScan ScanFrameIndex(const std::filesystem::path& path, int64_t upTo, R
         const int64_t wanted = upTo >= std::numeric_limits<int64_t>::max() - 65 ? std::numeric_limits<int64_t>::max() : std::max<int64_t>(upTo, 0) + 1 + 64;
         std::vector<int64_t> times;
         int64_t firstMissing = -1;  // the first packet with neither pts nor dts
-        while (static_cast<int64_t>(times.size()) < wanted && av_read_frame(fmt, pkt) >= 0) {
+        while (scan.frames < wanted && av_read_frame(fmt, pkt) >= 0) {  // every video packet counts: one without a time adds none
             if (pkt->stream_index == vs && !(pkt->flags & AV_PKT_FLAG_DISCARD)) {
                 const int64_t t = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
                 if (t == AV_NOPTS_VALUE) {
-                    if (firstMissing < 0) firstMissing = scan.frames;
-                } else {
-                    times.push_back(t);
+                    firstMissing = scan.frames++;  // firstBad from here on whatever follows: a raw stream is not read to its end
+                    av_packet_unref(pkt);
+                    break;
                 }
+                times.push_back(t);
                 ++scan.frames;
             }
             av_packet_unref(pkt);
