@@ -654,6 +654,13 @@ void StageCard::setExtra(QWidget* extra) {
     if (auto* column = qobject_cast<QVBoxLayout*>(form_->layout())) column->addWidget(extra);
 }
 
+void StageCard::refreshBusy() {
+    if (!controlRow_) return;
+    const StageEntry* e = model_.stageEntry(stage_);
+    const nlohmann::json effective = EffectiveStageParams(stage_, e ? e->params : nlohmann::json::object());
+    controlRow_->refresh((busy_ && busy_()) || model_.controlMaskBusy(), NrBypassParams(effective));
+}
+
 void StageCard::refresh() {
     updating_ = true;
     const StageEntry* e = model_.stageEntry(stage_);

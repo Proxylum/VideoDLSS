@@ -132,6 +132,9 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     connect(startPage_, &StartPage::openPathRequested, this, &MainWindow::openPath);
     connect(tasks_, &TaskQueue::taskOutput, this, [](int id, const QString& line) { Log()->info("[task {}] {}", id, line.toStdString()); });
     connect(tasks_, &TaskQueue::taskFinished, this, &MainWindow::onTaskFinished);
+    // PR-10: the preview's lines go to the log as the tasks' do (its status says «подробности в логе»)
+    connect(tasks_, &TaskQueue::previewOutput, this, [](int id, const QString& line) { Log()->info("[preview {}] {}", id, line.toStdString()); });
+    connect(tasks_, &TaskQueue::previewPreempted, this, [this](int) { statusBar()->showMessage(tr("Превью отменено: началась обработка"), 5000); });
     connect(projectPanel_, &ProjectPanel::processQueued, this, &MainWindow::watchProcess);
     connect(processing_, &ProcessingPanel::showResultRequested, this, [this] {
         processingActive_ = false;
@@ -501,7 +504,7 @@ void MainWindow::notify(const QString& title, const QString& text) {
 }
 
 bool MainWindow::event(QEvent* e) {
-    if (e->type() == QEvent::WindowActivate && tray_ && !tasks_->busy()) tray_->hide();  // the user is back: no icon to leave behind
+    if (e->type() == QEvent::WindowActivate && tray_ && !tasks_->mainBusy()) tray_->hide();  // the user is back: no icon to leave behind
     return QMainWindow::event(e);
 }
 
@@ -527,7 +530,7 @@ bool MainWindow::settleUnsaved() {
 
 void MainWindow::closeProject() {
     if (!model_.hasProject()) return;
-    if (tasks_->busy()) {
+    if (tasks_->mainBusy()) {  // a preview is cancelled with the project (PR-10)
         QMessageBox::information(this, tr("Идёт обработка"), tr("Дождитесь окончания обработки или отмените её, затем закройте проект."));
         return;
     }
@@ -579,7 +582,7 @@ void MainWindow::saveSettings() {
 }
 
 void MainWindow::closeEvent(QCloseEvent* e) {
-    if (tasks_->busy()) {
+    if (tasks_->mainBusy()) {  // a preview ends with the window (the queue kills its process)
         if (QMessageBox::question(this, tr("Идёт обработка"), tr("Прервать обработку и закрыть? Готовые стадии останутся на диске.")) != QMessageBox::Yes) {
             e->ignore();
             return;

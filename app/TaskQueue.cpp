@@ -83,9 +83,17 @@ TaskQueue::~TaskQueue() {
     }
 }
 
-int TaskQueue::enqueue(const QString& title, const QString& program, const QStringList& args, const std::vector<StagePlan>& plan) {
+int TaskQueue::enqueue(const QString& title, const QString& program, const QStringList& args, const std::vector<StagePlan>& plan, Lane lane) {
+    if (lane == Lane::Preview) {
+        if (mainBusy()) return -1;  // processing first: a preview after it is the caller's call
+        std::vector<int> waiting;   // ids first: a slot of the finish may queue (the vector grows)
+        for (const auto& w : tasks_)
+            if (w.lane == Lane::Preview && !w.done && (current_ < 0 || tasks_[static_cast<size_t>(current_)].id != w.id)) waiting.push_back(w.id);
+        for (const int id : waiting) cancel(id);
+    }
     Task t;
     t.id = nextId_++;
+    t.lane = lane;
     t.title = title;
     t.program = program;
     t.args = args;
@@ -102,22 +110,83 @@ int TaskQueue::enqueue(const QString& title, const QString& program, const QStri
     }
     Recount(t.progress, false);
     t.progress.eta = plan.empty() ? -1.0 : TimeLeft(t.progress, -1.0);
-    t.row = table_->rowCount();
-    table_->insertRow(t.row);
-    table_->setItem(t.row, kColTitle, new QTableWidgetItem(title));
-    auto* bar = new QProgressBar(table_);
-    bar->setRange(0, 100);
-    bar->setValue(static_cast<int>(std::lround(t.progress.fraction * 100)));
-    table_->setCellWidget(t.row, kColProgress, bar);
-    table_->setItem(t.row, kColStatus, new QTableWidgetItem(tr("в очереди")));
-    auto* cancel = new QPushButton(tr("Отменить"), table_);
+    if (lane == Lane::Preview && previewRow_ >= 0) {  // one row for every preview: a debounced series would fill the table
+        t.row = previewRow_;
+        table_->item(t.row, kColTitle)->setText(title);
+    } else {
+        t.row = table_->rowCount();
+        table_->insertRow(t.row);
+        table_->setItem(t.row, kColTitle, new QTableWidgetItem(title));
+        table_->setItem(t.row, kColStatus, new QTableWidgetItem());
+        auto* bar = new QProgressBar(table_);
+        bar->setRange(0, 100);
+        table_->setCellWidget(t.row, kColProgress, bar);
+        if (lane == Lane::Preview) previewRow_ = t.row;
+    }
+    if (auto* bar = qobject_cast<QProgressBar*>(table_->cellWidget(t.row, kColProgress))) bar->setValue(static_cast<int>(std::lround(t.progress.fraction * 100)));
+    table_->item(t.row, kColStatus)->setText(tr("в очереди"));
+    auto* cancel = new QPushButton(tr("Отменить"), table_);  // a new one in the preview's row: it cancels this preview
     SetRole(cancel, "small");
     const int id = t.id;
     connect(cancel, &QPushButton::clicked, this, [this, id] { this->cancel(id); });
     table_->setCellWidget(t.row, kColCancel, cancel);
+    if (lane == Lane::Preview) previewRowOwner_ = id;
     tasks_.push_back(t);
+    if (lane == Lane::Main) {
+        // processing goes first: every preview is preempted - the running one killed (this task starts when it has exited and let its
+        // files go), a waiting one dropped
+        std::vector<int> previews;
+        for (const auto& p : tasks_)
+            if (p.lane == Lane::Preview && !p.done) previews.push_back(p.id);
+        for (const int p : previews) {
+            emit previewPreempted(p);
+            this->cancel(p);  // the member, not the row's button above
+        }
+    }
     if (!busy()) startNext();
     return id;
+}
+
+bool TaskQueue::mainBusy() const {
+    for (const auto& t : tasks_)
+        if (t.lane == Lane::Main && !t.done) return true;
+    return false;
+}
+
+bool TaskQueue::previewBusy() const {
+    for (const auto& t : tasks_)
+        if (t.lane == Lane::Preview && !t.done) return true;
+    return false;
+}
+
+TaskQueue::Lane TaskQueue::laneOf(int id) const {
+    const Task* t = find(id);
+    return t ? t->lane : Lane::Main;
+}
+
+void TaskQueue::emitStarted(const Task& t) {
+    const int id = t.id;
+    if (t.lane == Lane::Main) emit taskStarted(id);
+    else emit previewStarted(id);
+}
+
+void TaskQueue::emitProgress(const Task& t) {
+    const int id = t.id;
+    const Progress copy = t.progress;
+    if (t.lane == Lane::Main) emit taskProgress(id, copy);
+    else emit previewProgress(id, copy);
+}
+
+void TaskQueue::emitFinished(const Task& t, bool ok) {
+    const int id = t.id;
+    if (t.lane == Lane::Main) emit taskFinished(id, ok);
+    else emit previewFinished(id, ok);
+}
+
+void TaskQueue::emitOutput(const Task& t, const QString& line) {
+    const int id = t.id;
+    if (t.lane == Lane::Main) emit taskOutput(id, line);
+    else emit previewOutput(id, line);
 }
 
 void TaskQueue::cancel(int id) {
@@ -178,15 +247,15 @@ double TaskQueue::plannedSeconds(const Task& t, const QString& stage) const {
 void TaskQueue::startNext() {
     if (current_ >= 0) return;
     int next = -1;
-    for (size_t i = 0; i < tasks_.size(); ++i)
-        if (!tasks_[i].done) {
-            next = static_cast<int>(i);
-            break;
-        }
+    for (const Lane lane : {Lane::Main, Lane::Preview}) {  // processing before any preview
+        for (size_t i = 0; i < tasks_.size() && next < 0; ++i)
+            if (!tasks_[i].done && tasks_[i].lane == lane) next = static_cast<int>(i);
+        if (next >= 0) break;
+    }
     if (next < 0) return;
     current_ = next;
     Task& t = tasks_[static_cast<size_t>(current_)];
-    table_->item(t.row, kColStatus)->setText(tr("выполняется"));
+    if (ownsRow(t)) table_->item(t.row, kColStatus)->setText(tr("выполняется"));
     process_ = std::make_unique<QProcess>(this);
     process_->setProcessChannelMode(QProcess::MergedChannels);
     connect(process_.get(), &QProcess::readyRead, this, &TaskQueue::onOutput);
@@ -195,11 +264,10 @@ void TaskQueue::startNext() {
     buffer_.clear();
     t.timer.start();
     Log()->info("task {}: {} {}", t.id, t.program.toStdString(), t.args.join(' ').toStdString());
-    const int id = t.id;
-    const Progress initial = t.progress;
-    emit taskStarted(id);
-    emit taskProgress(id, initial);  // reused stages are marked before the first line of output
-    process_->start(t.program, t.args);
+    const Task started = t;  // the signals' slots may queue a task: `t` is not used after them
+    emitStarted(started);
+    emitProgress(started);  // reused stages are marked before the first line of output
+    process_->start(started.program, started.args);
     if (tasks_[static_cast<size_t>(current_)].cancelled) process_->kill();  // cancelled from a taskStarted slot
 }
 
@@ -222,8 +290,7 @@ void TaskQueue::onOutput() {
         Task& t = tasks_[static_cast<size_t>(current_)];  // re-fetched: a slot may have queued a task (vector growth)
         if (const auto f = failedRe.match(line); f.hasMatch()) {  // first: a progress update may be glued to this line
             stageFailed(t, f.captured(1));
-            const int id = t.id;
-            emit taskOutput(id, line);
+            emitOutput(tasks_[static_cast<size_t>(current_)], line);
             continue;
         }
         if (const auto m = progressRe.match(line); m.hasMatch()) {
@@ -233,8 +300,7 @@ void TaskQueue::onOutput() {
         if (line.trimmed().isEmpty()) continue;
         if (const auto d = doneRe.match(line); d.hasMatch()) stageDone(t, d.captured(1), d.captured(3).toDouble());
         else if (const auto r = reusedRe.match(line); r.hasMatch()) stageReused(t, r.captured(1));
-        const int id = t.id;
-        emit taskOutput(id, line);
+        emitOutput(tasks_[static_cast<size_t>(current_)], line);
     }
 }
 
@@ -337,15 +403,15 @@ void TaskQueue::stageFailed(Task& t, const QString& stage) {
 
 void TaskQueue::publish(Task& t) {
     const Progress& p = t.progress;
-    if (auto* bar = qobject_cast<QProgressBar*>(table_->cellWidget(t.row, kColProgress))) bar->setValue(static_cast<int>(std::lround(p.fraction * 100)));
-    if (!t.done) {
-        QString status = tr("выполняется");
-        if (p.eta > 0.0) status += tr(" · осталось %1").arg(FormatDuration(p.eta));
-        table_->item(t.row, kColStatus)->setText(status);
+    if (ownsRow(t)) {
+        if (auto* bar = qobject_cast<QProgressBar*>(table_->cellWidget(t.row, kColProgress))) bar->setValue(static_cast<int>(std::lround(p.fraction * 100)));
+        if (!t.done) {
+            QString status = tr("выполняется");
+            if (p.eta > 0.0) status += tr(" · осталось %1").arg(FormatDuration(p.eta));
+            table_->item(t.row, kColStatus)->setText(status);
+        }
     }
-    const int id = t.id;
-    const Progress copy = p;
-    emit taskProgress(id, copy);
+    emitProgress(t);
 }
 
 void TaskQueue::finishTask(Task& t, bool ok, const QString& status) {
@@ -366,13 +432,14 @@ void TaskQueue::finishTask(Task& t, bool ok, const QString& status) {
     }
     p.eta = ok ? 0.0 : -1.0;
     Recount(p, ok);
-    table_->item(t.row, kColStatus)->setText(status);
-    if (auto* bar = qobject_cast<QProgressBar*>(table_->cellWidget(t.row, kColProgress))) bar->setValue(static_cast<int>(std::lround(p.fraction * 100)));
-    if (auto* cancel = table_->cellWidget(t.row, kColCancel)) cancel->setEnabled(false);
-    const int id = t.id;
-    const Progress copy = p;
-    emit taskProgress(id, copy);
-    emit taskFinished(id, ok);  // slots may enqueue: `t` is not touched after this
+    if (ownsRow(t)) {  // a preview killed for the next one: the row is the next one's already
+        table_->item(t.row, kColStatus)->setText(status);
+        if (auto* bar = qobject_cast<QProgressBar*>(table_->cellWidget(t.row, kColProgress))) bar->setValue(static_cast<int>(std::lround(p.fraction * 100)));
+        if (auto* cancel = table_->cellWidget(t.row, kColCancel)) cancel->setEnabled(false);
+    }
+    const Task finished = t;  // slots may enqueue: `t` is not touched after this
+    emitProgress(finished);
+    emitFinished(finished, ok);
 }
 
 void TaskQueue::onFinished(int exitCode, QProcess::ExitStatus status) {

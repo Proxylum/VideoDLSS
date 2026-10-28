@@ -43,6 +43,7 @@ signals:
 
 private:
     void refreshVersions();
+    void updateGates();  // PR-10: what waits for a preview, without the whole refresh (a preview starts and ends in seconds)
     void runStage(const std::string& stage);
     void processAll();  // save the project and run `dlssvid process --project` (the whole pipeline -> result)
     void patchDll();    // nr stage: dlssnr-patcher over the user's nvngx_dlssnr.dll (`dlssvid nr-patch`)
@@ -75,6 +76,8 @@ private:
     QLabel* encodeState_;
     QLabel* versionsInfo_;
     QPushButton* gc_;
+    std::vector<QPushButton*> versionButtons_;  // «Вернуть» / «Удалить» of the versions listed (rebuilt by refreshVersions)
+    bool historyOnDisk_ = false;
     QWidget* versionsRows_;
     QGridLayout* versionsGrid_;
     QLabel* footer_;

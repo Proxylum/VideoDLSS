@@ -912,6 +912,62 @@ TEST_CASE("TaskQueue cancels the running task, drops a queued one and keeps the 
     CHECK(queue.progress(dropped).elapsed == 0.0);
 }
 
+// PR-10: the preview's lane. Processing preempts a preview and starts once its process has exited; a preview waits for nothing and is
+// refused while processing runs or waits; the previews' events are their own signals (MainWindow::onTaskFinished follows processing
+// only); one table row serves every preview.
+TEST_CASE("TaskQueue lanes: a Main task preempts a running preview; a preview is refused while Main runs or waits; previews share one table row; preview events stay off the Main signals", "[app][tasks][preview]") {
+    App();
+    TaskQueue queue;
+    QStringList main, preview;
+    QObject::connect(&queue, &TaskQueue::taskStarted, [&](int id) { main << QString("start %1").arg(id); });
+    QObject::connect(&queue, &TaskQueue::taskFinished, [&](int id, bool ok) { main << QString("finish %1 %2").arg(id).arg(ok ? "ok" : "fail"); });
+    QObject::connect(&queue, &TaskQueue::taskOutput, [&](int id, const QString&) { main << QString("output %1").arg(id); });
+    QObject::connect(&queue, &TaskQueue::previewStarted, [&](int id) { preview << QString("start %1").arg(id); });
+    QObject::connect(&queue, &TaskQueue::previewFinished, [&](int id, bool ok) { preview << QString("finish %1 %2").arg(id).arg(ok ? "ok" : "fail"); });
+    QObject::connect(&queue, &TaskQueue::previewPreempted, [&](int id) { preview << QString("preempted %1").arg(id); });
+    auto* table = queue.findChild<QTableWidget*>();
+    REQUIRE(table);
+
+    // a preview alone: its own signals, one row; a second one waits behind it, a third replaces the second (only the last waits)
+    const int p1 = queue.enqueue("p1", "ping", {"-n", "60", "127.0.0.1"}, {}, TaskQueue::Lane::Preview);
+    REQUIRE(p1 > 0);
+    CHECK(queue.previewBusy());
+    CHECK_FALSE(queue.mainBusy());
+    CHECK(queue.busy());
+    CHECK(queue.laneOf(p1) == TaskQueue::Lane::Preview);
+    const int p2 = queue.enqueue("p2", "cmd", {"/c", "echo", "never"}, {}, TaskQueue::Lane::Preview);
+    const int p3 = queue.enqueue("p3", "ping", {"-n", "60", "127.0.0.1"}, {}, TaskQueue::Lane::Preview);
+    CHECK(queue.cancelled(p2));
+    CHECK_FALSE(queue.finished(p3));
+    CHECK(table->rowCount() == 1);
+    CHECK(table->item(0, 0)->text() == "p3");
+    CHECK(main.isEmpty());
+
+    // processing arrives: both previews preempted (the running one killed), processing starts after the kill
+    const int m = queue.enqueue("main", "cmd", {"/c", "echo", "3/10 frames"});
+    CHECK(queue.mainBusy());
+    CHECK(queue.enqueue("p4", "cmd", {"/c", "echo", "x"}, {}, TaskQueue::Lane::Preview) == -1);  // refused while processing waits
+    Pump([&] { return queue.finished(m); }, 20000);
+    REQUIRE(queue.succeeded(m));
+    CHECK(queue.cancelled(p1));
+    CHECK(queue.cancelled(p3));
+    CHECK(preview.contains(QString("preempted %1").arg(p1)));
+    CHECK(preview.contains(QString("preempted %1").arg(p3)));
+    CHECK(main.first() == QString("start %1").arg(m));  // after the preview's process exited
+    CHECK(preview.indexOf(QString("finish %1 fail").arg(p1)) >= 0);
+    for (const QString& e : main) CHECK_FALSE(e.contains(QString(" %1").arg(p1)));  // no preview on the Main signals
+    CHECK(table->rowCount() == 2);  // the previews' row and the processing's
+    CHECK_FALSE(queue.mainBusy());
+
+    // after processing a preview runs again, in the same row
+    const int p5 = queue.enqueue("p5", "cmd", {"/c", "echo", "1/1 frames"}, {}, TaskQueue::Lane::Preview);
+    REQUIRE(p5 > 0);
+    Pump([&] { return queue.finished(p5); }, 20000);
+    CHECK(queue.succeeded(p5));
+    CHECK(table->rowCount() == 2);
+    CHECK(queue.progress(p5).fraction == 1.0);
+}
+
 TEST_CASE("TaskQueue counts reused stages at once and takes the time left from the plan and the measured rate", "[app][tasks]") {
     App();
     TaskQueue queue;
@@ -2234,7 +2290,7 @@ TEST_CASE("StageCard NR control mask row: buttons off while a task runs or an im
     QPushButton* gc = nullptr;
     for (QPushButton* b : panel.findChildren<QPushButton*>()) {
         if (b->text().startsWith(QString::fromUtf8("Обработать"))) process = b;
-        if (b->toolTip() == QString::fromUtf8("Недоступно во время обработки или загрузки маски") && b->text() != QString::fromUtf8("Вернуть") &&
+        if (b->toolTip() == QString::fromUtf8("Недоступно во время обработки, превью или загрузки маски") && b->text() != QString::fromUtf8("Вернуть") &&
             b->text() != QString::fromUtf8("Удалить"))
             gc = b;
     }
