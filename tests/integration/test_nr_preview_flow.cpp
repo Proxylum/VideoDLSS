@@ -8,15 +8,19 @@
 #include <fstream>
 #include <iterator>
 #include <nlohmann/json.hpp>
+#include <chrono>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "TestClips.h"
+#include "gpu/D3D12Device.h"
 #include "passes/Manifest.h"
 #include "passes/PassSequence.h"
 #include "pipeline/NrPreview.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/ProcessRunner.h"
+#include "stages/nr/INrBackend.h"
 #include "util/Subprocess.h"
 
 using namespace dlssvid;
@@ -171,3 +175,65 @@ TEST_CASE("NR preview key changes with the DLL sha", "[integration][preview]") {
     _putenv_s("DLSSVID_NVIDIA_DLL_DIR", "");
     CHECK(b != a);
 }
+
+// PR-10 (spec §9 of the design): the preview's command on the real model - a frame, a frame with history, and one kill during the
+// model's start-up, after which the next preview works. One feature per process: no stress probe. Only with an NVIDIA GPU, the DLL and
+// the driver; runs at CI idle (GPU tests).
+TEST_CASE("NR preview command on the real DLL: a frame, a frame with history, and a kill during start-up", "[integration][nr][gpu][ngx][preview]") {
+    D3D12Device dev({false, false});
+    if (!dev.IsNvidia()) SKIP("Neural Rendering needs an NVIDIA GPU");
+    const NrAvailability avail = NrAvailable("ngx");
+    if (!avail.available) SKIP(avail.reason);
+    const NvidiaDriverVersion drv = NvidiaDriverFromUmd(dev.UmdDriverVersion());
+    if (drv.valid && !drv.AtLeast(kNrMinDriverMajor, kNrMinDriverMinor)) SKIP("driver " + drv.ToString() + " is older than 616.56 (TASK-0011)");
+    ClipSpec spec;
+    spec.frames = 12;
+    spec.width = 256;
+    spec.height = 144;
+    const auto dir = Dir("ngx");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions upstream = Options(dir, clip);  // the passes the preview reads, NR not run
+    upstream.warp = false;
+    for (auto& s : upstream.stages) s.enabled = s.name != "fg" && s.name != "nr";
+    RunProcess(upstream);
+    ProcessOptions o = Options(dir, clip);  // the project's plan: NR on NGX
+    o.warp = false;
+    ApplyParamSpec(o.stages, "nr.backend=ngx");
+    const ProcessPlan plan = PlanProcess(o);
+    NrPreviewEnv env = Env(clip);
+    env.warp = false;
+    auto run = [&](NrPreviewMode mode, int64_t first) {
+        const NrPreviewJob job = PrepareNrPreview(plan, mode, first, 0, env);
+        REQUIRE(job.gate.ok());
+        CHECK_FALSE(job.dllSha256.empty());
+        std::string out;
+        REQUIRE(Run(job, &out) == 0);
+        const NrPreviewVerdict v = VerifyNrPreviewRun(job);
+        REQUIRE(v.ok());
+        CHECK(v.cacheable);  // the CLI loaded the DLL the plan hashed
+        return PublishNrPreview(job, 1.0, v.cacheable);
+    };
+    const NrPreviewEntry frame = run(NrPreviewMode::Frame, 5);
+    CHECK(frame.dir.filename().string().size() == 12);
+    CHECK(Manifest::Load(frame.ColorDir()).firstFrame == 5);
+    const NrPreviewEntry history = run(NrPreviewMode::History, 8);
+    CHECK(history.warmup == kNrPreviewHistoryFrames);
+    CHECK(history.stats["frames"] == 7);
+    // one kill while the model starts (the GUI's «Отменить», processing preempting it): the next preview runs as before
+    {
+        const NrPreviewJob job = PrepareNrPreview(plan, NrPreviewMode::Frame, 3, 0, env);
+        WriteNrPreviewParams(job);
+        std::vector<std::string> args = job.Args();
+        args.insert(args.begin(), DLSSVID_CLI_PATH);
+        Subprocess p;
+        p.Start(args, {}, true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));  // NGX init and CreateFeature take ≈ 1.6-2 s (E8)
+        p.Terminate();
+        p.Wait(10000);
+        std::error_code ec;
+        std::filesystem::remove_all(job.workDir, ec);
+    }
+    const NrPreviewEntry after = run(NrPreviewMode::Frame, 3);
+    CHECK(Manifest::Load(after.ColorDir()).frameCount == 1);
+}
+
