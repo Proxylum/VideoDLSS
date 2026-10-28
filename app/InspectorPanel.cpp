@@ -170,6 +170,7 @@ InspectorPanel::InspectorPanel(AppModel& model, ViewportWindow& viewport, QWidge
     for (QComboBox* g : grid_) connect(g, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) { applyGrid(); });
     connect(&model_, &AppModel::stateChanged, this, &InspectorPanel::refresh);
     connect(&model_, &AppModel::sourcesChanged, this, &InspectorPanel::refresh);
+    connect(&model_, &AppModel::nrPreviewChanged, this, &InspectorPanel::refresh);  // PR-10
     connect(&viewport_, &ViewportWindow::probe, this, &InspectorPanel::showProbe);
     connect(&model_, &AppModel::engineerModeChanged, this, &InspectorPanel::setEngineerMode);
     setEngineerMode(model_.engineerMode());

@@ -84,6 +84,10 @@ CompareBar::CompareBar(AppModel& model, QWidget* parent) : QWidget(parent), mode
         refresh();
     });
     connect(&model_, &AppModel::stateChanged, this, &CompareBar::refresh);
+    connect(&model_, &AppModel::nrPreviewChanged, this, [this] {  // PR-10: the preview is an item of the «Улучшение» chip's menu
+        rebuildChips();
+        refresh();
+    });
     rebuildChips();
     refresh();
 }

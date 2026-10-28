@@ -121,6 +121,7 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     connect(&model_, &AppModel::timeChanged, this, [this](double) { updateCellLabels(); });
     connect(&model_, &AppModel::framesUpdated, this, &MainWindow::updateCellLabels);  // «загрузка…» -> the frame
     connect(&model_, &AppModel::sourcesChanged, this, &MainWindow::updateCellLabels);
+    connect(&model_, &AppModel::nrPreviewChanged, this, &MainWindow::updateCellLabels);  // PR-10
     connect(&model_, &AppModel::projectChanged, this, [this] {
         updatePage();
         updateTitle();

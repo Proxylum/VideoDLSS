@@ -3824,3 +3824,155 @@ TEST_CASE("PresetMenu: the other kind's mark names a preset with & as written", 
     CHECK(doc.toPlainText().contains(QString::fromUtf8("из «A & B»")));
     QSettings().remove("presets/newProject");
 }
+
+// ---- PR-10: the NR preview ----
+
+namespace {
+// a processed project of the stub methods (12 frames, upscale x2, no FG): the CLI's passes under passes/
+struct PreviewProject {
+    std::filesystem::path dir;
+    std::unique_ptr<AppModel> model;
+    explicit PreviewProject(const char* name) : dir(Dir(name)) {
+        ClipSpec spec;
+        spec.frames = 12;
+        spec.width = 48;
+        spec.height = 32;
+        const auto clip = WriteClip(dir / "clip.mkv", spec);
+        Project p = Project::Create(clip, dir / "passes");
+        for (auto& st : p.stages) {
+            if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+            if (st.name == "upscale") st.params["backend"] = "nis";
+            if (st.name == "fg") st.enabled = false;
+        }
+        p.resultVideo = dir / "clip_result.mkv";
+        p.codec = "ffv1";
+        p.Save(dir / "proj.dlssvid.json");
+        std::string out;
+        if (Subprocess::Run({DLSSVID_CLI_PATH, "process", "--project", (dir / "proj.dlssvid.json").string(), "--warp", "--disable-unavailable"}, &out) != 0)
+            throw std::runtime_error("process failed: " + out);
+        model = std::make_unique<AppModel>(true);
+        model->openProject(Q(dir / "proj.dlssvid.json"));
+    }
+    std::filesystem::path root() const { return dir / "passes"; }
+    // a preview's entry as PreviewRunner publishes it: its color_nr over first..last
+    std::filesystem::path FakeEntry(const std::string& key, int64_t first, int64_t last) const {
+        const auto entry = root() / ".preview" / "nr" / key;
+        const Manifest sr = Manifest::Load(root() / "color_sr");
+        PassWriter w(entry / "color_nr", Manifest::ForPass(PassKind::ColorNr, sr.width, sr.height, FileFormat::Exr));
+        for (int64_t f = first; f <= last; ++f) w.WriteFrame(f, MakePassImage(PassKind::ColorNr, sr.width, sr.height));
+        w.Finish();
+        return entry;
+    }
+    AppModel::NrPreviewShown Shown(const std::filesystem::path& entry, int64_t first, int64_t last) const {
+        AppModel::NrPreviewShown s;
+        s.dir = entry;
+        s.root = root();
+        s.key = entry.filename().string();
+        s.mode = NrPreviewMode::History;
+        s.first = first;
+        s.last = last;
+        return s;
+    }
+};
+}  // namespace
+
+TEST_CASE("AppModel shows an NR preview as color_nr@preview against the current color_nr, never saves it in the project and drops it with the project", "[app][preview][gpu]") {
+    App();
+    QSettings().remove("card/nr/previewBefore");
+    PreviewProject m("model_preview");
+    AppModel& model = *m.model;
+    REQUIRE(model.sourceNames().contains("color_nr"));
+    const auto entry = m.FakeEntry("abcdef012345", 5, 6);
+    QSignalSpy changed(&model, &AppModel::nrPreviewChanged);
+    QSignalSpy sources(&model, &AppModel::sourcesChanged);
+    const bool dirtyBefore = model.dirty();
+    model.showNrPreview(m.Shown(entry, 5, 6), true);
+    CHECK(changed.count() == 1);
+    CHECK(sources.isEmpty());  // not a reload of the passes: the versions panel is not rebuilt
+    const ViewportSource* s = model.store().FindSource(kNrPreviewSource);
+    REQUIRE(s);
+    CHECK(s->firstFrame == 5);
+    CHECK(s->lastFrame == 6);
+    CHECK(model.compareView() == AppModel::CompareView::BeforeAfter);
+    CHECK(model.state().CompareSide(true)->source == kNrPreviewSource);
+    CHECK(model.state().CompareSide(false)->source == "color_nr");  // the pass covers 5..6: old settings | new ones
+    CHECK(model.store().FrameAt("source", model.time()) == 5);    // the cursor on its first frame
+    CHECK(model.dirty() == dirtyBefore);
+    bool listed = false;  // an item of the «Улучшение» chip's menu
+    for (const auto& c : model.chips())
+        if (c.source == "color_nr")
+            for (const auto& v : c.versions) listed = listed || v.name == kNrPreviewSource;
+    CHECK(listed);
+    for (const auto& p : model.exportablePasses()) CHECK(p.find('@') == std::string::npos);
+    model.setNrPreviewBefore("sr");
+    CHECK(model.state().CompareSide(false)->source == "color_sr");
+    model.setNrPreviewBefore("nr");
+    CHECK(model.state().CompareSide(false)->source == "color_nr");
+
+    // saved: the file names the pass, the session keeps the preview
+    REQUIRE(model.saveProject());
+    {
+        std::ifstream in(m.dir / "proj.dlssvid.json", std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(text.find("@preview") == std::string::npos);
+        const ViewportState saved = Project::Load(m.dir / "proj.dlssvid.json").viewport;
+        REQUIRE(saved.CompareConfigured());
+        CHECK(saved.CompareSide(true)->source == "color_nr");
+        CHECK(saved.CompareSide(false)->source == "source");
+    }
+    CHECK(model.state().CompareSide(true)->source == kNrPreviewSource);
+
+    // cleared: its side back to the pass, its files let go (the folder can be deleted at once)
+    model.clearNrPreview();
+    CHECK_FALSE(model.nrPreview());
+    CHECK_FALSE(model.store().FindSource(kNrPreviewSource));
+    REQUIRE(model.state().CompareConfigured());  // two sides, not color_nr against itself
+    CHECK(model.state().CompareSide(true)->source == "color_nr");
+    CHECK(model.state().CompareSide(false)->source == "source");
+    std::error_code ec;
+    std::filesystem::remove_all(entry, ec);
+    CHECK_FALSE(ec);
+
+    // another project (or root) drops a preview and says so: a preview in flight is cancelled, its result dropped by the generation
+    const auto again = m.FakeEntry("abcdef012346", 7, 7);
+    model.showNrPreview(m.Shown(again, 7, 7), false);
+    REQUIRE(model.nrPreview());
+    const uint64_t generation = model.generation();
+    QSignalSpy context(&model, &AppModel::passesContextChanged);
+    {  // a file that names the preview (edited by hand) opens with the pass
+        Project p = Project::Load(m.dir / "proj.dlssvid.json");
+        p.viewport.SetCompare("color_sr", kNrPreviewSource);
+        p.Save(m.dir / "edited.dlssvid.json");
+    }
+    model.openProject(Q(m.dir / "edited.dlssvid.json"));
+    CHECK_FALSE(model.nrPreview());
+    CHECK(model.generation() > generation);
+    CHECK(context.count() == 1);
+    REQUIRE(model.state().CompareConfigured());
+    CHECK(model.state().CompareSide(true)->source == "color_nr");
+    CHECK_FALSE(model.store().FindSource(kNrPreviewSource));
+}
+
+TEST_CASE("AppModel: the preview's plan has no force marks of the stages above NR; the stages before it are one process --no-encode", "[app][preview][gpu]") {
+    App();
+    PreviewProject m("preview_plan");
+    AppModel& model = *m.model;
+    auto action = [](const ProcessPlan& plan, const char* stage) {
+        for (const auto& d : plan.stages)
+            if (d.name == stage) return d.action;
+        return std::string("none");
+    };
+    CHECK(&model.previewPlan() == &model.plan());
+    model.setForce("upscale", true);
+    model.refreshPlanIfPending();  // the mark schedules the plan: the preview takes it now
+    CHECK(action(model.plan(), "upscale") == "run");
+    CHECK(action(model.previewPlan(), "upscale") == "reuse");
+    CHECK(action(model.previewPlan(), "nr") == "reuse");
+    model.setForce("upscale", false);
+    model.setForce("nr", true);  // a mark on NR itself does not touch its inputs
+    model.refreshPlanIfPending();
+    CHECK(&model.previewPlan() == &model.plan());
+    model.setForce("nr", false);
+    CHECK(model.upstreamArgs({"depth", "flow", "upscale"}) ==
+          QStringList{"process", "--project", Q(model.project().file), "--disable-unavailable", "--stages", "depth,flow,upscale", "--no-encode"});
+}
