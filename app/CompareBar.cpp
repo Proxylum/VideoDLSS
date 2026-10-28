@@ -145,7 +145,7 @@ void CompareBar::refresh() {
     const std::string shownPass = SplitSourceVersion(shown).first;
     for (size_t i = 0; i < chips_.size(); ++i) {
         const QSignalBlocker b(chips_[i]);
-        chips_[i]->setChecked(!shown.empty() && chipSources_[i] == shownPass);
+        chips_[i]->setChecked(!shown.empty() && (chipSources_[i] == shownPass || chipSources_[i] == shown));  // the preview's own chip too
     }
 }
 

@@ -101,6 +101,7 @@ private:
     NrPreviewMode ModeOf(Request r) const;
     void setStatus(const QString& text, const QString& role = "hint", const QString& tip = {});
     void refuse(const QString& text);  // start()'s refusal: it goes when its condition may have gone (a plan, the mask, a task, the cursor)
+    bool liftRefusal();                // that time: the status of the preview shown (or none); false when there was no refusal
     QString blockText(const NrPreviewJob& job, Availability* a) const;  // the gate's refusal in Russian
     // What «Посчитать этапы до улучшения» computes: the enabled stages of scenes, depth, flow, upscale not reused in the preview's plan
     // (their titles), the seconds of those that run, whether any runs (a restore alone takes seconds)
@@ -152,6 +153,7 @@ private:
     std::set<std::string> vfrSources_;  // source hashes the CLI refused as variable-frame-rate (this session)
     QString status_, tip_, role_ = "hint";
     bool refused_ = false;
+    bool autoStart_ = false;  // start() from «обновлять при изменении»: the preview already on screen is not shown again
     NrPreviewUsage usage_;
     QThreadPool pool_;  // one thread: GC, «Очистить», «Сохранить кадр»
     int housekeeping_ = 0;  // its jobs queued or running: a new run waits for all of them (a GC removes our work folders not pinned)

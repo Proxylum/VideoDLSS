@@ -566,6 +566,12 @@ TEST_CASE("NR preview: a mask NR opens by name though the plan leaves it out is 
     }
     CHECK(VerifyNrPreviewRun(added).why == NrPreviewReject::InputChanged);  // written during the run
 
+    // a control mask the plan did not have, applied by the run (written meanwhile): refused, as process refuses it
+    const NrPreviewJob plain = PrepareNrPreview(plan, NrPreviewMode::Frame, 5, 0, env);
+    REQUIRE(plain.controlMask.empty());
+    FakeRun(plain, -1, std::string(64, 'e'));
+    CHECK(VerifyNrPreviewRun(plain).why == NrPreviewReject::ControlMask);
+
     // the bypass (intensity 0) opens no mask: none in the key, a mask written during its run does not refuse it
     ProcessPlan bypass = plan;
     Nr(bypass).params["intensity"] = 0.0;

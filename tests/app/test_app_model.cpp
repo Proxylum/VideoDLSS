@@ -54,6 +54,7 @@
 #include <catch2/catch_approx.hpp>
 
 #include "AppModel.h"
+#include "CompareBar.h"
 #include "ControlMaskRow.h"
 #include "ControlMaskText.h"
 #include "SourceNames.h"
@@ -4520,6 +4521,107 @@ TEST_CASE("NR preview: a request made after the watchdog stopped a hung run is s
     Pump([] { return false; }, 1800);
     CHECK(asked);
     CHECK(started.count() == 2);
+
+    // no request after the hang: the one made before it does not run after the kill
+    runner.setOnWatchdogForTests({});
+    runner.setCommandForTests(LongCommand);
+    model.seekToSourceFrame(6);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    REQUIRE(runner.running());
+    model.seekToSourceFrame(7);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // waits
+    Pump([&] { return started.count() >= 3 && !runner.running(); }, 20000);
+    Pump([] { return false; }, 1800);
+    CHECK(started.count() == 3);
+    CHECK(runner.statusText().startsWith(QString::fromUtf8("Превью не ответило")));
+}
+
+TEST_CASE("NR preview: processing preempts a run superseded by a cached frame and the bar keeps the cached frame's status", "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_preempt_superseded");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.seekToSourceFrame(2);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    Pump([] { return false; }, 1600);
+    runner.setCommandForTests(LongCommand);
+    model.seekToSourceFrame(6);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // frame 6 runs
+    model.seekToSourceFrame(2);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // frame 2 from the cache, 6 goes on
+    const QString shown = runner.statusText();
+    REQUIRE(shown.contains(QString::fromUtf8("из кэша")));
+    const int mainId = queue.enqueue("main", "cmd", {"/c", "echo", "1/1 frames"});
+    Pump([&] { return queue.finished(mainId) && !runner.running(); }, 20000);
+    CHECK(runner.statusText() == shown);  // not «Превью отменено: началась обработка»: frame 2 is on screen
+}
+
+TEST_CASE("NR preview: auto update is silent during processing and keeps the stale status; an edit that leaves the key shows nothing anew", "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_auto_quiet");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    runner.setPointerHeldForTests([] { return false; });
+    runner.setDebounceMsForTests(100);
+    model.seekToSourceFrame(3);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    runner.setAutoUpdate(true);
+    QSignalSpy started(&queue, &TaskQueue::previewStarted);
+    QSignalSpy shownAgain(&model, &AppModel::nrPreviewChanged);
+    const QString status = runner.statusText();
+    model.setStageEnabled("fg", true);  // a stage after NR: the preview's key stays
+    model.setStageEnabled("fg", false);
+    Pump([] { return false; }, 2000);
+    CHECK(started.isEmpty());
+    CHECK(shownAgain.isEmpty());  // not shown again: no reload of the viewport
+    CHECK(runner.statusText() == status);
+    // processing: a change marks the preview stale, auto update keeps quiet, the stale status outlives the processing
+    const int mainId = queue.enqueue("main", "cmd", {"/c", "ping", "-n", "2", "127.0.0.1"});
+    model.setStageParam("nr", "intensity", 1.3);
+    model.refreshPlan();
+    REQUIRE(runner.staleReason() == QString::fromUtf8("настройки изменились"));
+    const QString stale = QString::fromUtf8("Показано превью для прежних настроек — настройки изменились");
+    Pump([] { return false; }, 400);  // past the debounce: auto update keeps quiet while processing runs
+    REQUIRE_FALSE(queue.finished(mainId));
+    CHECK(runner.statusText() == stale);
+    CHECK_FALSE(runner.start({PreviewRunner::Kind::Frame, 0}));  // a click is refused...
+    CHECK(runner.statusText().contains(QString::fromUtf8("Идёт обработка")));
+    Pump([&] { return queue.finished(mainId); }, 20000);
+    Pump([] { return false; }, 300);
+    CHECK(runner.statusText() == stale);  // ...and when the refusal goes, the stale status is back
+    runner.setAutoUpdate(false);
+}
+
+TEST_CASE("CompareBar: with no current color_nr the preview has a chip of its own, after the numbered ones", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_chip");
+    AppModel& model = *m.model;
+    std::filesystem::remove_all(m.root() / "color_nr");  // NR not computed yet: no «Улучшение» chip to hang on
+    model.reloadSources();
+    REQUIRE_FALSE(model.store().FindSource("color_nr"));
+    std::map<std::string, int> keys;
+    for (const auto& c : model.chips()) keys[c.source] = c.hotkey;
+    model.showNrPreview(m.Shown(m.FakeEntry("abcdef012345", 4, 4), 4, 4), false);
+    const auto chips = model.chips();
+    REQUIRE_FALSE(chips.empty());
+    CHECK(chips.back().source == kNrPreviewSource);
+    CHECK(chips.back().hotkey == 0);
+    for (const auto& c : chips)
+        if (c.source != kNrPreviewSource) CHECK(c.hotkey == keys[c.source]);  // the keys 1..9 do not move
+    CompareBar bar(model);
+    QToolButton* chip = nullptr;
+    for (QToolButton* b : bar.findChildren<QToolButton*>())
+        if (b->text() == HumanSourceName(kNrPreviewSource)) chip = b;
+    REQUIRE(chip);
+    CHECK(chip->isChecked());  // the «after» side shows it
+    model.clearNrPreview();
+    for (const auto& c : model.chips()) CHECK(c.source != kNrPreviewSource);
 }
 
 TEST_CASE("NR preview: a request made during a save while a segment runs is taken up when the save ends - a cached frame shows and the segment goes",
@@ -4645,6 +4747,9 @@ TEST_CASE("NR preview: computing the stages before NR runs process --stages with
     PreviewRunner runner(model, queue);
     model.setStageParam("upscale", "scale", 1.5);  // the colour to compute: no preview of any kind
     model.setForce("depth", true);
+    model.setStageParam("flow", "perf", "fast");  // flow off with other settings: the click computes it only if it passes it
+    model.setStageEnabled("flow", false);
+    const std::string vectors = FileSha(m.root() / "mv_dlss" / "manifest.json");
     model.refreshPlan();
     const PreviewRunner::Availability a = runner.availability({PreviewRunner::Kind::Frame, 0});
     CHECK_FALSE(a.ok);
@@ -4664,6 +4769,7 @@ TEST_CASE("NR preview: computing the stages before NR runs process --stages with
     CHECK(runner.statusText().startsWith(QString::fromUtf8("Этапы до улучшения посчитаны за")));  // while the preview after them starts
     CHECK_FALSE(runner.handleTaskFinished(id, true));  // handled once, by the queue's signal
     CHECK(model.forced("depth"));  // the mark stays for «Обработать»
+    CHECK(FileSha(m.root() / "mv_dlss" / "manifest.json") == vectors);  // only the enabled stages went to --stages
     CHECK(FileSha(model.project().resultVideo) == result);
     CHECK(Manifest::Load(m.root() / "color_sr").width == 72);  // 48 x 1.5
     Pump([&] { return model.nrPreview().has_value() && !runner.running(); }, 60000);
@@ -4737,6 +4843,7 @@ TEST_CASE("NrPreviewCellSuffix and HumanSourceName name the preview, its history
     // C7/C9 of review 2: the disk text tells the preview budget from free space
     CHECK(NrPreviewDiskText(kNrPreviewMaxBytes + 1, 800ull << 30).endsWith(QString::fromUtf8("отведённых под превью")));
     CHECK(NrPreviewDiskText(kNrPreviewMaxBytes, 1ull << 30).startsWith(QString::fromUtf8("Не хватает места: превью ≈ ")));
+    CHECK(NrPreviewDiskText(12ull << 20, 3ull << 29).contains(HumanBytes(kNrPreviewDiskReserve)));  // 12 MB with 1.5 GiB free: the reserve says why
     CHECK(HumanSourceName(kNrPreviewSource) == QString::fromUtf8("Улучшение · превью"));
 }
 

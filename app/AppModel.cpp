@@ -716,6 +716,15 @@ std::vector<AppModel::Chip> AppModel::chips() const {
         return ra != rb ? ra < rb : a.source < b.source;
     });
     for (size_t i = 0; i < out.size() && i < 9; ++i) out[i].hotkey = static_cast<int>(i) + 1;  // keys 1..9 follow the chip order
+    // PR-10: the preview hangs on the «Улучшение» chip; NR not computed yet, there is none - a chip of its own after the numbered ones
+    if (nrPreview_ && !hasSource("color_nr"))
+        if (const ViewportSource* p = store_->FindSource(kNrPreviewSource)) {
+            Chip c;
+            c.source = p->name;
+            c.label = HumanSourceName(p->name);
+            c.tooltip = SourceTooltip(*p);
+            out.push_back(std::move(c));
+        }
     return out;
 }
 

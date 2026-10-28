@@ -81,7 +81,10 @@ PreviewRunner::PreviewRunner(AppModel& model, TaskQueue& tasks, QObject* parent)
             autoTimer_.start();
             return;
         }
-        if (autoUpdate_ && everStarted_ && model_.hasProject()) start(lastFrameKind_);
+        if (!autoUpdate_ || !everStarted_ || !model_.hasProject() || tasks_.mainBusy() || model_.controlMaskBusy()) return;  // silent meanwhile
+        autoStart_ = true;
+        start(lastFrameKind_);
+        autoStart_ = false;
     });
     connect(&tasks_, &TaskQueue::previewStarted, this, &PreviewRunner::onStarted);
     connect(&tasks_, &TaskQueue::previewProgress, this, [this](int id, const TaskQueue::Progress&) { onProgress(id); });
@@ -110,15 +113,11 @@ PreviewRunner::PreviewRunner(AppModel& model, TaskQueue& tasks, QObject* parent)
     connect(&model_, &AppModel::planChanged, this, &PreviewRunner::updateStale);
     // a refusal («Идёт обработка …», «Загружается маска …», «Курсор за концом клипа») holds while its condition may: then the bar
     // says what a click would do now
-    auto unrefuse = [this] {
-        if (refused_) setStatus({});
-    };
-    connect(&model_, &AppModel::planChanged, this, unrefuse);
-    connect(&model_, &AppModel::controlMaskChanged, this, unrefuse);
-    connect(&model_, &AppModel::timeChanged, this, unrefuse);
+    connect(&model_, &AppModel::planChanged, this, &PreviewRunner::liftRefusal);
+    connect(&model_, &AppModel::controlMaskChanged, this, &PreviewRunner::liftRefusal);
+    connect(&model_, &AppModel::timeChanged, this, &PreviewRunner::liftRefusal);
     connect(&tasks_, &TaskQueue::taskFinished, this, [this](int, bool) {
-        if (refused_) setStatus({});
-        else emit changed();  // processing over: the bar's buttons come back
+        if (!liftRefusal()) emit changed();  // processing over: the bar's buttons come back
     });
     connect(&tasks_, &TaskQueue::taskStarted, this, [this](int) { emit changed(); });  // processing: the bar says so, its buttons wait
     auto edited = [this] {
@@ -151,6 +150,14 @@ void PreviewRunner::setStatus(const QString& text, const QString& role, const QS
 void PreviewRunner::refuse(const QString& text) {
     setStatus(text, "warn");
     refused_ = true;
+}
+
+bool PreviewRunner::liftRefusal() {
+    if (!refused_) return false;
+    if (model_.nrPreview() && shownJob_ && !stale_.isEmpty()) setStatus(Tr("Показано превью для прежних настроек — %1").arg(stale_), "warn");
+    else if (model_.nrPreview() && shownJob_) setStatus(shownStatus_, "ok", shownTip_);
+    else setStatus({});
+    return true;
 }
 
 NrPreviewMode PreviewRunner::ModeOf(Request r) const {
@@ -314,7 +321,11 @@ bool PreviewRunner::start(Request r) {
         }
         pending_.reset();
         shownRequest_ = r;
-        show(*hit, job, true, true);
+        if (autoStart_ && model_.nrPreview() && model_.nrPreview()->dir == hit->dir) {  // an edit that left the key: nothing to show anew
+            if (job_) setStatus(shownStatus_, "ok", shownTip_);                       // the superseded run's progress had the status
+        } else {
+            show(*hit, job, true, true);
+        }
         return true;
     }
     if (!job.gate.ok()) {  // over the disk budget and gone from the cache meanwhile
@@ -422,9 +433,10 @@ void PreviewRunner::onFinished(int id, bool ok) {
         removeWork(job.workDir);
         if (preempted_) {
             pending_.reset();
-            setStatus(Tr("Превью отменено: началась обработка"));
+            if (!superseded) setStatus(Tr("Превью отменено: началась обработка"));
         } else if (watchdogFired_) {
-            setStatus(Tr("Превью не ответило за %1 — остановлено").arg(FormatDuration(seconds)), "warn");
+            if (!superseded) setStatus(Tr("Превью не ответило за %1 — остановлено").arg(FormatDuration(seconds)), "warn");
+            else Log()->warn("nr preview {}: stopped after {}", id, FormatDuration(seconds).toStdString());
         } else if (!pending_ && !superseded) {
             setStatus(Tr("Превью отменено"));
         }
@@ -769,7 +781,8 @@ QString NrPreviewDroppedText(const std::vector<std::string>& dropped) {
 QString NrPreviewDiskText(uint64_t estimatedBytes, uint64_t freeBytes) {
     if (estimatedBytes > kNrPreviewMaxBytes)  // the budget, not the volume, is the limit
         return Tr("≈ %1 на диске — больше %2, отведённых под превью").arg(HumanBytes(estimatedBytes), HumanBytes(kNrPreviewMaxBytes));
-    return Tr("Не хватает места: превью ≈ %1, свободно %2").arg(HumanBytes(estimatedBytes), HumanBytes(freeBytes));
+    return Tr("Не хватает места: превью ≈ %1, свободно %2, а %3 превью оставляют на диске свободными")
+        .arg(HumanBytes(estimatedBytes), HumanBytes(freeBytes), HumanBytes(kNrPreviewDiskReserve));
 }
 
 QString NrPreviewCellSuffix(const AppModel::NrPreviewShown& shown, FrameState state, bool stale) {

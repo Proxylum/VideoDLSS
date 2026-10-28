@@ -392,10 +392,10 @@ NrPreviewVerdict VerifyNrPreviewRun(const NrPreviewJob& job) {
         Int(stats, "frames_written") != job.frames || Int(stats, "warmup_frames") != job.warmup)
         return reject(NrPreviewReject::Frames, "written " + std::to_string(m.frameCount) + " of " + std::to_string(job.frames) + " frames (" +
                                                    std::to_string(m.firstFrame) + ".." + std::to_string(m.lastFrame) + ")");
-    if (!job.controlMask.empty()) {
+    {  // the control mask the run applied against the key's - both ways, as process checks it: one written meanwhile is caught too
         const auto cm = stats.find("control_mask");
-        if (cm == stats.end() || !cm->is_object() || Str(*cm, "fingerprint") != job.controlMask)
-            return reject(NrPreviewReject::ControlMask, "the control mask changed during the run");
+        const std::string read = cm != stats.end() && cm->is_object() ? Str(*cm, "fingerprint") : std::string();
+        if (read != job.controlMask) return reject(NrPreviewReject::ControlMask, "the control mask changed during the run");
     }
     for (const auto& [pass, dir] : job.dirs)
         if (ManifestSha256(dir) != job.manifests.at(pass)) return reject(NrPreviewReject::InputChanged, pass);
