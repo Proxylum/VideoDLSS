@@ -68,9 +68,11 @@ int64_t PtsToIndex(int64_t pts, int64_t startTime, Rational timeBase, Rational r
 // another frame. `indexRate` as VideoDecoder::Options::indexRate ({0, 1} = the stream's guessed rate).
 struct FrameIndexScan {
     int64_t frames = 0;     // video packets read
-    int64_t firstBad = -1;  // the first frame whose pts names another index; -1: none
+    int64_t firstBad = -1;  // the first frame whose pts names another index (or that has no pts nor dts); -1: none
     int64_t badIndex = -1;  // the index that frame's pts names (-1 when it has no pts nor dts)
+    bool noRate = false;    // the stream has no frame rate: no index can be taken from pts (firstBad 0)
     bool Consistent() const { return firstBad < 0; }
+    std::string Why() const;  // «frame 61 carries the time of frame 66», «frame 12 has no timestamp», «the stream has no frame rate»
 };
 FrameIndexScan ScanFrameIndex(const std::filesystem::path& path, int64_t upTo, Rational indexRate = {0, 1});
 // SeekToFrame decodes forward instead of seeking when the target is at most this many frames ahead: the indices are counted then, not

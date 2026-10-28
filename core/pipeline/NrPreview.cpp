@@ -21,6 +21,7 @@
 #include "pipeline/PassVersions.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/ParamSchema.h"
+#include "stages/nr/NrStage.h"
 #include "util/Error.h"
 #include "util/Log.h"
 #include "util/Sha256.h"
@@ -281,12 +282,12 @@ NrPreviewJob PrepareNrPreview(const ProcessPlan& plan, NrPreviewMode mode, int64
             if (schema->Find(it.key())) job.params[it.key()] = it.value();
 
     job.estimatedBytes = static_cast<uint64_t>(static_cast<double>(n) * static_cast<double>(BytesPerFrame("nr", w, h, 1.0, 1)) * 1.1);
+    bool overBudget = false;  // refused after the key: a preview in the cache is shown without room
     if (env.freeBytes > 0) {
         const uint64_t room = env.freeBytes > kNrPreviewDiskReserve ? env.freeBytes - kNrPreviewDiskReserve : 0;
-        if (job.estimatedBytes > std::min(kNrPreviewMaxBytes, room)) {
-            job.gate.why = NrPreviewBlock::Disk;
-            return job;
-        }
+        overBudget = job.estimatedBytes > std::min(kNrPreviewMaxBytes, room);
+    } else {
+        overBudget = job.estimatedBytes > kNrPreviewMaxBytes;
     }
     // through the video a range past the first frames is sought, and the CLI checks the seek first: it demuxes the clip up to the
     // range (ScanFrameIndex, NrCommands) - seconds of a long clip before the model starts. The colour pass is read by index instead
@@ -308,6 +309,14 @@ NrPreviewJob PrepareNrPreview(const ProcessPlan& plan, NrPreviewMode mode, int64
         job.manifests[p] = ManifestSha256(job.dirs.at(p));
         inputs[p] = {{"id", nr.inputs.at(p)}, {"manifest", job.manifests[p]}};
     }
+    // the masks the run opens by name (NrStage::Init) though the plan left them out (not of the whole clip): their bytes in the key
+    nlohmann::json masks = nlohmann::json::object();
+    for (const auto& name : NrStage::MaskNames()) {
+        const std::string pass = "mask_" + name;
+        if (job.dirs.count(pass) || !Manifest::Exists(plan.passesRoot / pass)) continue;
+        job.masks[pass] = ManifestSha256(plan.passesRoot / pass);
+        masks[pass] = job.masks[pass];
+    }
     // the CLI that runs it: kPassToolVersion is the same across development builds, the executable is not
     nlohmann::json cli = nlohmann::json::object();
     if (!env.cli.empty()) {
@@ -328,6 +337,7 @@ NrPreviewJob PrepareNrPreview(const ProcessPlan& plan, NrPreviewMode mode, int64
                                 {"params", nr.params},
                                 {"tool", nr.tool},
                                 {"inputs", inputs},
+                                {"masks", masks},
                                 {"warp", env.warp},
                                 {"cli", cli}};
     job.keyJson = CanonicalJson(key);
@@ -335,6 +345,7 @@ NrPreviewJob PrepareNrPreview(const ProcessPlan& plan, NrPreviewMode mode, int64
     const fs::path base = NrPreviewRoot(plan.passesRoot);
     job.entryDir = base / job.key;
     job.workDir = base / (job.key + ".part-" + NextWorkSuffix());
+    if (overBudget) job.gate.why = NrPreviewBlock::Disk;
     return job;
 }
 
@@ -388,6 +399,14 @@ NrPreviewVerdict VerifyNrPreviewRun(const NrPreviewJob& job) {
     }
     for (const auto& [pass, dir] : job.dirs)
         if (ManifestSha256(dir) != job.manifests.at(pass)) return reject(NrPreviewReject::InputChanged, pass);
+    for (const auto& name : NrStage::MaskNames()) {  // a mask the run opened by name: written, rewritten or removed meanwhile
+        const std::string pass = "mask_" + name;
+        if (job.dirs.count(pass)) continue;
+        const bool now = Manifest::Exists(job.root / pass);
+        const auto it = job.masks.find(pass);
+        if (now != (it != job.masks.end()) || (now && ManifestSha256(job.root / pass) != it->second))
+            return reject(NrPreviewReject::InputChanged, pass);
+    }
     // the DLL the run loaded against the one the key names: another one is shown, not cached under this key
     if (!job.dllSha256.empty())
         if (const auto d = run.find("diagnostics"); d != run.end() && d->is_object())

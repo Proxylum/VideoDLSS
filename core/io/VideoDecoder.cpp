@@ -146,6 +146,13 @@ int64_t PtsToIndex(int64_t pts, int64_t startTime, Rational timeBase, Rational r
     return static_cast<int64_t>(std::llround(seconds * rate.num / rate.den));
 }
 
+std::string FrameIndexScan::Why() const {
+    if (noRate) return "the stream has no frame rate";
+    if (firstBad < 0) return "every frame at its time";
+    if (badIndex < 0) return "frame " + std::to_string(firstBad) + " has no timestamp";
+    return "frame " + std::to_string(firstBad) + " carries the time of frame " + std::to_string(badIndex);
+}
+
 FrameIndexScan ScanFrameIndex(const std::filesystem::path& path, int64_t upTo, Rational indexRate) {
     FrameIndexScan scan;
     AVFormatContext* fmt = nullptr;
@@ -166,19 +173,25 @@ FrameIndexScan ScanFrameIndex(const std::filesystem::path& path, int64_t upTo, R
         // the reordering of B-frames moves a frame by a few packets: 64 more than needed put every frame up to upTo in its place
         const int64_t wanted = upTo >= std::numeric_limits<int64_t>::max() - 65 ? std::numeric_limits<int64_t>::max() : std::max<int64_t>(upTo, 0) + 1 + 64;
         std::vector<int64_t> times;
-        bool missing = false;
+        int64_t firstMissing = -1;  // the first packet with neither pts nor dts
         while (static_cast<int64_t>(times.size()) < wanted && av_read_frame(fmt, pkt) >= 0) {
             if (pkt->stream_index == vs && !(pkt->flags & AV_PKT_FLAG_DISCARD)) {
                 const int64_t t = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
-                if (t == AV_NOPTS_VALUE) missing = true;
-                else times.push_back(t);
+                if (t == AV_NOPTS_VALUE) {
+                    if (firstMissing < 0) firstMissing = scan.frames;
+                } else {
+                    times.push_back(t);
+                }
                 ++scan.frames;
             }
             av_packet_unref(pkt);
         }
         std::sort(times.begin(), times.end());
-        if (rate.num <= 0 || tb.num <= 0 || missing) {
-            scan.firstBad = 0;  // no rate or no timestamps: no index can be taken from pts
+        if (rate.num <= 0 || tb.num <= 0) {
+            scan.firstBad = 0;  // no rate: no index can be taken from pts
+            scan.noRate = true;
+        } else if (firstMissing >= 0) {
+            scan.firstBad = firstMissing;  // a frame without a time: the ones after it cannot be found by theirs
         } else {
             const int64_t last = std::min<int64_t>(upTo, static_cast<int64_t>(times.size()) - 1);
             for (int64_t k = 0; k <= last; ++k) {

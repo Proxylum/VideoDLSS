@@ -70,6 +70,9 @@ struct NrPreviewJob {
     nlohmann::json params = nlohmann::json::object();  // nr schema keys only: the run's --params-file
     std::map<std::string, std::filesystem::path> dirs;  // input pass -> folder given to the run
     std::map<std::string, std::string> manifests;       // input pass -> sha256 of its manifest.json bytes when prepared
+    // mask_* NR opens by name under the root (--masks-dir) that are not inputs (the plan keeps only masks of the whole clip):
+    // pass -> sha256 of its manifest.json bytes
+    std::map<std::string, std::string> masks;
     uint64_t estimatedBytes = 0;
     double estimatedSeconds = 0.0;   // with scanBytes / kNrPreviewScanRate
     uint64_t scanBytes = 0;          // the source's bytes the CLI demuxes before the model (colour from the video, a seek): 0 for none
@@ -77,8 +80,8 @@ struct NrPreviewJob {
     // The command line (without the program): dlssvid nr into workDir with the inputs, the params file and --json in workDir.
     std::vector<std::string> Args() const;
 };
-// The job of a preview at frame `first` (segment: `seconds` long). A gate that refuses comes back in job.gate with nothing else set.
-// Writes nothing: PreviewRunner creates workDir and the params file (WriteNrPreviewParams) before it starts the command.
+// The job of a preview at frame `first` (segment: `seconds` long). A gate that refuses comes back in job.gate with nothing else set -
+// but Disk: the key is set (a preview in the cache needs no room). Writes nothing: PreviewRunner creates workDir and the params file (WriteNrPreviewParams) before it starts the command.
 NrPreviewJob PrepareNrPreview(const ProcessPlan& plan, NrPreviewMode mode, int64_t first, double seconds, const NrPreviewEnv& env);
 // workDir/params.json from job.params (creates workDir).
 void WriteNrPreviewParams(const NrPreviewJob& job);

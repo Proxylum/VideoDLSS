@@ -105,7 +105,7 @@ void ControlMaskRow::refresh(bool busy, bool bypass) {
     status_->setToolTip(tip);
     SetRole(status_, role);
     const bool importing = s.status == AppModel::ControlMaskState::Status::Importing;
-    const QString busyTip = busy && !importing ? tr("Недоступно во время обработки") : QString();
+    const QString busyTip = busy && !importing ? tr("Недоступно во время обработки или превью улучшения") : QString();
     load_->setEnabled(loadable && !busy);
     load_->setToolTip(busyTip.isEmpty() ? tr("Выбрать изображение маски (PNG, TIFF, EXR). Прежняя маска уйдёт в историю версий.") : busyTip);
     show_->setVisible(showable);

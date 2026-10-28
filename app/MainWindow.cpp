@@ -463,11 +463,7 @@ void MainWindow::watchProcess(int taskId, const QString& what) {
 }
 
 void MainWindow::onTaskFinished(int taskId, bool ok) {
-    if (preview_->isUpstreamTask(taskId)) {  // PR-10: the stages before NR - no force marks cleared (none were passed), then the preview
-        model_.reloadSources();
-        preview_->upstreamFinished(taskId, ok);
-        return;
-    }
+    if (preview_->handleTaskFinished(taskId, ok)) return;  // PR-10: the stages before NR - no force marks cleared, then the preview
     if (taskId == processTaskId_ && ok) model_.setLastRun(tasks_->progress(taskId).elapsed);  // «готов за …» in the result line
     model_.clearForce();
     model_.reloadSources();  // the new passes / the result: sources, the plan, the cards

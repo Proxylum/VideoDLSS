@@ -114,7 +114,11 @@ PreviewRunner::PreviewRunner(AppModel& model, TaskQueue& tasks, QObject* parent)
     connect(&model_, &AppModel::planChanged, this, unrefuse);
     connect(&model_, &AppModel::controlMaskChanged, this, unrefuse);
     connect(&model_, &AppModel::timeChanged, this, unrefuse);
-    connect(&tasks_, &TaskQueue::taskFinished, this, unrefuse);
+    connect(&tasks_, &TaskQueue::taskFinished, this, [this](int, bool) {
+        if (refused_) setStatus({});
+        else emit changed();  // processing over: the bar's buttons come back
+    });
+    connect(&tasks_, &TaskQueue::taskStarted, this, [this](int) { emit changed(); });  // processing: the bar says so, its buttons wait
     auto edited = [this] {
         if (autoUpdate_ && everStarted_) autoTimer_.start();
     };
@@ -157,7 +161,7 @@ NrPreviewEnv PreviewRunner::env() const {
     e.source = p.sourceVideo;
     e.cli = std::filesystem::path(model_.cliPath().toStdWString());
     e.warp = model_.device().IsWarp();
-    e.freeBytes = model_.freeSpace();
+    e.freeBytes = freeBytes();
     e.clipFrames = model_.sourceInfo().frames > 0 ? model_.sourceInfo().frames : -1;
     e.fps = model_.sourceInfo().fps > 0 ? model_.sourceInfo().fps : 24.0;
     e.colorW = model_.sourceInfo().width;
@@ -173,6 +177,8 @@ NrPreviewEnv PreviewRunner::env() const {
     if (const double ms = QSettings().value(QString("preview/nr/%1/%2/frame_ms").arg(ngx ? "ngx" : "other", size), 0.0).toDouble(); ms > 0) e.msPerFrame = ms;
     return e;
 }
+
+uint64_t PreviewRunner::freeBytes() const { return freeSpace_ ? freeSpace_() : model_.freeSpace(); }
 
 QString PreviewRunner::appBlock(const NrPreviewJob* job) const {
     if (!model_.hasProject()) return Tr("Превью недоступно: нет проекта");
@@ -200,8 +206,7 @@ QString PreviewRunner::blockText(const NrPreviewJob& job, Availability* a) const
         case NrPreviewBlock::NoDll: return Tr("Нет nvngx_dlssnr.dll — превью недоступно (см. строку готовности на стартовом экране)");
         case NrPreviewBlock::ControlMask: return Tr("Маска управления не читается: %1").arg(QString::fromStdString(g.detail));
         case NrPreviewBlock::PastEnd: return Tr("Курсор за концом клипа");
-        case NrPreviewBlock::Disk:
-            return Tr("Не хватает места: превью ≈ %1, свободно %2").arg(HumanBytes(job.estimatedBytes), HumanBytes(model_.freeSpace()));
+        case NrPreviewBlock::Disk: return NrPreviewDiskText(job.estimatedBytes, freeBytes());
         case NrPreviewBlock::Upstream:
         case NrPreviewBlock::Restore:
         case NrPreviewBlock::Pending: {
@@ -239,7 +244,7 @@ PreviewRunner::Availability PreviewRunner::availability(Request r) const {
     const NrPreviewJob job = PrepareNrPreview(model_.previewPlan(), ModeOf(r), a.frame, r.seconds, env());
     a.seconds = job.estimatedSeconds;
     a.bytes = job.estimatedBytes;
-    if (!job.gate.ok()) {
+    if (!job.gate.ok() && !(job.gate.why == NrPreviewBlock::Disk && FindNrPreview(job))) {  // a cached one needs no room
         a.text = blockText(job, &a);
         a.role = "warn";
         return a;
@@ -269,7 +274,7 @@ bool PreviewRunner::start(Request r) {
     }
     const int64_t frame = model_.store().FrameAt("source", model_.time());
     NrPreviewJob job = PrepareNrPreview(model_.previewPlan(), ModeOf(r), frame, r.seconds, env());
-    if (!job.gate.ok()) {
+    if (!job.gate.ok() && !(job.gate.why == NrPreviewBlock::Disk && FindNrPreview(job))) {  // a cached one needs no room
         refuse(blockText(job, nullptr));
         return false;
     }
@@ -277,7 +282,8 @@ bool PreviewRunner::start(Request r) {
         refuse(b);
         return false;
     }
-    if (job_ && job_->key == job.key) {  // this very preview is being computed: it is the last request again
+    const bool dying = job_ && tasks_.cancelled(taskId_);  // cancelled, its process not gone yet: it serves nothing
+    if (job_ && !dying && job_->key == job.key) {  // this very preview is being computed: it is the last request again
         pending_.reset();
         jobSuperseded_ = false;
         return true;
@@ -285,16 +291,20 @@ bool PreviewRunner::start(Request r) {
     if (const auto hit = FindNrPreview(job)) {  // computed before: shown at once, no task
         if (job_) {
             jobSuperseded_ = true;  // the run in flight is an older request: it fills the cache, it is not shown (the last one wins)
-            if (jobRequest_.kind == Kind::Segment) tasks_.cancel(taskId_);
+            if (jobRequest_.kind == Kind::Segment && !dying) tasks_.cancel(taskId_);
         }
         pending_.reset();
         shownRequest_ = r;
         show(*hit, job, true, true);
         return true;
     }
+    if (!job.gate.ok()) {  // over the disk budget and gone from the cache meanwhile
+        refuse(blockText(job, nullptr));
+        return false;
+    }
     if (job_) {
         pending_ = r;  // the last request wins
-        if (jobRequest_.kind == Kind::Segment) tasks_.cancel(taskId_);  // a segment is long: it goes; a frame finishes (NGX's create)
+        if (jobRequest_.kind == Kind::Segment && !dying) tasks_.cancel(taskId_);  // a segment is long: it goes; a frame finishes (NGX's create)
         return true;
     }
     if (lastStart_.isValid() && lastStart_.elapsed() < kMinStartGapMs) {
@@ -380,10 +390,10 @@ void PreviewRunner::onFinished(int id, bool ok) {
     taskId_ = -1;
     watchdog_.stop();
     tick_.stop();
+    emit changed();  // not running: [Отменить] and «Очистить превью» follow, whatever the branch below says
     if (jobGeneration_ != model_.generation() || job.root != model_.project().passesRoot) {  // another project or root since: dropped
         removeWork(job.workDir);
-        pending_.reset();
-        setStatus({});
+        runPending();  // a request made since is of the project open now (the switch cleared the status and the older ones)
         return;
     }
     if (tasks_.cancelled(id)) {
@@ -492,7 +502,7 @@ void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, b
         if (job.mode == NrPreviewMode::History && entry.warmup < kNrPreviewHistoryFrames)
             text += entry.warmup == 0 ? Tr(" · первый кадр клипа: без истории") : Tr(" · разгон %1 кадров (начало клипа)").arg(entry.warmup);
     }
-    if (std::find(job.gate.dropped.begin(), job.gate.dropped.end(), "mv_dlss") != job.gate.dropped.end()) text += Tr(" · без векторов движения");
+    text += NrPreviewDroppedText(job.gate.dropped);
     const QString tip = entry.cacheable ? QString() : uncachedTip_;
     setStatus(text, "ok", tip);
     updateUsage();
@@ -510,13 +520,23 @@ void PreviewRunner::updateStale() {
     }
     const NrPreviewJob now = PrepareNrPreview(model_.previewPlan(), shownJob_->mode, shownJob_->first, shownRequest_.seconds, env());
     QString reason;
-    if (!now.gate.ok()) {
-        reason = Tr("входы пересчитаны");
+    if (!now.gate.ok() && now.gate.why != NrPreviewBlock::Disk) {  // the disk budget changes nothing of the preview shown
+        switch (now.gate.why) {
+            case NrPreviewBlock::Upstream:
+            case NrPreviewBlock::Restore:
+            case NrPreviewBlock::Pending: reason = Tr("этапы до улучшения нужно пересчитать"); break;
+            case NrPreviewBlock::NrOff: reason = Tr("улучшение выключено"); break;
+            case NrPreviewBlock::NoDll: reason = Tr("нет nvngx_dlssnr.dll"); break;
+            case NrPreviewBlock::ControlMask: reason = Tr("маска управления не читается"); break;
+            case NrPreviewBlock::NrError: reason = Tr("в плане ошибка"); break;
+            default: reason = Tr("входы пересчитаны"); break;  // PastEnd: the clip is shorter now
+        }
     } else if (now.keyJson != shownJob_->keyJson) {
         const nlohmann::json a = nlohmann::json::parse(shownJob_->keyJson, nullptr, false), b = nlohmann::json::parse(now.keyJson, nullptr, false);
         auto differs = [&](const char* k) { return a.is_object() && b.is_object() && a.value(k, nlohmann::json()) != b.value(k, nlohmann::json()); };
         if (differs("params")) reason = Tr("настройки изменились");
         else if (differs("inputs") || differs("source") || differs("source_format")) reason = Tr("входы пересчитаны");
+        else if (differs("masks")) reason = Tr("маски изменились");
         else if (a.is_object() && b.is_object() && a.value("tool", nlohmann::json()).value("dll", std::string()) != b.value("tool", nlohmann::json()).value("dll", std::string()))
             reason = Tr("сменилась nvngx_dlssnr.dll");
         else reason = Tr("программа обновлена");
@@ -594,7 +614,11 @@ void PreviewRunner::cancelUpstream() {
 }
 
 int PreviewRunner::prepareInputs() {
-    if (!model_.hasProject() || tasks_.mainBusy() || model_.controlMaskBusy()) return -1;
+    if (!model_.hasProject()) return -1;
+    if (tasks_.mainBusy() || model_.controlMaskBusy()) {  // a stale button: said why
+        refuse(tasks_.mainBusy() ? Tr("Идёт обработка — превью будет доступно после неё") : Tr("Загружается маска управления — подождите"));
+        return -1;
+    }
     std::vector<std::string> stages;
     for (const char* name : {"scenes", "depth", "flow", "upscale"})
         if (const StageEntry* e = model_.stageEntry(name); e && e->enabled) stages.push_back(name);
@@ -614,6 +638,13 @@ int PreviewRunner::prepareInputs() {
     upstreamTaskId_ = tasks_.enqueue(Tr("Этапы до улучшения"), model_.cliPath(), model_.upstreamArgs(stages), plan);  // preempts a preview
     setStatus(Tr("Этапы до улучшения: %1").arg(upstreamTitles_));
     return upstreamTaskId_;
+}
+
+bool PreviewRunner::handleTaskFinished(int id, bool ok) {
+    if (!isUpstreamTask(id)) return false;
+    model_.reloadSources();
+    upstreamFinished(id, ok);
+    return true;
 }
 
 void PreviewRunner::upstreamFinished(int id, bool ok) {
@@ -687,11 +718,26 @@ void PreviewRunner::setBefore(const QString& which) { model_.setNrPreviewBefore(
 
 QString PreviewDuration(double seconds) { return seconds < 0.5 ? Tr("< 1 с") : FormatDuration(seconds); }
 
+QString NrPreviewDroppedText(const std::vector<std::string>& dropped) {
+    const bool mv = std::find(dropped.begin(), dropped.end(), "mv_dlss") != dropped.end();
+    const bool depth = std::find(dropped.begin(), dropped.end(), "depth_dlss") != dropped.end();
+    if (mv && depth) return Tr(" · без векторов движения и глубины");
+    if (mv) return Tr(" · без векторов движения");
+    if (depth) return Tr(" · без глубины");
+    return {};
+}
+
+QString NrPreviewDiskText(uint64_t estimatedBytes, uint64_t freeBytes) {
+    if (estimatedBytes > kNrPreviewMaxBytes)  // the budget, not the volume, is the limit
+        return Tr("≈ %1 на диске — больше %2, отведённых под превью").arg(HumanBytes(estimatedBytes), HumanBytes(kNrPreviewMaxBytes));
+    return Tr("Не хватает места: превью ≈ %1, свободно %2").arg(HumanBytes(estimatedBytes), HumanBytes(freeBytes));
+}
+
 QString NrPreviewCellSuffix(const AppModel::NrPreviewShown& shown, FrameState state, bool stale) {
     QString s;
     if (shown.mode == NrPreviewMode::Segment) s = Tr(" · отрезок %1–%2").arg(shown.first).arg(shown.last);
     else s = shown.mode == NrPreviewMode::Frame ? Tr(" · без истории") : Tr(" · с историей");
-    if (std::find(shown.dropped.begin(), shown.dropped.end(), "mv_dlss") != shown.dropped.end()) s += Tr(" · без векторов движения");
+    s += NrPreviewDroppedText(shown.dropped);
     if (stale) s += Tr(" · устарело");
     switch (state) {
         case FrameState::Missing: s += Tr(" · нет кадра превью (кадры %1–%2)").arg(shown.first).arg(shown.last); break;

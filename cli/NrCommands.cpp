@@ -229,8 +229,7 @@ NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStage
             const int64_t scanTo = a.frames > 0 ? r.first + a.frames - 1 : last;
             const FrameIndexScan scan = ScanFrameIndex(a.input, scanTo >= 0 ? scanTo : std::numeric_limits<int64_t>::max());
             if (!scan.Consistent())
-                throw NrVfrError("nr: " + a.input + " has a variable frame rate (frame " + std::to_string(scan.firstBad) +
-                                 (scan.badIndex >= 0 ? " carries the time of frame " + std::to_string(scan.badIndex) : std::string(" has no timestamp")) +
+                throw NrVfrError("nr: " + a.input + (scan.noRate ? " cannot be sought by frame (" : " has a variable frame rate (") + scan.Why() +
                                  "): --start cannot find frame " + std::to_string(r.first) +
                                  " by seeking - give --color-dir with the upscaled pass, or process the clip from the start");
         }

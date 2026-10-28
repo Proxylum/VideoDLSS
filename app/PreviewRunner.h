@@ -66,7 +66,7 @@ public:
     bool isUpstreamTask(int id) const { return id >= 0 && id == upstreamTaskId_; }
     bool upstreamRunning() const { return upstreamTaskId_ >= 0; }
     void cancelUpstream();  // the bar's [Отменить] while «Посчитать этапы до улучшения» runs (upstreamFinished says so)
-    void upstreamFinished(int id, bool ok);  // MainWindow::onTaskFinished, after the sources were reloaded
+    void upstreamFinished(int id, bool ok);  // handleTaskFinished, after the sources were reloaded
     void hide();                              // «Убрать»: off the viewport, kept in the cache
     void clearCache();                        // «Очистить превью»: every preview of the project from the disk
     void saveFrame(const QString& file);      // «Сохранить кадр…»: the frame under the cursor (PNG 16 bit, EXR as it is)
@@ -85,12 +85,17 @@ public:
     void setPointerHeldForTests(std::function<bool()> held) { pointerHeld_ = std::move(held); }
     void setDebounceMsForTests(int ms);
     void setCommandForTests(std::function<std::pair<QString, QStringList>(const NrPreviewJob&)> command) { command_ = std::move(command); }
+    void setFreeSpaceForTests(std::function<uint64_t()> free) { freeSpace_ = std::move(free); }
+    // MainWindow::onTaskFinished first: the task of «Посчитать этапы до улучшения» - the sources reloaded, the preview after it; true
+    // when it was that task (then no force mark is cleared: none was passed, they stay for «Обработать»)
+    bool handleTaskFinished(int id, bool ok);
 
 signals:
     void changed();
 
 private:
     NrPreviewEnv env() const;
+    uint64_t freeBytes() const;
     NrPreviewMode ModeOf(Request r) const;
     void setStatus(const QString& text, const QString& role = "hint", const QString& tip = {});
     void refuse(const QString& text);  // start()'s refusal: it goes when its condition may have gone (a plan, the mask, a task, the cursor)
@@ -145,6 +150,7 @@ private:
     int housekeeping_ = 0;  // its jobs queued or running: a new run waits for all of them (a GC removes our work folders not pinned)
     std::function<bool()> pointerHeld_;
     std::function<std::pair<QString, QStringList>(const NrPreviewJob&)> command_;
+    std::function<uint64_t()> freeSpace_;
 };
 
 // What one preview tells of the next ones' estimate: {start of the process up to the first model frame, s; a model frame, ms}. `run` is
@@ -154,6 +160,12 @@ std::pair<double, double> PreviewCalibration(double elapsed, int64_t modelFrames
 
 // «≈ 3 с», «≈ 2 мин», «< 1 с»: FormatDuration with the seconds of a preview (it would say «≈ 0 с»)
 QString PreviewDuration(double seconds);
+
+// « · без векторов движения», « · без глубины», « · без векторов движения и глубины»: the guides a frame preview went without (empty: none)
+QString NrPreviewDroppedText(const std::vector<std::string>& dropped);
+
+// The Disk refusal: over the preview budget (kNrPreviewMaxBytes) or short of free space
+QString NrPreviewDiskText(uint64_t estimatedBytes, uint64_t freeBytes);
 
 // The preview's part of a cell label (MainWindow::cellLabel): « · без истории» / « · с историей» / « · отрезок F–L», « · нет кадра превью
 // (кадры F–L)» outside its frames, « · устарело», « · без векторов движения» when a frame went without them.
