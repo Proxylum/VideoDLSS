@@ -181,6 +181,22 @@ TEST_CASE("ViewportState reads the frame of pre-stage-9 projects and formats tim
     CHECK(FormatTimecode(-1.0) == "00:00.00");
 }
 
+// PR-10: the NR preview going away gives its side of the wipe (or its grid cell) back to the pass, with that pass's display.
+TEST_CASE("ReplaceLayerSource swaps a source in the layers and the grid", "[viewport][state][preview]") {
+    ViewportState s;
+    s.SetCompare("color_sr", "color_nr@preview");
+    s.layers[1].display = DisplayMode::Grayscale;
+    s.gridSources[2] = "color_nr@preview";
+    const WipeState wipe = s.wipe;
+    CHECK(ReplaceLayerSource(s, "color_nr@preview", "color_nr"));
+    CHECK(s.layers[0].source == "color_sr");
+    CHECK(s.layers[1].source == "color_nr");
+    CHECK(s.layers[1].display == DisplayMode::Color);
+    CHECK(s.gridSources[2] == "color_nr");
+    CHECK(s.wipe == wipe);  // the wipe stays where it was
+    CHECK_FALSE(ReplaceLayerSource(s, "color_nr@preview", "color_nr"));
+}
+
 TEST_CASE("ViewportState compares in one action and names previous versions as sources", "[viewport][state]") {
     CHECK(SplitSourceVersion("color_nr@20260922-140200_3f2a9c1d") == std::pair<std::string, std::string>{"color_nr", "20260922-140200_3f2a9c1d"});
     CHECK(SplitSourceVersion("color_nr") == std::pair<std::string, std::string>{"color_nr", ""});
@@ -188,6 +204,8 @@ TEST_CASE("ViewportState compares in one action and names previous versions as s
     CHECK(VersionSourceName("color_nr", "") == "color_nr");
     CHECK(LayerState::DefaultDisplayFor("depth_raw@20260922-140200_3f2a9c1d") == DisplayMode::Turbo);  // a version shows like its pass
     CHECK(LayerState::DefaultDisplayFor("color_nr@x") == DisplayMode::Color);
+    CHECK(SplitSourceVersion("color_nr@preview") == std::pair<std::string, std::string>{"color_nr", "preview"});  // PR-10
+    CHECK(LayerState::DefaultDisplayFor("color_nr@preview") == DisplayMode::Color);
 
     ViewportState s;
     CHECK(!s.CompareConfigured());

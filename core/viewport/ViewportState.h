@@ -102,6 +102,9 @@ struct ViewportState {
 // SplitSourceVersion("color_nr@20260922-140200_3f2a9c1d") -> {"color_nr", "20260922-140200_3f2a9c1d"}.
 std::pair<std::string, std::string> SplitSourceVersion(const std::string& source);
 std::string VersionSourceName(const std::string& pass, const std::string& version);
+// Every layer and grid cell showing `from` shows `to` instead (a layer with its default display for `to`): the NR preview going away
+// (PR-10) gives its side back to the pass. Whether anything changed.
+bool ReplaceLayerSource(ViewportState& state, const std::string& from, const std::string& to);
 
 // "MM:SS.hh" (hours in front from 1 h): the timeline's timecode.
 std::string FormatTimecode(double seconds);

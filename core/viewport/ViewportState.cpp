@@ -172,6 +172,23 @@ std::vector<std::string> ViewportState::NeededSources() const {
     return out;
 }
 
+bool ReplaceLayerSource(ViewportState& state, const std::string& from, const std::string& to) {
+    bool changed = false;
+    for (auto& l : state.layers)
+        if (l.source == from) {
+            l.source = to;
+            l.display = LayerState::DefaultDisplayFor(to);
+            l.autoRange = true;
+            changed = true;
+        }
+    for (auto& g : state.gridSources)
+        if (g == from) {
+            g = to;
+            changed = true;
+        }
+    return changed;
+}
+
 std::pair<std::string, std::string> SplitSourceVersion(const std::string& source) {
     const size_t at = source.find('@');
     if (at == std::string::npos) return {source, {}};

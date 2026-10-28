@@ -528,6 +528,7 @@ TEST_CASE("AppModel compares in one action: views, presets, chips with versions,
     CHECK(chips[2].tooltip.contains("color_nr"));
     CHECK(HumanSourceName(versionName).startsWith(QString::fromUtf8("Улучшение · ")));
     CHECK(VersionLabel("20260922-140200_3f2a9c1d") == QString::fromUtf8("22.09 14:02 · 3f2a9c1d"));
+    CHECK(HumanSourceName("color_nr@preview") == QString::fromUtf8("Улучшение · превью"));  // PR-10
     CHECK(SourceRank("source") < SourceRank("depth_raw"));
     CHECK(SourceRank("color_fg") < SourceRank("result"));
     CHECK(SourceRank("mask_face") > SourceRank("result"));

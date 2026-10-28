@@ -33,6 +33,7 @@ QString BaseName(const std::string& pass) {
 }  // namespace
 
 QString VersionLabel(const std::string& id) {
+    if (id == "preview") return Tr("превью");  // the NR preview (PR-10): color_nr@preview
     // "YYYYMMDD-HHMMSS_fp8" (PassVersions.h) -> "DD.MM HH:MM · fp8"
     if (id.size() >= 15 && id[8] == '-') {
         const QString q = QString::fromStdString(id);

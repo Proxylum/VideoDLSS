@@ -346,6 +346,36 @@ TEST_CASE("FrameStore: mask_control is a colour texture; a grey U16 mask shows g
     for (size_t c = 0; c < 3; ++c) CHECK(HalfToFloat(h[c]) == Approx(32768.0 / 65535.0).margin(1e-3));  // grey: (v, v, v)
 }
 
+// PR-10: the NR preview is a pass folder outside the discovery (<root>/.preview/nr/<key>/color_nr) shown as color_nr@preview with
+// its own frame range - outside it there is no frame, and none is held from inside it.
+TEST_CASE("A preview source from PassFolderSource is Missing outside its range and holds no frame there", "[viewport][store][gpu][preview]") {
+    const auto root = Root("preview_source");
+    WritePass(root / "color_sr", PassKind::ColorSr, 8, 4, 0, 9);
+    const auto dir = root / ".preview" / "nr" / "abcdef012345" / "color_nr";
+    WritePass(dir, PassKind::ColorNr, 8, 4, 5, 7);
+    for (const auto& s : FrameStore::DiscoverPasses(root)) CHECK(s.name == "color_sr");  // not discovered
+    const auto preview = FrameStore::PassFolderSource(dir, "color_nr@preview", "color_nr", "preview");
+    REQUIRE(preview);
+    CHECK(preview->firstFrame == 5);
+    CHECK(preview->lastFrame == 7);
+    CHECK(preview->version == "preview");
+    std::vector<ViewportSource> sources = FrameStore::DiscoverPasses(root);
+    sources.push_back(*preview);
+    D3D12Device dev({true, false});
+    FrameStore::Options opt;
+    FrameStore store(dev, opt);
+    store.SetSources(sources);
+    store.SetCurrentFrame(6, {"color_sr", "color_nr@preview"});
+    store.WaitForCurrent(10000);
+    CHECK(store.GetStatus(6, "color_nr@preview") == FrameStore::Status::Ready);
+    store.SetCurrentFrame(9, {"color_sr", "color_nr@preview"});
+    store.WaitForCurrent(10000);
+    CHECK(store.GetStatus(9, "color_nr@preview") == FrameStore::Status::Missing);
+    CHECK(store.GetStatus(9, "color_sr") == FrameStore::Status::Ready);
+    CHECK_FALSE(store.Textures(9).count("color_nr@preview"));
+    CHECK(store.FrameCount() == 10);  // the preview gives the time line no length of its own
+}
+
 TEST_CASE("FrameStore discovers previous pass versions as sources named pass@id (stage 9)", "[viewport][store]") {
     const auto root = Root("versions");
     WritePass(root / "color_nr", PassKind::ColorNr, 8, 4, 0, 3, FileFormat::Png, 24);

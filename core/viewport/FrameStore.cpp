@@ -147,28 +147,35 @@ constexpr int64_t kWalkLimit = 48;  // decode forward instead of seeking when th
 
 // ---- sources -----------------------------------------------------------------------------------
 
+std::optional<ViewportSource> FrameStore::PassFolderSource(const std::filesystem::path& dir, const std::string& name, const std::string& pass,
+                                                           const std::string& version) {
+    ViewportSource s;
+    s.manifest = std::make_shared<const Manifest>(Manifest::Load(dir));
+    if (s.manifest->IsDataPass()) return std::nullopt;  // a data pass (scenes, PR-13): no frames to show
+    s.name = name;
+    s.pass = pass;
+    s.version = version;
+    s.path = dir;
+    s.kind = KindForManifest(*s.manifest);
+    s.firstFrame = s.manifest->firstFrame;
+    s.lastFrame = s.manifest->lastFrame;
+    s.width = s.manifest->width;
+    s.height = s.manifest->height;
+    s.fps = s.manifest->fps;
+    s.isStatic = s.manifest->IsStatic();
+    return s;
+}
+
 std::vector<ViewportSource> FrameStore::DiscoverPasses(const std::filesystem::path& passesRoot) {
     std::vector<ViewportSource> out;
     if (!std::filesystem::is_directory(passesRoot)) return out;
     for (const auto& entry : std::filesystem::directory_iterator(passesRoot)) {
         if (!entry.is_directory() || !Manifest::Exists(entry.path())) continue;
         try {
-            ViewportSource s;
-            s.manifest = std::make_shared<const Manifest>(Manifest::Load(entry.path()));
-            if (s.manifest->IsDataPass()) continue;  // a data pass (scenes, PR-13): no frames to show
             // the folder, as the versions (PassVersions.h) and the pipeline name it; by the manifest's pass the NR masks mask_ui /
             // mask_ignore / mask_face / mask_skin (all "mask") were one source and exported from <root>/mask (TASK-0063)
-            s.name = entry.path().filename().string();
-            s.pass = s.name;
-            s.path = entry.path();
-            s.kind = KindForManifest(*s.manifest);
-            s.firstFrame = s.manifest->firstFrame;
-            s.lastFrame = s.manifest->lastFrame;
-            s.width = s.manifest->width;
-            s.height = s.manifest->height;
-            s.fps = s.manifest->fps;
-            s.isStatic = s.manifest->IsStatic();
-            out.push_back(std::move(s));
+            const std::string folder = entry.path().filename().string();
+            if (auto s = PassFolderSource(entry.path(), folder, folder)) out.push_back(std::move(*s));
         } catch (const std::exception& e) {
             Log()->warn("pass folder {} skipped: {}", entry.path().string(), e.what());
         }
@@ -183,21 +190,7 @@ std::vector<ViewportSource> FrameStore::DiscoverPassVersions(const std::filesyst
     for (const auto& v : ListPassVersions(passesRoot)) {
         if (v.current) continue;
         try {
-            ViewportSource s;
-            s.manifest = std::make_shared<const Manifest>(Manifest::Load(v.dir));
-            if (s.manifest->IsDataPass()) continue;  // a data pass (scenes, PR-13): no frames to show
-            s.pass = v.pass;
-            s.version = v.id;
-            s.name = VersionSourceName(v.pass, v.id);
-            s.path = v.dir;
-            s.kind = KindForManifest(*s.manifest);
-            s.firstFrame = s.manifest->firstFrame;
-            s.lastFrame = s.manifest->lastFrame;
-            s.width = s.manifest->width;
-            s.height = s.manifest->height;
-            s.fps = s.manifest->fps;
-            s.isStatic = s.manifest->IsStatic();
-            out.push_back(std::move(s));
+            if (auto s = PassFolderSource(v.dir, VersionSourceName(v.pass, v.id), v.pass, v.id)) out.push_back(std::move(*s));
         } catch (const std::exception& e) {
             Log()->warn("pass version {} skipped: {}", v.dir.string(), e.what());
         }
