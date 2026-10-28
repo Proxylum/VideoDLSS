@@ -86,6 +86,8 @@ public:
     void setDebounceMsForTests(int ms);
     void setCommandForTests(std::function<std::pair<QString, QStringList>(const NrPreviewJob&)> command) { command_ = std::move(command); }
     void setFreeSpaceForTests(std::function<uint64_t()> free) { freeSpace_ = std::move(free); }
+    void setWatchdogMsForTests(int ms) { watchdogMsForTests_ = ms; }
+    void setOnWatchdogForTests(std::function<void()> f) { onWatchdog_ = std::move(f); }  // right after it cancelled the run
     // MainWindow::onTaskFinished first: the task of «Посчитать этапы до улучшения» - the sources reloaded, the preview after it; true
     // when it was that task (then no force mark is cleared: none was passed, they stay for «Обработать»)
     bool handleTaskFinished(int id, bool ok);
@@ -100,6 +102,9 @@ private:
     void setStatus(const QString& text, const QString& role = "hint", const QString& tip = {});
     void refuse(const QString& text);  // start()'s refusal: it goes when its condition may have gone (a plan, the mask, a task, the cursor)
     QString blockText(const NrPreviewJob& job, Availability* a) const;  // the gate's refusal in Russian
+    // What «Посчитать этапы до улучшения» computes: the enabled stages of scenes, depth, flow, upscale not reused in the preview's plan
+    // (their titles), the seconds of those that run, whether any runs (a restore alone takes seconds)
+    QStringList upstreamToRun(double* seconds, bool* runs) const;
     QString appBlock(const NrPreviewJob* job) const;                    // the app's: no project, processing, the mask's import, WARP, VFR
     void onStarted(int id);
     void onProgress(int id);
@@ -134,6 +139,8 @@ private:
     Request shownRequest_;
     QString stale_;
     QString uncachedTip_;  // why the preview shown is not in the cache (another DLL, a folder that could not be renamed)
+    QString shownStatus_, shownTip_;  // show()'s status: back when the preview is current again
+    QString upstreamNote_;  // «Этапы до улучшения посчитаны за …»: said until the preview after them shows
     // the stages before NR
     int upstreamTaskId_ = -1;
     std::optional<Request> afterUpstream_;
@@ -151,12 +158,15 @@ private:
     std::function<bool()> pointerHeld_;
     std::function<std::pair<QString, QStringList>(const NrPreviewJob&)> command_;
     std::function<uint64_t()> freeSpace_;
+    int watchdogMsForTests_ = 0;
+    std::function<void()> onWatchdog_;
 };
 
 // What one preview tells of the next ones' estimate: {start of the process up to the first model frame, s; a model frame, ms}. `run` is
 // its nr.json: stats.ms_per_frame_wall counts the model's start (diagnostics.init_ms + create_ms) in, so it is taken out; `elapsed` is the
-// process's wall time. {-1, -1} without the numbers.
-std::pair<double, double> PreviewCalibration(double elapsed, int64_t modelFrames, const nlohmann::json& run);
+// process's wall time. {-1, -1} without the numbers. With `scanned` (a seek through the video checked first, outside the stage's timer,
+// estimated apart by scanBytes) the start is unknown: -1, the frame's time stands.
+std::pair<double, double> PreviewCalibration(double elapsed, int64_t modelFrames, const nlohmann::json& run, bool scanned = false);
 
 // «≈ 3 с», «≈ 2 мин», «< 1 с»: FormatDuration with the seconds of a preview (it would say «≈ 0 с»)
 QString PreviewDuration(double seconds);

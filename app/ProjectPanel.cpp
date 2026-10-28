@@ -604,6 +604,11 @@ void ProjectPanel::refreshVersions() {
             connect(remove, &QPushButton::clicked, this, [this, dir, pass, id] {
                 if (tasks_.busy() || model_.controlMaskBusy()) return;
                 if (QMessageBox::question(this, tr("Удалить версию"), tr("Удалить %1 (%2) с диска?").arg(HumanSourceName(pass), VersionLabel(id))) != QMessageBox::Yes) return;
+                if (tasks_.busy() || model_.controlMaskBusy()) {  // started while the question was open (PR-10: a preview)
+                    updateGates();
+                    QMessageBox::information(this, tr("Удалить версию"), tr("Идёт обработка или превью улучшения — удалите версию, когда они закончатся"));
+                    return;
+                }
                 std::error_code ec;
                 std::filesystem::remove_all(dir, ec);
                 if (ec) QMessageBox::warning(this, tr("Версии пассов"), QString::fromStdString(ec.message()));

@@ -17,6 +17,7 @@
 #include <QPushButton>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMessageBox>
 #include <QScrollArea>
 #include <QShortcut>
 #include <QTextDocument>
@@ -4147,6 +4148,12 @@ TEST_CASE("NR preview: written under .preview; plan and versions unchanged; colo
         CHECK_FALSE(prepare->isHidden());  // the frame goes without the vectors, the history needs them: the bar offers the stages
         CHECK(prepare->isEnabled());
         CHECK(cancel->isHidden());
+        QAbstractButton* segmentButton = nullptr;
+        for (QAbstractButton* b : bar.findChildren<QAbstractButton*>())
+            if (b->text().startsWith(QString::fromUtf8("Превью отрезка"))) segmentButton = b;
+        REQUIRE(segmentButton);
+        CHECK_FALSE(segmentButton->isEnabled());
+        CHECK(segmentButton->toolTip() == runner.availability({PreviewRunner::Kind::Segment, 1}).text);  // why, not the frame's estimate
         const std::string result = FileSha(model.project().resultVideo);
         const int id = runner.prepareInputs();
         REQUIRE(id > 0);
@@ -4228,6 +4235,7 @@ TEST_CASE("NR preview: a changed setting marks the shown preview stale and the o
     model.refreshPlan();
     CHECK(runner.staleReason().isEmpty());
     CHECK(runner.statusText().startsWith(QString::fromUtf8("Показано превью кадра 3")));
+    CHECK_FALSE(runner.statusText().contains(QString::fromUtf8("из кэша")));  // computed, not taken from the cache
 
     // changed while a preview computes: its result comes as one of the earlier settings (review of PR-10)
     runner.hide();
@@ -4425,6 +4433,122 @@ TEST_CASE("NR preview: Use, Delete, gc and the mask row wait for a running previ
     Pump([&] { return !queue.previewBusy(); }, 20000);
     Pump([] { return false; }, 100);
     CHECK(all(true));
+
+    // «Удалить»: a preview that starts while its question is open stops the removal (the check is repeated after the dialog)
+    Pump([] { return false; }, 1600);  // the gap between starts: the preview starts at once inside the dialog
+    const nlohmann::json versions = VersionsJson(m.root());
+    int questions = 0, notes = 0;
+    QTimer answer;
+    answer.setInterval(50);
+    QObject::connect(&answer, &QTimer::timeout, [&] {
+        for (QWidget* w : QApplication::topLevelWidgets()) {
+            auto* box = qobject_cast<QMessageBox*>(w);
+            if (!box || !box->isVisible()) continue;
+            if (QAbstractButton* yes = box->button(QMessageBox::Yes)) {
+                ++questions;
+                runner.start({PreviewRunner::Kind::Frame, 0});
+                yes->click();
+            } else {
+                ++notes;
+                box->accept();
+            }
+        }
+    });
+    answer.start();
+    remove.first()->click();
+    answer.stop();
+    CHECK(questions == 1);
+    CHECK(notes == 1);  // «Идёт обработка или превью улучшения — удалите версию, когда они закончатся»
+    CHECK(VersionsJson(m.root()) == versions);  // nothing removed
+    runner.cancel();
+    Pump([&] { return !queue.previewBusy(); }, 20000);
+}
+
+TEST_CASE("NR preview: the prepare button names every stage the click computes; a frame that now goes without depth is stale for the stages to compute",
+          "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_upstream_set");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.seekToSourceFrame(4);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    REQUIRE(runner.staleReason().isEmpty());
+    model.setStageParam("depth", "stabilize", "none");  // depth would run; the NIS upscale reads no guides: a frame goes without depth
+    model.refreshPlan();
+    const StageDecision* depth = nullptr;
+    for (const auto& d : model.previewPlan().stages)
+        if (d.name == "depth") depth = &d;
+    REQUIRE(depth);
+    REQUIRE(depth->action == "run");
+    CHECK(runner.availability({PreviewRunner::Kind::Frame, 0}).ok);
+    CHECK(runner.staleReason() == QString::fromUtf8("этапы до улучшения нужно пересчитать"));  // nothing was recomputed yet
+    model.setStageParam("upscale", "scale", 1.5);  // the colour too: the frame stops at the upscale, the click computes depth as well
+    model.refreshPlan();
+    const PreviewRunner::Availability f = runner.availability({PreviewRunner::Kind::Frame, 0});
+    CHECK_FALSE(f.ok);
+    CHECK(f.canPrepare);
+    CHECK(f.upstream.contains(model.stageTitle("depth")));
+    CHECK(f.upstream.contains(model.stageTitle("upscale")));
+    CHECK(f.text.contains(model.stageTitle("depth")));
+}
+
+TEST_CASE("NR preview: a request made after the watchdog stopped a hung run is served once the killed process exits; one made before is dropped",
+          "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_watchdog");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    QSignalSpy started(&queue, &TaskQueue::previewStarted);
+    runner.setWatchdogMsForTests(300);
+    runner.setCommandForTests(LongCommand);
+    model.seekToSourceFrame(2);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    REQUIRE(runner.running());
+    model.seekToSourceFrame(3);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // waits; dropped with the hang
+    runner.setCommandForTests([](const NrPreviewJob&) { return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "1/1 frames"}}; });
+    bool asked = false;
+    runner.setOnWatchdogForTests([&] {
+        model.seekToSourceFrame(5);
+        asked = runner.start({PreviewRunner::Kind::Frame, 0});  // the killed process has not exited yet
+    });
+    Pump([&] { return started.count() >= 2 && !runner.running(); }, 20000);
+    Pump([] { return false; }, 1800);
+    CHECK(asked);
+    CHECK(started.count() == 2);
+}
+
+TEST_CASE("NR preview: a request made during a save while a segment runs is taken up when the save ends - a cached frame shows and the segment goes",
+          "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_save_park");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.seekToSourceFrame(2);  // frame 2 computed: shown and in the cache
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    Pump([] { return false; }, 1600);
+    runner.setCommandForTests(LongCommand);
+    model.seekToSourceFrame(3);
+    REQUIRE(runner.start({PreviewRunner::Kind::Segment, 1}));
+    REQUIRE(runner.running());
+    const int segment = runner.runningTaskId();
+    model.seekToSourceFrame(2);
+    runner.saveFrame(Q(m.dir / "saved.png"));
+    REQUIRE(runner.housekeeping());
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // parked by the save
+    Pump([&] { return !runner.housekeeping() && !runner.running(); }, 20000);
+    CHECK(queue.cancelled(segment));  // the segment went for the newer request
+    REQUIRE(model.nrPreview());
+    CHECK(model.nrPreview()->mode == NrPreviewMode::Frame);
+    CHECK(model.nrPreview()->first == 2);
+    CHECK(std::filesystem::exists(m.dir / "saved.png"));
 }
 
 TEST_CASE("NR preview: a refusal goes when its reason does", "[app][preview][regression]") {
@@ -4537,6 +4661,7 @@ TEST_CASE("NR preview: computing the stages before NR runs process --stages with
     REQUIRE(id > 0);
     Pump([&] { return queue.finished(id); }, 120000);
     REQUIRE(queue.succeeded(id));
+    CHECK(runner.statusText().startsWith(QString::fromUtf8("Этапы до улучшения посчитаны за")));  // while the preview after them starts
     CHECK_FALSE(runner.handleTaskFinished(id, true));  // handled once, by the queue's signal
     CHECK(model.forced("depth"));  // the mark stays for «Обработать»
     CHECK(FileSha(model.project().resultVideo) == result);
@@ -4559,7 +4684,8 @@ TEST_CASE("NR preview: clearing lets the viewport go first; GC keeps the shown e
         std::snprintf(key, sizeof key, "%012x", 0xb00 + i);
         const auto e = m.FakeEntry(key, 0, 0);
         std::ofstream(e / "preview.json") << nlohmann::json{{"format", "dlssvid-nr-preview"}, {"key", key}, {"bytes", 100}}.dump();
-        std::filesystem::last_write_time(e / "preview.json", std::filesystem::last_write_time(e / "preview.json") - std::chrono::hours(1 + i));
+        // shown later than the preview to come: by LRU it is the one to go, only the runner's pin keeps it
+        std::filesystem::last_write_time(e / "preview.json", std::filesystem::last_write_time(e / "preview.json") + std::chrono::hours(1 + i));
     }
     model.seekToSourceFrame(2);
     REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
@@ -4706,5 +4832,8 @@ TEST_CASE("PreviewCalibration takes the model's start out of the wall per frame"
     CHECK(ms2 == Catch::Approx((8.532 - 1.701) * 1000.0 / 54).margin(1e-6));
     CHECK(s2 == Catch::Approx(9.04 - 8.532 + 1.701).margin(1e-6));
     CHECK(PreviewCalibration(1.0, 1, nlohmann::json::object()).first < 0);  // no numbers: no change
+    const auto [scanStart, scanMs] = PreviewCalibration(2.59, 1, frame, true);  // a seek checked before the stage: its time is not the start
+    CHECK(scanStart < 0);
+    CHECK(scanMs == Catch::Approx(ms));
     CHECK(PreviewCalibration(1.0, 0, frame).first < 0);
 }

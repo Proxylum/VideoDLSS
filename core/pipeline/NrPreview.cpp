@@ -311,7 +311,7 @@ NrPreviewJob PrepareNrPreview(const ProcessPlan& plan, NrPreviewMode mode, int64
     }
     // the masks the run opens by name (NrStage::Init) though the plan left them out (not of the whole clip): their bytes in the key
     nlohmann::json masks = nlohmann::json::object();
-    for (const auto& name : NrStage::MaskNames()) {
+    for (const auto& name : NrBypassParams(nr.params) ? std::vector<std::string>{} : NrStage::MaskNames()) {  // the bypass reads none
         const std::string pass = "mask_" + name;
         if (job.dirs.count(pass) || !Manifest::Exists(plan.passesRoot / pass)) continue;
         job.masks[pass] = ManifestSha256(plan.passesRoot / pass);
@@ -399,7 +399,7 @@ NrPreviewVerdict VerifyNrPreviewRun(const NrPreviewJob& job) {
     }
     for (const auto& [pass, dir] : job.dirs)
         if (ManifestSha256(dir) != job.manifests.at(pass)) return reject(NrPreviewReject::InputChanged, pass);
-    for (const auto& name : NrStage::MaskNames()) {  // a mask the run opened by name: written, rewritten or removed meanwhile
+    for (const auto& name : NrBypassParams(job.params) ? std::vector<std::string>{} : NrStage::MaskNames()) {  // a mask the run opened by name: written, rewritten or removed meanwhile
         const std::string pass = "mask_" + name;
         if (job.dirs.count(pass)) continue;
         const bool now = Manifest::Exists(job.root / pass);

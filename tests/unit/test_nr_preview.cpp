@@ -565,6 +565,18 @@ TEST_CASE("NR preview: a mask NR opens by name though the plan leaves it out is 
         w.Finish();
     }
     CHECK(VerifyNrPreviewRun(added).why == NrPreviewReject::InputChanged);  // written during the run
+
+    // the bypass (intensity 0) opens no mask: none in the key, a mask written during its run does not refuse it
+    ProcessPlan bypass = plan;
+    Nr(bypass).params["intensity"] = 0.0;
+    const NrPreviewJob b = PrepareNrPreview(bypass, NrPreviewMode::Frame, 5, 0, env);
+    REQUIRE(b.gate.ok());
+    CHECK(b.masks.empty());
+    FakeRun(b);
+    Manifest face = Manifest::Load(root / "mask_face");
+    face.stageParams = {{"note", "other"}};
+    face.Save(root / "mask_face");
+    CHECK(VerifyNrPreviewRun(b).ok());
 }
 
 TEST_CASE("NR preview: over the disk budget the key is still set - a preview in the cache needs no room", "[unit][preview][regression]") {

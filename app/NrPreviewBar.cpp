@@ -173,7 +173,7 @@ void NrPreviewBar::refresh() {
         else a->setToolTip(seg.text);
     }
     segment_->setEnabled(anySegment);
-    segment_->setToolTip(anySegment ? tr("Превью отрезка от курсора") : frame.text);
+    segment_->setToolTip(anySegment ? tr("Превью отрезка от курсора") : !segments.empty() ? segments.front().text : frame.text);  // the shortest's reason
     {
         const QSignalBlocker b(auto_);
         auto_->setChecked(runner_.autoUpdate());

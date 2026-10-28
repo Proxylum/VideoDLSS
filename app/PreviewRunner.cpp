@@ -69,7 +69,9 @@ PreviewRunner::PreviewRunner(AppModel& model, TaskQueue& tasks, QObject* parent)
     connect(&watchdog_, &QTimer::timeout, this, [this] {  // a run that does not end (a driver hang): stopped
         if (taskId_ < 0) return;
         watchdogFired_ = true;
+        pending_.reset();  // asked before the hang; one asked while the killed process exits runs after it
         tasks_.cancel(taskId_);
+        if (onWatchdog_) onWatchdog_();
     });
     connect(&tick_, &QTimer::timeout, this, [this] { onProgress(taskId_); });
     connect(&throttle_, &QTimer::timeout, this, &PreviewRunner::runPending);
@@ -210,23 +212,40 @@ QString PreviewRunner::blockText(const NrPreviewJob& job, Availability* a) const
         case NrPreviewBlock::Upstream:
         case NrPreviewBlock::Restore:
         case NrPreviewBlock::Pending: {
+            // what the click computes - every stage before NR not reused, not only the ones the gate stopped at (a frame drops
+            // the depth and the vectors it can go without, the click computes them all the same)
             double seconds = 0;
-            for (const auto& s : model_.previewPlan().stages)
-                if (std::find(g.stages.begin(), g.stages.end(), s.name) != g.stages.end())
-                    for (const auto& e : model_.outcome().stages)
-                        if (e.stage == s.name && e.action == "run") seconds += e.seconds;
+            bool runs = false;
+            QStringList titles = upstreamToRun(&seconds, &runs);
+            if (titles.isEmpty())
+                for (const auto& s : g.stages) titles << m.stageTitle(s);
             if (a) {
                 a->canPrepare = true;
                 a->upstreamSeconds = seconds;
-                for (const auto& s : g.stages) a->upstream << m.stageTitle(s);
+                a->upstream = titles;
             }
-            if (g.why == NrPreviewBlock::Restore)
+            if (g.why == NrPreviewBlock::Restore && !runs)
                 return Tr("Нужная версия «%1» лежит в истории — «Посчитать этапы до улучшения» вернёт её за секунды").arg(StageTitles(m, g.stages));
             if (g.why == NrPreviewBlock::Pending) return Tr("Склейки ещё не найдены — сначала посчитайте этапы до улучшения");
-            return Tr("Сначала посчитайте этапы до улучшения: %1 — по всему клипу, %2").arg(StageTitles(m, g.stages), PreviewDuration(seconds));
+            return Tr("Сначала посчитайте этапы до улучшения: %1 — по всему клипу, %2").arg(titles.join(", "), PreviewDuration(seconds));
         }
     }
     return {};
+}
+
+QStringList PreviewRunner::upstreamToRun(double* seconds, bool* runs) const {
+    QStringList titles;
+    for (const char* name : {"scenes", "depth", "flow", "upscale"}) {  // as prepareInputs passes them to process --stages
+        const StageEntry* e = model_.stageEntry(name);
+        const StageDecision* d = Decision(model_.previewPlan(), name);
+        if (!e || !e->enabled || !d || d->action == "reuse") continue;
+        titles << model_.stageTitle(name);
+        if (d->action != "run") continue;
+        if (runs) *runs = true;
+        for (const auto& s : model_.outcome().stages)
+            if (s.stage == name && seconds) *seconds += s.seconds;
+    }
+    return titles;
 }
 
 PreviewRunner::Availability PreviewRunner::availability(Request r) const {
@@ -342,7 +361,8 @@ bool PreviewRunner::start(Request r) {
     preempted_ = watchdogFired_ = jobSuperseded_ = false;
     lastLine_.clear();
     // a hang, not a slow disk: the demux before a seek gets the time of an external HDD on top
-    watchdog_.start(static_cast<int>((std::max(30.0, 3.0 * job.estimatedSeconds + 30.0) + static_cast<double>(job.scanBytes) / kNrPreviewScanRateSlow) * 1000.0));
+    watchdog_.start(watchdogMsForTests_ > 0 ? watchdogMsForTests_
+                                            : static_cast<int>((std::max(30.0, 3.0 * job.estimatedSeconds + 30.0) + static_cast<double>(job.scanBytes) / kNrPreviewScanRateSlow) * 1000.0));
     tick_.start();
     Log()->info("nr preview: {} {} at frame {} ({} frames, warm-up {}), key {}", ToString(job.mode), id, job.first, job.frames, job.warmup, job.key);
     onProgress(id);
@@ -363,7 +383,8 @@ void PreviewRunner::onProgress(int id) {
         const int percent = p.total > 0 ? static_cast<int>(p.done * 100 / p.total) : 0;
         setStatus(Tr("Превью отрезка %1–%2 · %3 % · осталось %4").arg(job_->first).arg(job_->first + job_->frames - 1).arg(percent).arg(remain));
     } else if (p.done == 0) {
-        setStatus(Tr("Превью кадра %1 · запуск модели · осталось %2").arg(job_->first).arg(remain));
+        if (!upstreamNote_.isEmpty()) setStatus(Tr("%1 — считаю превью кадра %2 · осталось %3").arg(upstreamNote_).arg(job_->first).arg(remain), "ok");
+        else setStatus(Tr("Превью кадра %1 · запуск модели · осталось %2").arg(job_->first).arg(remain));
     } else {
         setStatus(Tr("Превью кадра %1 · %2 · осталось %3").arg(job_->first).arg(jobRequest_.kind == Kind::Frame ? Tr("без истории") : Tr("с историей"), remain));
     }
@@ -386,6 +407,7 @@ void PreviewRunner::onFinished(int id, bool ok) {
     const bool superseded = jobSuperseded_;  // a newer request is on screen: the statuses are its own
     const double seconds = jobClock_.isValid() ? static_cast<double>(jobClock_.elapsed()) / 1000.0 : 0.0;
     jobSuperseded_ = false;
+    upstreamNote_.clear();  // said while the run started; its end says what it gave
     job_.reset();
     taskId_ = -1;
     watchdog_.stop();
@@ -402,7 +424,6 @@ void PreviewRunner::onFinished(int id, bool ok) {
             pending_.reset();
             setStatus(Tr("Превью отменено: началась обработка"));
         } else if (watchdogFired_) {
-            pending_.reset();
             setStatus(Tr("Превью не ответило за %1 — остановлено").arg(FormatDuration(seconds)), "warn");
         } else if (!pending_ && !superseded) {
             setStatus(Tr("Превью отменено"));
@@ -504,6 +525,10 @@ void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, b
     }
     text += NrPreviewDroppedText(job.gate.dropped);
     const QString tip = entry.cacheable ? QString() : uncachedTip_;
+    if (cached && !upstreamNote_.isEmpty()) text = upstreamNote_ + Tr(" — ") + text;  // the stages done, the preview from the cache
+    upstreamNote_.clear();
+    shownStatus_ = text;
+    shownTip_ = tip;
     setStatus(text, "ok", tip);
     updateUsage();
 }
@@ -534,7 +559,11 @@ void PreviewRunner::updateStale() {
     } else if (now.keyJson != shownJob_->keyJson) {
         const nlohmann::json a = nlohmann::json::parse(shownJob_->keyJson, nullptr, false), b = nlohmann::json::parse(now.keyJson, nullptr, false);
         auto differs = [&](const char* k) { return a.is_object() && b.is_object() && a.value(k, nlohmann::json()) != b.value(k, nlohmann::json()); };
+        bool dropsMore = false;
+        for (const auto& d : now.gate.dropped)
+            dropsMore = dropsMore || std::find(shownJob_->gate.dropped.begin(), shownJob_->gate.dropped.end(), d) == shownJob_->gate.dropped.end();
         if (differs("params")) reason = Tr("настройки изменились");
+        else if (dropsMore) reason = Tr("этапы до улучшения нужно пересчитать");
         else if (differs("inputs") || differs("source") || differs("source_format")) reason = Tr("входы пересчитаны");
         else if (differs("masks")) reason = Tr("маски изменились");
         else if (a.is_object() && b.is_object() && a.value("tool", nlohmann::json()).value("dll", std::string()) != b.value("tool", nlohmann::json()).value("dll", std::string()))
@@ -544,7 +573,7 @@ void PreviewRunner::updateStale() {
     if (reason == stale_) return;
     stale_ = reason;
     if (!stale_.isEmpty()) setStatus(Tr("Показано превью для прежних настроек — %1").arg(stale_), "warn");
-    else if (shownEntry_) show(*shownEntry_, *shownJob_, true, false);  // the value came back: current again
+    else setStatus(shownStatus_, "ok", shownTip_);  // the value came back: current again (the viewport as it is)
     emit model_.nrPreviewChanged();  // the cell label says «устарело»
 }
 
@@ -566,12 +595,18 @@ void PreviewRunner::housekeep(std::function<void()> work, std::function<void()> 
             --housekeeping_;
             done();
             updateUsage();
-            runPending();
+            if (!housekeeping_ && pending_ && job_) {  // parked while a run goes: as asked now (a hit shows, a segment goes)
+                const Request r = *pending_;
+                pending_.reset();
+                start(r);
+            } else {
+                runPending();
+            }
         }, Qt::QueuedConnection);
     });
 }
 
-std::pair<double, double> PreviewCalibration(double elapsed, int64_t modelFrames, const nlohmann::json& run) {
+std::pair<double, double> PreviewCalibration(double elapsed, int64_t modelFrames, const nlohmann::json& run, bool scanned) {
     auto number = [](const nlohmann::json& j, const char* key) {
         if (!j.is_object()) return 0.0;
         const auto it = j.find(key);
@@ -585,19 +620,22 @@ std::pair<double, double> PreviewCalibration(double elapsed, int64_t modelFrames
     const double runSeconds = wallMs * static_cast<double>(modelFrames) / 1000.0;  // the stage's timer: the model's start included
     const double frameMs = std::max(0.0, (runSeconds - modelStart) * 1000.0 / static_cast<double>(modelFrames));
     const double start = std::max(0.0, elapsed - runSeconds) + std::min(modelStart, runSeconds);  // the process before the stage + the model's start
-    return {start, frameMs};
+    return {scanned ? -1.0 : start, frameMs};
 }
 
 void PreviewRunner::calibrate(const NrPreviewJob& job, double seconds, const NrPreviewEntry& entry) {
-    const auto [start, frameMs] = PreviewCalibration(seconds, job.warmup + job.frames, ReadJson(entry.dir / "nr.json"));
-    if (start < 0.0) return;
+    const auto [start, frameMs] = PreviewCalibration(seconds, job.warmup + job.frames, ReadJson(entry.dir / "nr.json"), job.scanBytes > 0);
+    if (frameMs < 0.0) return;
     const StageDecision* nr = Decision(model_.previewPlan(), "nr");
     const bool ngx = nr && nr->tool.is_object() && nr->tool.value("backend", std::string()) == "ngx" && !NrBypassParams(nr->params);
     const NrPreviewEnv e = env();
     const QString base = QString("preview/nr/%1/%2x%3/").arg(ngx ? "ngx" : "other").arg(e.colorW).arg(e.colorH);
     QSettings s;
-    const double oldStart = s.value(base + "start_s", start).toDouble(), oldMs = s.value(base + "frame_ms", frameMs).toDouble();
-    s.setValue(base + "start_s", 0.7 * oldStart + 0.3 * start);  // a moving average: one slow start does not skew the estimate
+    const double oldMs = s.value(base + "frame_ms", frameMs).toDouble();
+    if (start >= 0.0) {  // a moving average: one slow start does not skew the estimate
+        const double oldStart = s.value(base + "start_s", start).toDouble();
+        s.setValue(base + "start_s", 0.7 * oldStart + 0.3 * start);
+    }
     s.setValue(base + "frame_ms", 0.7 * oldMs + 0.3 * frameMs);
 }
 
@@ -658,9 +696,10 @@ void PreviewRunner::upstreamFinished(int id, bool ok) {
     }
     const Request next = afterUpstream_.value_or(lastFrameKind_);
     afterUpstream_.reset();
+    upstreamNote_ = Tr("Этапы до улучшения посчитаны за %1").arg(FormatDuration(took));  // onProgress / show say it while it starts
     const int64_t frame = model_.store().FrameAt("source", model_.time());
-    setStatus(Tr("Этапы до улучшения посчитаны за %1 — считаю превью кадра %2").arg(FormatDuration(took)).arg(frame), "ok");
-    if (!start(next)) return;  // the status says why
+    setStatus(Tr("%1 — считаю превью кадра %2").arg(upstreamNote_).arg(frame), "ok");
+    if (!start(next)) upstreamNote_.clear();  // the status says why
 }
 
 void PreviewRunner::hide() {
