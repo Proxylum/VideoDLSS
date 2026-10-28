@@ -153,7 +153,7 @@ NrPreviewEnv PreviewRunner::env() const {
     const StageDecision* nr = Decision(model_.previewPlan(), "nr");
     const bool ngx = nr && nr->tool.is_object() && nr->tool.value("backend", std::string()) == "ngx" && !NrBypassParams(nr->params);
     const QString size = QString("%1x%2").arg(e.colorW).arg(e.colorH);
-    e.startSeconds = QSettings().value(QString("preview/nr/%1/%2/start_s").arg(ngx ? "ngx" : "other", size), ngx ? 2.0 : 0.5).toDouble();
+    e.startSeconds = QSettings().value(QString("preview/nr/%1/%2/start_s").arg(ngx ? "ngx" : "other", size), ngx ? 2.4 : 0.5).toDouble();  // benchmarks.md: 2.4 s at 1440p
     if (const double ms = QSettings().value(QString("preview/nr/%1/%2/frame_ms").arg(ngx ? "ngx" : "other", size), 0.0).toDouble(); ms > 0) e.msPerFrame = ms;
     return e;
 }
@@ -518,20 +518,34 @@ void PreviewRunner::housekeep(std::function<void()> work, std::function<void()> 
     });
 }
 
+std::pair<double, double> PreviewCalibration(double elapsed, int64_t modelFrames, const nlohmann::json& run) {
+    auto number = [](const nlohmann::json& j, const char* key) {
+        if (!j.is_object()) return 0.0;
+        const auto it = j.find(key);
+        return it != j.end() && it->is_number() ? it->get<double>() : 0.0;
+    };
+    const auto stats = run.is_object() ? run.find("stats") : run.end();
+    const auto diag = run.is_object() ? run.find("diagnostics") : run.end();
+    const double wallMs = stats != run.end() ? number(*stats, "ms_per_frame_wall") : 0.0;
+    if (wallMs <= 0.0 || modelFrames <= 0) return {-1.0, -1.0};
+    const double modelStart = diag != run.end() ? (number(*diag, "init_ms") + number(*diag, "create_ms")) / 1000.0 : 0.0;
+    const double runSeconds = wallMs * static_cast<double>(modelFrames) / 1000.0;  // the stage's timer: the model's start included
+    const double frameMs = std::max(0.0, (runSeconds - modelStart) * 1000.0 / static_cast<double>(modelFrames));
+    const double start = std::max(0.0, elapsed - runSeconds) + std::min(modelStart, runSeconds);  // the process before the stage + the model's start
+    return {start, frameMs};
+}
+
 void PreviewRunner::calibrate(const NrPreviewJob& job, double seconds, const NrPreviewEntry& entry) {
-    const double wallMs = entry.stats.is_object() && entry.stats.contains("ms_per_frame_wall") && entry.stats["ms_per_frame_wall"].is_number()
-                              ? entry.stats["ms_per_frame_wall"].get<double>()
-                              : 0.0;
-    if (wallMs <= 0.0) return;
+    const auto [start, frameMs] = PreviewCalibration(seconds, job.warmup + job.frames, ReadJson(entry.dir / "nr.json"));
+    if (start < 0.0) return;
     const StageDecision* nr = Decision(model_.previewPlan(), "nr");
     const bool ngx = nr && nr->tool.is_object() && nr->tool.value("backend", std::string()) == "ngx" && !NrBypassParams(nr->params);
     const NrPreviewEnv e = env();
     const QString base = QString("preview/nr/%1/%2x%3/").arg(ngx ? "ngx" : "other").arg(e.colorW).arg(e.colorH);
-    const double start = std::max(0.0, seconds - static_cast<double>(job.warmup + job.frames) * wallMs / 1000.0);
     QSettings s;
-    const double oldStart = s.value(base + "start_s", start).toDouble(), oldMs = s.value(base + "frame_ms", wallMs).toDouble();
+    const double oldStart = s.value(base + "start_s", start).toDouble(), oldMs = s.value(base + "frame_ms", frameMs).toDouble();
     s.setValue(base + "start_s", 0.7 * oldStart + 0.3 * start);  // a moving average: one slow start does not skew the estimate
-    s.setValue(base + "frame_ms", 0.7 * oldMs + 0.3 * wallMs);
+    s.setValue(base + "frame_ms", 0.7 * oldMs + 0.3 * frameMs);
 }
 
 void PreviewRunner::cancel() {

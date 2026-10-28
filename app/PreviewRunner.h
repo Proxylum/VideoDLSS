@@ -142,6 +142,11 @@ private:
     std::function<std::pair<QString, QStringList>(const NrPreviewJob&)> command_;
 };
 
+// What one preview tells of the next ones' estimate: {start of the process up to the first model frame, s; a model frame, ms}. `run` is
+// its nr.json: stats.ms_per_frame_wall counts the model's start (diagnostics.init_ms + create_ms) in, so it is taken out; `elapsed` is the
+// process's wall time. {-1, -1} without the numbers.
+std::pair<double, double> PreviewCalibration(double elapsed, int64_t modelFrames, const nlohmann::json& run);
+
 // «≈ 3 с», «≈ 2 мин», «< 1 с»: FormatDuration with the seconds of a preview (it would say «≈ 0 с»)
 QString PreviewDuration(double seconds);
 

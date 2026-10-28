@@ -4372,3 +4372,20 @@ TEST_CASE("NR preview bar: shots at 100 and 150 percent", "[.shots]") {
     shot("nr_preview_upstream");
 }
 
+// PR-10 (found by the timings, docs/benchmarks.md): nr.json's wall per model frame counts the model's start in - taken as it is, a frame
+// preview of 2.6 s gave a start of 0.5 s and a «frame» of 2 s.
+TEST_CASE("PreviewCalibration takes the model's start out of the wall per frame", "[app][preview][regression]") {
+    // the measured frame preview at 1440p: 2.59 s in all, the stage 2083 ms for one frame of which init 1486 + create 188 ms
+    const nlohmann::json frame = {{"stats", {{"ms_per_frame_wall", 2083.0}}}, {"diagnostics", {{"init_ms", 1486.0}, {"create_ms", 188.0}}}};
+    const auto [start, ms] = PreviewCalibration(2.59, 1, frame);
+    CHECK(start == Catch::Approx(2.59 - 2.083 + 1.674).margin(1e-6));
+    CHECK(ms == Catch::Approx(409.0).margin(1e-6));
+    CHECK(start + ms / 1000.0 == Catch::Approx(2.59).margin(1e-6));  // the estimate of the same preview is what it took
+    // the 48-frame segment: 9.04 s, 158 ms per frame over 54 model frames
+    const nlohmann::json seg = {{"stats", {{"ms_per_frame_wall", 158.0}}}, {"diagnostics", {{"init_ms", 1481.0}, {"create_ms", 220.0}}}};
+    const auto [s2, ms2] = PreviewCalibration(9.04, 54, seg);
+    CHECK(ms2 == Catch::Approx((8.532 - 1.701) * 1000.0 / 54).margin(1e-6));
+    CHECK(s2 == Catch::Approx(9.04 - 8.532 + 1.701).margin(1e-6));
+    CHECK(PreviewCalibration(1.0, 1, nlohmann::json::object()).first < 0);  // no numbers: no change
+    CHECK(PreviewCalibration(1.0, 0, frame).first < 0);
+}
