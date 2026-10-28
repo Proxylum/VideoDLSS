@@ -2270,7 +2270,7 @@ TEST_CASE("StageCard NR control mask row: buttons off while a task runs or an im
     CHECK_FALSE(m.row()->loadButton()->isEnabled());
     CHECK_FALSE(m.row()->removeButton()->isEnabled());
     CHECK_FALSE(m.row()->showButton()->isEnabled());
-    CHECK(m.row()->loadButton()->toolTip() == QString::fromUtf8("Недоступно во время обработки"));
+    CHECK(m.row()->loadButton()->toolTip() == QString::fromUtf8("Недоступно во время обработки или превью улучшения"));
     taskRuns = false;
     m.card->refresh();
     REQUIRE(m.row()->loadButton()->isEnabled());
@@ -4154,8 +4154,7 @@ TEST_CASE("NR preview: written under .preview; plan and versions unchanged; colo
         CHECK_FALSE(cancel->isHidden());  // the stages before NR can be cancelled from the bar
         Pump([&] { return queue.finished(id); }, 120000);
         REQUIRE(queue.succeeded(id));
-        model.reloadSources();  // as MainWindow::onTaskFinished does for this task
-        runner.upstreamFinished(id, true);
+        REQUIRE(runner.handleTaskFinished(id, true));  // as MainWindow::onTaskFinished
         CHECK(FileSha(model.project().resultVideo) == result);  // --no-encode: the result untouched
         CHECK(runner.availability({PreviewRunner::Kind::FrameHistory, 0}).ok);
         Pump([&] { return !runner.running() && model.nrPreview() && model.nrPreview()->first == 7; }, 60000);  // the preview asked runs then
@@ -4244,6 +4243,10 @@ TEST_CASE("NR preview: a changed setting marks the shown preview stale and the o
     CHECK(model.nrPreview()->first == 4);
     CHECK(runner.staleReason() == QString::fromUtf8("настройки изменились"));
     CHECK(runner.statusText() == QString::fromUtf8("Показано превью для прежних настроек — настройки изменились"));
+    // the colour would be computed again: nothing was recomputed yet, the stages before NR would be (review of PR-10)
+    model.setStageParam("upscale", "scale", 1.5);
+    model.refreshPlan();
+    CHECK(runner.staleReason() == QString::fromUtf8("этапы до улучшения нужно пересчитать"));
 }
 
 TEST_CASE("NR preview: the last request wins over a run in flight - a cached frame shown meanwhile stays, the run fills the cache; a segment cancelled for it says nothing",
@@ -4273,18 +4276,155 @@ TEST_CASE("NR preview: the last request wins over a run in flight - a cached fra
     model.seekToSourceFrame(6);
     CHECK(runner.availability({PreviewRunner::Kind::Frame, 0}).cached);  // the run of 6 was kept
 
-    // a segment is cancelled for a cached frame: the status stays the frame's
+    // a segment is cancelled for a cached frame: the status stays the frame's, the bar forgets the run once it is gone
+    NrPreviewBar bar(model, runner);
+    QPushButton* cancel = nullptr;
+    for (QPushButton* b : bar.findChildren<QPushButton*>())
+        if (b->text() == QString::fromUtf8("Отменить")) cancel = b;
+    REQUIRE(cancel);
     runner.setCommandForTests(LongCommand);
     Pump([] { return false; }, 1600);
     model.seekToSourceFrame(3);
     REQUIRE(runner.start({PreviewRunner::Kind::Segment, 1}));
     REQUIRE(runner.running());
     model.seekToSourceFrame(2);
-    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([] { return false; }, 300);  // the bar's refresh after the seek: before the hit, the segment still running
+    REQUIRE(runner.running());
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // the hit: the bar refreshed with the segment still exiting
+    CHECK_FALSE(cancel->isHidden());
     Pump([&] { return !runner.running(); }, 20000);
     Pump([] { return false; }, 200);
     CHECK(model.nrPreview()->first == 2);
     CHECK(runner.statusText().contains(QString::fromUtf8("из кэша")));
+    CHECK(cancel->isHidden());  // nothing runs
+}
+
+TEST_CASE("NR preview: a request while a cancelled run is still exiting runs after it, in this project or the one opened since", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_dying");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    QSignalSpy started(&queue, &TaskQueue::previewStarted);
+    auto echo = [](const NrPreviewJob&) { return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "1/1 frames"}}; };
+    runner.setCommandForTests(LongCommand);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    REQUIRE(runner.running());
+    runner.cancel();
+    runner.setCommandForTests(echo);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // the same preview: the cancelled run serves nothing
+    Pump([&] { return started.count() >= 2 && !runner.running(); }, 20000);
+    CHECK(started.count() == 2);
+    // another project while a run exits: a click there waits for the exit, then runs
+    Pump([] { return false; }, 1600);
+    runner.setCommandForTests(LongCommand);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    REQUIRE(runner.running());
+    model.openProject(Q(m.dir / "proj.dlssvid.json"));
+    runner.setCommandForTests(echo);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return started.count() >= 4 && !runner.running(); }, 20000);
+    CHECK(started.count() == 4);
+}
+
+TEST_CASE("NR preview: low on disk, a preview in the cache is shown and not marked stale; one not computed is refused", "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_disk");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.seekToSourceFrame(4);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    runner.hide();
+    runner.setFreeSpaceForTests([] { return uint64_t{1} << 30; });  // under the 2 GiB the previews leave free
+    const PreviewRunner::Availability a = runner.availability({PreviewRunner::Kind::Frame, 0});
+    CHECK(a.ok);
+    CHECK(a.cached);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    REQUIRE(model.nrPreview());
+    CHECK(runner.statusText().contains(QString::fromUtf8("из кэша")));
+    model.refreshPlan();
+    CHECK(runner.staleReason().isEmpty());  // the disk changes nothing of the preview shown
+    model.seekToSourceFrame(6);
+    const PreviewRunner::Availability b = runner.availability({PreviewRunner::Kind::Frame, 0});
+    CHECK_FALSE(b.ok);
+    CHECK(b.text.startsWith(QString::fromUtf8("Не хватает места")));
+}
+
+TEST_CASE("NR preview bar follows processing: it says so while a Main task runs and the prepare button refuses with that text", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_bar_main");
+    AppModel& model = *m.model;
+    model.setStageParam("upscale", "scale", 1.5);  // the colour to compute: the bar offers the stages before NR
+    model.refreshPlan();
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    NrPreviewBar bar(model, runner);
+    QPushButton* prepare = nullptr;
+    for (QPushButton* b : bar.findChildren<QPushButton*>())
+        if (b->text().startsWith(QString::fromUtf8("Посчитать этапы до улучшения"))) prepare = b;
+    REQUIRE(prepare);
+    REQUIRE_FALSE(prepare->isHidden());
+    auto status = [&] {
+        for (QLabel* l : bar.findChildren<QLabel*>())
+            if (l->text().contains(QString::fromUtf8("Идёт обработка"))) return true;
+        return false;
+    };
+    const int id = queue.enqueue("main", "cmd", {"/c", "ping", "-n", "3", "127.0.0.1"});
+    Pump([&] { return prepare->isHidden(); }, 5000);
+    CHECK(prepare->isHidden());
+    CHECK(status());
+    CHECK(runner.prepareInputs() == -1);
+    CHECK(runner.statusText().contains(QString::fromUtf8("Идёт обработка")));
+    Pump([&] { return queue.finished(id); }, 20000);
+    Pump([] { return false; }, 100);
+    CHECK_FALSE(prepare->isHidden());  // processing over: the button again
+    CHECK_FALSE(status());
+}
+
+TEST_CASE("NR preview: Use, Delete, gc and the mask row wait for a running preview and come back after it", "[app][preview][gpu]") {
+    App();
+    PreviewProject m("preview_gates");
+    AppModel& model = *m.model;
+    model.setStageParam("flow", "perf", "fast");  // a run at another perf: the vectors made before are a version in the history
+    REQUIRE(model.saveProject());
+    std::string out;
+    REQUIRE(Subprocess::Run({DLSSVID_CLI_PATH, "process", "--project", (m.dir / "proj.dlssvid.json").string(), "--warp", "--disable-unavailable"}, &out) == 0);
+    model.reloadSources();
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    ProjectPanel panel(model, queue);
+    panel.setPreviewRunner(&runner);
+    auto named = [&](const char* text) {
+        QList<QPushButton*> l;
+        for (QPushButton* b : panel.findChildren<QPushButton*>())
+            if (b->text() == QString::fromUtf8(text)) l << b;
+        return l;
+    };
+    const QList<QPushButton*> use = named("Вернуть"), remove = named("Удалить"), gc = named("Очистить старые");
+    REQUIRE_FALSE(use.isEmpty());
+    REQUIRE_FALSE(remove.isEmpty());
+    REQUIRE(gc.size() == 1);
+    ControlMaskRow* row = panel.findChild<ControlMaskRow*>();
+    REQUIRE(row);
+    auto all = [&](bool enabled) {
+        bool same = gc.first()->isEnabled() == enabled && row->loadButton()->isEnabled() == enabled;
+        for (QPushButton* b : use + remove) same = same && b->isEnabled() == enabled;
+        return same;
+    };
+    REQUIRE(all(true));
+    runner.setCommandForTests(LongCommand);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return all(false); }, 5000);
+    CHECK(all(false));  // a preview reads the passes and the mask: they wait (user decision 2)
+    CHECK(use.first()->toolTip() == QString::fromUtf8("Недоступно во время обработки, превью или загрузки маски"));
+    CHECK(row->loadButton()->toolTip() == QString::fromUtf8("Недоступно во время обработки или превью улучшения"));
+    runner.cancel();
+    Pump([&] { return !queue.previewBusy(); }, 20000);
+    Pump([] { return false; }, 100);
+    CHECK(all(true));
 }
 
 TEST_CASE("NR preview: a refusal goes when its reason does", "[app][preview][regression]") {
@@ -4386,15 +4526,18 @@ TEST_CASE("NR preview: computing the stages before NR runs process --stages with
     CHECK_FALSE(a.ok);
     CHECK(a.canPrepare);
     CHECK(a.text.startsWith(QString::fromUtf8("Сначала посчитайте этапы до улучшения:")));
-    QStringList args;
-    QObject::connect(&queue, &TaskQueue::taskStarted, [&](int) {});
+    // MainWindow::onTaskFinished: the runner takes its task first, any other task clears the marks
+    QObject::connect(&queue, &TaskQueue::taskFinished, [&](int taskId, bool ok) {
+        if (runner.handleTaskFinished(taskId, ok)) return;
+        model.clearForce();
+        model.reloadSources();
+    });
     const std::string result = FileSha(model.project().resultVideo);
     const int id = runner.prepareInputs();
     REQUIRE(id > 0);
     Pump([&] { return queue.finished(id); }, 120000);
     REQUIRE(queue.succeeded(id));
-    model.reloadSources();
-    runner.upstreamFinished(id, true);
+    CHECK_FALSE(runner.handleTaskFinished(id, true));  // handled once, by the queue's signal
     CHECK(model.forced("depth"));  // the mark stays for «Обработать»
     CHECK(FileSha(model.project().resultVideo) == result);
     CHECK(Manifest::Load(m.root() / "color_sr").width == 72);  // 48 x 1.5
@@ -4461,6 +4604,13 @@ TEST_CASE("NrPreviewCellSuffix and HumanSourceName name the preview, its history
     s.mode = NrPreviewMode::Frame;
     s.dropped = {"mv_dlss"};
     CHECK(NrPreviewCellSuffix(s, FrameState::Ready, true) == QString::fromUtf8(" · без истории · без векторов движения · устарело"));
+    s.dropped = {"depth_dlss"};
+    CHECK(NrPreviewCellSuffix(s, FrameState::Ready, false) == QString::fromUtf8(" · без истории · без глубины"));
+    s.dropped = {"depth_dlss", "mv_dlss", "scenes"};
+    CHECK(NrPreviewCellSuffix(s, FrameState::Ready, false) == QString::fromUtf8(" · без истории · без векторов движения и глубины"));
+    // C7/C9 of review 2: the disk text tells the preview budget from free space
+    CHECK(NrPreviewDiskText(kNrPreviewMaxBytes + 1, 800ull << 30).endsWith(QString::fromUtf8("отведённых под превью")));
+    CHECK(NrPreviewDiskText(kNrPreviewMaxBytes, 1ull << 30).startsWith(QString::fromUtf8("Не хватает места: превью ≈ ")));
     CHECK(HumanSourceName(kNrPreviewSource) == QString::fromUtf8("Улучшение · превью"));
 }
 

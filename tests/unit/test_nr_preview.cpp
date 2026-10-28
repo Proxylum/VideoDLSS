@@ -135,7 +135,9 @@ TEST_CASE("NR preview key: stable, changes with every part of the run and not wi
     CHECK(base.entryDir == NrPreviewRoot(root) / base.key);
     CHECK(base.workDir.parent_path() == NrPreviewRoot(root));
     CHECK(base.workDir.filename().string().rfind(base.key + ".part-" + std::to_string(_getpid()) + "-", 0) == 0);
-    CHECK(base.keyJson.find(root.string()) == std::string::npos);  // no absolute path in the key
+    const std::string escaped = nlohmann::json(root.string()).dump();  // as the key JSON writes a path: backslashes doubled
+    CHECK(base.keyJson.find(escaped.substr(1, escaped.size() - 2)) == std::string::npos);  // no absolute path in the key
+    CHECK(base.keyJson.find("\"masks\":{}") != std::string::npos);  // no mask on disk
 
     auto keyWith = [&](const std::function<void(ProcessPlan&, NrPreviewEnv&)>& change, NrPreviewMode mode = NrPreviewMode::Frame, int64_t first = 5) {
         ProcessPlan p = plan;
@@ -522,6 +524,63 @@ TEST_CASE("NR preview: a frame saved as PNG 16-bit or as the EXR frame file", "[
     const PassImage exr = ReadExr(dir / "from_png.exr").ConvertNormalizedTo(PixelType::F32);
     CHECK(exr.width == pngPass.width);
     CHECK(PassImage::MaxAbsDiff(exr, pngPass) < 1e-3);  // half floats of 16-bit values
+}
+
+TEST_CASE("NR preview: a mask NR opens by name though the plan leaves it out is in the key and in the check of a run", "[unit][preview][regression]") {
+    const auto dir = Dir("masks");
+    const auto root = dir / "passes";
+    ProcessPlan plan = Plan(root);
+    const NrPreviewEnv env = Env(dir);
+    const std::string none = PrepareNrPreview(plan, NrPreviewMode::Frame, 5, 0, env).key;
+    {  // frames 100..101 only: no mask of the whole clip, the plan leaves it out - NrStage::Init opens it by name all the same
+        PassWriter w(root / "mask_ui", Manifest::ForPass(PassKind::Mask, 8, 4, FileFormat::Exr));
+        w.WriteFrame(100, MakePassImage(PassKind::Mask, 8, 4));
+        w.WriteFrame(101, MakePassImage(PassKind::Mask, 8, 4));
+        w.Finish();
+    }
+    const NrPreviewJob with = PrepareNrPreview(plan, NrPreviewMode::Frame, 5, 0, env);
+    REQUIRE(with.gate.ok());
+    CHECK(with.key != none);
+    CHECK(with.masks.count("mask_ui") == 1);
+    Manifest m = Manifest::Load(root / "mask_ui");
+    m.stageParams = {{"note", "other"}};  // restamped
+    m.Save(root / "mask_ui");
+    const NrPreviewJob job = PrepareNrPreview(plan, NrPreviewMode::Frame, 5, 0, env);
+    CHECK(job.key != with.key);
+    FakeRun(job);
+    m.stageParams = {{"note", "third"}};  // rewritten during the run
+    m.Save(root / "mask_ui");
+    const NrPreviewVerdict v = VerifyNrPreviewRun(job);
+    CHECK(v.why == NrPreviewReject::InputChanged);
+    CHECK(v.detail == "mask_ui");
+    const NrPreviewJob gone = PrepareNrPreview(plan, NrPreviewMode::Frame, 5, 0, env);
+    FakeRun(gone);
+    fs::remove_all(root / "mask_ui");  // removed during the run
+    CHECK(VerifyNrPreviewRun(gone).why == NrPreviewReject::InputChanged);
+    const NrPreviewJob added = PrepareNrPreview(plan, NrPreviewMode::Frame, 5, 0, env);
+    FakeRun(added);
+    {
+        PassWriter w(root / "mask_face", Manifest::ForPass(PassKind::Mask, 8, 4, FileFormat::Exr));
+        w.WriteFrame(0, MakePassImage(PassKind::Mask, 8, 4));
+        w.Finish();
+    }
+    CHECK(VerifyNrPreviewRun(added).why == NrPreviewReject::InputChanged);  // written during the run
+}
+
+TEST_CASE("NR preview: over the disk budget the key is still set - a preview in the cache needs no room", "[unit][preview][regression]") {
+    const auto dir = Dir("disk_cached");
+    const auto root = dir / "passes";
+    ProcessPlan plan = Plan(root);
+    NrPreviewEnv env = Env(dir);
+    const NrPreviewJob job = PrepareNrPreview(plan, NrPreviewMode::Frame, 5, 0, env);
+    REQUIRE(job.gate.ok());
+    FakeRun(job);
+    PublishNrPreview(job, 1.0, true);
+    env.freeBytes = 1;  // no room
+    const NrPreviewJob low = PrepareNrPreview(plan, NrPreviewMode::Frame, 5, 0, env);
+    CHECK(low.gate.why == NrPreviewBlock::Disk);
+    CHECK(low.key == job.key);
+    CHECK(FindNrPreview(low).has_value());
 }
 
 TEST_CASE("NR preview: a seek through the video counts the CLI's demux before it in the estimate; the colour pass is read by index", "[unit][preview][regression]") {

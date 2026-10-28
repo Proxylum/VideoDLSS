@@ -89,6 +89,19 @@ TEST_CASE("ScanKeyframes: keyframes and the longest run with its tail; PlanProxy
 }
 
 // PR-10: dlssvid nr --start on the video path seeks by pts, which assumes a constant rate - the scan finds where a clip breaks that.
+TEST_CASE("FrameIndexScan::Why names the frame with another's time, the frame without one and a stream without a rate", "[integration][io][regression]") {
+    FrameIndexScan s;
+    CHECK(s.Why() == "every frame at its time");
+    s.firstBad = 61;
+    s.badIndex = 66;
+    CHECK(s.Why() == "frame 61 carries the time of frame 66");
+    s.badIndex = -1;
+    CHECK(s.Why() == "frame 61 has no timestamp");  // the first frame without one, not frame 0
+    s.firstBad = 0;
+    s.noRate = true;
+    CHECK(s.Why() == "the stream has no frame rate");
+}
+
 TEST_CASE("ScanFrameIndex: a constant rate maps every frame to its index; a gap in the timestamps is found at its frame", "[integration][io]") {
     const auto d = Dir("frame_index");
     ClipSpec spec;
@@ -105,6 +118,7 @@ TEST_CASE("ScanFrameIndex: a constant rate maps every frame to its index; a gap 
     CHECK_FALSE(v.Consistent());
     CHECK(v.firstBad == 61);
     CHECK(v.badIndex == 66);
+    CHECK_FALSE(v.noRate);
     CHECK(ScanFrameIndex(vfr, 60).Consistent());  // the frames before the gap are where a seek finds them
     // a seek close ahead decodes forward and counts the frames: no pts involved
     VideoDecoder dec(vfr, VideoDecoder::Probe());
