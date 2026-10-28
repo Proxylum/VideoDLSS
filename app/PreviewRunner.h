@@ -1,0 +1,152 @@
+#pragma once
+
+#include <QElapsedTimer>
+#include <QObject>
+#include <QString>
+#include <QStringList>
+#include <QThreadPool>
+#include <QTimer>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <optional>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "AppModel.h"
+#include "pipeline/NrPreview.h"
+#include "viewport/ViewportRenderer.h"
+
+namespace dlssvid {
+
+class TaskQueue;
+
+// The NR preview of the card «Улучшение» (PR-10, spec §2f phase 1): a frame (no history, or after 6 frames of it) or a segment of
+// 1 / 3 / 5 / 10 s at the cursor, with the card's settings, made by `dlssvid nr` in the Preview lane of the TaskQueue (its own process:
+// NGX never runs inside the GUI) into <passes root>/.preview/nr - no pass, no version, the plan and the versions do not change - and
+// shown as color_nr@preview on the «after» side. The inputs are exact reuses only («Посчитать этапы до улучшения» computes them with
+// `process --no-encode`). A cached preview shows at once; a preview being computed is not killed by a newer request of a frame (the
+// last request waits and wins), a segment is. Processing preempts a preview (TaskQueue); another project or passes root drops it.
+class PreviewRunner : public QObject {
+    Q_OBJECT
+public:
+    enum class Kind { Frame, FrameHistory, Segment };
+    struct Request {
+        Kind kind = Kind::Frame;
+        int seconds = 0;  // Segment: 1 | 3 | 5 | 10
+        bool operator==(const Request&) const = default;
+    };
+    // What a button would do now: whether it can, the status text and tooltip, the stages to compute first.
+    struct Availability {
+        bool ok = false;
+        QString text, tip;
+        QString role = "hint";       // hint | warn | ok (Theme)
+        QStringList upstream;        // Upstream / Restore / Pending: the stages «Посчитать этапы до улучшения» runs (titles)
+        double upstreamSeconds = 0;  // their estimate
+        bool canPrepare = false;     // «Посчитать этапы до улучшения» helps
+        double seconds = 0;          // the preview's estimate
+        uint64_t bytes = 0;          // its size on disk
+        bool cached = false;         // computed already: shows at once
+        int64_t frame = 0;           // the source frame at the cursor
+    };
+
+    PreviewRunner(AppModel& model, TaskQueue& tasks, QObject* parent = nullptr);
+    ~PreviewRunner() override;
+
+    Availability availability(Request r) const;  // cheap: the plan, the app's blocks and a look in the cache
+    bool start(Request r);                        // false: unavailable (statusText says why); a cache hit shows at once, without a task
+    void cancel();                                // the running preview and the waiting request
+    bool running() const { return taskId_ >= 0; }
+    int runningTaskId() const { return taskId_; }
+    // «Посчитать этапы до улучшения»: a Main task of `process --stages <enabled of scenes, depth, flow, upscale> --no-encode`; after it
+    // the last kind of frame preview runs once. -1 when there is nothing to do or the project cannot be saved.
+    int prepareInputs();
+    bool isUpstreamTask(int id) const { return id >= 0 && id == upstreamTaskId_; }
+    void upstreamFinished(int id, bool ok);  // MainWindow::onTaskFinished, after the sources were reloaded
+    void hide();                              // «Убрать»: off the viewport, kept in the cache
+    void clearCache();                        // «Очистить превью»: every preview of the project from the disk
+    void saveFrame(const QString& file);      // «Сохранить кадр…»: the frame under the cursor (PNG 16 bit, EXR as it is)
+    void setBefore(const QString& which);     // "nr" | "sr": the «before» side
+    bool autoUpdate() const { return autoUpdate_; }
+    void setAutoUpdate(bool on);              // QSettings card/nr/previewAuto, off by default
+    Request lastFrameKind() const { return lastFrameKind_; }
+    QString statusText() const { return status_; }
+    QString statusTip() const { return tip_; }
+    QString statusRole() const { return role_; }
+    QString staleReason() const { return stale_; }  // «настройки изменились» ...; empty when the preview shown is current
+    NrPreviewUsage usage() const { return usage_; }
+    bool housekeeping() const { return housekeeping_; }
+
+    // tests: whether a mouse button is held (a slider being dragged), the debounce of «обновлять при изменении», the command of a job
+    void setPointerHeldForTests(std::function<bool()> held) { pointerHeld_ = std::move(held); }
+    void setDebounceMsForTests(int ms);
+    void setCommandForTests(std::function<std::pair<QString, QStringList>(const NrPreviewJob&)> command) { command_ = std::move(command); }
+
+signals:
+    void changed();
+
+private:
+    NrPreviewEnv env() const;
+    NrPreviewMode ModeOf(Request r) const;
+    void setStatus(const QString& text, const QString& role = "hint", const QString& tip = {});
+    QString blockText(const NrPreviewJob& job, Availability* a) const;  // the gate's refusal in Russian
+    QString appBlock(const NrPreviewJob* job) const;                    // the app's: no project, processing, the mask's import, WARP, VFR
+    void onStarted(int id);
+    void onProgress(int id);
+    void onFinished(int id, bool ok);
+    void onOutput(int id, const QString& line);
+    void runPending();
+    void show(const NrPreviewEntry& entry, const NrPreviewJob& job, bool cached, bool seek);
+    void updateStale();
+    void updateUsage();
+    void housekeep(std::function<void()> work, std::function<void()> done);
+    void calibrate(const NrPreviewJob& job, double seconds, const NrPreviewEntry& entry);
+    void removeWork(const std::filesystem::path& dir);
+
+    AppModel& model_;
+    TaskQueue& tasks_;
+    // the preview being computed
+    std::optional<NrPreviewJob> job_;
+    Request jobRequest_;
+    int taskId_ = -1;
+    uint64_t jobGeneration_ = 0;
+    double jobCursor_ = 0.0;  // the time when it was asked: the cursor jumps to its frame only when it has not moved since
+    QElapsedTimer jobClock_;
+    bool preempted_ = false, watchdogFired_ = false;
+    QString lastLine_;  // the CLI's last line of the running preview (its error)
+    std::optional<Request> pending_;
+    QTimer watchdog_, tick_, throttle_, autoTimer_;
+    QElapsedTimer lastStart_;
+    // the preview shown
+    std::optional<NrPreviewJob> shownJob_;
+    std::optional<NrPreviewEntry> shownEntry_;
+    Request shownRequest_;
+    QString stale_;
+    // the stages before NR
+    int upstreamTaskId_ = -1;
+    std::optional<Request> afterUpstream_;
+    QString upstreamTitles_;
+    // state
+    Request lastFrameKind_;
+    bool everStarted_ = false;  // «обновлять при изменении» follows a preview started by a click
+    bool autoUpdate_ = false;
+    std::set<std::string> vfrSources_;  // source hashes the CLI refused as variable-frame-rate (this session)
+    QString status_, tip_, role_ = "hint";
+    NrPreviewUsage usage_;
+    QThreadPool pool_;  // one thread: GC, «Очистить», «Сохранить кадр»
+    bool housekeeping_ = false;
+    std::vector<std::filesystem::path> pinnedSave_;  // entries a save is reading
+    std::function<bool()> pointerHeld_;
+    std::function<std::pair<QString, QStringList>(const NrPreviewJob&)> command_;
+};
+
+// «≈ 3 с», «≈ 2 мин», «< 1 с»: FormatDuration with the seconds of a preview (it would say «≈ 0 с»)
+QString PreviewDuration(double seconds);
+
+// The preview's part of a cell label (MainWindow::cellLabel): « · без истории» / « · с историей» / « · отрезок F–L», « · нет кадра превью
+// (кадры F–L)» outside its frames, « · устарело», « · без векторов движения» when a frame went without them.
+QString NrPreviewCellSuffix(const AppModel::NrPreviewShown& shown, FrameState state, bool stale);
+
+}  // namespace dlssvid

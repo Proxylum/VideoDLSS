@@ -27,6 +27,7 @@
 #include "CompareBar.h"
 #include "InspectorPanel.h"
 #include "LogPanel.h"
+#include "PreviewRunner.h"
 #include "ProcessingPanel.h"
 #include "ProjectPanel.h"
 #include "ResultBar.h"
@@ -80,9 +81,11 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
 
     // docks (object names: QMainWindow::saveState needs them)
     tasks_ = new TaskQueue(this);
+    preview_ = new PreviewRunner(model_, *tasks_, this);  // PR-10: the NR preview in the queue's Preview lane
     processing_ = new ProcessingPanel(*tasks_, pages_);
     pages_->addWidget(processing_);
     projectPanel_ = new ProjectPanel(model_, *tasks_, this);
+    projectPanel_->setPreviewRunner(preview_);
     projectDock_ = new QDockWidget(tr("Проект"), this);
     projectDock_->setObjectName("projectDock");
     projectDock_->setWidget(projectPanel_);
@@ -205,6 +208,11 @@ void MainWindow::buildMenus() {
     connect(&model_, &AppModel::loopChanged, loop, &QAction::setChecked);
     view->addSeparator();
     view->addAction(tr("До | После"), QKeySequence("W"), this, [this] { model_.toggleWipe(); });
+    // PR-10: the preview of the card «Улучшение» at the cursor (the last kind of frame preview asked)
+    view->addAction(tr("Превью кадра улучшения"), QKeySequence("P"), this, [this] {
+        if (!preview_->start(preview_->lastFrameKind())) statusBar()->showMessage(preview_->statusText(), 6000);
+    });
+    view->addAction(tr("Убрать превью улучшения"), this, [this] { preview_->hide(); });
     view->addAction(tr("Только после"), this, [this] { model_.setCompareView(AppModel::CompareView::AfterOnly); });
     view->addAction(tr("Сравнить: Апскейл ↔ Улучшение"), this, [this] { model_.applyPreset(AppModel::ComparePreset::SrVsNr); });
     view->addAction(tr("Сравнить: Исходник ↔ Глубина"), this, [this] { model_.applyPreset(AppModel::ComparePreset::SourceVsDepth); });
@@ -385,6 +393,10 @@ QString MainWindow::cellLabel(const QString& title, const std::string& source, b
     const ViewportSource* shown = model_.store().FindSource(source);
     s += shown && shown->isStatic ? tr("  статичная") : QString("  #%1").arg(model_.store().FrameAt(source, t));  // PR-8: one frame at every time
     if (withTime) s += QString(" · %1").arg(QString::fromStdString(FormatTimecode(t)));
+    if (source == kNrPreviewSource && model_.nrPreview()) {  // PR-10: which preview, and where its frames are
+        s += NrPreviewCellSuffix(*model_.nrPreview(), model_.frameStateOf(source), !preview_->staleReason().isEmpty());
+        return s;
+    }
     switch (model_.frameStateOf(source)) {
         case FrameState::Loading:
         case FrameState::Stale: s += tr(" · загрузка…"); break;  // stale: the previous frame stays on screen meanwhile
@@ -451,6 +463,11 @@ void MainWindow::watchProcess(int taskId, const QString& what) {
 }
 
 void MainWindow::onTaskFinished(int taskId, bool ok) {
+    if (preview_->isUpstreamTask(taskId)) {  // PR-10: the stages before NR - no force marks cleared (none were passed), then the preview
+        model_.reloadSources();
+        preview_->upstreamFinished(taskId, ok);
+        return;
+    }
     if (taskId == processTaskId_ && ok) model_.setLastRun(tasks_->progress(taskId).elapsed);  // «готов за …» in the result line
     model_.clearForce();
     model_.reloadSources();  // the new passes / the result: sources, the plan, the cards

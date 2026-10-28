@@ -117,6 +117,10 @@ QToolButton[role="chip"]:hover { border-color: @accent; }
 QToolButton[role="chip"]:checked { border-color: @accent; background: @tint; }
 QToolButton[role="chip"][popupMode="1"] { padding-right: 22px; }
 QToolButton::menu-button { border: 0; width: 18px; }
+QToolButton[role="split"] { min-height: 22px; padding: 0 9px; border-radius: 4px; font-size: 12px; border: 1px solid @control; background: @bg; }
+QToolButton[role="split"][popupMode="1"] { padding-right: 24px; }
+QToolButton[role="split"]:hover { border-color: @accent; }
+QToolButton[role="split"]:disabled { color: @disabled; border-color: @border; background: @dim; }
 
 QComboBox { min-height: 28px; padding: 0 8px; border-radius: 4px; border: 1px solid @control; background: @bg; color: @text; }
 QComboBox:hover { border-color: @accent; }

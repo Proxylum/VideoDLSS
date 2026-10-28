@@ -60,6 +60,8 @@
 #include "ParamText.h"
 #include "PresetMenu.h"
 #include "PresetStore.h"
+#include "NrPreviewBar.h"
+#include "PreviewRunner.h"
 #include "ProcessingPanel.h"
 #include "ProjectPanel.h"
 #include "RecentPreviews.h"
@@ -70,6 +72,7 @@
 #include "Theme.h"
 #include "TaskQueue.h"
 #include "TestClips.h"
+#include "util/Sha256.h"
 #include "util/Subprocess.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/ControlMask.h"
@@ -3974,5 +3977,398 @@ TEST_CASE("AppModel: the preview's plan has no force marks of the stages above N
     CHECK(&model.previewPlan() == &model.plan());
     model.setForce("nr", false);
     CHECK(model.upstreamArgs({"depth", "flow", "upscale"}) ==
-          QStringList{"process", "--project", Q(model.project().file), "--disable-unavailable", "--stages", "depth,flow,upscale", "--no-encode"});
+          QStringList{"process", "--project", Q(model.project().file), "--disable-unavailable", "--stages", "depth,flow,upscale", "--no-encode", "--warp"});
 }
+
+namespace {
+nlohmann::json VersionsJson(const std::filesystem::path& root) {
+    nlohmann::json j = nlohmann::json::array();
+    for (const auto& v : ListPassVersions(root)) j.push_back({v.pass, v.id, v.current, v.fingerprint, v.frames});
+    return j;
+}
+std::string FileSha(const std::filesystem::path& f) { return std::filesystem::exists(f) ? Sha256File(f) : std::string(); }
+// a command for PreviewRunner that runs a minute (a preview being computed) and is killed by the test
+std::pair<QString, QStringList> LongCommand(const NrPreviewJob&) { return {"ping", {"-n", "60", "127.0.0.1"}}; }
+}  // namespace
+
+// PR-10, test 10 of the plan: the preview of a frame is written under .preview - no pass, no version, nothing of the plan changes; it is
+// shown as color_nr@preview with its range; a repeat comes from the cache; inputs only a restore would give are refused; processing
+// preempts a preview being computed and a preview cannot start during processing.
+TEST_CASE("NR preview: written under .preview; plan and versions unchanged; color_nr@preview has the range; restore-only inputs refused; cache key changes with the DLL sha; the process button cancels a running preview and a preview cannot start during processing",
+          "[app][preview][gpu]") {
+    App();
+    QSettings().remove("card/nr/previewBefore");
+    PreviewProject m("preview_test10");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.setForce("upscale", true);  // a mark above NR: the preview reads the passes as they are, the mark stays for «Обработать»
+    model.refreshPlan();
+    model.seekToSourceFrame(5);
+    const nlohmann::json planBefore = model.plan().ToJson(), previewPlanBefore = model.previewPlan().ToJson();
+    const nlohmann::json versionsBefore = VersionsJson(m.root());
+    const std::string resultBefore = FileSha(model.project().resultVideo);
+    const bool dirtyBefore = model.dirty();
+    QSignalSpy started(&queue, &TaskQueue::previewStarted);
+    QSignalSpy mainStarted(&queue, &TaskQueue::taskStarted);
+
+    const PreviewRunner::Availability before = runner.availability({PreviewRunner::Kind::Frame, 0});
+    REQUIRE(before.ok);
+    CHECK(before.frame == 5);
+    CHECK_FALSE(before.cached);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    CHECK(runner.running());
+    Pump([&] { return model.nrPreview().has_value(); }, 60000);
+    INFO(runner.statusText().toStdString() << " | " << runner.statusTip().toStdString());
+    REQUIRE(model.nrPreview());
+    const AppModel::NrPreviewShown shown = *model.nrPreview();
+    CHECK(shown.first == 5);
+    CHECK(shown.last == 5);
+    CHECK(shown.mode == NrPreviewMode::Frame);
+    CHECK(shown.dir.parent_path() == m.root() / ".preview" / "nr");
+    CHECK(shown.dir.filename().string().size() == 12);
+    CHECK(Manifest::Load(shown.dir / "color_nr").firstFrame == 5);
+    CHECK(std::filesystem::exists(shown.dir / "preview.json"));
+    const ViewportSource* s = model.store().FindSource(kNrPreviewSource);
+    REQUIRE(s);
+    CHECK(s->firstFrame == 5);
+    CHECK(s->lastFrame == 5);
+    CHECK(model.state().CompareSide(true)->source == kNrPreviewSource);
+    CHECK(model.store().FrameAt("source", model.time()) == 5);
+    CHECK(runner.statusText().startsWith(QString::fromUtf8("Показано превью кадра 5 · без истории")));
+    // nothing of the project changed
+    CHECK(model.plan().ToJson() == planBefore);
+    CHECK(model.previewPlan().ToJson() == previewPlanBefore);
+    CHECK(VersionsJson(m.root()) == versionsBefore);
+    CHECK(model.forced("upscale"));
+    CHECK(model.dirty() == dirtyBefore);
+    CHECK(FileSha(model.project().resultVideo) == resultBefore);
+    CHECK(mainStarted.isEmpty());
+    CHECK(runner.usage().entries == 1);
+    Pump([&] { return !runner.housekeeping(); }, 10000);  // the clean-up after a preview (a request meanwhile waits for it)
+    // again: from the cache, no task
+    runner.hide();
+    CHECK_FALSE(model.nrPreview());
+    const int runs = started.count();
+    CHECK(runner.availability({PreviewRunner::Kind::Frame, 0}).cached);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    REQUIRE(model.nrPreview());
+    CHECK(model.nrPreview()->cached);
+    CHECK(started.count() == runs);
+    CHECK(runner.statusText().contains(QString::fromUtf8("из кэша")));
+    REQUIRE(model.saveProject());
+    {
+        std::ifstream in(m.dir / "proj.dlssvid.json", std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(text.find("@preview") == std::string::npos);
+    }
+
+    SECTION("restore-only inputs: a frame goes without the vectors, history refuses; the stages before NR bring the version back") {
+        model.setForce("upscale", false);
+        auto processWith = [&](const char* perf) {  // a run of flow at `perf` (stub), as «Обработать» would make it
+            model.setStageParam("flow", "perf", perf);
+            REQUIRE(model.saveProject());
+            std::string out;
+            REQUIRE(Subprocess::Run({DLSSVID_CLI_PATH, "process", "--project", (m.dir / "proj.dlssvid.json").string(), "--warp", "--disable-unavailable"}, &out) == 0);
+            model.reloadSources();
+        };
+        processWith("fast");
+        model.setStageParam("flow", "perf", "slow");  // the slow vectors are in the history now
+        model.refreshPlan();
+        const StageDecision* flow = nullptr;
+        for (const auto& d : model.previewPlan().stages)
+            if (d.name == "flow") flow = &d;
+        REQUIRE(flow);
+        REQUIRE(flow->action == "restore");
+        const PreviewRunner::Availability frame = runner.availability({PreviewRunner::Kind::Frame, 0});
+        CHECK(frame.ok);
+        QStringList args;
+        runner.setCommandForTests([&](const NrPreviewJob& job) {
+            for (const auto& a : job.Args()) args << QString::fromStdString(a);
+            return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "1/1 frames"}};
+        });
+        runner.hide();
+        model.seekToSourceFrame(7);
+        REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+        Pump([&] { return !args.isEmpty() && !runner.running(); }, 20000);  // after the gap between starts (1.5 s)
+        CHECK_FALSE(args.contains("--mv-dir"));  // left out: their stage is not reused
+        CHECK(args.contains("--color-dir"));
+        runner.setCommandForTests({});
+        const PreviewRunner::Availability history = runner.availability({PreviewRunner::Kind::FrameHistory, 0});
+        CHECK_FALSE(history.ok);
+        CHECK(history.canPrepare);
+        CHECK(history.text.contains(QString::fromUtf8("лежит в истории")));
+        const std::string result = FileSha(model.project().resultVideo);
+        const int id = runner.prepareInputs();
+        REQUIRE(id > 0);
+        Pump([&] { return queue.finished(id); }, 120000);
+        REQUIRE(queue.succeeded(id));
+        model.reloadSources();  // as MainWindow::onTaskFinished does for this task
+        runner.upstreamFinished(id, true);
+        CHECK(FileSha(model.project().resultVideo) == result);  // --no-encode: the result untouched
+        CHECK(runner.availability({PreviewRunner::Kind::FrameHistory, 0}).ok);
+        Pump([&] { return !runner.running() && model.nrPreview() && model.nrPreview()->first == 7; }, 60000);  // the preview asked runs then
+        CHECK(model.nrPreview());
+    }
+
+    SECTION("NGX on the software adapter is refused before anything runs") {
+        model.setStageParam("nr", "backend", "ngx");
+        model.refreshPlan();
+        const PreviewRunner::Availability a = runner.availability({PreviewRunner::Kind::Frame, 0});
+        CHECK_FALSE(a.ok);
+        CHECK((a.text.contains(QString::fromUtf8("программный адаптер")) || a.text.contains("nvngx_dlssnr.dll")));
+        CHECK_FALSE(runner.start({PreviewRunner::Kind::Frame, 0}));
+        CHECK_FALSE(runner.running());
+    }
+
+    SECTION("processing preempts a running preview; a preview cannot start during processing") {
+        runner.hide();
+        runner.setCommandForTests(LongCommand);
+        model.seekToSourceFrame(8);
+        REQUIRE(runner.start({PreviewRunner::Kind::FrameHistory, 0}));
+        Pump([&] { return runner.running(); }, 5000);  // after the gap between starts (1.5 s)
+        REQUIRE(runner.running());
+        std::filesystem::path work;
+        for (const auto& e : std::filesystem::directory_iterator(m.root() / ".preview" / "nr"))
+            if (e.path().filename().string().find(".part-") != std::string::npos) work = e.path();
+        REQUIRE_FALSE(work.empty());
+        const int mainId = queue.enqueue("Обработка", "cmd", {"/c", "ping", "-n", "2", "127.0.0.1"});
+        CHECK_FALSE(runner.start({PreviewRunner::Kind::Frame, 0}));  // processing waits: no preview
+        CHECK(runner.statusText().contains(QString::fromUtf8("Идёт обработка")));
+        Pump([&] { return queue.finished(mainId); }, 30000);
+        REQUIRE(queue.succeeded(mainId));
+        CHECK_FALSE(runner.running());
+        CHECK(runner.statusText() == QString::fromUtf8("Превью отменено: началась обработка"));
+        CHECK_FALSE(std::filesystem::exists(work));
+    }
+}
+
+TEST_CASE("NR preview: a changed setting marks the shown preview stale and the old value clears it", "[app][preview][gpu]") {
+    App();
+    PreviewProject m("preview_stale");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.seekToSourceFrame(3);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value(); }, 60000);
+    REQUIRE(model.nrPreview());
+    CHECK(runner.staleReason().isEmpty());
+    model.setStageParam("nr", "intensity", 1.3);
+    model.refreshPlan();
+    CHECK(runner.staleReason() == QString::fromUtf8("настройки изменились"));
+    CHECK(runner.statusText() == QString::fromUtf8("Показано превью для прежних настроек — настройки изменились"));
+    CHECK(NrPreviewCellSuffix(*model.nrPreview(), FrameState::Ready, true).contains(QString::fromUtf8("устарело")));
+    model.setStageParam("nr", "intensity", 1.0);
+    model.refreshPlan();
+    CHECK(runner.staleReason().isEmpty());
+    CHECK(runner.statusText().startsWith(QString::fromUtf8("Показано превью кадра 3")));
+}
+
+TEST_CASE("NR preview: a switch of project or passes root drops a running preview and its result", "[app][preview]") {
+    App();
+    PreviewProject m("preview_switch");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    runner.setCommandForTests(LongCommand);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    REQUIRE(runner.running());
+    const auto nrDir = m.root() / ".preview" / "nr";
+    model.setPassesRoot(Q(m.dir / "other_passes"));
+    Pump([&] { return !queue.previewBusy(); }, 20000);
+    CHECK_FALSE(runner.running());
+    CHECK_FALSE(model.nrPreview());
+    bool leftover = false;
+    for (const auto& e : std::filesystem::directory_iterator(nrDir)) leftover = leftover || e.path().filename().string().find(".part-") != std::string::npos;
+    CHECK_FALSE(leftover);
+    CHECK(runner.statusText().isEmpty());
+}
+
+TEST_CASE("NR preview: auto update fires once after the last change and not while the pointer is held", "[app][preview]") {
+    App();
+    PreviewProject m("preview_auto");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    bool held = false;
+    runner.setPointerHeldForTests([&] { return held; });
+    runner.setDebounceMsForTests(100);
+    runner.setCommandForTests([](const NrPreviewJob&) { return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "1/1 frames"}}; });
+    QSignalSpy started(&queue, &TaskQueue::previewStarted);
+    runner.setAutoUpdate(false);
+    model.setStageParam("nr", "intensity", 1.1);  // no preview asked yet, auto off: nothing
+    Pump([] { return false; }, 300);
+    CHECK(started.isEmpty());
+    REQUIRE(runner.start({PreviewRunner::Kind::FrameHistory, 0}));  // the first one by a click
+    Pump([&] { return !runner.running(); }, 20000);
+    REQUIRE(started.count() == 1);
+    runner.setAutoUpdate(true);
+    held = true;  // a slider dragged: changes, no preview while the button is held
+    model.setStageParam("nr", "intensity", 1.2);
+    model.setStageParam("nr", "intensity", 1.25);
+    Pump([] { return false; }, 400);
+    CHECK(started.count() == 1);
+    held = false;  // released: one preview of the last value, after the gap between starts
+    Pump([&] { return started.count() >= 2 && !runner.running(); }, 10000);
+    Pump([] { return false; }, 1800);
+    CHECK(started.count() == 2);
+    CHECK(runner.lastFrameKind().kind == PreviewRunner::Kind::FrameHistory);
+    runner.setAutoUpdate(false);
+}
+
+TEST_CASE("NR preview: computing the stages before NR runs process --stages with the enabled upstream stages and --no-encode, and keeps the force marks", "[app][preview][gpu]") {
+    App();
+    PreviewProject m("preview_upstream");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.setStageParam("upscale", "scale", 1.5);  // the colour to compute: no preview of any kind
+    model.setForce("depth", true);
+    model.refreshPlan();
+    const PreviewRunner::Availability a = runner.availability({PreviewRunner::Kind::Frame, 0});
+    CHECK_FALSE(a.ok);
+    CHECK(a.canPrepare);
+    CHECK(a.text.startsWith(QString::fromUtf8("Сначала посчитайте этапы до улучшения:")));
+    QStringList args;
+    QObject::connect(&queue, &TaskQueue::taskStarted, [&](int) {});
+    const std::string result = FileSha(model.project().resultVideo);
+    const int id = runner.prepareInputs();
+    REQUIRE(id > 0);
+    Pump([&] { return queue.finished(id); }, 120000);
+    REQUIRE(queue.succeeded(id));
+    model.reloadSources();
+    runner.upstreamFinished(id, true);
+    CHECK(model.forced("depth"));  // the mark stays for «Обработать»
+    CHECK(FileSha(model.project().resultVideo) == result);
+    CHECK(Manifest::Load(m.root() / "color_sr").width == 72);  // 48 x 1.5
+    Pump([&] { return model.nrPreview().has_value() && !runner.running(); }, 60000);
+    CHECK(model.nrPreview());
+    CHECK(model.upstreamArgs({"scenes", "depth", "flow", "upscale"}).contains("--no-encode"));
+    CHECK_FALSE(model.upstreamArgs({"depth"}).contains("--force"));
+}
+
+TEST_CASE("NR preview: clearing lets the viewport go first; GC keeps the shown entry", "[app][preview][gpu]") {
+    App();
+    PreviewProject m("preview_gc");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    // 17 older entries of other keys: the clean-up after the next preview keeps 16, the shown one among them
+    for (int i = 0; i < 17; ++i) {
+        char key[16];
+        std::snprintf(key, sizeof key, "%012x", 0xb00 + i);
+        const auto e = m.FakeEntry(key, 0, 0);
+        std::ofstream(e / "preview.json") << nlohmann::json{{"format", "dlssvid-nr-preview"}, {"key", key}, {"bytes", 100}}.dump();
+        std::filesystem::last_write_time(e / "preview.json", std::filesystem::last_write_time(e / "preview.json") - std::chrono::hours(1 + i));
+    }
+    model.seekToSourceFrame(2);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    const auto shown = model.nrPreview()->dir;
+    CHECK(std::filesystem::exists(shown));
+    CHECK(runner.usage().entries == 16);
+    // «Очистить превью»: off the viewport first, then every entry from the disk
+    runner.clearCache();
+    CHECK_FALSE(model.nrPreview());
+    CHECK_FALSE(model.store().FindSource(kNrPreviewSource));
+    Pump([&] { return !runner.housekeeping(); }, 20000);
+    CHECK_FALSE(std::filesystem::exists(shown));
+    CHECK(runner.usage().entries == 0);
+    CHECK(runner.statusText().startsWith(QString::fromUtf8("Превью очищено")));
+}
+
+TEST_CASE("NrPreviewCellSuffix and HumanSourceName name the preview, its history and its missing frames", "[app][preview]") {
+    AppModel::NrPreviewShown s;
+    s.first = 10;
+    s.last = 12;
+    s.mode = NrPreviewMode::Frame;
+    CHECK(NrPreviewCellSuffix(s, FrameState::Ready, false) == QString::fromUtf8(" · без истории"));
+    s.mode = NrPreviewMode::History;
+    CHECK(NrPreviewCellSuffix(s, FrameState::Ready, false) == QString::fromUtf8(" · с историей"));
+    s.mode = NrPreviewMode::Segment;
+    CHECK(NrPreviewCellSuffix(s, FrameState::Missing, false) == QString::fromUtf8(" · отрезок 10–12 · нет кадра превью (кадры 10–12)"));
+    s.mode = NrPreviewMode::Frame;
+    s.dropped = {"mv_dlss"};
+    CHECK(NrPreviewCellSuffix(s, FrameState::Ready, true) == QString::fromUtf8(" · без истории · без векторов движения · устарело"));
+    CHECK(HumanSourceName(kNrPreviewSource) == QString::fromUtf8("Улучшение · превью"));
+}
+
+TEST_CASE("SplitButton: Space and Enter run the default action, Alt+Down opens the menu", "[app][preview]") {
+    App();
+    AppModel model(true);
+    QWidget window;
+    auto* v = new QVBoxLayout(&window);
+    auto* button = new SplitButton(&window);
+    button->setText("x");
+    auto* menu = new QMenu(button);
+    menu->addAction("a");
+    button->setMenu(menu);
+    auto* box = new QCheckBox("auto", &window);
+    ClaimButtonKeys(box);
+    v->addWidget(button);
+    v->addWidget(box);
+    auto* space = new QShortcut(QKeySequence(Qt::Key_Space), &window);
+    QObject::connect(space, &QShortcut::activated, &model, [&] { model.setPlaying(!model.playing()); });
+    int clicks = 0, shown = 0;
+    QObject::connect(button, &QToolButton::clicked, [&] { ++clicks; });
+    QObject::connect(menu, &QMenu::aboutToShow, menu, [&] {
+        ++shown;
+        QTimer::singleShot(0, menu, &QMenu::close);
+    });
+    window.show();
+    window.activateWindow();
+    REQUIRE(QTest::qWaitForWindowActive(&window));
+    button->setFocus();
+    QTest::keyClick(button, Qt::Key_Space);
+    QTest::keyClick(button, Qt::Key_Return);
+    QTest::keyClick(button, Qt::Key_Enter, Qt::KeypadModifier);
+    CHECK(clicks == 3);
+    CHECK(shown == 0);
+    CHECK_FALSE(model.playing());  // Space stayed with the button
+    QTest::keyClick(button, Qt::Key_Down, Qt::AltModifier);
+    CHECK(shown == 1);
+    CHECK(clicks == 3);
+    box->setFocus();
+    QTest::keyClick(box, Qt::Key_Space);
+    CHECK(box->isChecked());
+    CHECK_FALSE(model.playing());
+}
+
+// The preview row of the card «Улучшение» (docs/ux-guidelines.md: shots at 100 % and 150 %). Hidden, run by hand:
+//   set DLSSVID_SHOTS_DIR=<folder> & set QT_SCALE_FACTOR=1.5 & dlssvid_app_tests "[.shots]"
+TEST_CASE("NR preview bar: shots at 100 and 150 percent", "[.shots]") {
+    App();
+    const QString out = qEnvironmentVariable("DLSSVID_SHOTS_DIR");
+    if (out.isEmpty()) SKIP("DLSSVID_SHOTS_DIR is not set");
+    dlssvid::ApplyTheme(App());
+    PreviewProject m("preview_shots");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    const QString scale = QString::number(qEnvironmentVariable("QT_SCALE_FACTOR", "1").toDouble() * 100);
+    auto shot = [&](const char* name) {
+        dlssvid::StageCard card(model, "nr");
+        card.setExtra(new NrPreviewBar(model, runner, &card));
+        card.setAttribute(Qt::WA_DontShowOnScreen);
+        card.setFixedWidth(880);
+        card.show();
+        card.refresh();
+        card.adjustSize();
+        QApplication::processEvents();
+        const QString file = out + "/" + name + "_" + scale + ".png";
+        REQUIRE(card.grab().save(file));
+        std::printf("saved %s\n", file.toStdString().c_str());
+    };
+    model.seekToSourceFrame(4);
+    shot("nr_preview_ready");
+    REQUIRE(runner.start({PreviewRunner::Kind::FrameHistory, 0}));
+    Pump([&] { return model.nrPreview().has_value(); }, 60000);
+    shot("nr_preview_shown");
+    model.setStageParam("upscale", "scale", 1.5);
+    model.refreshPlan();
+    runner.hide();
+    shot("nr_preview_upstream");
+}
+

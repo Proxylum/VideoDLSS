@@ -288,7 +288,9 @@ bool AppModel::saveForRun() {
 QStringList AppModel::upstreamArgs(const std::vector<std::string>& stages) const {
     QString list;
     for (const auto& s : stages) list += (list.isEmpty() ? "" : ",") + QString::fromStdString(s);
-    return {"process", "--project", QString::fromStdWString(project_.file.wstring()), "--disable-unavailable", "--stages", list, "--no-encode"};
+    QStringList args{"process", "--project", QString::fromStdWString(project_.file.wstring()), "--disable-unavailable", "--stages", list, "--no-encode"};
+    if (device_ && device_->IsWarp()) args << "--warp";  // the adapter the preview runs on (its job passes --warp too)
+    return args;
 }
 
 void AppModel::importControlMask(const QString& file) {

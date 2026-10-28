@@ -22,6 +22,8 @@
 #include "SceneCutsView.h"
 #include "SourceNames.h"
 #include "PresetMenu.h"
+#include "NrPreviewBar.h"
+#include "PreviewRunner.h"
 #include "StageCard.h"
 #include "Theme.h"
 #include "TaskQueue.h"
@@ -309,6 +311,18 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     versionsGrid_->setHorizontalSpacing(10);
     versionsGrid_->setVerticalSpacing(2);
     vl->addWidget(versionsRows_);
+    // PR-10: the previews' cache - not versions of passes, its own line (set up by setPreviewRunner)
+    previewLine_ = new QWidget(versionsCard);
+    auto* ph = new QHBoxLayout(previewLine_);
+    ph->setContentsMargins(0, 2, 0, 0);
+    previewInfo_ = Muted("", previewLine_);
+    previewInfo_->setWordWrap(true);
+    ph->addWidget(previewInfo_, 1);
+    previewClear_ = new QPushButton(tr("Очистить превью"), previewLine_);
+    SetRole(previewClear_, "small");
+    ph->addWidget(previewClear_);
+    previewLine_->setVisible(false);
+    vl->addWidget(previewLine_);
     layout->addWidget(versionsCard);
     connect(gc_, &QPushButton::clicked, this, [this] {
         if (tasks_.busy() || model_.controlMaskBusy()) return;  // the state may have changed since the button was enabled
@@ -602,6 +616,29 @@ void ProjectPanel::refreshVersions() {
         ++row;
     }
     versionsGrid_->setColumnStretch(2, 1);
+}
+
+StageCard* ProjectPanel::card(const std::string& stage) const {
+    for (StageCard* c : cards_)
+        if (c->stage() == stage) return c;
+    return nullptr;
+}
+
+void ProjectPanel::setPreviewRunner(PreviewRunner* runner) {
+    preview_ = runner;
+    if (!runner) return;
+    if (StageCard* nr = card("nr")) nr->setExtra(new NrPreviewBar(model_, *runner, nr));
+    connect(previewClear_, &QPushButton::clicked, this, [this] { preview_->clearCache(); });
+    auto line = [this] {
+        const NrPreviewUsage u = preview_->usage();
+        previewLine_->setVisible(u.entries > 0);
+        previewInfo_->setText(tr("Превью улучшения: %1 шт. · %2 — не версии пассов; старые удаляются сами (до 16 шт. и 4 ГБ)").arg(u.entries).arg(HumanBytes(u.bytes)));
+        const bool busy = tasks_.previewBusy() || preview_->housekeeping();
+        previewClear_->setEnabled(!busy);
+        previewClear_->setToolTip(busy ? tr("Недоступно, пока считается превью") : tr("Удалить с диска все посчитанные превью этого проекта"));
+    };
+    connect(preview_, &PreviewRunner::changed, this, line);
+    line();
 }
 
 void ProjectPanel::updateGates() {

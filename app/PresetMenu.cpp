@@ -59,6 +59,64 @@ void PresetButton::keyPressEvent(QKeyEvent* e) {
     QPushButton::keyPressEvent(e);
 }
 
+SplitButton::SplitButton(QWidget* parent) : QToolButton(parent) {
+    setPopupMode(QToolButton::MenuButtonPopup);
+    setToolButtonStyle(Qt::ToolButtonTextOnly);
+    setFocusPolicy(Qt::StrongFocus);
+}
+
+bool SplitButton::Runs(int key, Qt::KeyboardModifiers modifiers) {
+    if ((key == Qt::Key_Space || key == Qt::Key_Return) && modifiers == Qt::NoModifier) return true;
+    return key == Qt::Key_Enter && (modifiers == Qt::NoModifier || modifiers == Qt::KeypadModifier);
+}
+
+bool SplitButton::event(QEvent* e) {
+    if (e->type() == QEvent::ShortcutOverride) {
+        const auto* k = static_cast<QKeyEvent*>(e);
+        if (Runs(k->key(), k->modifiers()) || (menu() && k->key() == Qt::Key_Down && k->modifiers() == Qt::AltModifier)) {
+            e->accept();  // the key comes to keyPressEvent, not to the window's shortcut
+            return true;
+        }
+    }
+    return QToolButton::event(e);
+}
+
+void SplitButton::keyPressEvent(QKeyEvent* e) {
+    if (Runs(e->key(), e->modifiers())) {
+        e->accept();
+        if (isEnabled()) click();
+        return;
+    }
+    if (menu() && e->key() == Qt::Key_Down && e->modifiers() == Qt::AltModifier) {
+        e->accept();
+        showMenu();
+        return;
+    }
+    QToolButton::keyPressEvent(e);
+}
+
+namespace {
+class ButtonKeys : public QObject {
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* e) override {
+        if (e->type() == QEvent::ShortcutOverride) {
+            const auto* k = static_cast<QKeyEvent*>(e);
+            if ((k->key() == Qt::Key_Space || k->key() == Qt::Key_Return || k->key() == Qt::Key_Enter) &&
+                (k->modifiers() == Qt::NoModifier || k->modifiers() == Qt::KeypadModifier)) {
+                e->accept();  // the button's own key press toggles or clicks it
+                return false;
+            }
+        }
+        return QObject::eventFilter(watched, e);
+    }
+};
+}  // namespace
+
+void ClaimButtonKeys(QAbstractButton* button) { button->installEventFilter(new ButtonKeys(button)); }
+
 PresetMenu::PresetMenu(AppModel& model, std::string target, QWidget* parent)
     : QMenu(parent), model_(model), target_(std::move(target)), dialogs_(PresetDialogs::Default()) {
     setToolTipsVisible(true);
