@@ -5,6 +5,7 @@
 #include <QString>
 #include <QWidget>
 #include <filesystem>
+#include <functional>
 
 #include "PresetDialogs.h"
 
@@ -22,6 +23,8 @@ public:
     void setDialogs(PresetDialogs dialogs) { dialogs_ = std::move(dialogs); }
     // From the card's refresh: busy - a task runs or a mask is being imported; bypass - the stage's intensity is 0
     void refresh(bool busy, bool bypass);
+    // The card's check, asked again after the file dialog and the confirmation: a task (a preview) may start while they are open
+    void setBusyCheck(std::function<bool()> busy) { busyCheck_ = std::move(busy); }
 
     QLabel* status() const { return status_; }
     QPushButton* loadButton() const { return load_; }
@@ -46,6 +49,7 @@ private:
     bool pending_ = false;  // this row started the import in flight: it answers its end
     std::filesystem::path pendingRoot_;  // the passes root it was for: another project open at its end shows no note of it
     bool busy_ = false, bypass_ = false;
+    std::function<bool()> busyCheck_;
 };
 
 }  // namespace dlssvid

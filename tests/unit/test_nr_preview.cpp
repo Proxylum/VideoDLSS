@@ -1,6 +1,7 @@
 // The NR preview's core (PR-10, core/pipeline/NrPreview): the gate over the plan, the key, the command line, the check of a run,
 // the cache, its clean-up, and the .preview folder being no pass, no version and no viewport source.
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #ifndef NOMINMAX
@@ -25,6 +26,7 @@
 #include "passes/PassImage.h"
 #include "passes/PassSequence.h"
 #include "passes/ScenesPass.h"
+#include "passes/formats/ExrIO.h"
 #include "passes/formats/PngIO.h"
 #include "pipeline/NrPreview.h"
 #include "pipeline/PassVersions.h"
@@ -505,4 +507,44 @@ TEST_CASE("NR preview: a frame saved as PNG 16-bit or as the EXR frame file", "[
     CHECK(fs::file_size(dir / "frame.exr") == fs::file_size(e.ColorDir() / Manifest::Load(e.ColorDir()).FrameFileName(5)));
     CHECK_THROWS(SaveNrPreviewFrame(e, 40, dir / "none.png"));
     for (const auto& de : fs::directory_iterator(NrPreviewRoot(root))) CHECK(de.path().filename().string().rfind("save-", 0) != 0);  // no leftover
+
+    // a pass in PNG (nr.format png) saved under .exr: an EXR, not PNG bytes with that name (review of PR-10)
+    NrPreviewEntry p = e;
+    p.dir = NrPreviewRoot(root) / "0123456789ab";
+    {
+        PassWriter w(p.ColorDir(), Manifest::ForPass(PassKind::ColorNr, 8, 4, FileFormat::Png));
+        w.WriteFrame(5, PassReader::Open(e.ColorDir()).ReadFrame(5));
+        w.Finish();
+    }
+    REQUIRE(Manifest::Load(p.ColorDir()).format == FileFormat::Png);
+    const PassImage pngPass = PassReader::Open(p.ColorDir()).ReadFrame(5).ConvertNormalizedTo(PixelType::F32);
+    SaveNrPreviewFrame(p, 5, dir / "from_png.exr");
+    const PassImage exr = ReadExr(dir / "from_png.exr").ConvertNormalizedTo(PixelType::F32);
+    CHECK(exr.width == pngPass.width);
+    CHECK(PassImage::MaxAbsDiff(exr, pngPass) < 1e-3);  // half floats of 16-bit values
+}
+
+TEST_CASE("NR preview: a seek through the video counts the CLI's demux before it in the estimate; the colour pass is read by index", "[unit][preview][regression]") {
+    const auto dir = Dir("scan");
+    const auto root = dir / "passes";
+    ProcessPlan plan = Plan(root);
+    plan.frames = 600;
+    NrPreviewEnv env = Env(dir);
+    std::ofstream(env.source, std::ios::binary) << std::string(4u << 20, 'x');  // a 4 MiB "clip"
+    // with color_sr: by index, nothing to scan
+    const NrPreviewJob pass = PrepareNrPreview(plan, NrPreviewMode::Frame, 300, 0, env);
+    REQUIRE(pass.gate.ok());
+    CHECK(pass.scanBytes == 0);
+    // the colour from the video (upscale off)
+    plan.stages.erase(plan.stages.begin());
+    Nr(plan).inputs.clear();
+    const NrPreviewJob nearJob = PrepareNrPreview(plan, NrPreviewMode::History, 54, 0, env);  // from 48: the frames are counted
+    REQUIRE(nearJob.gate.ok());
+    CHECK(nearJob.scanBytes == 0);
+    const NrPreviewJob farJob = PrepareNrPreview(plan, NrPreviewMode::Frame, 300, 0, env);
+    REQUIRE(farJob.gate.ok());
+    CHECK(std::abs(static_cast<double>(farJob.scanBytes) - (4u << 20) * (300.0 + 1 + 64) / 600.0) <= 1.0);  // up to the frames read and 64
+    CHECK(farJob.estimatedSeconds == Catch::Approx(env.startSeconds + env.msPerFrame / 1000.0 + static_cast<double>(farJob.scanBytes) / kNrPreviewScanRate));
+    plan.frames = 0;  // the length unknown: the whole file
+    CHECK(PrepareNrPreview(plan, NrPreviewMode::Frame, 300, 0, env).scanBytes == (4u << 20));
 }

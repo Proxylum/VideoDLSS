@@ -23,6 +23,10 @@ inline constexpr int kNrPreviewMaxEntries = 16;                // the cache: at 
 inline constexpr uint64_t kNrPreviewMaxBytes = 4ull << 30;     // ...and this many bytes, the least recently shown go first
 inline constexpr int64_t kNrPreviewHistoryFrames = 6;          // the warm-up of «с историей» and segments (benchmarks: settled by ~6)
 inline constexpr uint64_t kNrPreviewDiskReserve = 2ull << 30;  // a preview leaves this much of the volume free
+// A range sought through the video is checked first: the CLI demuxes the clip up to it (ScanFrameIndex). Its bytes per second in the
+// estimate (an SSD) and in the GUI watchdog's allowance (an external HDD)
+inline constexpr double kNrPreviewScanRate = 400e6;
+inline constexpr double kNrPreviewScanRateSlow = 20e6;
 
 std::filesystem::path NrPreviewRoot(const std::filesystem::path& passesRoot);  // <root>/.preview/nr
 
@@ -67,7 +71,8 @@ struct NrPreviewJob {
     std::map<std::string, std::filesystem::path> dirs;  // input pass -> folder given to the run
     std::map<std::string, std::string> manifests;       // input pass -> sha256 of its manifest.json bytes when prepared
     uint64_t estimatedBytes = 0;
-    double estimatedSeconds = 0.0;
+    double estimatedSeconds = 0.0;   // with scanBytes / kNrPreviewScanRate
+    uint64_t scanBytes = 0;          // the source's bytes the CLI demuxes before the model (colour from the video, a seek): 0 for none
     bool warp = false;
     // The command line (without the program): dlssvid nr into workDir with the inputs, the params file and --json in workDir.
     std::vector<std::string> Args() const;
@@ -124,8 +129,8 @@ struct NrPreviewUsage {
     uint64_t bytes = 0;  // from the sidecars: no walk over the frames
 };
 NrPreviewUsage NrPreviewUsageOf(const std::filesystem::path& passesRoot);
-// «Сохранить кадр…»: frame `frame` of a preview's colour into `outFile` - .exr copies the frame file, anything else is written as
-// PNG 16-bit through the pass writer (in a save-<pid>-<n> folder under .preview/nr, then moved).
+// «Сохранить кадр…»: frame `frame` of a preview's colour into `outFile` - .exr copies an EXR frame file and writes another format as
+// EXR half, anything else is written as PNG 16-bit through the pass writer (in a save-<pid>-<n> folder under .preview/nr, then moved).
 void SaveNrPreviewFrame(const NrPreviewEntry& entry, int64_t frame, const std::filesystem::path& outFile);
 
 }  // namespace dlssvid

@@ -64,6 +64,8 @@ public:
     // the last kind of frame preview runs once. -1 when there is nothing to do or the project cannot be saved.
     int prepareInputs();
     bool isUpstreamTask(int id) const { return id >= 0 && id == upstreamTaskId_; }
+    bool upstreamRunning() const { return upstreamTaskId_ >= 0; }
+    void cancelUpstream();  // the bar's [Отменить] while «Посчитать этапы до улучшения» runs (upstreamFinished says so)
     void upstreamFinished(int id, bool ok);  // MainWindow::onTaskFinished, after the sources were reloaded
     void hide();                              // «Убрать»: off the viewport, kept in the cache
     void clearCache();                        // «Очистить превью»: every preview of the project from the disk
@@ -77,7 +79,7 @@ public:
     QString statusRole() const { return role_; }
     QString staleReason() const { return stale_; }  // «настройки изменились» ...; empty when the preview shown is current
     NrPreviewUsage usage() const { return usage_; }
-    bool housekeeping() const { return housekeeping_; }
+    bool housekeeping() const { return housekeeping_ > 0; }
 
     // tests: whether a mouse button is held (a slider being dragged), the debounce of «обновлять при изменении», the command of a job
     void setPointerHeldForTests(std::function<bool()> held) { pointerHeld_ = std::move(held); }
@@ -91,6 +93,7 @@ private:
     NrPreviewEnv env() const;
     NrPreviewMode ModeOf(Request r) const;
     void setStatus(const QString& text, const QString& role = "hint", const QString& tip = {});
+    void refuse(const QString& text);  // start()'s refusal: it goes when its condition may have gone (a plan, the mask, a task, the cursor)
     QString blockText(const NrPreviewJob& job, Availability* a) const;  // the gate's refusal in Russian
     QString appBlock(const NrPreviewJob* job) const;                    // the app's: no project, processing, the mask's import, WARP, VFR
     void onStarted(int id);
@@ -115,6 +118,7 @@ private:
     double jobCursor_ = 0.0;  // the time when it was asked: the cursor jumps to its frame only when it has not moved since
     QElapsedTimer jobClock_;
     bool preempted_ = false, watchdogFired_ = false;
+    bool jobSuperseded_ = false;  // a newer request was shown from the cache meanwhile: the run fills the cache, it is not shown
     QString lastLine_;  // the CLI's last line of the running preview (its error)
     std::optional<Request> pending_;
     QTimer watchdog_, tick_, throttle_, autoTimer_;
@@ -124,6 +128,7 @@ private:
     std::optional<NrPreviewEntry> shownEntry_;
     Request shownRequest_;
     QString stale_;
+    QString uncachedTip_;  // why the preview shown is not in the cache (another DLL, a folder that could not be renamed)
     // the stages before NR
     int upstreamTaskId_ = -1;
     std::optional<Request> afterUpstream_;
@@ -134,10 +139,10 @@ private:
     bool autoUpdate_ = false;
     std::set<std::string> vfrSources_;  // source hashes the CLI refused as variable-frame-rate (this session)
     QString status_, tip_, role_ = "hint";
+    bool refused_ = false;
     NrPreviewUsage usage_;
     QThreadPool pool_;  // one thread: GC, «Очистить», «Сохранить кадр»
-    bool housekeeping_ = false;
-    std::vector<std::filesystem::path> pinnedSave_;  // entries a save is reading
+    int housekeeping_ = 0;  // its jobs queued or running: a new run waits for all of them (a GC removes our work folders not pinned)
     std::function<bool()> pointerHeld_;
     std::function<std::pair<QString, QStringList>(const NrPreviewJob&)> command_;
 };

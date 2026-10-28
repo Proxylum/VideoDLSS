@@ -948,6 +948,10 @@ TEST_CASE("TaskQueue lanes: a Main task preempts a running preview; a preview is
 
     // processing arrives: both previews preempted (the running one killed), processing starts after the kill
     const int m = queue.enqueue("main", "cmd", {"/c", "echo", "3/10 frames"});
+    bool p1DoneAtMainStart = false;
+    QObject::connect(&queue, &TaskQueue::taskStarted, [&](int id) {
+        if (id == m) p1DoneAtMainStart = queue.finished(p1);
+    });
     CHECK(queue.mainBusy());
     CHECK(queue.enqueue("p4", "cmd", {"/c", "echo", "x"}, {}, TaskQueue::Lane::Preview) == -1);  // refused while processing waits
     Pump([&] { return queue.finished(m); }, 20000);
@@ -956,7 +960,8 @@ TEST_CASE("TaskQueue lanes: a Main task preempts a running preview; a preview is
     CHECK(queue.cancelled(p3));
     CHECK(preview.contains(QString("preempted %1").arg(p1)));
     CHECK(preview.contains(QString("preempted %1").arg(p3)));
-    CHECK(main.first() == QString("start %1").arg(m));  // after the preview's process exited
+    CHECK(main.first() == QString("start %1").arg(m));
+    CHECK(p1DoneAtMainStart);  // after the preview's process exited and let its files go
     CHECK(preview.indexOf(QString("finish %1 fail").arg(p1)) >= 0);
     for (const QString& e : main) CHECK_FALSE(e.contains(QString(" %1").arg(p1)));  // no preview on the Main signals
     CHECK(table->rowCount() == 2);  // the previews' row and the processing's
@@ -2364,6 +2369,37 @@ TEST_CASE("StageCard NR control mask row: buttons off while a task runs or an im
 
 // Review of PR-8: an import that ends after another project was opened re-reads the mask of the project open now - not «Загружается…» for
 // good, and that project's mask back on the viewport.
+TEST_CASE("ControlMaskRow: a task that started while the file dialog or the confirmation was open stops the import and the removal", "[app][card][mask][regression]") {
+    App();
+    MaskCard m("card_mask_dialog_busy");
+    bool taskRuns = false;
+    m.card->setBusyCheck([&] { return taskRuns; });
+    REQUIRE(m.load(MaskPng(m.dir / "a.png", 16, 8, false)));
+    const QString fingerprint = m.model->controlMask().fingerprint;
+    const QString next = MaskPng(m.dir / "b.png", 16, 8, true);
+    PresetDialogs d = m.dialogs.Make();
+    d.openFile = [&](QWidget*, const QString&, const QString&, const QString&) {
+        taskRuns = true;  // a preview started while the dialog was open
+        return next;
+    };
+    d.confirm = [&](QWidget*, const QString&, const QString&, const QString&) {
+        taskRuns = true;
+        return true;
+    };
+    m.card->setDialogs(d);
+    m.row()->loadButton()->click();
+    CHECK_FALSE(m.model->controlMaskBusy());  // no import
+    CHECK(m.model->controlMask().fingerprint == fingerprint);
+    CHECK(m.dialogs.warnings == 1);
+    CHECK_FALSE(m.row()->loadButton()->isEnabled());
+    taskRuns = false;
+    m.card->refresh();
+    REQUIRE(m.row()->removeButton()->isEnabled());
+    m.row()->removeButton()->click();
+    CHECK(m.model->controlMask().status == AppModel::ControlMaskState::Status::Ready);  // not removed
+    CHECK(m.dialogs.warnings == 2);
+}
+
 TEST_CASE("AppModel: a mask import that ends after another project was opened shows the mask of the open project", "[app][mask][regression]") {
     App();
     MaskCard a("card_mask_switch_a");
@@ -3994,7 +4030,7 @@ std::pair<QString, QStringList> LongCommand(const NrPreviewJob&) { return {"ping
 // PR-10, test 10 of the plan: the preview of a frame is written under .preview - no pass, no version, nothing of the plan changes; it is
 // shown as color_nr@preview with its range; a repeat comes from the cache; inputs only a restore would give are refused; processing
 // preempts a preview being computed and a preview cannot start during processing.
-TEST_CASE("NR preview: written under .preview; plan and versions unchanged; color_nr@preview has the range; restore-only inputs refused; cache key changes with the DLL sha; the process button cancels a running preview and a preview cannot start during processing",
+TEST_CASE("NR preview: written under .preview; plan and versions unchanged; color_nr@preview has the range; restore-only inputs refused; the process button stays on, cancels a running preview and queues one run; a preview cannot start during processing",
           "[app][preview][gpu]") {
     App();
     QSettings().remove("card/nr/previewBefore");
@@ -4098,9 +4134,24 @@ TEST_CASE("NR preview: written under .preview; plan and versions unchanged; colo
         CHECK_FALSE(history.ok);
         CHECK(history.canPrepare);
         CHECK(history.text.contains(QString::fromUtf8("лежит в истории")));
+        NrPreviewBar bar(model, runner);
+        auto button = [&](const char* text) -> QPushButton* {
+            for (QPushButton* b : bar.findChildren<QPushButton*>())
+                if (b->text().startsWith(QString::fromUtf8(text))) return b;
+            return nullptr;
+        };
+        QPushButton* prepare = button("Посчитать этапы до улучшения");
+        QPushButton* cancel = button("Отменить");
+        REQUIRE(prepare);
+        REQUIRE(cancel);
+        CHECK_FALSE(prepare->isHidden());  // the frame goes without the vectors, the history needs them: the bar offers the stages
+        CHECK(prepare->isEnabled());
+        CHECK(cancel->isHidden());
         const std::string result = FileSha(model.project().resultVideo);
         const int id = runner.prepareInputs();
         REQUIRE(id > 0);
+        CHECK(runner.upstreamRunning());
+        CHECK_FALSE(cancel->isHidden());  // the stages before NR can be cancelled from the bar
         Pump([&] { return queue.finished(id); }, 120000);
         REQUIRE(queue.succeeded(id));
         model.reloadSources();  // as MainWindow::onTaskFinished does for this task
@@ -4121,9 +4172,14 @@ TEST_CASE("NR preview: written under .preview; plan and versions unchanged; colo
         CHECK_FALSE(runner.running());
     }
 
-    SECTION("processing preempts a running preview; a preview cannot start during processing") {
+    SECTION("«Обработать» stays on during a preview and preempts it; a second press queues nothing; a preview cannot start during processing") {
         runner.hide();
         runner.setCommandForTests(LongCommand);
+        ProjectPanel panel(model, queue);
+        QPushButton* process = nullptr;
+        for (QPushButton* b : panel.findChildren<QPushButton*>())
+            if (b->text().startsWith(QString::fromUtf8("Обработать"))) process = b;
+        REQUIRE(process);
         model.seekToSourceFrame(8);
         REQUIRE(runner.start({PreviewRunner::Kind::FrameHistory, 0}));
         Pump([&] { return runner.running(); }, 5000);  // after the gap between starts (1.5 s)
@@ -4132,11 +4188,21 @@ TEST_CASE("NR preview: written under .preview; plan and versions unchanged; colo
         for (const auto& e : std::filesystem::directory_iterator(m.root() / ".preview" / "nr"))
             if (e.path().filename().string().find(".part-") != std::string::npos) work = e.path();
         REQUIRE_FALSE(work.empty());
-        const int mainId = queue.enqueue("Обработка", "cmd", {"/c", "ping", "-n", "2", "127.0.0.1"});
+        panel.refresh();
+        CHECK(process->isEnabled());  // a preview does not hold processing back
+        QSignalSpy queued(&panel, &ProjectPanel::processQueued);
+        process->click();
+        REQUIRE(queued.count() == 1);
+        const int mainId = queued.first().at(0).toInt();
+        CHECK_FALSE(process->isEnabled());  // at once: the run waits for the preview's process to exit
+        for (QShortcut* sc : panel.findChildren<QShortcut*>())
+            if (sc->key() == QKeySequence("Ctrl+Return")) emit sc->activated();
+        CHECK(queued.count() == 1);  // a second press queues no second run
         CHECK_FALSE(runner.start({PreviewRunner::Kind::Frame, 0}));  // processing waits: no preview
         CHECK(runner.statusText().contains(QString::fromUtf8("Идёт обработка")));
-        Pump([&] { return queue.finished(mainId); }, 30000);
-        REQUIRE(queue.succeeded(mainId));
+        Pump([&] { return queue.finished(mainId); }, 120000);
+        REQUIRE(queue.finished(mainId));
+        CHECK(mainStarted.count() == 1);
         CHECK_FALSE(runner.running());
         CHECK(runner.statusText() == QString::fromUtf8("Превью отменено: началась обработка"));
         CHECK_FALSE(std::filesystem::exists(work));
@@ -4163,6 +4229,76 @@ TEST_CASE("NR preview: a changed setting marks the shown preview stale and the o
     model.refreshPlan();
     CHECK(runner.staleReason().isEmpty());
     CHECK(runner.statusText().startsWith(QString::fromUtf8("Показано превью кадра 3")));
+
+    // changed while a preview computes: its result comes as one of the earlier settings (review of PR-10)
+    runner.hide();
+    Pump([&] { return !runner.housekeeping(); }, 10000);
+    Pump([] { return false; }, 1600);  // the gap between starts: the run starts now, with 1.0
+    model.seekToSourceFrame(4);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    REQUIRE(runner.running());
+    model.setStageParam("nr", "intensity", 1.2);
+    model.refreshPlan();
+    Pump([&] { return model.nrPreview().has_value() && !runner.running(); }, 60000);
+    REQUIRE(model.nrPreview());
+    CHECK(model.nrPreview()->first == 4);
+    CHECK(runner.staleReason() == QString::fromUtf8("настройки изменились"));
+    CHECK(runner.statusText() == QString::fromUtf8("Показано превью для прежних настроек — настройки изменились"));
+}
+
+TEST_CASE("NR preview: the last request wins over a run in flight - a cached frame shown meanwhile stays, the run fills the cache; a segment cancelled for it says nothing",
+          "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_last_wins");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.seekToSourceFrame(2);  // frame 2 computed: it is in the cache
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    runner.hide();
+    Pump([] { return false; }, 1600);  // the gap between starts
+    model.seekToSourceFrame(6);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // frame 6 runs
+    REQUIRE(runner.running());
+    model.seekToSourceFrame(2);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // frame 2 from the cache, while 6 runs
+    REQUIRE(model.nrPreview());
+    CHECK(model.nrPreview()->first == 2);
+    Pump([&] { return !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    CHECK(model.nrPreview()->first == 2);  // not replaced by the older request
+    CHECK(runner.statusText().contains(QString::fromUtf8("из кэша")));
+    model.seekToSourceFrame(6);
+    CHECK(runner.availability({PreviewRunner::Kind::Frame, 0}).cached);  // the run of 6 was kept
+
+    // a segment is cancelled for a cached frame: the status stays the frame's
+    runner.setCommandForTests(LongCommand);
+    Pump([] { return false; }, 1600);
+    model.seekToSourceFrame(3);
+    REQUIRE(runner.start({PreviewRunner::Kind::Segment, 1}));
+    REQUIRE(runner.running());
+    model.seekToSourceFrame(2);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return !runner.running(); }, 20000);
+    Pump([] { return false; }, 200);
+    CHECK(model.nrPreview()->first == 2);
+    CHECK(runner.statusText().contains(QString::fromUtf8("из кэша")));
+}
+
+TEST_CASE("NR preview: a refusal goes when its reason does", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_refusal");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    const int mainId = queue.enqueue("main", "cmd", {"/c", "ping", "-n", "2", "127.0.0.1"});
+    CHECK_FALSE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    CHECK(runner.statusText().contains(QString::fromUtf8("Идёт обработка")));
+    Pump([&] { return queue.finished(mainId); }, 20000);
+    CHECK(runner.statusText().isEmpty());  // the bar says what a click does now
+    CHECK(runner.availability({PreviewRunner::Kind::Frame, 0}).ok);
 }
 
 TEST_CASE("NR preview: a switch of project or passes root drops a running preview and its result", "[app][preview]") {
@@ -4171,11 +4307,14 @@ TEST_CASE("NR preview: a switch of project or passes root drops a running previe
     AppModel& model = *m.model;
     TaskQueue queue;
     PreviewRunner runner(model, queue);
+    model.showNrPreview(m.Shown(m.FakeEntry("abcdef012345", 0, 0), 0, 0), false);  // a preview shown...
+    REQUIRE(model.state().CompareSide(true)->source == kNrPreviewSource);
     runner.setCommandForTests(LongCommand);
-    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // ...and one running
     REQUIRE(runner.running());
     const auto nrDir = m.root() / ".preview" / "nr";
     model.setPassesRoot(Q(m.dir / "other_passes"));
+    for (const auto& l : model.state().layers) CHECK(l.source != kNrPreviewSource);  // the side is the pass again, not an empty source
     Pump([&] { return !queue.previewBusy(); }, 20000);
     CHECK_FALSE(runner.running());
     CHECK_FALSE(model.nrPreview());
@@ -4194,7 +4333,11 @@ TEST_CASE("NR preview: auto update fires once after the last change and not whil
     bool held = false;
     runner.setPointerHeldForTests([&] { return held; });
     runner.setDebounceMsForTests(100);
-    runner.setCommandForTests([](const NrPreviewJob&) { return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "1/1 frames"}}; });
+    QList<double> intensities;  // of each run
+    runner.setCommandForTests([&](const NrPreviewJob& job) {
+        intensities << job.params.value("intensity", 0.0);
+        return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "1/1 frames"}};
+    });
     QSignalSpy started(&queue, &TaskQueue::previewStarted);
     runner.setAutoUpdate(false);
     model.setStageParam("nr", "intensity", 1.1);  // no preview asked yet, auto off: nothing
@@ -4204,16 +4347,29 @@ TEST_CASE("NR preview: auto update fires once after the last change and not whil
     Pump([&] { return !runner.running(); }, 20000);
     REQUIRE(started.count() == 1);
     runner.setAutoUpdate(true);
+    Pump([] { return false; }, 1700);  // past the gap between starts: a start now would show at once
     held = true;  // a slider dragged: changes, no preview while the button is held
     model.setStageParam("nr", "intensity", 1.2);
     model.setStageParam("nr", "intensity", 1.25);
     Pump([] { return false; }, 400);
     CHECK(started.count() == 1);
-    held = false;  // released: one preview of the last value, after the gap between starts
+    held = false;  // released: one preview of the last value
     Pump([&] { return started.count() >= 2 && !runner.running(); }, 10000);
     Pump([] { return false; }, 1800);
     CHECK(started.count() == 2);
+    CHECK(intensities.last() == Catch::Approx(1.25));
     CHECK(runner.lastFrameKind().kind == PreviewRunner::Kind::FrameHistory);
+    // two changes at once: one preview, of the last one (the debounce restarts on every change)
+    model.setStageParam("nr", "intensity", 1.3);
+    model.setStageParam("nr", "intensity", 1.35);
+    Pump([&] { return started.count() >= 3 && !runner.running(); }, 10000);
+    Pump([] { return false; }, 1800);  // a second start would come after the gap
+    CHECK(started.count() == 3);
+    CHECK(intensities.last() == Catch::Approx(1.35));
+    // another project (the same one opened again): nothing by itself - the first preview there is by a click (design §3.3)
+    model.openProject(Q(m.dir / "proj.dlssvid.json"));
+    Pump([] { return false; }, 2000);
+    CHECK(started.count() == 3);
     runner.setAutoUpdate(false);
 }
 
@@ -4269,6 +4425,19 @@ TEST_CASE("NR preview: clearing lets the viewport go first; GC keeps the shown e
     const auto shown = model.nrPreview()->dir;
     CHECK(std::filesystem::exists(shown));
     CHECK(runner.usage().entries == 16);
+    // two saves queued: the first one's end does not let a run in while the second is still in the pool (review of PR-10)
+    const QString first = Q(m.dir / "save1.png"), second = Q(m.dir / "save2.png");
+    std::optional<bool> busyAfterFirst;
+    const auto c = QObject::connect(&runner, &PreviewRunner::changed, [&] {
+        if (!busyAfterFirst && runner.statusText().contains(first)) busyAfterFirst = runner.housekeeping();
+    });
+    runner.saveFrame(first);
+    runner.saveFrame(second);
+    Pump([&] { return !runner.housekeeping(); }, 20000);
+    QObject::disconnect(c);
+    REQUIRE(busyAfterFirst);
+    CHECK(*busyAfterFirst);
+    CHECK(std::filesystem::exists(m.dir / "save2.png"));
     // «Очистить превью»: off the viewport first, then every entry from the disk
     runner.clearCache();
     CHECK_FALSE(model.nrPreview());

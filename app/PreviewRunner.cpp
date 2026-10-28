@@ -101,10 +101,20 @@ PreviewRunner::PreviewRunner(AppModel& model, TaskQueue& tasks, QObject* parent)
         stale_.clear();
         upstreamTaskId_ = -1;
         afterUpstream_.reset();
+        everStarted_ = false;  // auto update follows a click in this project (design §3.3): projectChanged comes next
         setStatus({});
         QMetaObject::invokeMethod(this, [this] { updateUsage(); }, Qt::QueuedConnection);  // the new root is set after the signal
     });
     connect(&model_, &AppModel::planChanged, this, &PreviewRunner::updateStale);
+    // a refusal («Идёт обработка …», «Загружается маска …», «Курсор за концом клипа») holds while its condition may: then the bar
+    // says what a click would do now
+    auto unrefuse = [this] {
+        if (refused_) setStatus({});
+    };
+    connect(&model_, &AppModel::planChanged, this, unrefuse);
+    connect(&model_, &AppModel::controlMaskChanged, this, unrefuse);
+    connect(&model_, &AppModel::timeChanged, this, unrefuse);
+    connect(&tasks_, &TaskQueue::taskFinished, this, unrefuse);
     auto edited = [this] {
         if (autoUpdate_ && everStarted_) autoTimer_.start();
     };
@@ -125,10 +135,16 @@ void PreviewRunner::setAutoUpdate(bool on) {
 }
 
 void PreviewRunner::setStatus(const QString& text, const QString& role, const QString& tip) {
+    refused_ = false;
     status_ = text;
     role_ = role;
     tip_ = tip;
     emit changed();
+}
+
+void PreviewRunner::refuse(const QString& text) {
+    setStatus(text, "warn");
+    refused_ = true;
 }
 
 NrPreviewMode PreviewRunner::ModeOf(Request r) const {
@@ -248,22 +264,29 @@ bool PreviewRunner::start(Request r) {
         return true;
     }
     if (const QString b = appBlock(nullptr); !b.isEmpty()) {
-        setStatus(b, "warn");
+        refuse(b);
         return false;
     }
     const int64_t frame = model_.store().FrameAt("source", model_.time());
     NrPreviewJob job = PrepareNrPreview(model_.previewPlan(), ModeOf(r), frame, r.seconds, env());
     if (!job.gate.ok()) {
-        setStatus(blockText(job, nullptr), "warn");
+        refuse(blockText(job, nullptr));
         return false;
     }
     if (const QString b = appBlock(&job); !b.isEmpty()) {
-        setStatus(b, "warn");
+        refuse(b);
         return false;
     }
-    if (job_ && job_->key == job.key) return true;  // this very preview is being computed
-    if (const auto hit = FindNrPreview(job)) {     // computed before: shown at once, no task
-        if (job_ && jobRequest_.kind == Kind::Segment) tasks_.cancel(taskId_);
+    if (job_ && job_->key == job.key) {  // this very preview is being computed: it is the last request again
+        pending_.reset();
+        jobSuperseded_ = false;
+        return true;
+    }
+    if (const auto hit = FindNrPreview(job)) {  // computed before: shown at once, no task
+        if (job_) {
+            jobSuperseded_ = true;  // the run in flight is an older request: it fills the cache, it is not shown (the last one wins)
+            if (jobRequest_.kind == Kind::Segment) tasks_.cancel(taskId_);
+        }
         pending_.reset();
         shownRequest_ = r;
         show(*hit, job, true, true);
@@ -296,7 +319,7 @@ bool PreviewRunner::start(Request r) {
     const int id = tasks_.enqueue(title, program, args, {{"", Tr("Превью улучшения"), job.estimatedSeconds, false}}, TaskQueue::Lane::Preview);
     if (id < 0) {
         removeWork(job.workDir);
-        setStatus(Tr("Идёт обработка — превью будет доступно после неё"), "warn");
+        refuse(Tr("Идёт обработка — превью будет доступно после неё"));
         return false;
     }
     job_ = job;
@@ -306,9 +329,10 @@ bool PreviewRunner::start(Request r) {
     jobCursor_ = model_.time();
     jobClock_.start();
     lastStart_.start();
-    preempted_ = watchdogFired_ = false;
+    preempted_ = watchdogFired_ = jobSuperseded_ = false;
     lastLine_.clear();
-    watchdog_.start(static_cast<int>(std::max(30.0, 3.0 * job.estimatedSeconds + 30.0) * 1000.0));
+    // a hang, not a slow disk: the demux before a seek gets the time of an external HDD on top
+    watchdog_.start(static_cast<int>((std::max(30.0, 3.0 * job.estimatedSeconds + 30.0) + static_cast<double>(job.scanBytes) / kNrPreviewScanRateSlow) * 1000.0));
     tick_.start();
     Log()->info("nr preview: {} {} at frame {} ({} frames, warm-up {}), key {}", ToString(job.mode), id, job.first, job.frames, job.warmup, job.key);
     onProgress(id);
@@ -320,7 +344,7 @@ void PreviewRunner::onStarted(int id) {
 }
 
 void PreviewRunner::onProgress(int id) {
-    if (id < 0 || id != taskId_ || !job_ || jobGeneration_ != model_.generation()) return;
+    if (id < 0 || id != taskId_ || !job_ || jobSuperseded_ || jobGeneration_ != model_.generation()) return;  // superseded: the shown one's status
     const TaskQueue::Progress p = tasks_.progress(id);
     const double elapsed = jobClock_.isValid() ? static_cast<double>(jobClock_.elapsed()) / 1000.0 : 0.0;
     const double left = std::max(0.0, job_->estimatedSeconds - elapsed);
@@ -349,7 +373,9 @@ void PreviewRunner::onFinished(int id, bool ok) {
     if (id != taskId_ || !job_) return;
     const NrPreviewJob job = *job_;
     const Request request = jobRequest_;
+    const bool superseded = jobSuperseded_;  // a newer request is on screen: the statuses are its own
     const double seconds = jobClock_.isValid() ? static_cast<double>(jobClock_.elapsed()) / 1000.0 : 0.0;
+    jobSuperseded_ = false;
     job_.reset();
     taskId_ = -1;
     watchdog_.stop();
@@ -368,7 +394,7 @@ void PreviewRunner::onFinished(int id, bool ok) {
         } else if (watchdogFired_) {
             pending_.reset();
             setStatus(Tr("Превью не ответило за %1 — остановлено").arg(FormatDuration(seconds)), "warn");
-        } else if (!pending_) {
+        } else if (!pending_ && !superseded) {
             setStatus(Tr("Превью отменено"));
         }
         runPending();
@@ -380,7 +406,7 @@ void PreviewRunner::onFinished(int id, bool ok) {
         removeWork(job.workDir);
         QString text = Tr("Превью не удалось — подробности в логе");
         if (const QString vfr = appBlock(&job); !vfr.isEmpty() && vfrSources_.count(job.sourceHash)) text = vfr;  // the source cannot be sought
-        setStatus(text, "warn", lastLine_);
+        if (!superseded) setStatus(text, "warn", lastLine_);
         Log()->warn("nr preview {} failed: {}", id, lastLine_.toStdString());
         runPending();
         return;
@@ -396,7 +422,7 @@ void PreviewRunner::onFinished(int id, bool ok) {
             default: why = Tr("нет сводки прогона"); break;
         }
         Log()->warn("nr preview {} discarded: {}", id, v.detail);
-        setStatus(Tr("Превью отброшено: %1").arg(why), "warn", QString::fromStdString(v.detail));
+        if (!superseded) setStatus(Tr("Превью отброшено: %1").arg(why), "warn", QString::fromStdString(v.detail));
         runPending();
         return;
     }
@@ -406,19 +432,26 @@ void PreviewRunner::onFinished(int id, bool ok) {
     } catch (const std::exception& e) {
         removeWork(job.workDir);
         Log()->error("nr preview: {}", e.what());
-        setStatus(Tr("Превью не удалось — подробности в логе"), "warn", QString::fromUtf8(e.what()));
+        if (!superseded) setStatus(Tr("Превью не удалось — подробности в логе"), "warn", QString::fromUtf8(e.what()));
         runPending();
         return;
     }
     calibrate(job, seconds, entry);
-    shownRequest_ = request;
-    const bool seek = std::abs(model_.time() - jobCursor_) < 1e-9 && !model_.playing();  // the cursor was not moved meanwhile
-    show(entry, job, false, seek);
-    Log()->info("nr preview: shown {} in {:.2f} s ({})", entry.key, seconds, entry.cacheable ? "cached" : "not cached");
-    // the clean-up keeps the entry shown and a run that started meanwhile
+    if (superseded) {
+        Log()->info("nr preview: {} computed in {:.2f} s, not shown: a newer one is", entry.key, seconds);
+    } else {
+        shownRequest_ = request;
+        uncachedTip_ = v.cacheable ? Tr("не сохранено в кэш: папку превью не удалось переименовать (занята) — подробности в логе")
+                                   : Tr("не сохранено в кэш: у CLI другая nvngx_dlssnr.dll");
+        const bool seek = std::abs(model_.time() - jobCursor_) < 1e-9 && !model_.playing();  // the cursor was not moved meanwhile
+        show(entry, job, false, seek);
+        updateStale();  // a setting changed while it ran: shown as a preview of the earlier settings
+        Log()->info("nr preview: shown {} in {:.2f} s ({})", entry.key, seconds, entry.cacheable ? "cached" : "not cached");
+    }
+    // the clean-up keeps the entry just made and the one shown; a new run waits for it (housekeeping_)
     const fs::path root = job.root;
     std::vector<fs::path> pinned{entry.dir};
-    if (job_) pinned.push_back(job_->workDir);
+    if (shownEntry_) pinned.push_back(shownEntry_->dir);
     housekeep([root, pinned] { GcNrPreviews(root, pinned); }, [] {});
     runPending();
 }
@@ -460,7 +493,7 @@ void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, b
             text += entry.warmup == 0 ? Tr(" · первый кадр клипа: без истории") : Tr(" · разгон %1 кадров (начало клипа)").arg(entry.warmup);
     }
     if (std::find(job.gate.dropped.begin(), job.gate.dropped.end(), "mv_dlss") != job.gate.dropped.end()) text += Tr(" · без векторов движения");
-    const QString tip = entry.cacheable ? QString() : Tr("не сохранено в кэш: у CLI другая nvngx_dlssnr.dll");
+    const QString tip = entry.cacheable ? QString() : uncachedTip_;
     setStatus(text, "ok", tip);
     updateUsage();
 }
@@ -501,7 +534,7 @@ void PreviewRunner::updateUsage() {
 }
 
 void PreviewRunner::housekeep(std::function<void()> work, std::function<void()> done) {
-    housekeeping_ = true;
+    ++housekeeping_;
     emit changed();
     pool_.start([this, work = std::move(work), done = std::move(done)] {
         try {
@@ -510,7 +543,7 @@ void PreviewRunner::housekeep(std::function<void()> work, std::function<void()> 
             Log()->warn("nr preview: {}", e.what());
         }
         QMetaObject::invokeMethod(this, [this, done] {
-            housekeeping_ = false;
+            --housekeeping_;
             done();
             updateUsage();
             runPending();
@@ -554,6 +587,10 @@ void PreviewRunner::cancel() {
     throttle_.stop();
     tick_.stop();  // no «осталось …» of a run going away
     if (taskId_ >= 0) tasks_.cancel(taskId_);
+}
+
+void PreviewRunner::cancelUpstream() {
+    if (upstreamTaskId_ >= 0) tasks_.cancel(upstreamTaskId_);
 }
 
 int PreviewRunner::prepareInputs() {

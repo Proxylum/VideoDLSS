@@ -14,6 +14,7 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 #include "AppModel.h"
 #include "PresetMenu.h"
@@ -103,7 +104,10 @@ NrPreviewBar::NrPreviewBar(AppModel& model, PreviewRunner& runner, QWidget* pare
     connect(history, &QAction::triggered, this, [this] { runner_.start({PreviewRunner::Kind::FrameHistory, 0}); });
     connect(clear, &QAction::triggered, this, [this] { runner_.clearCache(); });
     connect(auto_, &QCheckBox::toggled, this, [this](bool on) { runner_.setAutoUpdate(on); });
-    connect(cancel_, &QPushButton::clicked, this, [this] { runner_.cancel(); });
+    connect(cancel_, &QPushButton::clicked, this, [this] {
+        if (runner_.running()) runner_.cancel();
+        else runner_.cancelUpstream();
+    });
     connect(prepare_, &QPushButton::clicked, this, [this] { runner_.prepareInputs(); });
     connect(before_, &QComboBox::currentIndexChanged, this, [this](int) { runner_.setBefore(before_->currentData().toString()); });
     connect(save_, &QPushButton::clicked, this, [this] {
@@ -155,9 +159,10 @@ void NrPreviewBar::refresh() {
         c->setToolTip(tr("Удалить с диска все посчитанные превью этого проекта; пассы и версии не трогаются"));
     }
     bool anySegment = false;
+    std::vector<PreviewRunner::Availability> segments;
     for (QAction* a : segmentMenu_->actions()) {
         const int s = a->data().toInt();
-        const PreviewRunner::Availability seg = runner_.availability({PreviewRunner::Kind::Segment, s});
+        const PreviewRunner::Availability& seg = segments.emplace_back(runner_.availability({PreviewRunner::Kind::Segment, s}));
         a->setEnabled(seg.ok);
         anySegment = anySegment || seg.ok;
         const long long frames = std::max<long long>(1, std::llround(s * (model_.sourceInfo().fps > 0 ? model_.sourceInfo().fps : 24.0)));
@@ -186,13 +191,20 @@ void NrPreviewBar::refresh() {
     status_->setText(text);
     status_->setToolTip(tip);
     SetRole(status_, role.toUtf8().constData());
-    cancel_->setVisible(runner_.running());
-    prepare_->setVisible(!runner_.running() && frame.canPrepare);
-    prepare_->setEnabled(frame.canPrepare);
-    if (frame.canPrepare)
-        prepare_->setText(frame.upstreamSeconds > 0 ? tr("Посчитать этапы до улучшения · %1").arg(PreviewDuration(frame.upstreamSeconds)) : tr("Посчитать этапы до улучшения"));
-    prepare_->setToolTip(tr("Посчитать %1 по всему клипу (dlssvid process --no-encode): результат не перезаписывается, отметки «пересчитать» остаются")
-                             .arg(frame.upstream.join(", ")));
+    cancel_->setVisible(runner_.running() || runner_.upstreamRunning());
+    cancel_->setToolTip(runner_.running() ? tr("Отменить превью") : tr("Отменить расчёт этапов до улучшения"));
+    // the frame goes without the vectors and the scenes of a stage not reused, history and segments need them: the first that can
+    const PreviewRunner::Availability* prep = frame.canPrepare ? &frame : history.canPrepare ? &history : nullptr;
+    for (const auto& seg : segments)
+        if (!prep && seg.canPrepare) prep = &seg;
+    prepare_->setVisible(!runner_.running() && prep);
+    prepare_->setEnabled(prep != nullptr);
+    if (prep) {
+        prepare_->setText(prep->upstreamSeconds > 0 ? tr("Посчитать этапы до улучшения · %1").arg(PreviewDuration(prep->upstreamSeconds))
+                                                     : tr("Посчитать этапы до улучшения"));
+        prepare_->setToolTip(tr("Посчитать %1 по всему клипу (dlssvid process --no-encode): результат не перезаписывается, отметки «пересчитать» остаются")
+                                 .arg(prep->upstream.join(", ")));
+    }
     const bool has = shown.has_value();
     beforeLabel_->setVisible(has);
     before_->setVisible(has);

@@ -231,6 +231,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
                 label->setToolTip(QString::fromStdString(pr.hint + " (" + pr.pass + ")"));
                 controlRow_ = new ControlMaskRow(model_, f->parentWidget());
                 controlRow_->setDialogs(dialogs_);
+                controlRow_->setBusyCheck([this] { return busy_ && busy_(); });
                 f->addRow(label, controlRow_);
                 passLabels_.push_back(label);
             }

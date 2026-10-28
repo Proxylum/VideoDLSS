@@ -205,10 +205,8 @@ std::vector<ViewportSource> AppModel::viewportSources(bool dropControlMask) cons
 
 void AppModel::dropNrPreview() {
     ++generation_;
-    const bool had = nrPreview_.has_value();
-    nrPreview_.reset();
+    clearNrPreview();  // the side back to the pass, the files let go: «Папка пассов…» keeps the viewport
     emit passesContextChanged();
-    if (had) emit nrPreviewChanged();
 }
 
 std::string AppModel::nrPreviewBeforeChoice() const { return QSettings().value("card/nr/previewBefore", "nr").toString() == "sr" ? "sr" : "nr"; }

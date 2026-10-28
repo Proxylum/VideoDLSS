@@ -441,6 +441,8 @@ TEST_CASE("dlssvid nr with --color-dir reads a range from the pass by index, equ
     CHECK(rj["code"] == "vfr");
     CHECK_FALSE(std::filesystem::exists(dir / "refused" / "color_nr"));
     CHECK(run(vfr, "near", {"--start", "20", "--frames", "2"}).code == 0);  // close to the start the frames are counted, not sought
+    // sought, but before the gap: the scan stops at the run's last frame (mkv: the clip's length unknown; review of PR-10)
+    CHECK(run(vfr, "before_gap", {"--start", "55", "--frames", "2", "--warmup", "0"}).code == 0);
     CHECK(run(cfr, "cfr", {"--start", "100", "--frames", "2", "--warmup", "6"}).code == 0);  // a constant rate
     CHECK(ReadJson(dir / "cfr.json").value("ok", true));  // a success keeps its JSON (no ok: false)
 

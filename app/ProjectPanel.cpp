@@ -659,6 +659,7 @@ void ProjectPanel::processAll() {
     Project& p = model_.project();
     if (p.sourceVideo.empty()) return;
     if (model_.controlMaskBusy()) return;  // PR-8: Ctrl+Return too waits for the mask's import (its plan would read the folder being renamed)
+    if (tasks_.mainBusy()) return;         // PR-10: a second press while the run waits for a preempted preview's process to exit
     if (!model_.saveForRun()) return;
     std::vector<TaskQueue::StagePlan> plan;
     for (const StageEstimate& e : model_.outcome().stages) {
@@ -671,6 +672,7 @@ void ProjectPanel::processAll() {
     }
     model_.cancelProxies();  // the run rewrites the result while the proxy would be reading it (started again afterwards)
     const int id = tasks_.enqueue(tr("Обработка"), model_.cliPath(), model_.processArgs(), plan);
+    refresh();  // off at once: the run starts after a preempted preview's process exited (taskStarted then)
     emit processQueued(id, QString("%1 → %2").arg(QString::fromStdWString(p.sourceVideo.filename().wstring()), QString::fromStdWString(p.resultVideo.filename().wstring())));
 }
 

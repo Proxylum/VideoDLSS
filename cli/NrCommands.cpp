@@ -225,7 +225,9 @@ NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStage
         // a seek by pts lands on the frame of that time: refused where the pts do not name the frames' own indices - the passes and the
         // viewport count frames, a variable frame rate would give other frames (PR-10). A seek close ahead counts the frames instead
         if (!decoder.SeekIsSequential(r.from)) {
-            const FrameIndexScan scan = ScanFrameIndex(a.input, last >= 0 ? last : std::numeric_limits<int64_t>::max());
+            // the frames the run reads only: a gap later in the clip does not move them (mkv: the clip's length unknown, `last` -1)
+            const int64_t scanTo = a.frames > 0 ? r.first + a.frames - 1 : last;
+            const FrameIndexScan scan = ScanFrameIndex(a.input, scanTo >= 0 ? scanTo : std::numeric_limits<int64_t>::max());
             if (!scan.Consistent())
                 throw NrVfrError("nr: " + a.input + " has a variable frame rate (frame " + std::to_string(scan.firstBad) +
                                  (scan.badIndex >= 0 ? " carries the time of frame " + std::to_string(scan.badIndex) : std::string(" has no timestamp")) +

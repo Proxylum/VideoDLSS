@@ -9,6 +9,7 @@
 #include <fstream>
 #include <thread>
 
+#include "io/VideoDecoder.h"
 #include "passes/ControlMaskPass.h"
 #include "passes/Manifest.h"
 #include "passes/PassSequence.h"
@@ -287,7 +288,18 @@ NrPreviewJob PrepareNrPreview(const ProcessPlan& plan, NrPreviewMode mode, int64
             return job;
         }
     }
-    job.estimatedSeconds = env.startSeconds + static_cast<double>(job.warmup + n) * env.msPerFrame / 1000.0;
+    // through the video a range past the first frames is sought, and the CLI checks the seek first: it demuxes the clip up to the
+    // range (ScanFrameIndex, NrCommands) - seconds of a long clip before the model starts. The colour pass is read by index instead
+    if (!job.dirs.count("color_sr") && job.first - job.warmup > kSequentialSeekFrames && !env.source.empty()) {
+        std::error_code ec;
+        const uintmax_t size = fs::file_size(env.source, ec);
+        if (!ec && size > 0) {
+            const double part = clipFrames > 0 ? std::min(1.0, static_cast<double>(job.first + n + 64) / static_cast<double>(clipFrames)) : 1.0;
+            job.scanBytes = static_cast<uint64_t>(static_cast<double>(size) * part);
+        }
+    }
+    job.estimatedSeconds = env.startSeconds + static_cast<double>(job.warmup + n) * env.msPerFrame / 1000.0 +
+                           static_cast<double>(job.scanBytes) / kNrPreviewScanRate;
 
     const ToolInfo tool = ToolInfo::FromJson(nr.tool);
     job.dllSha256 = tool.dll.rfind("sha256:", 0) == 0 ? tool.dll.substr(7) : tool.dll;
@@ -535,8 +547,9 @@ void SaveNrPreviewFrame(const NrPreviewEntry& entry, int64_t frame, const fs::pa
     try {
         PassReader reader = PassReader::Open(color);
         Manifest out = reader.FrameManifest();
-        out.format = FileFormat::Png;
-        out.pixelType = PixelType::U16;
+        const bool exr = ext == ".exr";  // a pass in another format: the frame as EXR half, the name the user chose holds what it says
+        out.format = exr ? FileFormat::Exr : FileFormat::Png;
+        out.pixelType = exr ? PixelType::F16 : PixelType::U16;
         out.fingerprint.clear();
         out.filePattern = out.pass + "_%06d" + ExtensionFor(out.format, out.pixelType, out.channels.size());
         ExportPass(tmp, out, SourceFromReader(reader), FrameRange{frame, frame}, {});
