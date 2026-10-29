@@ -585,6 +585,29 @@ TEST_CASE("NR preview: a mask NR opens by name though the plan leaves it out is 
     CHECK(VerifyNrPreviewRun(b).ok());
 }
 
+TEST_CASE("NR preview: a key another instance publishes between the check and the rename - its entry is shown, the run's folder goes", "[unit][preview][regression]") {
+    const auto dir = Dir("publish_race");
+    const auto root = dir / "passes";
+    ProcessPlan plan = Plan(root);
+    const NrPreviewEnv env = Env(dir);
+    const NrPreviewJob mine = PrepareNrPreview(plan, NrPreviewMode::Frame, 5, 0, env);
+    const NrPreviewJob theirs = PrepareNrPreview(plan, NrPreviewMode::Frame, 5, 0, env);  // the same key, another work folder
+    REQUIRE(mine.key == theirs.key);
+    REQUIRE(mine.workDir != theirs.workDir);
+    FakeRun(mine);
+    FakeRun(theirs);
+    NrPreviewHooksForTests().beforeRename = [&](const NrPreviewJob&) {
+        NrPreviewHooksForTests().beforeRename = {};
+        PublishNrPreview(theirs, 1.0, true);  // the other window, after this one's check
+    };
+    const NrPreviewEntry e = PublishNrPreview(mine, 1.0, true);
+    NrPreviewHooksForTests().beforeRename = {};
+    CHECK(e.cacheable);
+    CHECK(e.dir == mine.entryDir);
+    CHECK_FALSE(fs::exists(mine.workDir));
+    CHECK(FindNrPreview(mine).has_value());
+}
+
 TEST_CASE("NR preview: over the disk budget the key is still set - a preview in the cache needs no room", "[unit][preview][regression]") {
     const auto dir = Dir("disk_cached");
     const auto root = dir / "passes";

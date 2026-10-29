@@ -417,6 +417,11 @@ NrPreviewVerdict VerifyNrPreviewRun(const NrPreviewJob& job) {
     return v;
 }
 
+NrPreviewTestHooks& NrPreviewHooksForTests() {
+    static NrPreviewTestHooks hooks;
+    return hooks;
+}
+
 NrPreviewEntry PublishNrPreview(const NrPreviewJob& job, double seconds, bool cacheable) {
     NrPreviewEntry e;
     e.dir = job.workDir;
@@ -452,6 +457,7 @@ NrPreviewEntry PublishNrPreview(const NrPreviewJob& job, double seconds, bool ca
         }
         fs::remove_all(job.entryDir, ec);  // a broken entry under this key: replaced
     }
+    if (NrPreviewHooksForTests().beforeRename) NrPreviewHooksForTests().beforeRename(job);
     for (int attempt = 0;; ++attempt) {
         ec.clear();
         fs::rename(job.workDir, job.entryDir, ec);
@@ -459,6 +465,11 @@ NrPreviewEntry PublishNrPreview(const NrPreviewJob& job, double seconds, bool ca
         std::this_thread::sleep_for(std::chrono::milliseconds(50));  // an antivirus or the indexer holds the fresh files a moment
     }
     if (ec) {
+        if (const auto found = FindNrPreview(job)) {  // another instance published the key after the check: the first one wins
+            std::error_code rm;
+            fs::remove_all(job.workDir, rm);
+            return *found;
+        }
         Log()->warn("nr preview: cannot publish {}: {} - shown from its work folder, not cached", Utf8(job.workDir), ec.message());
         e.cacheable = false;
         return e;

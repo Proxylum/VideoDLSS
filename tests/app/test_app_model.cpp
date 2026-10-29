@@ -4886,6 +4886,56 @@ TEST_CASE("NR preview: a control mask changed outside the program is refused wit
     CHECK(a.text == QString::fromUtf8("Маска управления не читается: ") + ControlMaskWhyText("changed outside dlssvid"));
 }
 
+TEST_CASE("NR preview: an auto request that changes nothing keeps the user's waiting click - the segment runs after the frame", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_auto_keeps_click");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    runner.setPointerHeldForTests([] { return false; });
+    runner.setDebounceMsForTests(100);
+    QSignalSpy started(&queue, &TaskQueue::previewStarted);
+    runner.setCommandForTests([](const NrPreviewJob&) { return std::pair<QString, QStringList>{"cmd", {"/c", "ping", "-n", "3", "127.0.0.1"}}; });
+    model.seekToSourceFrame(3);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // a frame for about 2 s
+    REQUIRE(runner.running());
+    runner.setAutoUpdate(true);
+    runner.setCommandForTests([](const NrPreviewJob&) { return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "1/1 frames"}}; });
+    REQUIRE(runner.start({PreviewRunner::Kind::Segment, 1}));  // waits behind the frame
+    model.setStageEnabled("fg", true);  // an edit outside the key: the auto request is the running frame again
+    model.setStageEnabled("fg", false);
+    Pump([&] { return started.count() >= 2; }, 20000);
+    CHECK(started.count() == 2);  // the segment clicked ran
+    runner.setAutoUpdate(false);
+    Pump([&] { return !runner.running(); }, 20000);
+}
+
+TEST_CASE("NR preview: a clean-up's report is of the project it was for", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_clear_switch");
+    AppModel& model = *m.model;
+    const auto e = m.FakeEntry("abcdef012345", 0, 0);
+    std::ofstream(e / "preview.json") << nlohmann::json{{"format", "dlssvid-nr-preview"}, {"key", "abcdef012345"}, {"bytes", 100}}.dump();
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    REQUIRE(runner.usage().entries == 1);
+    std::atomic<bool> release{false};
+    runner.setPoolGateForTests([&] {
+        while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    });
+    QSignalSpy messages(&model, &AppModel::message);
+    runner.clearCache();
+    REQUIRE(runner.housekeeping());
+    model.openProject(Q(m.dir / "proj.dlssvid.json"));  // another project (the same file again) while the clean-up goes
+    release = true;
+    Pump([&] { return !runner.housekeeping(); }, 20000);
+    runner.setPoolGateForTests({});
+    CHECK_FALSE(runner.statusText().contains(QString::fromUtf8("Превью очищено")));  // not this project's card
+    bool reported = false;  // the window's status bar reports the action the user took
+    for (const auto& args : messages) reported = reported || args.at(0).toString().startsWith(QString::fromUtf8("Превью очищено"));
+    CHECK(reported);
+}
+
 TEST_CASE("NR preview: a request made during a save while a segment runs is taken up when the save ends - a cached frame shows and the segment goes",
           "[app][preview][gpu][regression]") {
     App();

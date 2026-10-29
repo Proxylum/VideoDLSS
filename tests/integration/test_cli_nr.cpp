@@ -440,7 +440,8 @@ TEST_CASE("dlssvid nr with --color-dir reads a range from the pass by index, equ
     CHECK(rj["ok"] == false);
     CHECK(rj["code"] == "vfr");
     CHECK_FALSE(std::filesystem::exists(dir / "refused" / "color_nr"));
-    CHECK(run(vfr, "near", {"--start", "20", "--frames", "2"}).code == 0);  // close to the start the frames are counted, not sought
+    // close to the start the frames are counted, not sought: a range from 40 across the gap at 61 is not refused (review of PR-10)
+    CHECK(run(vfr, "near", {"--start", "40", "--frames", "30"}).code == 0);
     // sought, but before the gap: the scan stops at the run's last frame (mkv: the clip's length unknown; review of PR-10)
     CHECK(run(vfr, "before_gap", {"--start", "55", "--frames", "2", "--warmup", "0"}).code == 0);
     CHECK(run(cfr, "cfr", {"--start", "100", "--frames", "2", "--warmup", "6"}).code == 0);  // a constant rate
@@ -506,8 +507,6 @@ TEST_CASE("dlssvid nr --source-hash is taken as given; a malformed one is refuse
     }
 }
 
-// TASK-0047 (spec §2h): --params-file holds the project's nr keys; the options given on the command line win, even at their
-// default value; the file is validated with the flags by the schema, and a key the schema does not have is refused.
 TEST_CASE("dlssvid nr --json reports a failure whose text is not UTF-8 (regression: the summary was left empty)", "[integration][cli][nr][regression]") {
     const auto dir = Dir("nr_json_bytes");
     ClipSpec spec;
@@ -530,6 +529,8 @@ TEST_CASE("dlssvid nr --json reports a failure whose text is not UTF-8 (regressi
     CHECK(j["error"].get<std::string>().find("not valid JSON") != std::string::npos);  // the reason, its byte replaced
 }
 
+// TASK-0047 (spec §2h): --params-file holds the project's nr keys; the options given on the command line win, even at their
+// default value; the file is validated with the flags by the schema, and a key the schema does not have is refused.
 TEST_CASE("dlssvid nr --params-file; explicit flags override the file", "[integration][cli][nr]") {
     ClipSpec spec;
     spec.frames = 2;

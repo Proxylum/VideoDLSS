@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -83,6 +84,13 @@ struct NrPreviewJob {
 // The job of a preview at frame `first` (segment: `seconds` long). A gate that refuses comes back in job.gate with nothing else set -
 // but Disk: the key is set (a preview in the cache needs no room). Writes nothing: PreviewRunner creates workDir and the params file (WriteNrPreviewParams) before it starts the command.
 NrPreviewJob PrepareNrPreview(const ProcessPlan& plan, NrPreviewMode mode, int64_t first, double seconds, const NrPreviewEnv& env);
+// Test seam of PublishNrPreview: called before it renames the work folder into <key> (another instance can publish first). Empty in
+// the product.
+struct NrPreviewTestHooks {
+    std::function<void(const NrPreviewJob&)> beforeRename;
+};
+NrPreviewTestHooks& NrPreviewHooksForTests();
+
 // workDir/params.json from job.params (creates workDir).
 void WriteNrPreviewParams(const NrPreviewJob& job);
 

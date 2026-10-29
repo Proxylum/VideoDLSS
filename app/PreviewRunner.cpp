@@ -293,9 +293,11 @@ bool PreviewRunner::start(Request r) {
     if (r.kind != Kind::Segment) lastFrameKind_ = r;
     everStarted_ = true;
     model_.refreshPlanIfPending();  // an edit 250 ms ago: the preview is of the settings shown
-    if (housekeeping_) {            // a clean-up of the cache is moving folders: right after it
-        pending_ = r;
-        pendingAuto_ = autoStart_;
+    if (housekeeping_) {  // a clean-up of the cache is moving folders: right after it (an auto request does not replace a click)
+        if (!autoStart_ || !pending_ || pendingAuto_) {
+            pending_ = r;
+            pendingAuto_ = autoStart_;
+        }
         return true;
     }
     if (const QString b = appBlock(nullptr); !b.isEmpty()) {
@@ -313,15 +315,17 @@ bool PreviewRunner::start(Request r) {
         return false;
     }
     const bool dying = job_ && tasks_.cancelled(taskId_);  // cancelled, its process not gone yet: it serves nothing
+    // an auto request that changes nothing leaves a click waiting behind the run (design §3.3 step 4: nothing to do)
+    const bool keepClick = autoStart_ && pending_ && !pendingAuto_;
     if (job_ && !dying && job_->key == job.key) {  // this very preview is being computed: it is the last request again
-        pending_.reset();
+        if (!keepClick) pending_.reset();
         jobSuperseded_ = false;
         return true;
     }
     if (autoStart_ && shownJob_ && shownEntry_ && !shownEntry_->cacheable && model_.nrPreview() && shownJob_->key == job.key) {
         if (job_ && !dying && PrepareNrPreview(model_.previewPlan(), job_->mode, job_->first, jobRequest_.seconds, env()).key == job_->key)
             return true;  // an edit that changed neither the preview shown nor the run in flight: both stay
-        pending_.reset();  // the preview on screen is of this key, only not in the cache: an edit outside the key changes nothing
+        if (!keepClick) pending_.reset();  // the preview on screen is of this key, only not in the cache: an edit outside it changes nothing
         if (job_) {
             jobSuperseded_ = true;
             if (jobRequest_.kind == Kind::Segment && !dying) tasks_.cancel(taskId_);
@@ -338,7 +342,7 @@ bool PreviewRunner::start(Request r) {
             jobSuperseded_ = true;  // the run in flight is an older request: it fills the cache, it is not shown (the last one wins)
             if (jobRequest_.kind == Kind::Segment && !dying) tasks_.cancel(taskId_);
         }
-        pending_.reset();
+        if (!(onScreen && keepClick)) pending_.reset();
         shownRequest_ = r;
         if (onScreen) {  // an edit that left the key: nothing to show anew
             if (job_) setStatus(shownStatus_, "ok", shownTip_);                       // the superseded run's progress had the status
@@ -740,11 +744,12 @@ void PreviewRunner::clearCache() {
     std::vector<fs::path> pinned;
     if (job_) pinned.push_back(job_->workDir);
     auto report = std::make_shared<NrPreviewGcReport>();
+    const uint64_t generation = model_.generation();
     housekeep([root, pinned, report] { *report = RemoveNrPreviews(root, pinned); },
-              [this, report] {
+              [this, report, generation] {
                   const QString text = report->failed.empty() ? Tr("Превью очищено: %1").arg(HumanBytes(report->bytes))
                                                               : Tr("Превью очищено: %1; часть файлов занята — удалится позже").arg(HumanBytes(report->bytes));
-                  setStatus(text);
+                  if (generation == model_.generation()) setStatus(text);  // another project or root since: not its card's status
                   emit model_.message(text);  // the window's status bar (design §5.5): the card may be out of view
               });
 }
