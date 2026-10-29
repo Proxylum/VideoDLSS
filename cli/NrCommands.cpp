@@ -194,6 +194,11 @@ void GuardProcessedPass(const NrStageOptions& o, const char* what) {
               "--mv-dir / --masks-dir)");
 }
 
+namespace {
+// --json: reports carry paths and messages that may not be UTF-8 (ANSI paths, localized system errors) - replaced, not thrown
+std::string NrReportJson(const nlohmann::json& j) { return j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace); }
+}  // namespace
+
 NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStageOptions& o, bool fromPass) {
     NrRange r;
     r.first = a.start;
@@ -388,7 +393,7 @@ int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
             j["recreations"] = recreations;
             j["recreations_stop"] = recreateStop;
         }
-        std::ofstream(a.json) << j.dump(2) << "\n";
+        std::ofstream(a.json) << NrReportJson(j) << "\n";
     }
     return failed ? 1 : 0;
 }
@@ -537,7 +542,7 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
                               {"scene_cut_count", r.stats.sceneCutCount},
                               {"mv_scale", r.stats.mvScaleX > 0 ? nlohmann::json::array({r.stats.mvScaleX, r.stats.mvScaleY}) : nlohmann::json(nullptr)}}}};
         if (range.Ranged()) j["range"] = {{"first", r.stats.firstWritten}, {"last", r.stats.lastWritten}, {"warmup", r.stats.warmup}};
-        std::ofstream(a.json) << j.dump(2) << "\n";
+        std::ofstream(a.json) << NrReportJson(j) << "\n";
     }
     return 0;
 }
@@ -666,7 +671,8 @@ int NrCommands::Dispatch() {
             // the GUI's preview reads why a run failed: the text, and a code it acts on («vfr»: no seek into this source)
             if (!na_.json.empty() && !na_.check) {
                 const nlohmann::json j = {{"ok", false}, {"error", e.what()}, {"code", dynamic_cast<const NrVfrError*>(&e) ? "vfr" : ""}};
-                std::ofstream(na_.json) << j.dump(2) << "\n";
+                const std::string text = NrReportJson(j);  // before the file is truncated
+                std::ofstream(na_.json) << text << "\n";
             }
             throw;
         }

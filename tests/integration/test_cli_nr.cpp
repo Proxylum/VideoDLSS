@@ -508,6 +508,28 @@ TEST_CASE("dlssvid nr --source-hash is taken as given; a malformed one is refuse
 
 // TASK-0047 (spec §2h): --params-file holds the project's nr keys; the options given on the command line win, even at their
 // default value; the file is validated with the flags by the schema, and a key the schema does not have is refused.
+TEST_CASE("dlssvid nr --json reports a failure whose text is not UTF-8 (regression: the summary was left empty)", "[integration][cli][nr][regression]") {
+    const auto dir = Dir("nr_json_bytes");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    {  // a byte that is no UTF-8: the parser's message carries it, as an ANSI path or a localized system error would
+        std::ofstream f(dir / "bad.json", std::ios::binary);
+        f << "{\"intensity\": \"\xC0\xC1\"}";
+    }
+    const CliResult r = RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "out").string(), "--no-auto", "--params-file",
+                                (dir / "bad.json").string(), "--json", (dir / "out.json").string()});
+    INFO(r.out);
+    CHECK(r.code != 0);
+    const nlohmann::json j = ReadJson(dir / "out.json");
+    REQUIRE(j.is_object());
+    CHECK(j["ok"] == false);
+    CHECK(j["code"] == "");
+    CHECK(j["error"].get<std::string>().find("not valid JSON") != std::string::npos);  // the reason, its byte replaced
+}
+
 TEST_CASE("dlssvid nr --params-file; explicit flags override the file", "[integration][cli][nr]") {
     ClipSpec spec;
     spec.frames = 2;

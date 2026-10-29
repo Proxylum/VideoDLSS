@@ -742,8 +742,10 @@ void PreviewRunner::clearCache() {
     auto report = std::make_shared<NrPreviewGcReport>();
     housekeep([root, pinned, report] { *report = RemoveNrPreviews(root, pinned); },
               [this, report] {
-                  setStatus(report->failed.empty() ? Tr("Превью очищено: %1").arg(HumanBytes(report->bytes))
-                                                   : Tr("Превью очищено: %1; часть файлов занята — удалится позже").arg(HumanBytes(report->bytes)));
+                  const QString text = report->failed.empty() ? Tr("Превью очищено: %1").arg(HumanBytes(report->bytes))
+                                                              : Tr("Превью очищено: %1; часть файлов занята — удалится позже").arg(HumanBytes(report->bytes));
+                  setStatus(text);
+                  emit model_.message(text);  // the window's status bar (design §5.5): the card may be out of view
               });
 }
 

@@ -5075,7 +5075,8 @@ TEST_CASE("NR preview: clearing lets the viewport go first; GC keeps the shown e
     REQUIRE(busyAfterFirst);
     CHECK(*busyAfterFirst);
     CHECK(std::filesystem::exists(m.dir / "save2.png"));
-    // «Очистить превью»: off the viewport first, then every entry from the disk
+    // «Очистить превью»: off the viewport first, then every entry from the disk; the window's status bar says it too
+    QSignalSpy messages(&model, &AppModel::message);
     runner.clearCache();
     CHECK_FALSE(model.nrPreview());
     CHECK_FALSE(model.store().FindSource(kNrPreviewSource));
@@ -5083,6 +5084,8 @@ TEST_CASE("NR preview: clearing lets the viewport go first; GC keeps the shown e
     CHECK_FALSE(std::filesystem::exists(shown));
     CHECK(runner.usage().entries == 0);
     CHECK(runner.statusText().startsWith(QString::fromUtf8("Превью очищено")));
+    REQUIRE_FALSE(messages.isEmpty());
+    CHECK(messages.last().at(0).toString().startsWith(QString::fromUtf8("Превью очищено")));
 }
 
 TEST_CASE("NrPreviewCellSuffix and HumanSourceName name the preview, its history and its missing frames", "[app][preview]") {
