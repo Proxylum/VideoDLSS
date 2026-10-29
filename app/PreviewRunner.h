@@ -50,6 +50,7 @@ public:
         uint64_t bytes = 0;          // its size on disk
         bool cached = false;         // computed already: shows at once
         int64_t frame = 0;           // the source frame at the cursor
+        int64_t frames = 0;          // the frames it writes (a segment: cut at the clip's end)
     };
 
     PreviewRunner(AppModel& model, TaskQueue& tasks, QObject* parent = nullptr);

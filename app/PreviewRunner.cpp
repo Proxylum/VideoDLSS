@@ -9,6 +9,7 @@
 #include <fstream>
 #include <memory>
 
+#include "ControlMaskText.h"
 #include "SourceNames.h"
 #include "TaskQueue.h"
 #include "io/VideoDecoder.h"
@@ -214,7 +215,7 @@ QString PreviewRunner::blockText(const NrPreviewJob& job, Availability* a) const
         case NrPreviewBlock::NrOff: return Tr("Стадия «Улучшение» выключена");
         case NrPreviewBlock::NrError: return Tr("Превью недоступно: %1").arg(QString::fromStdString(g.detail));
         case NrPreviewBlock::NoDll: return Tr("Нет nvngx_dlssnr.dll — превью недоступно (см. строку готовности на стартовом экране)");
-        case NrPreviewBlock::ControlMask: return Tr("Маска управления не читается: %1").arg(QString::fromStdString(g.detail));
+        case NrPreviewBlock::ControlMask: return Tr("Маска управления не читается: %1").arg(ControlMaskWhyText(g.detail));
         case NrPreviewBlock::PastEnd: return Tr("Курсор за концом клипа");
         case NrPreviewBlock::Disk: return NrPreviewDiskText(job.estimatedBytes, freeBytes());
         case NrPreviewBlock::Upstream:
@@ -271,6 +272,7 @@ PreviewRunner::Availability PreviewRunner::availability(Request r) const {
     const NrPreviewJob job = PrepareNrPreview(model_.previewPlan(), ModeOf(r), a.frame, r.seconds, env());
     a.seconds = job.estimatedSeconds;
     a.bytes = job.estimatedBytes;
+    a.frames = job.frames;
     if (!job.gate.ok() && !(job.gate.why == NrPreviewBlock::Disk && FindNrPreview(job))) {  // a cached one needs no room
         a.text = blockText(job, &a);
         a.role = "warn";
@@ -317,6 +319,8 @@ bool PreviewRunner::start(Request r) {
         return true;
     }
     if (autoStart_ && shownJob_ && shownEntry_ && !shownEntry_->cacheable && model_.nrPreview() && shownJob_->key == job.key) {
+        if (job_ && !dying && PrepareNrPreview(model_.previewPlan(), job_->mode, job_->first, jobRequest_.seconds, env()).key == job_->key)
+            return true;  // an edit that changed neither the preview shown nor the run in flight: both stay
         pending_.reset();  // the preview on screen is of this key, only not in the cache: an edit outside the key changes nothing
         if (job_) {
             jobSuperseded_ = true;
@@ -547,7 +551,12 @@ void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, b
     QString text;
     const QString took = cached ? Tr("из кэша") : Took(entry.seconds);
     if (job.mode == NrPreviewMode::Segment) {
-        text = Tr("Показано превью отрезка %1–%2 (%3 с) · %4").arg(entry.first).arg(entry.last).arg(shownRequest_.seconds).arg(took);
+        const double fps = model_.sourceInfo().fps > 0 ? model_.sourceInfo().fps : 24.0;
+        const int64_t frames = entry.last - entry.first + 1;
+        const QString length = frames < std::llround(shownRequest_.seconds * fps)  // the clip ended first
+                                   ? Tr("%1 с, до конца клипа").arg(QLocale(QLocale::Russian).toString(static_cast<double>(frames) / fps, 'f', 1))
+                                   : Tr("%1 с").arg(shownRequest_.seconds);
+        text = Tr("Показано превью отрезка %1–%2 (%3) · %4").arg(entry.first).arg(entry.last).arg(length, took);
     } else {
         text = Tr("Показано превью кадра %1 · %2 · %3").arg(entry.first).arg(job.mode == NrPreviewMode::Frame ? Tr("без истории") : Tr("с историей"), took);
     }

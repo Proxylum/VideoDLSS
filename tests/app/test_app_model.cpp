@@ -4771,7 +4771,19 @@ TEST_CASE("NR preview: a preview the cache could not take says why - in the tool
     Pump([] { return false; }, 1000);
     CHECK(started.isEmpty());
     CHECK(shownAgain.isEmpty());
+    // a segment running meanwhile: the same edit leaves it alone too
+    runner.setCommandForTests(LongCommand);
+    REQUIRE(runner.start({PreviewRunner::Kind::Segment, 1}));
+    REQUIRE(runner.running());
+    const int segment = runner.runningTaskId();
+    model.setStageEnabled("fg", true);
+    model.setStageEnabled("fg", false);
+    Pump([] { return false; }, 1000);
+    CHECK(runner.running());
+    CHECK_FALSE(queue.cancelled(segment));
     runner.setAutoUpdate(false);
+    runner.cancel();
+    Pump([&] { return !queue.previewBusy(); }, 20000);
 }
 
 TEST_CASE("NR preview: a request made after the preempting processing was dropped, while the killed preview exits, runs", "[app][preview][regression]") {
@@ -4844,6 +4856,34 @@ TEST_CASE("NR preview: a segment at the clip's start says its warm-up is short",
     REQUIRE(model.nrPreview());
     CHECK(model.nrPreview()->warmup == 2);
     CHECK(runner.statusText().contains(QString::fromUtf8("разгон 2 кадров (начало клипа)")));
+    // 1 s asked, the 12-frame clip ends first: the frames computed, not the seconds asked
+    CHECK(model.nrPreview()->last == 11);
+    CHECK(runner.statusText().contains(QString::fromUtf8("с, до конца клипа)")));
+    NrPreviewBar bar(model, runner);
+    QAction* oneSecond = nullptr;
+    for (QMenu* menu : bar.findChildren<QMenu*>())  // the segment menu: its items carry the seconds
+        for (QAction* a : menu->actions())
+            if (a->data().toInt() == 1 && a->text() == QString::fromUtf8("1 с")) oneSecond = a;
+    REQUIRE(oneSecond);
+    CHECK(oneSecond->toolTip().startsWith(QString::fromUtf8("10 кадров от курсора")));
+}
+
+TEST_CASE("NR preview: a control mask changed outside the program is refused with the mask row's Russian reason", "[app][preview][mask][regression]") {
+    App();
+    PreviewProject m("preview_mask_why");
+    AppModel& model = *m.model;
+    QSignalSpy done(&model, &AppModel::controlMaskFinished);
+    model.importControlMask(MaskPng(m.dir / "mask.png", 16, 8, false));
+    REQUIRE((!done.isEmpty() || done.wait(20000)));
+    REQUIRE(done.last().at(0).toBool());
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    REQUIRE(runner.availability({PreviewRunner::Kind::Frame, 0}).ok);
+    const auto dir = m.root() / kControlMaskPass;
+    MaskPng(dir / Manifest::Load(dir).FrameFileName(0), 16, 8, false, 12345);  // the image edited by hand: another content
+    const PreviewRunner::Availability a = runner.availability({PreviewRunner::Kind::Frame, 0});
+    CHECK_FALSE(a.ok);
+    CHECK(a.text == QString::fromUtf8("Маска управления не читается: ") + ControlMaskWhyText("changed outside dlssvid"));
 }
 
 TEST_CASE("NR preview: a request made during a save while a segment runs is taken up when the save ends - a cached frame shows and the segment goes",

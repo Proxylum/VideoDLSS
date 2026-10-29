@@ -167,7 +167,7 @@ void NrPreviewBar::refresh() {
         const PreviewRunner::Availability& seg = segments.emplace_back(runner_.availability({PreviewRunner::Kind::Segment, s}));
         a->setEnabled(seg.ok);
         anySegment = anySegment || seg.ok;
-        const long long frames = std::max<long long>(1, std::llround(s * (model_.sourceInfo().fps > 0 ? model_.sourceInfo().fps : 24.0)));
+        const long long frames = seg.frames > 0 ? seg.frames : std::max<long long>(1, std::llround(s * (model_.sourceInfo().fps > 0 ? model_.sourceInfo().fps : 24.0)));
         if (seg.ok)
             a->setToolTip(tr("%1 кадров от курсора и 6 кадров разгона: видно мерцание и устойчивость. %2, на диске ≈ %3")
                               .arg(frames)
