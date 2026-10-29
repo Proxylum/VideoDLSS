@@ -3927,6 +3927,7 @@ TEST_CASE("AppModel shows an NR preview as color_nr@preview against the current 
     QSignalSpy changed(&model, &AppModel::nrPreviewChanged);
     QSignalSpy sources(&model, &AppModel::sourcesChanged);
     const bool dirtyBefore = model.dirty();
+    const auto exportBefore = model.exportablePasses();
     model.showNrPreview(m.Shown(entry, 5, 6), true);
     CHECK(changed.count() == 1);
     CHECK(sources.isEmpty());  // not a reload of the passes: the versions panel is not rebuilt
@@ -3944,7 +3945,7 @@ TEST_CASE("AppModel shows an NR preview as color_nr@preview against the current 
         if (c.source == "color_nr")
             for (const auto& v : c.versions) listed = listed || v.name == kNrPreviewSource;
     CHECK(listed);
-    for (const auto& p : model.exportablePasses()) CHECK(p.find('@') == std::string::npos);
+    CHECK(model.exportablePasses() == exportBefore);  // the preview is no pass to export: no second color_nr
     model.setNrPreviewBefore("sr");
     CHECK(model.state().CompareSide(false)->source == "color_sr");
     model.setNrPreviewBefore("nr");
@@ -4758,6 +4759,91 @@ TEST_CASE("NR preview: a preview the cache could not take says why - in the tool
     INFO(runner.statusText().toStdString() << " | " << runner.statusTip().toStdString());
     CHECK(runner.statusTip().contains(QString::fromUtf8("папку превью не удалось переименовать")));  // not «другая nvngx_dlssnr.dll»
     CHECK(runner.statusText().contains(QString::fromUtf8("не сохранено в кэш")));
+    // auto update after an edit outside its key: the uncached preview on screen is neither computed nor shown again
+    runner.setPointerHeldForTests([] { return false; });
+    runner.setDebounceMsForTests(100);
+    runner.setAutoUpdate(true);
+    Pump([] { return false; }, 1600);
+    QSignalSpy started(&queue, &TaskQueue::previewStarted);
+    QSignalSpy shownAgain(&model, &AppModel::nrPreviewChanged);
+    model.setStageEnabled("fg", true);
+    model.setStageEnabled("fg", false);
+    Pump([] { return false; }, 1000);
+    CHECK(started.isEmpty());
+    CHECK(shownAgain.isEmpty());
+    runner.setAutoUpdate(false);
+}
+
+TEST_CASE("NR preview: a request made after the preempting processing was dropped, while the killed preview exits, runs", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_preempt_dropped");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    QSignalSpy started(&queue, &TaskQueue::previewStarted);
+    runner.setCommandForTests(LongCommand);
+    model.seekToSourceFrame(2);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    REQUIRE(runner.running());
+    const int mainId = queue.enqueue("main", "cmd", {"/c", "echo", "x"});  // preempts: the preview is killed, its exit comes later
+    queue.cancel(mainId);                                                    // the processing dropped before it started
+    REQUIRE_FALSE(queue.mainBusy());
+    runner.setCommandForTests([](const NrPreviewJob&) { return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "1/1 frames"}}; });
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));  // the killed run has not exited yet: it waits
+    Pump([&] { return started.count() >= 2 && !runner.running(); }, 20000);
+    CHECK(started.count() == 2);
+}
+
+TEST_CASE("NR preview: an auto request parked by a save stays one - a running segment and the preview on screen stay", "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_auto_parked");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    runner.setPointerHeldForTests([] { return false; });
+    runner.setDebounceMsForTests(100);
+    model.seekToSourceFrame(3);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    runner.setAutoUpdate(true);
+    Pump([] { return false; }, 1600);
+    runner.setCommandForTests(LongCommand);
+    REQUIRE(runner.start({PreviewRunner::Kind::Segment, 1}));
+    REQUIRE(runner.running());
+    const int segment = runner.runningTaskId();
+    std::atomic<bool> release{false};
+    runner.setPoolGateForTests([&] {
+        while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    });
+    runner.saveFrame(Q(m.dir / "saved.png"));  // the save waits on the gate: the clean-up goes on
+    REQUIRE(runner.housekeeping());
+    model.setStageEnabled("fg", true);  // an edit outside the keys while the save goes: the auto request is parked
+    model.setStageEnabled("fg", false);
+    Pump([] { return false; }, 400);
+    release = true;
+    Pump([&] { return !runner.housekeeping(); }, 20000);
+    Pump([] { return false; }, 300);
+    runner.setPoolGateForTests({});
+    CHECK(runner.running());
+    CHECK_FALSE(queue.cancelled(segment));
+    runner.setAutoUpdate(false);
+    runner.cancel();
+    Pump([&] { return !queue.previewBusy(); }, 20000);
+}
+
+TEST_CASE("NR preview: a segment at the clip's start says its warm-up is short", "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_segment_start");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.seekToSourceFrame(2);
+    REQUIRE(runner.start({PreviewRunner::Kind::Segment, 1}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running(); }, 60000);
+    REQUIRE(model.nrPreview());
+    CHECK(model.nrPreview()->warmup == 2);
+    CHECK(runner.statusText().contains(QString::fromUtf8("разгон 2 кадров (начало клипа)")));
 }
 
 TEST_CASE("NR preview: a request made during a save while a segment runs is taken up when the save ends - a cached frame shows and the segment goes",

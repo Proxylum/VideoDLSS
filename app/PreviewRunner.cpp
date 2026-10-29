@@ -293,6 +293,7 @@ bool PreviewRunner::start(Request r) {
     model_.refreshPlanIfPending();  // an edit 250 ms ago: the preview is of the settings shown
     if (housekeeping_) {            // a clean-up of the cache is moving folders: right after it
         pending_ = r;
+        pendingAuto_ = autoStart_;
         return true;
     }
     if (const QString b = appBlock(nullptr); !b.isEmpty()) {
@@ -313,6 +314,15 @@ bool PreviewRunner::start(Request r) {
     if (job_ && !dying && job_->key == job.key) {  // this very preview is being computed: it is the last request again
         pending_.reset();
         jobSuperseded_ = false;
+        return true;
+    }
+    if (autoStart_ && shownJob_ && shownEntry_ && !shownEntry_->cacheable && model_.nrPreview() && shownJob_->key == job.key) {
+        pending_.reset();  // the preview on screen is of this key, only not in the cache: an edit outside the key changes nothing
+        if (job_) {
+            jobSuperseded_ = true;
+            if (jobRequest_.kind == Kind::Segment && !dying) tasks_.cancel(taskId_);
+            setStatus(shownStatus_, "ok", shownTip_);
+        }
         return true;
     }
     if (const auto hit = FindNrPreview(job)) {  // computed before: shown at once, no task
@@ -339,11 +349,13 @@ bool PreviewRunner::start(Request r) {
     }
     if (job_) {
         pending_ = r;  // the last request wins
+        pendingAuto_ = autoStart_;
         if (jobRequest_.kind == Kind::Segment && !dying) tasks_.cancel(taskId_);  // a segment is long: it goes; a frame finishes (NGX's create)
         return true;
     }
     if (lastStart_.isValid() && lastStart_.elapsed() < kMinStartGapMs) {
         pending_ = r;
+        pendingAuto_ = autoStart_;
         throttle_.start(static_cast<int>(kMinStartGapMs - lastStart_.elapsed()));
         return true;
     }
@@ -436,9 +448,8 @@ void PreviewRunner::onFinished(int id, bool ok) {
     }
     if (tasks_.cancelled(id)) {
         removeWork(job.workDir);
-        if (preempted_) {
-            pending_.reset();
-            if (!superseded) setStatus(Tr("Превью отменено: началась обработка"));
+        if (preempted_) {  // the requests before the preemption went with it (previewPreempted); one made since runs below
+            if (!superseded && !pending_) setStatus(Tr("Превью отменено: началась обработка"));
         } else if (watchdogFired_) {
             if (!superseded) setStatus(Tr("Превью не ответило за %1 — остановлено").arg(FormatDuration(seconds)), "warn");
             else Log()->warn("nr preview {}: stopped after {}", id, FormatDuration(seconds).toStdString());
@@ -513,7 +524,9 @@ void PreviewRunner::runPending() {
     if (throttle_.isActive()) return;
     const Request r = *pending_;
     pending_.reset();
+    autoStart_ = pendingAuto_;  // an auto request waited: it stays one
     start(r);
+    autoStart_ = false;
 }
 
 void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, bool cached, bool seek) {
@@ -537,9 +550,10 @@ void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, b
         text = Tr("Показано превью отрезка %1–%2 (%3 с) · %4").arg(entry.first).arg(entry.last).arg(shownRequest_.seconds).arg(took);
     } else {
         text = Tr("Показано превью кадра %1 · %2 · %3").arg(entry.first).arg(job.mode == NrPreviewMode::Frame ? Tr("без истории") : Tr("с историей"), took);
-        if (job.mode == NrPreviewMode::History && entry.warmup < kNrPreviewHistoryFrames)
-            text += entry.warmup == 0 ? Tr(" · первый кадр клипа: без истории") : Tr(" · разгон %1 кадров (начало клипа)").arg(entry.warmup);
     }
+    if (job.mode != NrPreviewMode::Frame && entry.warmup < kNrPreviewHistoryFrames)  // the history and a segment: the clip's start
+        text += entry.warmup == 0 && job.mode == NrPreviewMode::History ? Tr(" · первый кадр клипа: без истории")
+                                                                         : Tr(" · разгон %1 кадров (начало клипа)").arg(entry.warmup);
     text += NrPreviewDroppedText(job.gate.dropped);
     const QString tip = entry.cacheable ? QString() : uncachedTip_;
     if (!entry.cacheable && model_.engineerMode()) text += Tr(" · ") + tip;  // the engineer mode says it in the line (design §5)
@@ -579,6 +593,7 @@ void PreviewRunner::housekeep(std::function<void()> work, std::function<void()> 
     ++housekeeping_;
     emit changed();
     pool_.start([this, work = std::move(work), done = std::move(done)] {
+        if (poolGate_) poolGate_();
         try {
             work();
         } catch (const std::exception& e) {
@@ -591,7 +606,9 @@ void PreviewRunner::housekeep(std::function<void()> work, std::function<void()> 
             if (!housekeeping_ && pending_ && job_) {  // parked while a run goes: as asked now (a hit shows, a segment goes)
                 const Request r = *pending_;
                 pending_.reset();
+                autoStart_ = pendingAuto_;  // an auto request stays one: the preview on screen and the run in flight stay
                 start(r);
+                autoStart_ = false;
             } else {
                 runPending();
             }

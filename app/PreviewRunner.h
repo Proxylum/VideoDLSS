@@ -88,6 +88,7 @@ public:
     void setFreeSpaceForTests(std::function<uint64_t()> free) { freeSpace_ = std::move(free); }
     void setWatchdogMsForTests(int ms) { watchdogMsForTests_ = ms; }
     void setOnWatchdogForTests(std::function<void()> f) { onWatchdog_ = std::move(f); }  // right after it cancelled the run
+    void setPoolGateForTests(std::function<void()> f) { poolGate_ = std::move(f); }  // on the pool's thread before each clean-up
     // MainWindow::onTaskFinished first: the task of «Посчитать этапы до улучшения» - the sources reloaded, the preview after it; true
     // when it was that task (then no force mark is cleared: none was passed, they stay for «Обработать»)
     bool handleTaskFinished(int id, bool ok);
@@ -154,6 +155,7 @@ private:
     QString status_, tip_, role_ = "hint";
     bool refused_ = false;
     bool autoStart_ = false;  // start() from «обновлять при изменении»: the preview already on screen is not shown again
+    bool pendingAuto_ = false;  // pending_ was parked by an auto start (a clean-up meanwhile): replayed as one
     NrPreviewUsage usage_;
     QThreadPool pool_;  // one thread: GC, «Очистить», «Сохранить кадр»
     int housekeeping_ = 0;  // its jobs queued or running: a new run waits for all of them (a GC removes our work folders not pinned)
@@ -162,6 +164,7 @@ private:
     std::function<uint64_t()> freeSpace_;
     int watchdogMsForTests_ = 0;
     std::function<void()> onWatchdog_;
+    std::function<void()> poolGate_;
 };
 
 // What one preview tells of the next ones' estimate: {start of the process up to the first model frame, s; a model frame, ms}. `run` is
