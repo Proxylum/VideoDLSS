@@ -473,12 +473,14 @@ void PreviewRunner::onFinished(int id, bool ok) {
         if (run.is_object() && run.value("code", std::string()) == "vfr") vfrSources_.insert(job.sourceHash);
         removeWork(job.workDir);
         QString text = Tr("Превью не удалось — подробности в логе");
-        if (const QString vfr = appBlock(&job); !vfr.isEmpty() && vfrSources_.count(job.sourceHash)) text = vfr;  // the source cannot be sought
+        const QString vfr = appBlock(&job);
+        const bool cannotSeek = !vfr.isEmpty() && vfrSources_.count(job.sourceHash);  // the source cannot be sought
+        if (cannotSeek) text = vfr;
         const bool pastEnd = run.is_object() && run.value("code", std::string()) == "past_end";  // the length was estimated
         if (pastEnd) text = Tr("Курсор за концом клипа");
         if (!superseded) {
             setStatus(text, "warn", lastLine_);
-            refused_ = pastEnd;  // as the gate's refusal: the cursor moved back into the clip lifts it
+            refused_ = pastEnd || cannotSeek;  // as the gate's and the app's refusals: the cursor or the plan lifts it
         }
         Log()->warn("nr preview {} failed: {}", id, lastLine_.toStdString());
         runPending();
@@ -697,7 +699,8 @@ int PreviewRunner::prepareInputs() {
             s.name = QString::fromStdString(e.stage);
             s.title = model_.stageTitle(e.stage);
             s.seconds = e.seconds;
-            s.reused = e.action != "run";
+            const StageDecision* d = Decision(model_.previewPlan(), e.stage);  // the marks stay for «Обработать»: not passed
+            s.reused = !d || d->action != "run";
             plan.push_back(s);
         }
     upstreamTitles_ = StageTitles(model_, stages);

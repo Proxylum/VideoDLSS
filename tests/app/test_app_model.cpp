@@ -3873,16 +3873,19 @@ namespace {
 struct PreviewProject {
     std::filesystem::path dir;
     std::unique_ptr<AppModel> model;
-    explicit PreviewProject(const char* name) : dir(Dir(name)) {
+    explicit PreviewProject(const char* name, int frames = 12, bool upscale = true) : dir(Dir(name)) {
         ClipSpec spec;
-        spec.frames = 12;
+        spec.frames = frames;
         spec.width = 48;
         spec.height = 32;
         const auto clip = WriteClip(dir / "clip.mkv", spec);
         Project p = Project::Create(clip, dir / "passes");
         for (auto& st : p.stages) {
             if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
-            if (st.name == "upscale") st.params["backend"] = "nis";
+            if (st.name == "upscale") {
+                st.params["backend"] = "nis";
+                st.enabled = upscale;  // off: no color_sr, NR reads the colour from the video
+            }
             if (st.name == "fg") st.enabled = false;
         }
         p.resultVideo = dir / "clip_result.mkv";
@@ -5053,6 +5056,25 @@ TEST_CASE("NR preview: a CLI refusal with code past_end reads as the cursor past
     CHECK_FALSE(runner.statusText().contains(QString::fromUtf8("за концом клипа")));
 }
 
+TEST_CASE("NR preview: the CLI's VFR refusal goes when the cursor moves to where a seek counts frames", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_vfr_lift", 60, false);  // no upscale, no color_sr: the colour from the video, a seek past 48 frames checked
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    runner.setCommandForTests([](const NrPreviewJob& job) {  // the CLI's refusal of a seek into a variable-frame-rate source
+        std::ofstream(job.workDir / "nr.json") << R"({"ok": false, "error": "nr: clip.mkv has a variable frame rate", "code": "vfr"})";
+        return std::pair<QString, QStringList>{"cmd", {"/c", "exit", "1"}};
+    });
+    model.seekToSourceFrame(55);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return !runner.running(); }, 20000);
+    INFO(runner.statusText().toStdString());
+    REQUIRE(runner.statusText().contains(QString::fromUtf8("переменная частота")));
+    model.seekToSourceFrame(10);  // a seek this close counts the frames: the refusal goes
+    CHECK_FALSE(runner.statusText().contains(QString::fromUtf8("переменная частота")));
+}
+
 TEST_CASE("AppModel: the before choice acts on the preview's comparison only - never one source on both sides; the chip counts no preview as a version",
           "[app][preview][regression]") {
     App();
@@ -5218,6 +5240,10 @@ TEST_CASE("NR preview: computing the stages before NR runs process --stages with
     const std::string result = FileSha(model.project().resultVideo);
     const int id = runner.prepareInputs();
     REQUIRE(id > 0);
+    bool depthReused = false;  // marked «пересчитать», yet current: the task without --force reuses it - no time of its run counted
+    for (const auto& s : queue.progress(id).stages)
+        if (s.name == "depth") depthReused = s.state == "reused";
+    CHECK(depthReused);
     Pump([&] { return queue.finished(id); }, 120000);
     REQUIRE(queue.succeeded(id));
     CHECK(runner.statusText().startsWith(QString::fromUtf8("Этапы до улучшения посчитаны за")));  // while the preview after them starts
