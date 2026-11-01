@@ -421,7 +421,7 @@ void AppModel::startProxies() {
     proxyProcess_ = new QProcess(this);
     proxyProcess_->setProcessChannelMode(QProcess::MergedChannels);
     connect(proxyProcess_, &QProcess::finished, this, [this, p = proxyProcess_](int code, QProcess::ExitStatus status) {
-        const QString out = QString::fromLocal8Bit(p->readAll());
+        const QString out = QString::fromUtf8(p->readAll());  // dlssvid writes UTF-8 (TASK-0066)
         p->deleteLater();
         if (proxyProcess_ == p) proxyProcess_ = nullptr;
         if (status != QProcess::NormalExit || code != 0) {

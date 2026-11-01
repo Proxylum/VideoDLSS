@@ -48,3 +48,19 @@ TEST_CASE("Win32LongPath opens, checks and reads files beyond MAX_PATH; short pa
     std::filesystem::remove_all(base);
     CHECK(!std::filesystem::exists(base));
 }
+
+// TASK-0066: every executable of the project runs with UTF-8 as its process code page (cmake/utf8.manifest), so a
+// std::string path is UTF-8 both ways. Under the ANSI code page (CP1251) path::string() of a Cyrillic folder was not
+// UTF-8: the CLI aborted on such an argument, a project naming such a file could not be written as JSON.
+TEST_CASE("The process code page is UTF-8: a std::string path is UTF-8 both ways", "[unit][paths][regression]") {
+    REQUIRE(Utf8CodePage());
+    const std::u8string name = u8"Видео проекта";
+    const std::string utf8(name.begin(), name.end());
+    CHECK(std::filesystem::path(utf8) == std::filesystem::path(name));
+    CHECK(std::filesystem::path(name).string() == utf8);
+    const std::filesystem::path dir = std::filesystem::path(DLSSVID_TEST_TMP) / "paths_utf8" / name;
+    std::filesystem::remove_all(dir.parent_path());
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir.string() + "/файл.txt") << "ok";  // a narrow file name, as the code builds them
+    CHECK(std::filesystem::exists(dir / u8"файл.txt"));
+}

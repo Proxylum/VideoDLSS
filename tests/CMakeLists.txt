@@ -62,6 +62,7 @@ add_executable(dlssvid_unit_tests
   unit/test_repo_hygiene.cpp
 )
 target_link_libraries(dlssvid_unit_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
+dlssvid_utf8_code_page(dlssvid_unit_tests)  # paths as std::string, as in the CLI and the GUI
 # PR-8: the frozen PR-7 resolve (tests/unit/frozen), compiled like the product; the product's own headers come from core's folder
 if(NOT DIRECTX_DXC_TOOL)
   set(DIRECTX_DXC_TOOL ${DLSSVID_DXC_TOOL})
@@ -109,6 +110,7 @@ add_executable(dlssvid_integration_tests
   integration/test_scenes_stage.cpp
 )
 target_link_libraries(dlssvid_integration_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
+dlssvid_utf8_code_page(dlssvid_integration_tests)  # paths as std::string, as in the CLI and the GUI
 target_compile_definitions(dlssvid_integration_tests PRIVATE
   DLSSVID_CLI_PATH="$<TARGET_FILE:dlssvid>"
   DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
@@ -122,6 +124,7 @@ if(DLSSVID_BUILD_APP)
   add_executable(dlssvid_app_tests app/test_app_model.cpp integration/TestClips.h integration/TestClips.cpp)
   target_include_directories(dlssvid_app_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/integration)
   target_link_libraries(dlssvid_app_tests PRIVATE dlssvid_app Catch2::Catch2WithMain Qt6::Test)
+  dlssvid_utf8_code_page(dlssvid_app_tests)
   target_compile_definitions(dlssvid_app_tests PRIVATE
     DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
     DLSSVID_QT_PLUGINS="${DLSSVID_QT_BIN}/../plugins"
@@ -130,6 +133,7 @@ if(DLSSVID_BUILD_APP)
   add_dependencies(dlssvid_app_tests dlssvid)
   if(TARGET dlssvid-gui)  # both deploy Qt into bin/ in POST_BUILD: one after the other, or two windeployqt race (CI 2026-09-25)
     add_dependencies(dlssvid_app_tests dlssvid-gui)
+    target_compile_definitions(dlssvid_app_tests PRIVATE DLSSVID_GUI_PATH="$<TARGET_FILE:dlssvid-gui>")  # its manifest is checked
   endif()
   dlssvid_deploy_qt(dlssvid_app_tests)
   # windeployqt deploys only the windows platform plugin: copy the offscreen one next to the executable
@@ -154,6 +158,7 @@ endif()
 add_executable(dlssvid_golden_tests golden/test_golden.cpp integration/TestClips.h integration/TestClips.cpp)
 target_include_directories(dlssvid_golden_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/integration)
 target_link_libraries(dlssvid_golden_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
+dlssvid_utf8_code_page(dlssvid_golden_tests)  # paths as std::string, as in the CLI and the GUI
 target_compile_definitions(dlssvid_golden_tests PRIVATE
   DLSSVID_CLI_PATH="$<TARGET_FILE:dlssvid>"
   DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
@@ -166,6 +171,7 @@ catch_discover_tests(dlssvid_golden_tests TEST_PREFIX "golden." DISCOVERY_MODE P
 add_executable(dlssvid_perf_tests perf/test_scrub_perf.cpp perf/test_nr_mask_perf.cpp integration/TestClips.h integration/TestClips.cpp)
 target_include_directories(dlssvid_perf_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/integration ${CMAKE_CURRENT_SOURCE_DIR}/unit)
 target_link_libraries(dlssvid_perf_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
+dlssvid_utf8_code_page(dlssvid_perf_tests)  # paths as std::string, as in the CLI and the GUI
 target_compile_definitions(dlssvid_perf_tests PRIVATE
   DLSSVID_CLI_PATH="$<TARGET_FILE:dlssvid>"
   DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp")

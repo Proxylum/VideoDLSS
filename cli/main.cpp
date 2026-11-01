@@ -33,6 +33,7 @@
 #include "stages/flow/FlowStage.h"
 #include "util/Error.h"
 #include "util/Log.h"
+#include "util/Paths.h"
 #include "util/Sha256.h"
 
 #ifdef DLSSVID_WITH_CUDA
@@ -764,6 +765,16 @@ void AddImportOptions(CLI::App* cmd, ImportArgs& a) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // The arguments come in the process code page: UTF-8 with cmake/utf8.manifest. A Windows that ignores the manifest
+    // (older than 10 1903) passes them in the ANSI code page, and CLI11's path checks read them as UTF-8 - a Cyrillic
+    // letter aborted the process (TASK-0066). There: a message instead.
+    if (!Utf8CodePage())
+        for (int i = 1; i < argc; ++i)
+            for (const char* c = argv[i]; *c; ++c)
+                if (static_cast<unsigned char>(*c) >= 0x80) {
+                    std::fprintf(stderr, "dlssvid: argument %d is not ASCII; non-ASCII arguments and paths need Windows 10 version 1903 or newer\n", i);
+                    return 1;
+                }
     CLI::App app{"dlssvid — offline DLSS video pipeline"};
     app.set_version_flag("--version", DLSSVID_VERSION);
     app.require_subcommand(1);

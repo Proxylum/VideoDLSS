@@ -38,4 +38,12 @@ std::filesystem::path CurrentExecutable() {
 #endif
 }
 
+bool Utf8CodePage() {
+#ifdef _WIN32
+    return GetACP() == CP_UTF8;
+#else
+    return true;
+#endif
+}
+
 }  // namespace dlssvid

@@ -5427,3 +5427,72 @@ TEST_CASE("PreviewCalibration takes the model's start out of the wall per frame"
     CHECK(scanMs == Catch::Approx(ms));
     CHECK(PreviewCalibration(1.0, 0, frame).first < 0);
 }
+
+TEST_CASE("AppModel: a project in a Cyrillic folder opens, shows the video, saves, and processes through the task queue",
+          "[app][model][gpu][regression]") {
+    // TASK-0066: the GUI and the CLI share the project file and pass paths as std::string; under the ANSI code page a
+    // Cyrillic path was not UTF-8 there - the project could not be saved, FFmpeg could not open the video, the CLI aborted
+    App();
+    const auto d = Dir("cyrillic") / u8"Проект с кириллицей";
+    std::filesystem::create_directories(d);
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(d / u8"клип.mkv", spec);
+    Project p = Project::Create(clip, d / u8"пассы");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.enabled = false;
+    }
+    p.resultVideo = d / u8"результат.mkv";
+    p.codec = "ffv1";
+    p.Save(d / u8"проект.dlssvid.json");
+
+    AppModel model(true);
+    model.openProject(Q(d / u8"проект.dlssvid.json"));
+    REQUIRE(model.hasProject());
+    CHECK(model.planError().isEmpty());
+    CHECK(model.sourceInfo().frames == 4);  // probed in this process: FFmpeg takes the name as UTF-8
+    model.setFrame(2);
+    model.store().WaitForCurrent();
+    CHECK(model.store().GetStatus(2, "source") == FrameStore::Status::Ready);
+    REQUIRE(model.saveProjectAs(Q(d / u8"копия.dlssvid.json")));
+    CHECK(std::filesystem::equivalent(Project::Load(d / u8"копия.dlssvid.json").sourceVideo, clip));
+
+    TaskQueue queue;  // as «Обработать» runs it: QProcess, the arguments as UTF-16
+    QString output;
+    QObject::connect(&queue, &TaskQueue::taskOutput, [&](int, const QString& line) { output += line + "\n"; });
+    const int id = queue.enqueue("process", DLSSVID_CLI_PATH, model.processArgs() << "--warp");
+    Pump([&] { return queue.finished(id); }, 120000);
+    INFO(output.toStdString());
+    REQUIRE(queue.succeeded(id));
+    CHECK(std::filesystem::exists(d / u8"результат.mkv"));
+    model.reloadSources();
+    CHECK(model.cardState("depth").state == QString::fromUtf8("переиспользуется"));
+}
+
+#ifdef DLSSVID_GUI_PATH
+namespace {
+// The application manifest a Windows executable carries (RT_MANIFEST, CREATEPROCESS_MANIFEST_RESOURCE_ID).
+std::string EmbeddedManifest(const std::filesystem::path& exe) {
+    HMODULE m = LoadLibraryExW(exe.c_str(), nullptr, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    if (!m) return {};
+    std::string text;
+    if (HRSRC r = FindResourceW(m, MAKEINTRESOURCEW(1), MAKEINTRESOURCEW(24)))
+        if (HGLOBAL g = LoadResource(m, r)) text.assign(static_cast<const char*>(LockResource(g)), SizeofResource(m, r));
+    FreeLibrary(m);
+    return text;
+}
+}  // namespace
+
+TEST_CASE("dlssvid-gui and dlssvid carry the UTF-8 process code page in their manifests", "[app][regression]") {
+    // TASK-0066: cmake/utf8.manifest merged into each executable; the GUI's own run is not covered by any other test
+    for (const char* exe : {DLSSVID_GUI_PATH, DLSSVID_CLI_PATH}) {
+        INFO(exe);
+        const std::string manifest = EmbeddedManifest(exe);
+        CHECK(manifest.find("<activeCodePage xmlns=\"http://schemas.microsoft.com/SMI/2019/WindowsSettings\">UTF-8</activeCodePage>") != std::string::npos);
+    }
+}
+#endif

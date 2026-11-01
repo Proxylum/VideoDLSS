@@ -38,6 +38,7 @@ add_dependencies(dlssvid_app dlssvid)
 
 qt_add_executable(dlssvid-gui WIN32 main.cpp)
 target_link_libraries(dlssvid-gui PRIVATE dlssvid_app)
+dlssvid_utf8_code_page(dlssvid-gui)
 # the GUI runs stages through the CLI: keep dlssvid.exe next to it
 add_custom_command(TARGET dlssvid-gui POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:dlssvid>" "$<TARGET_FILE_DIR:dlssvid-gui>"
