@@ -209,6 +209,7 @@ void AppModel::sanitizePreviewSide() {
     ViewportState& st = state();
     bool named = false;
     for (const auto& l : st.layers) named = named || l.source == kNrPreviewSource;
+    for (const auto& g : st.gridSources) named = named || g == kNrPreviewSource;
     if (!named) return;
     DropPreviewSide(st, hasSource("color_nr") ? std::string("color_nr") : afterSource(), beforeSource());
     notifyStateChanged(false);
@@ -270,8 +271,9 @@ void AppModel::setNrPreviewBefore(const std::string& which) {
     if (!nrPreview_ || !state().CompareConfigured()) return;
     ViewportState& st = state();
     LayerState& a = st.layers[static_cast<size_t>(st.wipe.layerA)];
+    const LayerState& b = st.layers[static_cast<size_t>(st.wipe.layerB)];
     const std::string before = nrPreviewBefore();
-    if (a.source == before) return;
+    if (b.source != kNrPreviewSource || a.source == before) return;  // another «after» (a chip): never one source on both sides
     a.source = before;
     a.display = LayerState::DefaultDisplayFor(before);
     a.autoRange = true;

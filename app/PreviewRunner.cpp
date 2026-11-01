@@ -474,8 +474,12 @@ void PreviewRunner::onFinished(int id, bool ok) {
         removeWork(job.workDir);
         QString text = Tr("Превью не удалось — подробности в логе");
         if (const QString vfr = appBlock(&job); !vfr.isEmpty() && vfrSources_.count(job.sourceHash)) text = vfr;  // the source cannot be sought
-        if (run.is_object() && run.value("code", std::string()) == "past_end") text = Tr("Курсор за концом клипа");  // its length was estimated
-        if (!superseded) setStatus(text, "warn", lastLine_);
+        const bool pastEnd = run.is_object() && run.value("code", std::string()) == "past_end";  // the length was estimated
+        if (pastEnd) text = Tr("Курсор за концом клипа");
+        if (!superseded) {
+            setStatus(text, "warn", lastLine_);
+            refused_ = pastEnd;  // as the gate's refusal: the cursor moved back into the clip lifts it
+        }
         Log()->warn("nr preview {} failed: {}", id, lastLine_.toStdString());
         runPending();
         return;

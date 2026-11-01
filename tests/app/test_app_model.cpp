@@ -4002,6 +4002,13 @@ TEST_CASE("AppModel shows an NR preview as color_nr@preview against the current 
     REQUIRE(model.state().CompareConfigured());
     CHECK(model.state().CompareSide(true)->source != "color_nr");
     CHECK(model.state().CompareSide(true)->source == model.afterSource());
+    {  // a grid cell that names the preview: replaced on load too
+        Project p = Project::Load(m.dir / "proj.dlssvid.json");
+        p.viewport.gridSources[1] = kNrPreviewSource;
+        p.Save(m.dir / "edited_grid.dlssvid.json");
+    }
+    model.openProject(Q(m.dir / "edited_grid.dlssvid.json"));
+    CHECK(model.state().gridSources[1] == "color_nr");
 }
 
 TEST_CASE("AppModel: the preview's plan has no force marks of the stages above NR; the stages before it are one process --no-encode", "[app][preview][gpu]") {
@@ -5042,6 +5049,33 @@ TEST_CASE("NR preview: a CLI refusal with code past_end reads as the cursor past
     REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
     Pump([&] { return !runner.running(); }, 20000);
     CHECK(runner.statusText() == QString::fromUtf8("Курсор за концом клипа"));
+    model.seekToSourceFrame(5);  // back inside the clip: the refusal goes
+    CHECK_FALSE(runner.statusText().contains(QString::fromUtf8("за концом клипа")));
+}
+
+TEST_CASE("AppModel: the before choice acts on the preview's comparison only - never one source on both sides; the chip counts no preview as a version",
+          "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_before_choice");
+    AppModel& model = *m.model;
+    QSettings().remove("card/nr/previewBefore");
+    model.showNrPreview(m.Shown(m.FakeEntry("abcdef012345", 4, 4), 4, 4), false);
+    REQUIRE(model.state().CompareSide(true)->source == kNrPreviewSource);
+    {  // color_nr has no history: its chip's menu holds the preview only
+        CompareBar bar(model);
+        QToolButton* chip = nullptr;
+        for (QToolButton* b : bar.findChildren<QToolButton*>())
+            if (b->text() == HumanSourceName("color_nr")) chip = b;
+        REQUIRE(chip);
+        CHECK_FALSE(chip->toolTip().contains(QString::fromUtf8("предыдущ")));
+        CHECK(chip->toolTip().contains(QString::fromUtf8("превью: меню справа")));
+    }
+    model.showSource("color_sr");  // the «after» side on the upscale's chip: no longer the preview
+    REQUIRE(model.state().CompareSide(true)->source == "color_sr");
+    model.setNrPreviewBefore("sr");
+    CHECK(model.state().CompareConfigured());  // not color_sr | color_sr
+    CHECK(model.state().CompareSide(false)->source != "color_sr");
+    QSettings().remove("card/nr/previewBefore");
 }
 
 TEST_CASE("NR preview: a request made during a save while a segment runs is taken up when the save ends - a cached frame shows and the segment goes",
