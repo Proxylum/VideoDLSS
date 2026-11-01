@@ -70,9 +70,10 @@ std::filesystem::path TrtFlowEstimator::OnnxFor(uint32_t w, uint32_t h) {
               ") and models/export/.venv is missing (see models/export/README.md)");
     Log()->info("exporting {} to ONNX ({}x{}) — first time only", modelId_, w, h);
     std::string out;
-    const uint32_t rc = Subprocess::Run({venvPython.string(), script.string(), "--model", modelId_, "--width", std::to_string(w), "--height", std::to_string(h),
-                                         "--out", path.string(), "--cache", registry_->CacheDir().string()},
-                                        &out, modelsDir / "export");
+    std::vector<std::string> args = PythonCommand(venvPython, script);
+    args.insert(args.end(), {"--model", modelId_, "--width", std::to_string(w), "--height", std::to_string(h), "--out", path.string(), "--cache",
+                             registry_->CacheDir().string()});
+    const uint32_t rc = Subprocess::Run(args, &out, modelsDir / "export");
     if (rc != 0 || !std::filesystem::exists(path)) Throw("ONNX export failed (exit " + std::to_string(rc) + "):\n" + out);
     return path;
 }

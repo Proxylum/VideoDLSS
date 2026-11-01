@@ -69,7 +69,7 @@ std::string DefaultPatchPython() {
 }
 
 std::vector<std::string> BuildPatchCommand(const NrPatchOptions& o, const std::filesystem::path& script, const std::filesystem::path& output) {
-    std::vector<std::string> cmd{o.python.empty() ? DefaultPatchPython() : o.python, script.string()};
+    std::vector<std::string> cmd = PythonCommand(o.python.empty() ? DefaultPatchPython() : o.python, script);
     for (const auto& a : o.archs)
         if (const char* flag = ArchFlag(a)) cmd.push_back(flag);
     if (!o.dryRun) {

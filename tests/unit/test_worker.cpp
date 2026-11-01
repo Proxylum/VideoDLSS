@@ -41,6 +41,20 @@ struct ModelsDirEnv {
     }
     ~ModelsDirEnv() { _putenv_s("DLSSVID_MODELS_DIR", before ? before->c_str() : ""); }
 };
+// TMP and TEMP for one test (temp_directory_path reads TMP first, the children inherit both); the values before come back.
+struct TempEnv {
+    std::optional<std::wstring> tmp, temp;
+    explicit TempEnv(const std::filesystem::path& dir) {
+        if (const wchar_t* e = _wgetenv(L"TMP")) tmp = e;
+        if (const wchar_t* e = _wgetenv(L"TEMP")) temp = e;
+        _wputenv_s(L"TMP", dir.c_str());
+        _wputenv_s(L"TEMP", dir.c_str());
+    }
+    ~TempEnv() {
+        _wputenv_s(L"TMP", tmp ? tmp->c_str() : L"");
+        _wputenv_s(L"TEMP", temp ? temp->c_str() : L"");
+    }
+};
 }  // namespace
 
 TEST_CASE("QuoteArg follows Windows rules", "[worker][subprocess]") {
@@ -94,6 +108,34 @@ TEST_CASE("Worker stub backend matches the C++ stub and honours windows", "[work
     CHECK(PassImage::MaxAbsDiff(out[0], expA) < 2e-3);  // rgb travels as float16
     CHECK(PassImage::MaxAbsDiff(out[1], expB) < 2e-3);
     CHECK(est.Describe()["runtime"] == "pytorch (depth_worker)");
+    est.Shutdown();
+}
+
+// Review of TASK-0066: the requests carry UTF-8 paths (the scratch frames under TEMP, the models folder) and Python read
+// its stdin pipe in the ANSI code page - the paths came garbled («И», UTF-8 D0 98, even as a lone surrogate: 0x98 is no
+// CP1251 character), the frames were not found. PythonCommand starts it in Python's UTF-8 mode.
+TEST_CASE("PythonCommand runs a script in Python's UTF-8 mode, the paths as UTF-8", "[worker][subprocess][regression]") {
+    CHECK(PythonCommand("python", std::filesystem::path(u8"D:/Скрипты/w.py")) ==
+          std::vector<std::string>{"python", "-X", "utf8", Utf8Arg(std::filesystem::path(u8"D:/Скрипты/w.py"))});
+}
+
+TEST_CASE("Worker stub backend takes non-ASCII paths: the scratch under a Cyrillic TEMP, a Cyrillic models folder", "[worker][depth][regression]") {
+    if (!HavePythonNumpy()) SKIP("python + numpy not on PATH");
+    const auto root = std::filesystem::path(DLSSVID_TEST_TMP) / "worker_utf8";
+    std::filesystem::remove_all(root);
+    const auto temp = root / u8"Временная папка И";
+    std::filesystem::create_directories(temp);
+    const TempEnv env(temp);
+    const ModelsDirEnv models(root / u8"Модели И");  // sent in the init request
+    WorkerDepthEstimator est("stub");
+    DepthEstimatorConfig cfg;
+    cfg.extra["python"] = "python";
+    est.Init(cfg);
+    const PassImage a = Frame(24, 12, 0), b = Frame(24, 12, 1);
+    std::vector<PassImage> out;
+    est.Estimate({&a, &b}, out);  // the frames go through .npz files in the scratch folder
+    REQUIRE(out.size() == 2);
+    CHECK(PassImage::MaxAbsDiff(out[1], StubDepthEstimator::Expected(b)) < 2e-3);
     est.Shutdown();
 }
 

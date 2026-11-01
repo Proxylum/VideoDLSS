@@ -70,7 +70,7 @@ void WorkerDepthEstimator::Init(const DepthEstimatorConfig& config) {
     std::filesystem::create_directories(scratch_);
 
     proc_ = std::make_unique<Subprocess>();
-    proc_->Start({python.string(), worker.string()}, root / "depth_worker");
+    proc_->Start(PythonCommand(python, worker), root / "depth_worker");
     nlohmann::json init = {{"cmd", "init"},
                            {"backend", backend_},
                            {"model", config.modelId},

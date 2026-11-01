@@ -35,8 +35,9 @@ std::filesystem::path TrtUpscaler::OnnxFor(const ModelRegistry& registry, const 
               modelId + " elsewhere and copy the file");
     Log()->info("exporting {} to ONNX with {} (downloads the weights on first use) — first time only", modelId, script.filename().string());
     std::string out;
-    const uint32_t rc = Subprocess::Run({venvPython.string(), script.string(), "--model", modelId, "--out", path.string(), "--cache", registry.CacheDir().string()}, &out,
-                                        modelsDir / "export");
+    std::vector<std::string> args = PythonCommand(venvPython, script);
+    args.insert(args.end(), {"--model", modelId, "--out", path.string(), "--cache", registry.CacheDir().string()});
+    const uint32_t rc = Subprocess::Run(args, &out, modelsDir / "export");
     if (rc != 0 || !std::filesystem::exists(path)) Throw("ONNX export of " + modelId + " failed (exit " + std::to_string(rc) + "):\n" + out);
     return path;
 }

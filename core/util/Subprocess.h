@@ -47,6 +47,12 @@ private:
 };
 
 std::string QuoteArg(const std::string& arg);  // Windows command-line quoting
-std::string Utf8Arg(const std::filesystem::path& p);  // a path as the UTF-8 argument Subprocess::Start expects (not path.string(): ACP)
+// A path as the UTF-8 argument Subprocess::Start expects, whatever the process code page (path.string() is UTF-8 only
+// with cmake/utf8.manifest in effect, docs/conventions.md §1).
+std::string Utf8Arg(const std::filesystem::path& p);
+// The command that runs a Python script: the interpreter in its UTF-8 mode (`-X utf8`), so the script reads its stdin and
+// writes its stdout in UTF-8, as dlssvid writes and reads them. Without it Python reads a pipe in the ANSI code page: the
+// workers got the UTF-8 paths of their requests garbled and did not find their files (TASK-0066).
+std::vector<std::string> PythonCommand(const std::filesystem::path& python, const std::filesystem::path& script);
 
 }  // namespace dlssvid
