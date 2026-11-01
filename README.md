@@ -374,7 +374,8 @@ python scripts\nr_ab.py --clip input.mp4 --passes passes --experiment E1 --start
 
 `--start` counts frames as the pass folders and the viewport do, from 0. With `--color-dir` a range starting past frame 0 takes
 its frames from the pass by index - the video is not decoded, any frame rate works (PR-10); through the video the seek goes by
-pts at the stream's rate, and a variable-frame-rate source is refused (`--json` then carries `"code": "vfr"`). A part of the clip carries `stage_params.range`, `process` never takes it for the clip's pass, and a
+pts at the stream's rate, and a variable-frame-rate source is refused (`--json` then carries `"code": "vfr"`; a `--start` past the
+clip's end carries `"code": "past_end"`). A part of the clip carries `stage_params.range`, `process` never takes it for the clip's pass, and a
 range is not written over a `color_nr` that `process` made. `--params-file` takes one JSON object of the project's keys
 (`stages.nr.params`); a key the schema does not have is refused, so a typo cannot pass unnoticed. It also takes a
 `dlssvid-preset` file (PR-9, `docs/conventions.md` «Пресеты»): a card preset of «Улучшение» gives its settings — its
