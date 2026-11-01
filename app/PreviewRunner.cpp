@@ -293,6 +293,7 @@ bool PreviewRunner::start(Request r) {
     if (r.kind != Kind::Segment) lastFrameKind_ = r;
     everStarted_ = true;
     model_.refreshPlanIfPending();  // an edit 250 ms ago: the preview is of the settings shown
+    if (!autoStart_) autoTimer_.stop();  // a click is of every edit so far: their debounced auto request would only replace it
     if (housekeeping_) {  // a clean-up of the cache is moving folders: right after it (an auto request does not replace a click)
         if (!autoStart_ || !pending_ || pendingAuto_) {
             pending_ = r;

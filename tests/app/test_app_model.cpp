@@ -4175,7 +4175,7 @@ TEST_CASE("NR preview: written under .preview; plan and versions unchanged; colo
         model.refreshPlan();
         const PreviewRunner::Availability a = runner.availability({PreviewRunner::Kind::Frame, 0});
         CHECK_FALSE(a.ok);
-        CHECK((a.text.contains(QString::fromUtf8("программный адаптер")) || a.text.contains("nvngx_dlssnr.dll")));
+        CHECK(a.text.contains(QString::fromUtf8("программный адаптер")));  // the app's block comes before the gate (no DLL or not)
         CHECK_FALSE(runner.start({PreviewRunner::Kind::Frame, 0}));
         CHECK_FALSE(runner.running());
     }
@@ -4934,6 +4934,33 @@ TEST_CASE("NR preview: a clean-up's report is of the project it was for", "[app]
     bool reported = false;  // the window's status bar reports the action the user took
     for (const auto& args : messages) reported = reported || args.at(0).toString().startsWith(QString::fromUtf8("Превью очищено"));
     CHECK(reported);
+}
+
+TEST_CASE("NR preview: a click stops the auto update of an edit made before it - a segment clicked right after a change runs on", "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_click_stops_auto");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    runner.setPointerHeldForTests([] { return false; });
+    runner.setDebounceMsForTests(300);
+    model.seekToSourceFrame(3);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    runner.setAutoUpdate(true);
+    Pump([] { return false; }, 1600);
+    runner.setCommandForTests(LongCommand);
+    model.setStageParam("nr", "intensity", 1.2);  // an edit: its auto request is debounced...
+    REQUIRE(runner.start({PreviewRunner::Kind::Segment, 1}));  // ...and a segment clicked at once, of the edited settings
+    REQUIRE(runner.running());
+    const int segment = runner.runningTaskId();
+    Pump([] { return false; }, 800);  // past the debounce
+    CHECK(runner.running());
+    CHECK_FALSE(queue.cancelled(segment));  // not replaced by a frame of the same edit
+    runner.setAutoUpdate(false);
+    runner.cancel();
+    Pump([&] { return !queue.previewBusy(); }, 20000);
 }
 
 TEST_CASE("NR preview: a request made during a save while a segment runs is taken up when the save ends - a cached frame shows and the segment goes",
