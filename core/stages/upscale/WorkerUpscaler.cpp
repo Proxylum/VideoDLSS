@@ -4,6 +4,7 @@
 
 #include <cstdlib>
 
+#include "ml/ModelRegistry.h"
 #include "passes/formats/NpzIO.h"
 #include "util/Error.h"
 #include "util/Log.h"
@@ -72,6 +73,11 @@ std::filesystem::path WorkerUpscaler::FindPython(const UpscalerConfig& config, c
     return "python";
 }
 
+std::filesystem::path WorkerUpscaler::FindModelsDir(const UpscalerConfig& config) {
+    const std::string dir = config.extra.value("models_dir", "");
+    return dir.empty() ? ModelRegistry::DefaultModelsDir() : std::filesystem::path(dir);
+}
+
 UpscalerAvailability WorkerUpscaler::Available() {
     const auto root = FindProjectRoot();
     if (!std::filesystem::exists(root / "sr_worker" / "worker.py"))
@@ -106,7 +112,7 @@ void WorkerUpscaler::Init(D3D12Device&, const UpscalerConfig& config) {
                                  {"backend", backend_},
                                  {"model", modelId_},
                                  {"fp16", config.extra.value("fp16", false)},
-                                 {"models_dir", config.extra.value("models_dir", (root / "models").string())},
+                                 {"models_dir", FindModelsDir(config).string()},
                                  {"extra", extra}};
     info_ = Call(init, 10 * 60 * 1000);  // the first run downloads the weights
     window_ = std::max(1, info_.value("window", 15));

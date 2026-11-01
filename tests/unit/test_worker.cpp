@@ -5,9 +5,14 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <optional>
+#include <string>
 
+#include "ml/ModelRegistry.h"
 #include "stages/depth/StubDepthEstimator.h"
 #include "stages/depth/WorkerDepthEstimator.h"
+#include "stages/upscale/WorkerUpscaler.h"
 #include "util/Subprocess.h"
 
 using namespace dlssvid;
@@ -27,6 +32,15 @@ PassImage Frame(uint32_t w, uint32_t h, int i) {
         }
     return img;
 }
+// DLSSVID_MODELS_DIR for one test; the value before it (the CI runner sets one) comes back afterwards.
+struct ModelsDirEnv {
+    std::optional<std::string> before;
+    explicit ModelsDirEnv(const std::filesystem::path& dir) {
+        if (const char* e = std::getenv("DLSSVID_MODELS_DIR")) before = e;
+        _putenv_s("DLSSVID_MODELS_DIR", dir.string().c_str());
+    }
+    ~ModelsDirEnv() { _putenv_s("DLSSVID_MODELS_DIR", before ? before->c_str() : ""); }
+};
 }  // namespace
 
 TEST_CASE("QuoteArg follows Windows rules", "[worker][subprocess]") {
@@ -117,4 +131,41 @@ TEST_CASE("Worker VDA refuses an unknown or foreign model and a bad window befor
     cfg.modelId = "";
     cfg.window = 10;
     CHECK(initError("vda").find("multiple of 4") != std::string::npos);
+}
+
+// Regression (TASK-0065): without a models_dir of the stage the workers got <project root>/models, while the registry, the
+// fingerprints and the TensorRT paths read DLSSVID_MODELS_DIR - a clean CI checkout downloaded RealBasicVSR again on every run
+// (CI of PR #32: the download hung past the 10 min of init).
+TEST_CASE("Workers take the models folder of the registry: DLSSVID_MODELS_DIR, not <project root>/models", "[worker][models][regression]") {
+    const auto dir = std::filesystem::path(DLSSVID_TEST_TMP) / "worker_models_dir" / "models";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    std::ofstream(dir / "registry.json") << R"({"models": []})";
+    const ModelsDirEnv env(dir);
+    CHECK(ModelRegistry::DefaultModelsDir() == dir);
+
+    UpscalerConfig up;
+    CHECK(WorkerUpscaler::FindModelsDir(up) == dir);
+    up.extra["models_dir"] = "";  // the schema's default: none
+    CHECK(WorkerUpscaler::FindModelsDir(up) == dir);
+    up.extra["models_dir"] = "D:/m";  // the stage's folder wins
+    CHECK(WorkerUpscaler::FindModelsDir(up) == std::filesystem::path("D:/m"));
+
+    DepthEstimatorConfig depth;
+    CHECK(WorkerDepthEstimator::FindModelsDir(depth) == dir);
+    depth.modelsDir = "D:/m";
+    CHECK(WorkerDepthEstimator::FindModelsDir(depth) == std::filesystem::path("D:/m"));
+
+    // and Init uses it: VDA resolves its model in that (empty) registry before python starts - <root>/models knows metric-vda-small
+    depth.modelsDir.clear();
+    depth.modelId = "metric-vda-small";
+    depth.extra["python"] = "python-that-does-not-exist";  // never started
+    WorkerDepthEstimator w("vda");
+    std::string error;
+    try {
+        w.Init(depth);
+    } catch (const std::exception& e) {
+        error = e.what();
+    }
+    CHECK(error.find("unknown VDA model 'metric-vda-small'") != std::string::npos);
 }

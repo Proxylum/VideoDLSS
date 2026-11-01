@@ -38,6 +38,9 @@ public:
 
     static std::filesystem::path FindProjectRoot();
     static std::filesystem::path FindPython(const UpscalerConfig& config, const std::filesystem::path& projectRoot);
+    // The worker's models_dir (registry.json + cache/ with the weights): the stage's models_dir, else the registry's folder
+    // (DLSSVID_MODELS_DIR first) - not <project root>/models, which a clean CI checkout fills by downloading again.
+    static std::filesystem::path FindModelsDir(const UpscalerConfig& config);
 
 private:
     nlohmann::json Call(const nlohmann::json& request, uint32_t timeoutMs);
