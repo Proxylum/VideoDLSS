@@ -231,6 +231,7 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
                 label->setToolTip(QString::fromStdString(pr.hint + " (" + pr.pass + ")"));
                 controlRow_ = new ControlMaskRow(model_, f->parentWidget());
                 controlRow_->setDialogs(dialogs_);
+                controlRow_->setBusyCheck([this] { return busy_ && busy_(); });
                 f->addRow(label, controlRow_);
                 passLabels_.push_back(label);
             }
@@ -652,6 +653,13 @@ bool StageCard::changed(const ParamSpec& spec) const {
 void StageCard::setExtra(QWidget* extra) {
     extra->setParent(form_);
     if (auto* column = qobject_cast<QVBoxLayout*>(form_->layout())) column->addWidget(extra);
+}
+
+void StageCard::refreshBusy() {
+    if (!controlRow_) return;
+    const StageEntry* e = model_.stageEntry(stage_);
+    const nlohmann::json effective = EffectiveStageParams(stage_, e ? e->params : nlohmann::json::object());
+    controlRow_->refresh((busy_ && busy_()) || model_.controlMaskBusy(), NrBypassParams(effective));
 }
 
 void StageCard::refresh() {

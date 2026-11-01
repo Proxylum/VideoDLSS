@@ -1172,8 +1172,9 @@ ProcessResult RunProcess(const ProcessOptions& options) {
     ProcessResult result;
     result.output = options.output;
     if (options.input.empty() || !std::filesystem::exists(options.input)) Throw("process: input video not found: " + options.input.string());
-    if (options.output.empty()) Throw("process: -o/--output is required");
-    std::filesystem::create_directories(std::filesystem::absolute(options.output).parent_path());
+    if (options.passthrough && !options.encode) Throw("process: --no-encode and --passthrough exclude each other");
+    if (options.output.empty() && options.encode) Throw("process: -o/--output is required");
+    if (options.encode) std::filesystem::create_directories(std::filesystem::absolute(options.output).parent_path());
 
     VideoStreamInfo info;
     {
@@ -1588,6 +1589,18 @@ ProcessResult RunProcess(const ProcessOptions& options) {
     if (retiredAny && options.keepVersions > 0) {
         const PassGcReport gc = GcPassVersions(root, options.keepVersions);
         if (!gc.removed.empty()) Log()->info("process: {} old pass version(s) removed ({} MB), {} kept per pass", gc.removed.size(), gc.bytes / (1024 * 1024), options.keepVersions);
+    }
+
+    if (!options.encode) {  // PR-10: the passes only (the preview's stages before NR) - the result is left as it is
+        ProcessStageReport enc;
+        enc.name = "encode";
+        enc.status = "skipped";
+        enc.reason = "--no-encode: the result is not written";
+        result.stages.push_back(enc);
+        result.output.clear();
+        result.seconds = Seconds(tAll);
+        Log()->info("process: passes done in {:.1f} s, the result is not encoded (--no-encode)", result.seconds);
+        return result;
     }
 
     // ---- encode the last colour pass, or pass the source through ----

@@ -2,6 +2,7 @@
 
 #include <QMenu>
 #include <QPushButton>
+#include <QToolButton>
 #include <string>
 
 #include "PresetDialogs.h"
@@ -24,6 +25,23 @@ protected:
     bool event(QEvent* e) override;
     void keyPressEvent(QKeyEvent* e) override;
 };
+
+// A button with a default action and a menu (PR-10: «Превью кадра │▾»): Space, Enter and Return without modifiers run the default
+// action, Alt+↓ opens the menu - claimed from the window as PresetButton's keys are (a QPushButton with a menu opens it on a click).
+class SplitButton : public QToolButton {
+    Q_OBJECT
+public:
+    explicit SplitButton(QWidget* parent = nullptr);
+    static bool Runs(int key, Qt::KeyboardModifiers modifiers);
+
+protected:
+    bool event(QEvent* e) override;
+    void keyPressEvent(QKeyEvent* e) override;
+};
+
+// Space and Enter of a checkbox or a button stay with it while it has the focus, not with the window's playback (PR-10: the preview
+// row; QAbstractButton does not claim ShortcutOverride).
+void ClaimButtonKeys(QAbstractButton* button);
 
 // A menu of presets (PR-9, docs/ux-guidelines.md principle 11): the person's presets of the target with the difference each would make
 // (tooltip and status tip) and a check at the one that matches, the automatic slots, «Сохранить текущие…», «Импорт…», «Экспорт ▸»,

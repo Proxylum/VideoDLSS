@@ -197,7 +197,7 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
                         for (size_t x = 0; x < W; ++x) row16(p, r)[x] = static_cast<uint16_t>(src.Plane(static_cast<size_t>(p))[(r / 2) * cw + x / 2] << 8);
             }
         }
-        frame->pts = i;
+        frame->pts = spec.pts ? spec.pts(i) : i;
         CheckAv(avcodec_send_frame(vctx, frame), "send video frame");
         drain(vctx, vs, false);
     }

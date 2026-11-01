@@ -60,6 +60,7 @@ ViewportWindow::ViewportWindow(AppModel& model) : model_(model) {
         }
     });
     connect(&model_, &AppModel::sourcesChanged, this, [this] { requestRender(); });
+    connect(&model_, &AppModel::nrPreviewChanged, this, [this] { requestRender(); });  // PR-10
 }
 
 ViewportWindow::~ViewportWindow() = default;

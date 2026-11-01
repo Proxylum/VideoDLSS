@@ -372,8 +372,10 @@ dlssvid nr -i input.mp4 -o ab\c ... --mv-scale auto --create-with-mv --no-depth-
 python scripts\nr_ab.py --clip input.mp4 --passes passes --experiment E1 --start 48       :: NR A/B (docs/benchmarks.md): one range per variant + compare -> markdown tables; --list, --dry-run
 ```
 
-`--start` counts frames as the pass folders and the viewport do, from 0; the seek assumes a constant frame rate (VFR is
-not detected yet). A part of the clip carries `stage_params.range`, `process` never takes it for the clip's pass, and a
+`--start` counts frames as the pass folders and the viewport do, from 0. With `--color-dir` a range starting past frame 0 takes
+its frames from the pass by index - the video is not decoded, any frame rate works (PR-10); through the video the seek goes by
+pts at the stream's rate, and a variable-frame-rate source is refused (`--json` then carries `"code": "vfr"`; a `--start` past the
+clip's end carries `"code": "past_end"`). A part of the clip carries `stage_params.range`, `process` never takes it for the clip's pass, and a
 range is not written over a `color_nr` that `process` made. `--params-file` takes one JSON object of the project's keys
 (`stages.nr.params`); a key the schema does not have is refused, so a typo cannot pass unnoticed. It also takes a
 `dlssvid-preset` file (PR-9, `docs/conventions.md` «Пресеты»): a card preset of «Улучшение» gives its settings — its
@@ -418,6 +420,7 @@ dlssvid process --project clip.dlssvid.json --plan [--json plan.json]           
 dlssvid process -i input.mp4 -o result.mp4 --param nr.intensity=1.4 --keep-versions 3 :: only nr, fg and the encode rerun; the old color_nr / color_fg stay as versions (default keep: 2)
 dlssvid process --project clip.dlssvid.json --force nr,fg                            :: recompute these stages in place even when their passes match; parameters are validated first
 dlssvid process --project clip.dlssvid.json --no-settings-note                      :: no settings note in the result (by default its comment tag says what made it: dlssvid info result.mp4)
+dlssvid process --project clip.dlssvid.json --stages scenes,depth,flow,upscale --no-encode :: the passes only: the result is not written (the GUI's «Посчитать этапы до улучшения»)
 dlssvid passes list --passes result_passes [--pass color_nr] [--json list.json]       :: every pass: the current version and the previous ones (fingerprint, parameters, size)
 dlssvid passes use color_nr 20260922-140200 --passes result_passes                   :: switch a pass (or a whole stage: nr) to a previous version; the current one is kept
 dlssvid passes gc --project clip.dlssvid.json [--keep 2] [--dry-run]                  :: drop old versions beyond the newest N per pass (versions other passes list as inputs stay)
@@ -541,6 +544,16 @@ task per pass into a chosen folder) and «Другое видео» (= «Фай�
 keys `1`…`9` follow the chips of the compare bar. The passes folder can be changed from the project panel («Пассы ·
 изменить…», the project remembers it); cell labels carry the source size («Исходник · 1920×800  #123 · 00:05.12»).
 
+The NR preview (PR-10, the card «Улучшение», `P`): «Превью кадра» computes the frame under the cursor with the card's settings
+(without the model's history, or «Кадр с историей» after 6 frames of it), «Превью отрезка ▾» 1, 3, 5 or 10 s from the cursor; it
+runs `dlssvid nr` in its own process into `<passes>/.preview/nr/<key>` (no pass, no version: the plan and the versions do not
+change) and shows it as «Улучшение · превью» on the «after» side, the current «Улучшение» (or «Апскейл») on the «before» side.
+A preview computed before shows at once; «обновлять при изменении» recomputes the last frame preview 0.6 s after a change (a
+slider: after it is released); «Обработать» cancels a running preview. The inputs are the passes on disk only: when a stage
+before NR would have to run, «Посчитать этапы до улучшения» runs `dlssvid process --stages … --no-encode` (the result is not
+touched). The cache keeps 16 previews and 4 GB, «Очистить превью» empties it; «Сохранить кадр…» writes the frame as PNG 16-bit
+or EXR.
+
 ## Layout
 
 ```
@@ -576,7 +589,7 @@ bin/nvidia/ user-supplied NVIDIA DLLs (git-ignored)
 ## Tests
 
 `ctest --preset release` (or run `dlssvid_unit_tests` / `dlssvid_integration_tests` directly;
-Catch2 tags: `[gpu]`, `[cuda]`, `[integration]`, `[cli]`, `[nvdec]`, `[passes]`, `[formats]`, `[convert]`). The NPZ ↔ numpy test needs `python` with numpy on PATH and skips otherwise. GPU-specific tests skip themselves when no NVIDIA GPU is present.
+Catch2 tags: `[gpu]`, `[cuda]`, `[integration]`, `[cli]`, `[nvdec]`, `[passes]`, `[formats]`, `[convert]`, `[preview]` for the NR preview). The NPZ ↔ numpy test needs `python` with numpy on PATH and skips otherwise. GPU-specific tests skip themselves when no NVIDIA GPU is present.
 
 ## Licences and third-party components
 

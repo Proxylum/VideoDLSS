@@ -49,6 +49,16 @@ bool HavePython() {
     return ok;
 }
 
+// stdout and stderr of a run (the progress lines go to stderr, Subprocess::Run takes stdout only)
+std::string RunCliAll(const std::vector<std::string>& args, const std::filesystem::path& log) {
+    std::string cmd = "\"\"" DLSSVID_CLI_PATH "\"";
+    for (const auto& a : args) cmd += " \"" + a + "\"";
+    cmd += " > \"" + log.string() + "\" 2>&1\"";
+    std::system(cmd.c_str());
+    std::ifstream in(log, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
 nlohmann::json ReadJson(const std::filesystem::path& p) {
     std::ifstream in(p);
     nlohmann::json j;
@@ -399,6 +409,151 @@ TEST_CASE("dlssvid nr --start/--frames/--warmup writes only the requested range"
     CHECK(guard.code != 0);
     CHECK(guard.out.find("processed project") != std::string::npos);
     run("part", {"--frames", "1"});
+}
+
+// PR-10: the preview's ranges. With the colour pass a range takes its frames from the pass by index - no seek, any frame rate -
+// and equals the full run; through the video a variable frame rate is refused (the seek by pts would land on other frames).
+TEST_CASE("dlssvid nr with --color-dir reads a range from the pass by index, equal to the full run; through the video a variable frame rate is refused", "[integration][cli][nr][preview][regression]") {
+    ClipSpec spec;
+    spec.frames = 120;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("range_vfr");
+    const auto cfr = WriteClip(dir / "cfr.mkv", spec);
+    spec.pts = [](int64_t i) { return i < 61 ? i : i + 5; };  // five frames' time missing after frame 60
+    const auto vfr = WriteClip(dir / "vfr.mkv", spec);
+    auto run = [&](const std::filesystem::path& clip, const char* name, std::vector<std::string> extra) {
+        std::vector<std::string> args{"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / name).string(), "--no-auto",
+                                      "--json", (dir / (std::string(name) + ".json")).string()};
+        args.insert(args.end(), extra.begin(), extra.end());
+        const CliResult r = RunCli(args);
+        INFO(name << ": " << r.out);
+        return r;
+    };
+    auto frame = [&](const char* name, int64_t i) { return PassReader::Open(dir / name / "color_nr").ReadFrame(i).ConvertNormalizedTo(PixelType::F32); };
+
+    // through the video, past the frames a seek decodes forward: refused before the GPU, the reason in --json
+    const CliResult refused = run(vfr, "refused", {"--start", "100", "--frames", "2", "--warmup", "6"});
+    CHECK(refused.code != 0);
+    CHECK(refused.out.find("variable frame rate") != std::string::npos);
+    const nlohmann::json rj = ReadJson(dir / "refused.json");
+    CHECK(rj["ok"] == false);
+    CHECK(rj["code"] == "vfr");
+    CHECK_FALSE(std::filesystem::exists(dir / "refused" / "color_nr"));
+    // close to the start the frames are counted, not sought: a range from 40 across the gap at 61 is not refused (review of PR-10)
+    CHECK(run(vfr, "near", {"--start", "40", "--frames", "30"}).code == 0);
+    // sought, but before the gap: the scan stops at the run's last frame (mkv: the clip's length unknown; review of PR-10)
+    CHECK(run(vfr, "before_gap", {"--start", "55", "--frames", "2", "--warmup", "0"}).code == 0);
+    CHECK(run(cfr, "cfr", {"--start", "100", "--frames", "2", "--warmup", "6"}).code == 0);  // a constant rate
+    CHECK(ReadJson(dir / "cfr.json").value("ok", true));  // a success keeps its JSON (no ok: false)
+
+    // the colour pass of the VFR clip as process numbers it (decoded from the start), and ranges from it by index: the frames of the
+    // full run (no history: the stub model is per frame)
+    REQUIRE(RunCli({"export", "-i", vfr.string(), "-o", (dir / "color").string()}).code == 0);
+    const std::string color = (dir / "color").string();
+    REQUIRE(run(vfr, "full", {"--color-dir", color}).code == 0);
+    const CliResult part = run(vfr, "part", {"--color-dir", color, "--start", "100", "--frames", "3", "--warmup", "6"});
+    REQUIRE(part.code == 0);
+    CHECK(part.out.find("the video is not decoded") != std::string::npos);
+    for (int64_t i = 100; i <= 102; ++i) CHECK(PassImage::MaxAbsDiff(frame("part", i), frame("full", i)) == 0.0);
+    const nlohmann::json pj = ReadJson(dir / "part.json");
+    CHECK(pj["stats"]["frames"] == 9);
+    CHECK(pj["stats"]["frames_written"] == 3);
+    CHECK(pj["stats"]["warmup_frames"] == 6);
+    const Manifest pm = Manifest::Load(dir / "part" / "color_nr");
+    CHECK(pm.firstFrame == 100);
+    CHECK(pm.lastFrame == 102);
+    // the warm-up builds the temporal filter's history on the pass path as well: equal to a run written from the warm-up's start
+    const std::vector<std::string> temporal{"--temporal", "0.9", "--temporal-threshold", "1"};
+    auto with = [&](std::vector<std::string> a) {
+        a.insert(a.end(), temporal.begin(), temporal.end());
+        return a;
+    };
+    REQUIRE(run(vfr, "warm", with({"--color-dir", color, "--start", "100", "--frames", "3", "--warmup", "6"})).code == 0);
+    REQUIRE(run(vfr, "from94", with({"--color-dir", color, "--start", "94", "--frames", "9"})).code == 0);
+    for (int64_t i = 100; i <= 102; ++i) CHECK(PassImage::MaxAbsDiff(frame("warm", i), frame("from94", i)) == 0.0);
+    CHECK(PassImage::MaxAbsDiff(frame("warm", 100), frame("part", 100)) > 2e-3);  // the history did act
+    // a constant rate: the pass path gives what the seek through the video gives, history included
+    REQUIRE(RunCli({"export", "-i", cfr.string(), "-o", (dir / "color_cfr").string()}).code == 0);
+    REQUIRE(run(cfr, "seek", with({"--start", "100", "--frames", "3", "--warmup", "6"})).code == 0);
+    REQUIRE(run(cfr, "frompass", with({"--color-dir", (dir / "color_cfr").string(), "--start", "100", "--frames", "3", "--warmup", "6"})).code == 0);
+    for (int64_t i = 100; i <= 102; ++i) CHECK(PassImage::MaxAbsDiff(frame("seek", i), frame("frompass", i)) == 0.0);
+    // to the end of the colour pass when --frames is not given
+    REQUIRE(run(vfr, "rest", {"--color-dir", color, "--start", "115", "--warmup", "2"}).code == 0);
+    CHECK(Manifest::Load(dir / "rest" / "color_nr").lastFrame == 119);
+    // a short run prints every frame's progress (the preview's 1 or 1 + 6 frames gave one line)
+    const std::string all = RunCliAll({"nr", "--backend", "stub", "--warp", "-i", vfr.string(), "-o", (dir / "progress").string(), "--no-auto", "--color-dir",
+                                       color, "--start", "100", "--frames", "3", "--warmup", "6"},
+                                      dir / "progress.log");
+    CHECK(all.find("1/9 frames") != std::string::npos);
+    CHECK(all.find("5/9 frames") != std::string::npos);
+}
+
+TEST_CASE("dlssvid nr --source-hash is taken as given; a malformed one is refused", "[integration][cli][nr][preview]") {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("source_hash");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    const std::string given = "sha256:" + std::string(64, 'a');
+    REQUIRE(RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "out").string(), "--frames", "1", "--source-hash", given}).code == 0);
+    CHECK(Manifest::Load(dir / "out" / "color_nr").sourceHash == given);  // not hashed again
+    for (const std::string& bad : std::vector<std::string>{"sha256:xyz", "abc", "sha256:" + std::string(64, 'A')}) {
+        INFO(bad);
+        const CliResult r = RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "bad").string(), "--frames", "1", "--source-hash", bad});
+        CHECK(r.code != 0);
+        CHECK(r.out.find("--source-hash expects") != std::string::npos);
+    }
+}
+
+TEST_CASE("dlssvid nr --color-dir: a colour pass that ends before an mkv clip of unknown length is refused, not taken for its end; --start past the end says code past_end",
+          "[integration][cli][nr][regression]") {
+    const auto dir = Dir("nr_short_pass");
+    ClipSpec spec;
+    spec.frames = 120;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);  // an mkv: no frame count in the container
+    REQUIRE(RunCli({"export", "-i", clip.string(), "-o", (dir / "color").string(), "--range", "0-59"}).code == 0);
+    const std::string color = (dir / "color").string();
+    auto run = [&](const char* name, std::vector<std::string> extra) {
+        std::vector<std::string> args{"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / name).string(), "--no-auto",
+                                      "--json", (dir / (std::string(name) + ".json")).string()};
+        args.insert(args.end(), extra.begin(), extra.end());
+        const CliResult r = RunCli(args);
+        INFO(name << ": " << r.out);
+        return r;
+    };
+    const CliResult cut = run("cut", {"--color-dir", color, "--start", "50", "--frames", "20", "--warmup", "6"});
+    CHECK(cut.code != 0);  // not «10 of 20 frames written» as if the clip ended at 59
+    CHECK(cut.out.find("has no frame 60") != std::string::npos);
+    CHECK(run("inside", {"--color-dir", color, "--start", "50", "--frames", "5", "--warmup", "6"}).code == 0);  // the pass covers it
+    const CliResult past = run("past", {"--start", "200", "--frames", "1"});
+    CHECK(past.code != 0);
+    CHECK(ReadJson(dir / "past.json")["code"] == "past_end");
+}
+
+TEST_CASE("dlssvid nr --json reports a failure whose text is not UTF-8 (regression: the summary was left empty)", "[integration][cli][nr][regression]") {
+    const auto dir = Dir("nr_json_bytes");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    {  // a byte that is no UTF-8: the parser's message carries it, as an ANSI path or a localized system error would
+        std::ofstream f(dir / "bad.json", std::ios::binary);
+        f << "{\"intensity\": \"\xC0\xC1\"}";
+    }
+    const CliResult r = RunCli({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / "out").string(), "--no-auto", "--params-file",
+                                (dir / "bad.json").string(), "--json", (dir / "out.json").string()});
+    INFO(r.out);
+    CHECK(r.code != 0);
+    const nlohmann::json j = ReadJson(dir / "out.json");
+    REQUIRE(j.is_object());
+    CHECK(j["ok"] == false);
+    CHECK(j["code"] == "");
+    CHECK(j["error"].get<std::string>().find("not valid JSON") != std::string::npos);  // the reason, its byte replaced
 }
 
 // TASK-0047 (spec §2h): --params-file holds the project's nr keys; the options given on the command line win, even at their

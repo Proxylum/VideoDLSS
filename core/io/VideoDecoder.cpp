@@ -13,7 +13,9 @@ extern "C" {
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <optional>
+#include <vector>
 
 #ifdef DLSSVID_WITH_CUDA
 #include <cuda_runtime.h>
@@ -129,6 +131,79 @@ KeyframeScan ScanKeyframes(const std::filesystem::path& path) {
             av_packet_unref(pkt);
         }
         scan.maxInterval = std::max(scan.maxInterval, anyKey ? sinceKey : scan.frames);  // the tail after the last keyframe
+    } catch (...) {
+        av_packet_free(&pkt);
+        avformat_close_input(&fmt);
+        throw;
+    }
+    av_packet_free(&pkt);
+    avformat_close_input(&fmt);
+    return scan;
+}
+
+int64_t PtsToIndex(int64_t pts, int64_t startTime, Rational timeBase, Rational rate) {
+    const double seconds = static_cast<double>(pts - startTime) * timeBase.num / timeBase.den;
+    return static_cast<int64_t>(std::llround(seconds * rate.num / rate.den));
+}
+
+std::string FrameIndexScan::Why() const {
+    if (noRate) return "the stream has no frame rate";
+    if (firstBad < 0) return "every frame at its time";
+    if (badIndex < 0) return "frame " + std::to_string(firstBad) + " has no timestamp";
+    return "frame " + std::to_string(firstBad) + " carries the time of frame " + std::to_string(badIndex);
+}
+
+FrameIndexScan ScanFrameIndex(const std::filesystem::path& path, int64_t upTo, Rational indexRate) {
+    FrameIndexScan scan;
+    AVFormatContext* fmt = nullptr;
+    const std::string url = path.string();
+    CheckAv(avformat_open_input(&fmt, url.c_str(), nullptr, nullptr), "avformat_open_input");
+    AVPacket* pkt = av_packet_alloc();
+    try {
+        CheckAv(avformat_find_stream_info(fmt, nullptr), "avformat_find_stream_info");
+        const int vs = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+        if (vs < 0) Throw("no video stream in " + url);
+        for (unsigned i = 0; i < fmt->nb_streams; ++i)
+            if (static_cast<int>(i) != vs) fmt->streams[i]->discard = AVDISCARD_ALL;  // video packets only
+        AVStream* st = fmt->streams[vs];
+        const AVRational guessed = av_guess_frame_rate(fmt, st, nullptr);
+        const Rational rate = indexRate.num > 0 && indexRate.den > 0 ? indexRate : Rational{guessed.num, guessed.den};
+        const Rational tb{st->time_base.num, st->time_base.den};
+        const int64_t start = st->start_time != AV_NOPTS_VALUE ? st->start_time : 0;
+        // the reordering of B-frames moves a frame by a few packets: 64 more than needed put every frame up to upTo in its place
+        const int64_t wanted = upTo >= std::numeric_limits<int64_t>::max() - 65 ? std::numeric_limits<int64_t>::max() : std::max<int64_t>(upTo, 0) + 1 + 64;
+        std::vector<int64_t> times;
+        int64_t firstMissing = -1;  // the first packet with neither pts nor dts
+        while (scan.frames < wanted && av_read_frame(fmt, pkt) >= 0) {  // every video packet counts: one without a time adds none
+            if (pkt->stream_index == vs && !(pkt->flags & AV_PKT_FLAG_DISCARD)) {
+                const int64_t t = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
+                if (t == AV_NOPTS_VALUE) {
+                    firstMissing = scan.frames++;  // firstBad from here on whatever follows: a raw stream is not read to its end
+                    av_packet_unref(pkt);
+                    break;
+                }
+                times.push_back(t);
+                ++scan.frames;
+            }
+            av_packet_unref(pkt);
+        }
+        std::sort(times.begin(), times.end());
+        if (rate.num <= 0 || tb.num <= 0) {
+            scan.firstBad = 0;  // no rate: no index can be taken from pts
+            scan.noRate = true;
+        } else if (firstMissing >= 0) {
+            scan.firstBad = firstMissing;  // a frame without a time: the ones after it cannot be found by theirs
+        } else {
+            const int64_t last = std::min<int64_t>(upTo, static_cast<int64_t>(times.size()) - 1);
+            for (int64_t k = 0; k <= last; ++k) {
+                const int64_t named = PtsToIndex(times[static_cast<size_t>(k)], start, tb, rate);
+                if (named != k) {
+                    scan.firstBad = k;
+                    scan.badIndex = named;
+                    break;
+                }
+            }
+        }
     } catch (...) {
         av_packet_free(&pkt);
         avformat_close_input(&fmt);
@@ -401,8 +476,7 @@ int64_t VideoDecoder::IndexFromPts(int64_t pts) const {
     const Rational rate = IndexRate();
     if (rate.num <= 0 || info_.timeBase.num <= 0) return nextIndex_;
     const int64_t start = fmt_->streams[videoStream_]->start_time != AV_NOPTS_VALUE ? fmt_->streams[videoStream_]->start_time : 0;
-    const double seconds = static_cast<double>(pts - start) * info_.timeBase.num / info_.timeBase.den;
-    return static_cast<int64_t>(std::llround(seconds * rate.num / rate.den));
+    return PtsToIndex(pts, start, info_.timeBase, rate);
 }
 
 bool VideoDecoder::DiscardFrames(int64_t upTo) {
@@ -437,7 +511,7 @@ bool VideoDecoder::SeekToFrame(int64_t index) {
     if (index < 0) return false;
     if (info_.frameCount > 0 && index >= info_.frameCount) return false;
     if (!drained_ && index == nextIndex_) return true;
-    if (!drained_ && index > nextIndex_ && index - nextIndex_ <= 48) return DiscardFrames(index);
+    if (!drained_ && index > nextIndex_ && index - nextIndex_ <= kSequentialSeekFrames) return DiscardFrames(index);
 
     const int64_t start = fmt_->streams[videoStream_]->start_time != AV_NOPTS_VALUE ? fmt_->streams[videoStream_]->start_time : 0;
     const Rational rate = IndexRate();

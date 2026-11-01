@@ -76,8 +76,25 @@ QString AppModel::cliPath() const {
     return QString(DLSSVID_CLI_NAME);
 }
 
+namespace {
+// PR-10: the preview's side back to `pass`; a comparison left with one source on both sides (the preview was compared with that pass)
+// compares `before` with it again - the wipe stays where it was
+void DropPreviewSide(ViewportState& st, const std::string& pass, const std::string& before) {
+    if (!ReplaceLayerSource(st, kNrPreviewSource, pass) || st.mode != ViewMode::Overlay || !st.wipe.enabled) return;
+    const int n = static_cast<int>(st.layers.size());
+    if (st.wipe.layerA < 0 || st.wipe.layerB < 0 || st.wipe.layerA >= n || st.wipe.layerB >= n) return;
+    LayerState& a = st.layers[static_cast<size_t>(st.wipe.layerA)];
+    const LayerState& b = st.layers[static_cast<size_t>(st.wipe.layerB)];
+    if (a.source != b.source || before == b.source) return;
+    a.source = before;
+    a.display = LayerState::DefaultDisplayFor(before);
+    a.autoRange = true;
+}
+}  // namespace
+
 void AppModel::openVideo(const QString& file) {
     try {
+        dropNrPreview();
         project_ = Project::Create(std::filesystem::path(file.toStdWString()), {});
         // default project file next to the video
         project_.file = std::filesystem::path(file.toStdWString()).replace_extension(".dlssvid.json");
@@ -85,6 +102,7 @@ void AppModel::openVideo(const QString& file) {
         if (loaded) project_ = Project::Load(project_.file);
         const QString seeded = loaded ? QString() : seedNewProject();  // before the first plan: it is made with those settings
         reloadSources();
+        sanitizePreviewSide();
         dirty_ = !loaded;  // a project made from the video is not on disk yet: it is saved next to the video on close
         emit dirtyChanged(dirty_);
         emit projectChanged();
@@ -97,8 +115,10 @@ void AppModel::openVideo(const QString& file) {
 
 void AppModel::openProject(const QString& file) {
     try {
+        dropNrPreview();
         project_ = Project::Load(std::filesystem::path(file.toStdWString()));
         reloadSources();
+        sanitizePreviewSide();
         dirty_ = false;
         emit dirtyChanged(false);
         emit projectChanged();
@@ -116,7 +136,11 @@ bool AppModel::saveProject() {
 
 bool AppModel::saveProjectAs(const QString& file) {
     try {
-        project_.Save(std::filesystem::path(file.toStdWString()));
+        // PR-10: the preview shown is of this session only - the file names the pass instead (every save, the automatic one too, is here)
+        Project saved = project_;
+        DropPreviewSide(saved.viewport, hasSource("color_nr") ? std::string("color_nr") : afterSource(), beforeSource());
+        saved.Save(std::filesystem::path(file.toStdWString()));
+        project_.file = saved.file;
         dirty_ = false;
         emit dirtyChanged(false);
         emit message(tr("Проект сохранён: %1").arg(file));
@@ -166,7 +190,118 @@ std::vector<ViewportSource> AppModel::viewportSources(bool dropControlMask) cons
     std::vector<ViewportSource> sources = project_.Sources();
     if (dropControlMask)  // the import renames mask_control: an open file of the viewport would fail it on Windows (Locked)
         sources.erase(std::remove_if(sources.begin(), sources.end(), [](const ViewportSource& s) { return s.pass == kControlMaskPass; }), sources.end());
+    // a history folder named «preview» (made by hand) would be a second color_nr@preview: the store keys its sources by name
+    sources.erase(std::remove_if(sources.begin(), sources.end(), [](const ViewportSource& s) { return s.version == "preview"; }), sources.end());
+    if (nrPreview_ && nrPreview_->root == project_.passesRoot) {
+        try {
+            if (auto s = FrameStore::PassFolderSource(nrPreview_->dir / "color_nr", kNrPreviewSource, "color_nr", "preview")) sources.push_back(std::move(*s));
+        } catch (const std::exception& e) {
+            Log()->warn("nr preview: {} does not read: {}", nrPreview_->dir.string(), e.what());
+        }
+    }
     return sources;
+}
+
+
+void AppModel::sanitizePreviewSide() {
+    // a file edited by hand (or of an older build) names the preview, which lives in the session only: as on save, the pass when
+    // there is one, else the «after» source - known once the sources are
+    ViewportState& st = state();
+    bool named = false;
+    for (const auto& l : st.layers) named = named || l.source == kNrPreviewSource;
+    for (const auto& g : st.gridSources) named = named || g == kNrPreviewSource;
+    if (!named) return;
+    DropPreviewSide(st, hasSource("color_nr") ? std::string("color_nr") : afterSource(), beforeSource());
+    notifyStateChanged(false);
+}
+
+void AppModel::dropNrPreview() {
+    ++generation_;
+    clearNrPreview();  // the side back to the pass, the files let go: «Папка пассов…» keeps the viewport
+    emit passesContextChanged();
+}
+
+std::string AppModel::nrPreviewBeforeChoice() const { return QSettings().value("card/nr/previewBefore", "nr").toString() == "sr" ? "sr" : "nr"; }
+
+std::string AppModel::nrPreviewBefore() const {
+    if (nrPreviewBeforeChoice() == "nr") {  // the settings of the pass against the preview's: «old <-> new»
+        const ViewportSource* nr = store_->FindSource("color_nr");
+        if (nr && (!nrPreview_ || (nr->firstFrame <= nrPreview_->first && nr->lastFrame >= nrPreview_->last))) return "color_nr";
+    }
+    if (hasSource("color_sr")) return "color_sr";
+    return "source";
+}
+
+void AppModel::showNrPreview(const NrPreviewShown& shown, bool seekToFirst) {
+    nrPreview_ = shown;
+    store_->SetSources(viewportSources(controlMaskBusy_));
+    ViewportState& st = state();
+    const std::string before = nrPreviewBefore();
+    if (st.CompareConfigured()) {  // the wipe stays where the user put it: only its sides change
+        LayerState& a = st.layers[static_cast<size_t>(st.wipe.layerA)];
+        LayerState& b = st.layers[static_cast<size_t>(st.wipe.layerB)];
+        if (a.source != before) {
+            a.source = before;
+            a.display = LayerState::DefaultDisplayFor(before);
+            a.autoRange = true;
+        }
+        b.source = kNrPreviewSource;
+        b.display = LayerState::DefaultDisplayFor(kNrPreviewSource);
+        b.autoRange = true;
+        st.selectedLayer = st.wipe.layerB;
+    } else {
+        st.SetCompare(before, kNrPreviewSource);
+    }
+    notifyStateChanged(false);  // not structural: the project is not marked unsaved
+    emit nrPreviewChanged();
+    if (seekToFirst && !playing_) seekToSourceFrame(shown.first);
+}
+
+void AppModel::clearNrPreview() {
+    if (!nrPreview_) return;
+    nrPreview_.reset();
+    store_->SetSources(viewportSources(controlMaskBusy_));  // waits for the loads in flight: the preview's files are let go
+    DropPreviewSide(state(), hasSource("color_nr") ? std::string("color_nr") : afterSource(), beforeSource());
+    notifyStateChanged(false);
+    emit nrPreviewChanged();
+}
+
+void AppModel::setNrPreviewBefore(const std::string& which) {
+    QSettings().setValue("card/nr/previewBefore", QString::fromStdString(which == "sr" ? "sr" : "nr"));
+    if (!nrPreview_ || !state().CompareConfigured()) return;
+    ViewportState& st = state();
+    LayerState& a = st.layers[static_cast<size_t>(st.wipe.layerA)];
+    const LayerState& b = st.layers[static_cast<size_t>(st.wipe.layerB)];
+    const std::string before = nrPreviewBefore();
+    if (b.source != kNrPreviewSource || a.source == before) return;  // another «after» (a chip): never one source on both sides
+    a.source = before;
+    a.display = LayerState::DefaultDisplayFor(before);
+    a.autoRange = true;
+    notifyStateChanged(false);
+    emit nrPreviewChanged();
+}
+
+void AppModel::refreshPlanIfPending() {
+    if (planTimer_.isActive()) refreshPlan();
+}
+
+bool AppModel::saveForRun() {
+    Project& p = project_;
+    if (p.sourceVideo.empty()) return false;
+    if (p.resultVideo.empty()) p.resultVideo = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + "_result" + ResultExtensionFor(p.codec));
+    if (p.file.empty()) {
+        const auto file = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + ".dlssvid.json");
+        return saveProjectAs(QString::fromStdWString(file.wstring()));
+    }
+    return saveProject();
+}
+
+QStringList AppModel::upstreamArgs(const std::vector<std::string>& stages) const {
+    QString list;
+    for (const auto& s : stages) list += (list.isEmpty() ? "" : ",") + QString::fromStdString(s);
+    QStringList args{"process", "--project", QString::fromStdWString(project_.file.wstring()), "--disable-unavailable", "--stages", list, "--no-encode"};
+    if (device_ && device_->IsWarp()) args << "--warp";  // the adapter the preview runs on (its job passes --warp too)
+    return args;
 }
 
 void AppModel::importControlMask(const QString& file) {
@@ -594,6 +729,15 @@ std::vector<AppModel::Chip> AppModel::chips() const {
         return ra != rb ? ra < rb : a.source < b.source;
     });
     for (size_t i = 0; i < out.size() && i < 9; ++i) out[i].hotkey = static_cast<int>(i) + 1;  // keys 1..9 follow the chip order
+    // PR-10: the preview hangs on the «Улучшение» chip; NR not computed yet, there is none - a chip of its own after the numbered ones
+    if (nrPreview_ && !hasSource("color_nr"))
+        if (const ViewportSource* p = store_->FindSource(kNrPreviewSource)) {
+            Chip c;
+            c.source = p->name;
+            c.label = HumanSourceName(p->name);
+            c.tooltip = SourceTooltip(*p);
+            out.push_back(std::move(c));
+        }
     return out;
 }
 
@@ -681,9 +825,24 @@ StageEntry* AppModel::stageEntry(const std::string& stage) {
     return nullptr;
 }
 
+ProcessOptions AppModel::planOptions(bool withForce) {
+    ProcessOptions o;
+    o.input = project_.sourceVideo;
+    o.output = project_.resultVideo.empty() ? project_.sourceVideo.parent_path() / (project_.sourceVideo.stem().string() + "_result" + ResultExtensionFor(project_.codec))
+                                            : project_.resultVideo;
+    o.passesRoot = project_.passesRoot;
+    o.stages = StagesFromProject(project_);
+    o.keepVersions = project_.passVersionsKeep;
+    if (withForce) o.forceStages = force_;
+    o.sourceHash = project_.SourceHash();
+    o.vramBytes = device_ && !device_->IsWarp() ? device_->DedicatedVideoMemory() : 0;  // the VRAM advice of depth
+    return o;
+}
+
 void AppModel::refreshPlan() {
     planTimer_.stop();
     plan_ = ProcessPlan{};
+    planNoForce_.reset();
     outcome_ = RunOutcome{};
     sourceInfo_ = SourceInfo{};
     planError_.clear();
@@ -706,17 +865,14 @@ void AppModel::refreshPlan() {
         sourceInfo_.decoded = probe.Info().decoded;
         sourceInfo_.bitDepth = probe.Info().bitDepth;
         sourceInfo_.chroma = probe.Info().chroma;
-        ProcessOptions o;
-        o.input = project_.sourceVideo;
-        o.output = project_.resultVideo.empty() ? project_.sourceVideo.parent_path() / (project_.sourceVideo.stem().string() + "_result" + ResultExtensionFor(project_.codec))
-                                                : project_.resultVideo;
-        o.passesRoot = project_.passesRoot;
-        o.stages = StagesFromProject(project_);
-        o.keepVersions = project_.passVersionsKeep;
-        o.forceStages = force_;
-        o.sourceHash = project_.SourceHash();
-        o.vramBytes = device_ && !device_->IsWarp() ? device_->DedicatedVideoMemory() : 0;  // the VRAM advice of depth
+        const ProcessOptions o = planOptions(true);
         plan_ = PlanProcess(o);
+        // PR-10: the preview reads the stages above NR as they are - a «пересчитать» mark there would make them «run» for it
+        for (const auto& s : force_)
+            if (s == "scenes" || s == "depth" || s == "flow" || s == "upscale") {
+                planNoForce_ = PlanProcess(planOptions(false));
+                break;
+            }
         outcome_ = EstimateRun(plan_, o.stages, sourceInfo_);
         // the result's layout: the encoder card's choice against the codec and the source (an impossible pair is a plan error)
         const OutputFormat of = ResolveOutputFormat(project_.codec, project_.outputFormat, sourceInfo_.decoded);
@@ -811,6 +967,7 @@ void AppModel::setEncode(const QString& codec, const std::map<std::string, std::
 void AppModel::setPassesRoot(const QString& dir) {
     const std::filesystem::path p(dir.toStdWString());
     if (p.empty() || p == project_.passesRoot) return;
+    dropNrPreview();  // a preview of the old root: cancelled, its result dropped
     project_.passesRoot = p;
     markDirty();
     reloadSources();  // the passes found there and the plan against them
@@ -1142,6 +1299,7 @@ bool AppModel::exportResult(const QString& to) {
 bool AppModel::closeProject() {
     if (!hasProject()) return false;
     setPlaying(false);
+    dropNrPreview();
     project_ = Project{};
     force_.clear();
     lastRun_ = 0.0;

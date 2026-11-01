@@ -105,7 +105,7 @@ void ControlMaskRow::refresh(bool busy, bool bypass) {
     status_->setToolTip(tip);
     SetRole(status_, role);
     const bool importing = s.status == AppModel::ControlMaskState::Status::Importing;
-    const QString busyTip = busy && !importing ? tr("Недоступно во время обработки") : QString();
+    const QString busyTip = busy && !importing ? tr("Недоступно во время обработки или превью улучшения") : QString();
     load_->setEnabled(loadable && !busy);
     load_->setToolTip(busyTip.isEmpty() ? tr("Выбрать изображение маски (PNG, TIFF, EXR). Прежняя маска уйдёт в историю версий.") : busyTip);
     show_->setVisible(showable);
@@ -123,6 +123,11 @@ void ControlMaskRow::refresh(bool busy, bool bypass) {
 void ControlMaskRow::load() {
     const QString file = dialogs_.openFile(window(), tr("Маска управления"), model_.lastDir("mask"), tr("Изображения (*.png *.tif *.tiff *.exr);;Все файлы (*)"));
     if (file.isEmpty()) return;
+    if (busyCheck_ && busyCheck_()) {  // started while the dialog was open: the run reads the mask folder the import renames
+        refresh(true, bypass_);
+        dialogs_.warn(window(), tr("Маска не загружена"), tr("Идёт обработка или превью улучшения — загрузите маску, когда они закончатся"));
+        return;
+    }
     notice_.clear();
     pending_ = true;
     pendingRoot_ = model_.project().passesRoot;
@@ -137,6 +142,11 @@ void ControlMaskRow::remove() {
                          : s.file.isEmpty() ? tr("Маска уйдёт в историю версий — %1").arg(tail)
                                             : tr("Маска «%1» уйдёт в историю версий — %2").arg(s.file, tail);
     if (!dialogs_.confirm(window(), tr("Убрать маску управления?"), text, broken ? tr("Удалить") : tr("Убрать"))) return;
+    if (busyCheck_ && busyCheck_()) {
+        refresh(true, bypass_);
+        dialogs_.warn(window(), tr("Маска не убрана"), tr("Идёт обработка или превью улучшения — уберите маску, когда они закончатся"));
+        return;
+    }
     notice_.clear();
     QString error;
     if (!model_.removeControlMask(&error)) dialogs_.warn(window(), tr("Маска не убрана"), error);

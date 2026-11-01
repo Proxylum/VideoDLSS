@@ -22,6 +22,8 @@
 #include "SceneCutsView.h"
 #include "SourceNames.h"
 #include "PresetMenu.h"
+#include "NrPreviewBar.h"
+#include "PreviewRunner.h"
 #include "StageCard.h"
 #include "Theme.h"
 #include "TaskQueue.h"
@@ -309,8 +311,21 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     versionsGrid_->setHorizontalSpacing(10);
     versionsGrid_->setVerticalSpacing(2);
     vl->addWidget(versionsRows_);
+    // PR-10: the previews' cache - not versions of passes, its own line (set up by setPreviewRunner)
+    previewLine_ = new QWidget(versionsCard);
+    auto* ph = new QHBoxLayout(previewLine_);
+    ph->setContentsMargins(0, 2, 0, 0);
+    previewInfo_ = Muted("", previewLine_);
+    previewInfo_->setWordWrap(true);
+    ph->addWidget(previewInfo_, 1);
+    previewClear_ = new QPushButton(tr("Очистить превью"), previewLine_);
+    SetRole(previewClear_, "small");
+    ph->addWidget(previewClear_);
+    previewLine_->setVisible(false);
+    vl->addWidget(previewLine_);
     layout->addWidget(versionsCard);
     connect(gc_, &QPushButton::clicked, this, [this] {
+        if (tasks_.busy() || model_.controlMaskBusy()) return;  // the state may have changed since the button was enabled
         try {
             const PassGcReport r = GcPassVersions(model_.project().passesRoot, model_.project().passVersionsKeep);
             Log()->info("gc: {} version(s) removed, {} bytes", r.removed.size(), r.bytes);
@@ -326,6 +341,9 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     connect(&model_, &AppModel::planChanged, this, &ProjectPanel::refresh);
     connect(&model_, &AppModel::engineerModeChanged, this, [this](bool) { refresh(); });
     connect(&tasks_, &TaskQueue::taskStarted, this, [this](int) { refresh(); });  // «Обработать» waits for the running task
+    // PR-10: a preview runs for seconds - the versions panel and the mask's row wait for it, nothing else
+    connect(&tasks_, &TaskQueue::previewStarted, this, [this](int) { updateGates(); });
+    connect(&tasks_, &TaskQueue::previewFinished, this, [this](int, bool) { updateGates(); });
     // PR-8: an import of the control mask - «Обработать», the folder of passes and the versions panel wait for it
     connect(&model_, &AppModel::controlMaskChanged, this, &ProjectPanel::refresh);
     connect(&model_, &AppModel::controlMaskFinished, this, [this](bool, bool, const QString&) { refresh(); });
@@ -356,7 +374,7 @@ void ProjectPanel::refresh() {
     }
     sourceAudio_->setText(!hasSource ? "—" : src.audio ? tr("есть — будет скопирован") : tr("нет"));
     sourcePasses_->setText(hasSource ? QString::fromStdWString(p.passesRoot.wstring()) : "—");
-    changePasses_->setEnabled(hasSource && !tasks_.busy() && !model_.controlMaskBusy());
+    changePasses_->setEnabled(hasSource && !tasks_.mainBusy() && !model_.controlMaskBusy());  // a preview is cancelled by the switch
     const std::string hash = model_.plan().sourceHash;
     sourceHash_->setText(hash.empty() ? "—" : ShortHash(hash) + " · " + model_.sourceHashStatus());
     sourceHash_->setToolTip(QString::fromStdString(hash));
@@ -386,7 +404,8 @@ void ProjectPanel::refresh() {
     outError_->setVisible(!model_.planError().isEmpty() && hasSource);
     const int toRun = std::max(0, out.stagesToRun - 1);  // the encode is not a «stage» for the button
     process_->setText(toRun > 0 ? tr("Обработать · %1").arg(Plural(toRun, tr("стадия"), tr("стадии"), tr("стадий"))) : tr("Обработать · только кодирование"));
-    process_->setEnabled(hasSource && model_.planError().isEmpty() && model_.planBlocker().isEmpty() && !tasks_.busy() && !model_.controlMaskBusy());
+    // a preview does not hold processing back: «Обработать» preempts it (TaskQueue)
+    process_->setEnabled(hasSource && model_.planError().isEmpty() && model_.planBlocker().isEmpty() && !tasks_.mainBusy() && !model_.controlMaskBusy());
     if (hasSource && model_.planError().isEmpty() && !model_.planBlocker().isEmpty()) {  // a stage the run would refuse
         outError_->setText(model_.planBlocker());
         outError_->setVisible(true);
@@ -485,9 +504,12 @@ void ProjectPanel::refreshVersions() {
                                                   .arg(QString::fromStdWString(p.passesRoot.wstring()), HumanBytes(total), HumanBytes(history),
                                                        Plural(p.passVersionsKeep, tr("последняя"), tr("последние"), tr("последних"))));
     // PR-8: while a task runs or a mask is imported «Вернуть», «Удалить» and gc wait - one could swap the mask under a run or take
-    // mask_control before the import's rename, and the import's way back to the previous mask needs its version
+    // mask_control before the import's rename, and the import's way back to the previous mask needs its version; PR-10: a preview
+    // reads the passes too (updateGates when it starts and ends)
     const bool versionsBusy = tasks_.busy() || model_.controlMaskBusy();
-    const QString busyTip = tr("Недоступно во время обработки или загрузки маски");
+    const QString busyTip = tr("Недоступно во время обработки, превью или загрузки маски");
+    historyOnDisk_ = history > 0;
+    versionButtons_.clear();
     gc_->setEnabled(history > 0 && !versionsBusy);
     if (versionsBusy) gc_->setToolTip(busyTip);
     else gc_->setToolTip(tr("Удалить предыдущие версии сверх хранимых (pass_versions_keep); версии, на которые ссылаются другие, остаются"));
@@ -562,7 +584,9 @@ void ProjectPanel::refreshVersions() {
             SetRole(use, "small");
             use->setToolTip(versionsBusy ? busyTip : tr("Сделать эту версию текущей; нынешняя останется в истории"));
             use->setEnabled(!versionsBusy);
+            versionButtons_.push_back(use);
             connect(use, &QPushButton::clicked, this, [this, pass, id] {
+                if (tasks_.busy() || model_.controlMaskBusy()) return;
                 try {
                     UsePassVersion(model_.project().passesRoot, pass, id);
                 } catch (const std::exception& e) {
@@ -576,8 +600,15 @@ void ProjectPanel::refreshVersions() {
             SetRole(remove, "small");
             remove->setEnabled(!versionsBusy);
             if (versionsBusy) remove->setToolTip(busyTip);
+            versionButtons_.push_back(remove);
             connect(remove, &QPushButton::clicked, this, [this, dir, pass, id] {
+                if (tasks_.busy() || model_.controlMaskBusy()) return;
                 if (QMessageBox::question(this, tr("Удалить версию"), tr("Удалить %1 (%2) с диска?").arg(HumanSourceName(pass), VersionLabel(id))) != QMessageBox::Yes) return;
+                if (tasks_.busy() || model_.controlMaskBusy()) {  // started while the question was open (PR-10: a preview)
+                    updateGates();
+                    QMessageBox::information(this, tr("Удалить версию"), tr("Идёт обработка или превью улучшения — удалите версию, когда они закончатся"));
+                    return;
+                }
                 std::error_code ec;
                 std::filesystem::remove_all(dir, ec);
                 if (ec) QMessageBox::warning(this, tr("Версии пассов"), QString::fromStdString(ec.message()));
@@ -592,17 +623,49 @@ void ProjectPanel::refreshVersions() {
     versionsGrid_->setColumnStretch(2, 1);
 }
 
+StageCard* ProjectPanel::card(const std::string& stage) const {
+    for (StageCard* c : cards_)
+        if (c->stage() == stage) return c;
+    return nullptr;
+}
+
+void ProjectPanel::setPreviewRunner(PreviewRunner* runner) {
+    preview_ = runner;
+    if (!runner) return;
+    if (StageCard* nr = card("nr")) nr->setExtra(new NrPreviewBar(model_, *runner, nr));
+    connect(previewClear_, &QPushButton::clicked, this, [this] { preview_->clearCache(); });
+    auto line = [this] {
+        const NrPreviewUsage u = preview_->usage();
+        previewLine_->setVisible(u.entries > 0);
+        previewInfo_->setText(tr("Превью улучшения: %1 шт. · %2 — не версии пассов; старые удаляются сами (до 16 шт. и 4 ГБ)").arg(u.entries).arg(HumanBytes(u.bytes)));
+        const bool busy = tasks_.previewBusy() || preview_->housekeeping();
+        previewClear_->setEnabled(!busy);
+        previewClear_->setToolTip(busy ? tr("Недоступно, пока считается превью") : tr("Удалить с диска все посчитанные превью этого проекта"));
+    };
+    connect(preview_, &PreviewRunner::changed, this, line);
+    line();
+}
+
+void ProjectPanel::updateGates() {
+    const bool versionsBusy = tasks_.busy() || model_.controlMaskBusy();
+    const QString busyTip = tr("Недоступно во время обработки, превью или загрузки маски");
+    gc_->setEnabled(historyOnDisk_ && !versionsBusy);
+    gc_->setToolTip(versionsBusy ? busyTip : tr("Удалить предыдущие версии сверх хранимых (pass_versions_keep); версии, на которые ссылаются другие, остаются"));
+    for (QPushButton* b : versionButtons_) {
+        b->setEnabled(!versionsBusy);
+        if (versionsBusy) b->setToolTip(busyTip);
+        else if (b->text() == tr("Вернуть")) b->setToolTip(tr("Сделать эту версию текущей; нынешняя останется в истории"));
+        else b->setToolTip(QString());
+    }
+    for (StageCard* card : cards_) card->refreshBusy();
+}
+
 void ProjectPanel::processAll() {
     Project& p = model_.project();
     if (p.sourceVideo.empty()) return;
     if (model_.controlMaskBusy()) return;  // PR-8: Ctrl+Return too waits for the mask's import (its plan would read the folder being renamed)
-    if (p.resultVideo.empty()) p.resultVideo = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + "_result" + ResultExtensionFor(p.codec));
-    if (p.file.empty()) {
-        const auto file = p.sourceVideo.parent_path() / (p.sourceVideo.stem().string() + ".dlssvid.json");
-        if (!model_.saveProjectAs(QString::fromStdWString(file.wstring()))) return;
-    } else if (!model_.saveProject()) {
-        return;
-    }
+    if (tasks_.mainBusy()) return;         // PR-10: a second press while the run waits for a preempted preview's process to exit
+    if (!model_.saveForRun()) return;
     std::vector<TaskQueue::StagePlan> plan;
     for (const StageEstimate& e : model_.outcome().stages) {
         TaskQueue::StagePlan s;
@@ -614,6 +677,7 @@ void ProjectPanel::processAll() {
     }
     model_.cancelProxies();  // the run rewrites the result while the proxy would be reading it (started again afterwards)
     const int id = tasks_.enqueue(tr("Обработка"), model_.cliPath(), model_.processArgs(), plan);
+    refresh();  // off at once: the run starts after a preempted preview's process exited (taskStarted then)
     emit processQueued(id, QString("%1 → %2").arg(QString::fromStdWString(p.sourceVideo.filename().wstring()), QString::fromStdWString(p.resultVideo.filename().wstring())));
 }
 
@@ -631,7 +695,7 @@ void ProjectPanel::runStage(const std::string& stage) {
 
 void ProjectPanel::choosePassesRoot() {
     if (!model_.hasProject()) return;
-    if (tasks_.busy()) {
+    if (tasks_.mainBusy()) {
         QMessageBox::information(this, tr("Идёт обработка"), tr("Папку пассов можно сменить после окончания обработки."));
         return;
     }

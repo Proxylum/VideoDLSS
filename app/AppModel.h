@@ -15,11 +15,13 @@
 #include <vector>
 
 #include <map>
+#include <optional>
 #include <set>
 
 #include "PlaybackClock.h"
 #include "gpu/D3D12Device.h"
 #include "pipeline/Estimates.h"
+#include "pipeline/NrPreview.h"
 #include "stages/StagePreset.h"
 #include "viewport/FrameStore.h"
 #include "viewport/PipelinePreset.h"
@@ -27,6 +29,10 @@
 #include "viewport/ViewportState.h"
 
 namespace dlssvid {
+
+// The NR preview's viewport source (PR-10): <passes root>/.preview/nr/<key>/color_nr - a «version» of color_nr for the chips, never in
+// the project file.
+inline constexpr const char* kNrPreviewSource = "color_nr@preview";
 
 // Application state shared by the panels: project, viewport state, frame store, playback.
 // All Qt widgets talk to the model; the model owns the D3D12 device and the frame cache.
@@ -259,6 +265,34 @@ public:  // no slots: a struct and plain methods
     // «Убрать»: into the history (a folder without a loadable manifest is deleted); false with the Russian text in `error`.
     bool removeControlMask(QString* error = nullptr);
 
+    // ---- the NR preview (PR-10): computed by PreviewRunner under <passes root>/.preview/nr, shown here as color_nr@preview ----
+    struct NrPreviewShown {
+        std::filesystem::path dir;   // the entry (its color_nr is the source)
+        std::filesystem::path root;  // the passes root it was made under
+        std::string key;
+        NrPreviewMode mode = NrPreviewMode::Frame;
+        int64_t first = 0, last = 0, warmup = 0;
+        bool cached = false;               // shown from the cache, without a run
+        std::vector<std::string> dropped;  // inputs a frame went without (depth_dlss, mv_dlss)
+    };
+    const std::optional<NrPreviewShown>& nrPreview() const { return nrPreview_; }
+    // On the «after» side of «before | after» (the wipe kept where it was when a comparison is set up), «before» by nrPreviewBefore.
+    // `seekToFirst`: the cursor to the preview's first frame. Not a change of the project: nothing is marked unsaved.
+    void showNrPreview(const NrPreviewShown& shown, bool seekToFirst);
+    void clearNrPreview();  // the store lets its files go first (SetSources waits for the loads), its side back to the pass
+    // «До: Текущее улучшение | Апскейл» (QSettings card/nr/previewBefore: "nr" | "sr"); the source shown on the «before» side
+    void setNrPreviewBefore(const std::string& which);
+    std::string nrPreviewBeforeChoice() const;  // "nr" | "sr"
+    std::string nrPreviewBefore() const;        // color_nr when it covers the preview's frames (choice "nr"), else color_sr, else source
+    // The plan without the force marks of the stages above NR: the preview's gate and key (a mark would rerun them for nothing).
+    const ProcessPlan& previewPlan() const { return planNoForce_ ? *planNoForce_ : plan_; }
+    void refreshPlanIfPending();  // a plan scheduled after an edit is made now (the preview reads it)
+    bool saveForRun();            // the default result path set and the project saved before a run; false when it cannot be saved
+    // «Посчитать этапы до улучшения»: process --project <file> --disable-unavailable --stages <stages> --no-encode (no --force: the
+    // marks stay for «Обработать»)
+    QStringList upstreamArgs(const std::vector<std::string>& stages) const;
+    uint64_t generation() const { return generation_; }  // +1 when the project or its passes root changes: a late preview is dropped
+
 signals:
     void projectChanged();
     void sourcesChanged();
@@ -278,9 +312,15 @@ signals:
     void controlMaskChanged();
     // ok: imported, replaced or the same pixels again (changed false; message «эта маска уже загружена»); else the refusal in Russian
     void controlMaskFinished(bool ok, bool changed, const QString& message);
+    void nrPreviewChanged();       // shown, cleared or its «before» side changed (PR-10): the chips, the labels, the viewport
+    void passesContextChanged();   // another project or passes root: a preview in flight is cancelled
 
 private:
-    std::vector<ViewportSource> viewportSources(bool dropControlMask) const;  // the project's; dropped: without mask_control and its versions
+    // the project's and the NR preview shown; dropped: without mask_control and its versions
+    std::vector<ViewportSource> viewportSources(bool dropControlMask) const;
+    ProcessOptions planOptions(bool withForce);  // the plan's options: with the force marks (plan_) or without (planNoForce_); hashes the source once
+    void dropNrPreview();                              // another project or root: the preview state goes, generation_ + 1
+    void sanitizePreviewSide();                        // after a load: a layer naming the preview goes to color_nr, else afterSource()
     QString seedNewProject();  // openVideo of a video without a project: the preset marked for new projects; the message's tail
     nlohmann::json stageParamsOf(const std::string& stage) const;  // the project's, {} for a stage it lacks
     void noteScrubReady();  // a scrub jump's frames are all on the GPU: one latency sample
@@ -304,6 +344,9 @@ private:
     bool loop_ = false;
     bool dirty_ = false;
     ProcessPlan plan_;
+    std::optional<ProcessPlan> planNoForce_;  // PR-10: when a stage above NR is marked «пересчитать»
+    std::optional<NrPreviewShown> nrPreview_;
+    uint64_t generation_ = 0;
     RunOutcome outcome_;
     SourceInfo sourceInfo_;
     QString planError_;

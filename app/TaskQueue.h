@@ -19,6 +19,12 @@ namespace dlssvid {
 // frames are in), the stages still queued use their estimates — together the overall fraction and the time left.
 // A running task can be cancelled (the child process is killed; the passes finished before it keep their manifests
 // and are reused by the next run), a queued one is dropped; both finish with ok = false.
+//
+// PR-10: two lanes on the one process. Main - processing, «Запустить отдельно», exports, the stages before NR: their events are the
+// task* signals. Preview - the NR preview (PreviewRunner): its events are the preview* signals only, so what follows a processing
+// task (MainWindow::onTaskFinished: the force marks cleared, the sources reloaded) never follows a preview. A Main task preempts
+// every preview (the running one is killed and starts after it exits, its files let go); a preview is refused while a Main task
+// runs or waits. All previews share one row of the table.
 class TaskQueue : public QWidget {
     Q_OBJECT
 public:
@@ -48,14 +54,21 @@ public:
         QStringList failedStageTitles() const;
     };
 
+    enum class Lane { Main, Preview };
+
     explicit TaskQueue(QWidget* parent = nullptr);
     ~TaskQueue() override;
 
-    // Queues `program args...`; returns the task id. `plan`: the stages of a `process` task, in run order.
-    int enqueue(const QString& title, const QString& program, const QStringList& args, const std::vector<StagePlan>& plan = {});
+    // Queues `program args...`; returns the task id. `plan`: the stages of a `process` task, in run order. A Main task preempts the
+    // previews (previewPreempted, then cancelled); a Preview task while a Main one runs or waits is refused (-1) and drops a preview
+    // still waiting.
+    int enqueue(const QString& title, const QString& program, const QStringList& args, const std::vector<StagePlan>& plan = {}, Lane lane = Lane::Main);
     // The running task is killed, a queued one is dropped; both finish with ok = false.
     void cancel(int id);
-    bool busy() const { return current_ >= 0; }
+    bool busy() const { return current_ >= 0; }  // a process of either lane runs
+    bool mainBusy() const;                       // a Main task runs or waits
+    bool previewBusy() const;                    // a Preview task runs or waits
+    Lane laneOf(int id) const;                   // Main for an unknown id
     int currentId() const { return current_ >= 0 ? tasks_[static_cast<size_t>(current_)].id : -1; }
     Progress progress(int id) const;  // the last progress of a task (empty for an unknown id)
     double elapsed(int id) const;     // seconds the task has run so far (live while it runs)
@@ -64,14 +77,22 @@ public:
     bool cancelled(int id) const;
 
 signals:
+    // Main tasks
     void taskStarted(int id);
     void taskProgress(int id, const Progress& progress);
     void taskFinished(int id, bool ok);
     void taskOutput(int id, const QString& line);
+    // Preview tasks (PR-10)
+    void previewStarted(int id);
+    void previewProgress(int id, const Progress& progress);
+    void previewFinished(int id, bool ok);
+    void previewOutput(int id, const QString& line);
+    void previewPreempted(int id);  // a Main task took over: emitted before the preview is cancelled
 
 private:
     struct Task {
         int id = 0;
+        Lane lane = Lane::Main;
         QString title, program;
         QStringList args;
         int row = 0;
@@ -94,6 +115,12 @@ private:
     void stageReused(Task& t, const QString& stage);
     void stageFailed(Task& t, const QString& stage);
     void publish(Task& t);  // the row and the taskProgress signal
+    // the signals of a task's lane
+    void emitStarted(const Task& t);
+    void emitProgress(const Task& t);
+    void emitFinished(const Task& t, bool ok);
+    void emitOutput(const Task& t, const QString& line);
+    bool ownsRow(const Task& t) const { return t.lane == Lane::Main || previewRowOwner_ == t.id; }  // a late end of a killed preview
     void finishTask(Task& t, bool ok, const QString& status);
     double plannedSeconds(const Task& t, const QString& stage) const;
     const Task* find(int id) const;
@@ -104,6 +131,8 @@ private:
     std::unique_ptr<QProcess> process_;
     QString buffer_;
     int nextId_ = 1;
+    int previewRow_ = -1;       // the one row of the previews
+    int previewRowOwner_ = -1;  // the preview that writes it
 };
 
 }  // namespace dlssvid

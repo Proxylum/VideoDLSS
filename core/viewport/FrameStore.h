@@ -87,6 +87,10 @@ public:
     static std::vector<ViewportSource> DiscoverPasses(const std::filesystem::path& passesRoot);
     // Previous versions under <pass>.v/ as sources named "<pass>@<id>" (stage 9: compare versions with the wipe).
     static std::vector<ViewportSource> DiscoverPassVersions(const std::filesystem::path& passesRoot);
+    // One pass folder as a source named `name` (DiscoverPasses, DiscoverPassVersions, and the NR preview of PR-10: color_nr@preview
+    // from <root>/.preview/nr/<key>/color_nr with its frame range); nullopt for a data pass. Throws when the manifest does not read.
+    static std::optional<ViewportSource> PassFolderSource(const std::filesystem::path& dir, const std::string& name, const std::string& pass,
+                                                          const std::string& version = {});
     static std::optional<ViewportSource> VideoSource(const std::string& name, const std::filesystem::path& file);
 
     // Reference image size (the "source" video or the first source).

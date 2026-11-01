@@ -46,6 +46,7 @@ public:
 
 public slots:
     void refresh();  // parameters from the project, the state from the plan, engineer widgets shown or hidden
+    void refreshBusy();  // PR-10: only what waits for a task (the control mask's row) - a preview starts and ends in seconds
 
 signals:
     void runRequested(const std::string& stage);  // engineer mode: this stage alone as `dlssvid <stage>`

@@ -16,6 +16,7 @@ namespace dlssvid {
 class AppModel;
 class PresetButton;
 class PresetMenu;
+class PreviewRunner;
 class StageCard;
 class TaskQueue;
 
@@ -34,6 +35,9 @@ public:
     ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent = nullptr);
     // «Пресет обработки ▾» of the stages' header (PR-9): every stage card and the encoder at once
     PresetMenu* pipelinePresetMenu() const { return pipelineMenu_; }
+    // PR-10: the preview row in the card «Улучшение» and the cache's line in «Версии пассов на диске» (MainWindow owns the runner)
+    void setPreviewRunner(PreviewRunner* runner);
+    StageCard* card(const std::string& stage) const;
 
 public slots:
     void refresh();
@@ -43,6 +47,7 @@ signals:
 
 private:
     void refreshVersions();
+    void updateGates();  // PR-10: what waits for a preview, without the whole refresh (a preview starts and ends in seconds)
     void runStage(const std::string& stage);
     void processAll();  // save the project and run `dlssvid process --project` (the whole pipeline -> result)
     void patchDll();    // nr stage: dlssnr-patcher over the user's nvngx_dlssnr.dll (`dlssvid nr-patch`)
@@ -75,6 +80,12 @@ private:
     QLabel* encodeState_;
     QLabel* versionsInfo_;
     QPushButton* gc_;
+    PreviewRunner* preview_ = nullptr;
+    QWidget* previewLine_ = nullptr;  // «Превью улучшения: N шт. · X …» [Очистить превью]
+    QLabel* previewInfo_ = nullptr;
+    QPushButton* previewClear_ = nullptr;
+    std::vector<QPushButton*> versionButtons_;  // «Вернуть» / «Удалить» of the versions listed (rebuilt by refreshVersions)
+    bool historyOnDisk_ = false;
     QWidget* versionsRows_;
     QGridLayout* versionsGrid_;
     QLabel* footer_;

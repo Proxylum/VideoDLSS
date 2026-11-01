@@ -5,7 +5,9 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 #include "gpu/D3D12Device.h"
@@ -27,8 +29,20 @@ namespace dlssvid::cli {
 
 namespace {
 
+// A range run of a variable-frame-rate video through the video path (PR-10): --json says code "vfr", the GUI's preview remembers it.
+class NrVfrError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+// --start past the clip's last frame: --json says code "past_end" (the GUI's preview of a clip whose length it only estimated)
+class NrPastEndError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+// every frame of a short run (the preview's 1 or 1 + 6 frames would print one line only), every 10th of a long one
 void Progress(int64_t done, int64_t total) {
-    if (done % 10 == 0 || done == total) {
+    if (done % 10 == 0 || done == total || (total > 0 && total <= 100)) {
         if (total > 0) std::fprintf(stderr, "\r%lld/%lld frames", static_cast<long long>(done), static_cast<long long>(total));
         else std::fprintf(stderr, "\r%lld frames", static_cast<long long>(done));
     }
@@ -148,9 +162,10 @@ nlohmann::json ResolveNrParams(const NrCommands::NrArgs& a, const CLI::App& cmd)
     return params;
 }
 
-// --start F --frames N --warmup K (spec §2f): decode from F-K so the model (Reset there) and the temporal filter build their
-// history, write F..F+N-1. Indices are those of the pass folders and the viewport. SeekToFrame maps them to pts at the
-// stream's rate, i.e. assumes a constant frame rate: VFR is not detected yet (matrix media-vfr; PR-10 refuses it).
+// --start F --frames N --warmup K (spec §2f): run from F-K so the model (Reset there) and the temporal filter build their
+// history, write F..F+N-1. Indices are those of the pass folders and the viewport. With --color-dir the frames come from the
+// pass by index and the video is not decoded (PR-10); through the video SeekToFrame maps them to pts at the stream's rate - a
+// constant rate - so a range is refused where the pts do not name the frames' own indices (a variable frame rate).
 struct NrRange {
     int64_t first = 0, warmup = 0, from = 0, maxFrames = -1;  // maxFrames: frames to decode, -1 to the end
     bool Ranged() const { return first > 0; }
@@ -184,7 +199,12 @@ void GuardProcessedPass(const NrStageOptions& o, const char* what) {
               "--mv-dir / --masks-dir)");
 }
 
-NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStageOptions& o) {
+namespace {
+// --json: reports carry paths and messages that may not be UTF-8 (ANSI paths, localized system errors) - replaced, not thrown
+std::string NrReportJson(const nlohmann::json& j) { return j.dump(2, ' ', false, nlohmann::json::error_handler_t::replace); }
+}  // namespace
+
+NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStageOptions& o, bool fromPass) {
     NrRange r;
     r.first = a.start;
     r.warmup = std::min(a.warmup, a.start);  // nothing before the clip's first frame
@@ -196,10 +216,11 @@ NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStage
     if (a.frames == 0) Throw("nr: --frames 0 with --start " + std::to_string(r.first) + " writes nothing: give N >= 1 or leave --frames out");
     const int64_t clipFrames = decoder.Info().frameCount;  // 0: unknown (mkv)
     if (clipFrames > 0 && r.first >= clipFrames)
-        Throw("nr: --start " + std::to_string(r.first) + " is past the end of the clip (" + std::to_string(clipFrames) + " frames)");
+        throw NrPastEndError("nr: --start " + std::to_string(r.first) + " is past the end of the clip (" + std::to_string(clipFrames) + " frames)");
     GuardProcessedPass(o, "the range");
     // the last frame the run reads: --frames is «at most N», the clip may end first; with the clip's length unknown (mkv) only
-    // the start of a pass is checked - a short colour pass still stops the run at «has no frame N» (review of TASK-0047)
+    // the start of a pass is checked - a short colour pass still stops the run at «has no frame N» (review of TASK-0047): through
+    // the video in NrStage, on the pass path by a count of the clip's packets past the pass (CmdNr, PR-10)
     int64_t last = a.frames > 0 ? r.first + a.frames - 1 : -1;
     if (clipFrames > 0) last = last < 0 ? clipFrames - 1 : std::min(last, clipFrames - 1);
     else last = -1;
@@ -208,9 +229,23 @@ NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStage
         CheckCoverage(o.depthDir, "the depth pass", r.from, last, false);
         CheckCoverage(o.mvDir, "the motion-vector pass", r.from, last, false);
     }
-    if (r.from > 0) {
-        Log()->info("nr: frames from {} through the model (warm-up {}), written from {}; the seek assumes a constant frame rate", r.from, r.warmup, r.first);
-        if (!decoder.SeekToFrame(r.from)) Throw("nr: --start " + std::to_string(r.first) + " is past the end of " + a.input);
+    if (r.from > 0 && fromPass) {
+        Log()->info("nr: frames from {} through the model (warm-up {}), written from {}; colour from the pass by index, the video is not decoded", r.from,
+                    r.warmup, r.first);
+    } else if (r.from > 0) {
+        // a seek by pts lands on the frame of that time: refused where the pts do not name the frames' own indices - the passes and the
+        // viewport count frames, a variable frame rate would give other frames (PR-10). A seek close ahead counts the frames instead
+        if (!decoder.SeekIsSequential(r.from)) {
+            // the frames the run reads only: a gap later in the clip does not move them (mkv: the clip's length unknown, `last` -1)
+            const int64_t scanTo = a.frames > 0 ? r.first + a.frames - 1 : last;
+            const FrameIndexScan scan = ScanFrameIndex(a.input, scanTo >= 0 ? scanTo : std::numeric_limits<int64_t>::max());
+            if (!scan.Consistent())
+                throw NrVfrError("nr: " + a.input + (scan.noRate ? " cannot be sought by frame (" : " has a variable frame rate (") + scan.Why() +
+                                 "): --start cannot find frame " + std::to_string(r.first) +
+                                 " by seeking - give --color-dir with the upscaled pass, or process the clip from the start");
+        }
+        Log()->info("nr: frames from {} through the model (warm-up {}), written from {}", r.from, r.warmup, r.first);
+        if (!decoder.SeekToFrame(r.from)) throw NrPastEndError("nr: --start " + std::to_string(r.first) + " is past the end of " + a.input);
     }
     return r;
 }
@@ -364,7 +399,7 @@ int CmdNrCheck(const NrCommands::NrArgs& a, const NrStageOptions& o) {
             j["recreations"] = recreations;
             j["recreations_stop"] = recreateStop;
         }
-        std::ofstream(a.json) << j.dump(2) << "\n";
+        std::ofstream(a.json) << NrReportJson(j) << "\n";
     }
     return failed ? 1 : 0;
 }
@@ -387,6 +422,10 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     if ((a.checkRepeat > 0 || a.checkFeatures > 0) && !a.check) Throw("nr: --check-repeat and --check-features belong to --check");
     if (a.check) return CmdNrCheck(a, o);
     if (a.input.empty()) Throw("nr: -i/--input is required (or --check)");
+    if (!a.sourceHash.empty() &&
+        (a.sourceHash.size() != 71 || a.sourceHash.rfind("sha256:", 0) != 0 ||
+         a.sourceHash.find_first_not_of("0123456789abcdef", 7) != std::string::npos))
+        Throw("nr: --source-hash expects sha256:<64 lowercase hex>");
     if (a.output.empty()) Throw("nr: -o/--output is required");
     VideoDecoder decoder(a.input);
     const auto& info = decoder.Info();
@@ -410,27 +449,44 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     o.videoOut = a.video;
     o.videoCodec = a.codec;
     o.sourceFile = std::filesystem::path(a.input).filename().string();
-    o.sourceHash = "sha256:" + Sha256File(a.input);
+    o.sourceHash = a.sourceHash.empty() ? "sha256:" + Sha256File(a.input) : a.sourceHash;  // the GUI's preview hashed it already
     // PR-13: the clip's scene-cut list, <output>/scenes unless told otherwise - only when NR keeps a history to reset
     bool scenesUsed = false;
     o.sceneCuts = ResolveScenes(a.scenesDir, a.noScenes, a.noAuto, a.output, o.sourceHash, StageReadsSceneCuts("nr", EffectiveStageParams("nr", params)), "nr",
                                 a.frames > 0 ? a.start + a.frames : 0, &scenesUsed);
-    const NrRange range = PrepareRange(a, decoder, o);
+    // with the colour pass a range starting past frame 0 takes its frames from the passes by index: no seek, any frame rate (PR-10)
+    const bool fromPass = !o.colorDir.empty() && a.start - std::min(a.warmup, a.start) > 0;
+    const NrRange range = PrepareRange(a, decoder, o, fromPass);
     if (!range.Ranged() && !NrAbJson(o).empty()) GuardProcessedPass(o, "an A/B run");
-    const int64_t total = range.maxFrames >= 0 ? range.maxFrames : info.frameCount > 0 ? info.frameCount - range.from : 0;
+    int64_t passFrames = -1;  // the pass path: frames from range.from to the colour pass's (and the clip's) end, at most maxFrames
+    if (fromPass) {
+        passFrames = Manifest::Load(o.colorDir).lastFrame - range.from + 1;
+        if (range.maxFrames >= 0) passFrames = std::min(passFrames, range.maxFrames);
+        if (info.frameCount > 0) passFrames = std::min(passFrames, info.frameCount - range.from);
+        passFrames = std::max<int64_t>(passFrames, 0);
+        // the clip's length unknown (mkv): a colour pass that ends where the run would go on is not the clip's end - the clip's
+        // packets past the pass are counted (demux only), and a short pass stops the run as it does through the video
+        const int64_t passLast = Manifest::Load(o.colorDir).lastFrame;
+        if (info.frameCount <= 0 && (range.maxFrames < 0 || passLast < range.from + range.maxFrames - 1) &&
+            ScanFrameIndex(a.input, passLast).frames > passLast + 1)
+            Throw("nr: the colour pass " + o.colorDir.string() + " has no frame " + std::to_string(passLast + 1) + " (the clip goes on past it)");
+    }
+    const int64_t total = fromPass ? passFrames : range.maxFrames >= 0 ? range.maxFrames : info.frameCount > 0 ? info.frameCount - range.from : 0;
     o.onFrame = [](int64_t frame, double ms) {
         if (frame % 10 == 0) std::fprintf(stderr, "  frame %lld %.1f ms\n", static_cast<long long>(frame), ms);
     };
     D3D12Device device({a.warp, false});
     const auto t0 = std::chrono::steady_clock::now();
-    const NrRunResult r = RunNr(decoder, device, o, range.maxFrames, [total](int64_t n) { Progress(n, total); });
+    const NrRunResult r = fromPass ? RunNrFromPasses(info, device, o, range.from, passFrames, [total](int64_t n) { Progress(n, total); })
+                                   : RunNr(decoder, device, o, range.maxFrames, [total](int64_t n) { Progress(n, total); });
     const double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     std::fprintf(stderr, "\n");
     if (r.stats.disabled) {
         std::printf("nr:          disabled — %s\n", r.stats.disabledReason.c_str());
         return 1;
     }
-    if (range.Ranged() && r.stats.written == 0) Throw("nr: nothing written - --start " + std::to_string(range.first) + " is past the end of " + a.input);
+    if (range.Ranged() && r.stats.written == 0)
+        throw NrPastEndError("nr: nothing written - --start " + std::to_string(range.first) + " is past the end of " + a.input);
     if (a.frames > 0 && r.stats.written < a.frames)
         Log()->warn("nr: the clip ends at frame {}: {} of {} frames written", r.stats.lastWritten, r.stats.written, a.frames);
     Log()->info("nr done: {} frames in {:.1f} s ({:.1f} ms/frame wall, {:.1f} ms/frame GPU), backend {}", r.stats.frames, sec,
@@ -499,7 +555,7 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
                               {"scene_cut_count", r.stats.sceneCutCount},
                               {"mv_scale", r.stats.mvScaleX > 0 ? nlohmann::json::array({r.stats.mvScaleX, r.stats.mvScaleY}) : nlohmann::json(nullptr)}}}};
         if (range.Ranged()) j["range"] = {{"first", r.stats.firstWritten}, {"last", r.stats.lastWritten}, {"warmup", r.stats.warmup}};
-        std::ofstream(a.json) << j.dump(2) << "\n";
+        std::ofstream(a.json) << NrReportJson(j) << "\n";
     }
     return 0;
 }
@@ -580,7 +636,9 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_option("--video", na_.video, "also encode the result into this video file (no audio)");
     nr_->add_option("--codec", na_.codec, "encoder for --video: h264_nvenc | hevc_nvenc | av1_nvenc | ffv1")->default_val("h264_nvenc");
     nr_->add_option("--frames", na_.frames, "write at most N frames (from --start; warm-up frames not counted)")->default_val(-1);
-    nr_->add_option("--start", na_.start, "first frame to write, as the pass folders and the viewport count (from 0); the seek assumes a constant frame rate")
+    nr_->add_option("--start", na_.start,
+                    "first frame to write, as the pass folders and the viewport count (from 0); with --color-dir the frames come from the pass by "
+                    "index, through the video a variable frame rate is refused")
         ->default_val(0)
         ->check(CLI::NonNegativeNumber);
     nr_->add_option("--warmup", na_.warmup, "frames before --start that go through the model for its history and are not written (fewer at the clip's start)")
@@ -605,7 +663,8 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_option("--check-features,--check_features", na_.checkFeatures,
                     "--check: N features alive at once, 1..4 (time and VRAM of each; stops at a failure or at 80 % of the DXGI budget)")
         ->check(CLI::Range(1, 4));
-    nr_->add_option("--json", na_.json, "write the run summary / diagnostics to this JSON file");
+    nr_->add_option("--json", na_.json, "write the run summary / diagnostics to this JSON file (a failure: {ok: false, error, code})");
+    nr_->add_option("--source-hash,--source_hash", na_.sourceHash, "sha256:<hex> of the input, instead of hashing it again (the GUI's preview)")->group("");
 
     patch_ = app.add_subcommand("nr-patch", "patch your nvngx_dlssnr.dll for RTX 20/30/40 with dlssnr-patcher (external tool, CUDA 13.3) into bin/nvidia/");
     patch_->add_option("-i,--input", pa_.input, "the original nvngx_dlssnr.dll")->required()->check(CLI::ExistingFile);
@@ -618,7 +677,20 @@ void NrCommands::Register(CLI::App& app) {
 }
 
 int NrCommands::Dispatch() {
-    if (nr_ && nr_->parsed()) return CmdNr(na_, *nr_);
+    if (nr_ && nr_->parsed()) {
+        try {
+            return CmdNr(na_, *nr_);
+        } catch (const std::exception& e) {
+            // the GUI's preview reads why a run failed: the text, and a code it acts on («vfr»: no seek into this source)
+            if (!na_.json.empty() && !na_.check) {
+                const char* code = dynamic_cast<const NrVfrError*>(&e) ? "vfr" : dynamic_cast<const NrPastEndError*>(&e) ? "past_end" : "";
+                const nlohmann::json j = {{"ok", false}, {"error", e.what()}, {"code", code}};
+                const std::string text = NrReportJson(j);  // before the file is truncated
+                std::ofstream(na_.json) << text << "\n";
+            }
+            throw;
+        }
+    }
     if (patch_ && patch_->parsed()) return CmdPatch(pa_);
     return -1;
 }

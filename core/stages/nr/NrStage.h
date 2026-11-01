@@ -179,6 +179,11 @@ struct NrRunResult {
 // Decodes from wherever the decoder stands (the CLI seeks for --start) and runs at most maxFrames frames through the stage.
 NrRunResult RunNr(VideoDecoder& decoder, D3D12Device& device, NrStageOptions options, int64_t maxFrames = -1, const std::function<void(int64_t)>& progress = {},
       const nlohmann::json& params = nlohmann::json::object());
+// Frames from..from+count-1 with the colour from options.colorDir by index, the video not decoded (PR-10: dlssvid nr --start with
+// --color-dir). The stage reads colour, depth, motion vectors and masks by the frame's index and never the decoded pixels then, so
+// the result is the full run's frames bit for bit - whatever the source's frame rate. `info` gives the colour metadata and the rate.
+NrRunResult RunNrFromPasses(const VideoStreamInfo& info, D3D12Device& device, NrStageOptions options, int64_t from, int64_t count,
+                            const std::function<void(int64_t)>& progress = {}, const nlohmann::json& params = nlohmann::json::object());
 
 // U8 / U16 / float mask image -> F32 [0, 1] single channel (masks are 8-bit PNG, ТЗ §5).
 PassImage MaskToFloat(const PassImage& mask);

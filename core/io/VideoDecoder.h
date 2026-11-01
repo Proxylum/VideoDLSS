@@ -58,6 +58,27 @@ struct KeyframeScan {
 };
 KeyframeScan ScanKeyframes(const std::filesystem::path& path);
 
+// The index of the frame at `pts` (in `timeBase` units) at `rate`, counted from the stream's `startTime`: what a seek and the frame
+// indices after it assume - a constant frame rate.
+int64_t PtsToIndex(int64_t pts, int64_t startTime, Rational timeBase, Rational rate);
+
+// Whether the indices a seek derives from pts are the frames' own up to frame `upTo` (PR-10: dlssvid nr --start on the video path).
+// Demux only, no decoding: the pts of the video packets up to `upTo` and a margin for reordering, sorted into presentation order;
+// frame k must carry the time of frame k. A variable frame rate (or a gap in the timestamps) does not, and SeekToFrame would land on
+// another frame. `indexRate` as VideoDecoder::Options::indexRate ({0, 1} = the stream's guessed rate).
+struct FrameIndexScan {
+    int64_t frames = 0;     // video packets read
+    int64_t firstBad = -1;  // the first frame whose pts names another index (or that has no pts nor dts); -1: none
+    int64_t badIndex = -1;  // the index that frame's pts names (-1 when it has no pts nor dts)
+    bool noRate = false;    // the stream has no frame rate: no index can be taken from pts (firstBad 0)
+    bool Consistent() const { return firstBad < 0; }
+    std::string Why() const;  // «frame 61 carries the time of frame 66», «frame 12 has no timestamp», «the stream has no frame rate»
+};
+FrameIndexScan ScanFrameIndex(const std::filesystem::path& path, int64_t upTo, Rational indexRate = {0, 1});
+// SeekToFrame decodes forward instead of seeking when the target is at most this many frames ahead: the indices are counted then, not
+// taken from pts.
+inline constexpr int64_t kSequentialSeekFrames = 48;
+
 // The CpuFrame layout a stream's pixel format decodes into (VideoStreamInfo::decoded for a format name): planar YUV
 // 4:2:0 / 4:2:2 / 4:4:4 at 8, 10, 12 or 16 bits stays as it is, everything else (RGB, 4:1:1, gray ...) becomes 8-bit
 // 4:2:0 through swscale. `width` / `height` are left at 0.
@@ -119,6 +140,8 @@ public:
     // the current position is used when the target is close ahead. Returns false when the
     // frame does not exist.
     bool SeekToFrame(int64_t index);
+    // Whether SeekToFrame(index) decodes forward from here (indices counted, any frame rate) rather than seeking by pts.
+    bool SeekIsSequential(int64_t index) const { return !drained_ && index >= nextIndex_ && index - nextIndex_ <= kSequentialSeekFrames; }
     int64_t NextIndex() const { return nextIndex_; }
     bool Drained() const { return drained_; }
     // Positions the demuxer at the keyframe at or before frame `index` and resets the decoder;

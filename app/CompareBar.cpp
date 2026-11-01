@@ -84,6 +84,10 @@ CompareBar::CompareBar(AppModel& model, QWidget* parent) : QWidget(parent), mode
         refresh();
     });
     connect(&model_, &AppModel::stateChanged, this, &CompareBar::refresh);
+    connect(&model_, &AppModel::nrPreviewChanged, this, [this] {  // PR-10: the preview is an item of the «Улучшение» chip's menu
+        rebuildChips();
+        refresh();
+    });
     rebuildChips();
     refresh();
 }
@@ -118,7 +122,9 @@ void CompareBar::rebuildChips() {
             }
             b->setMenu(menu);
             b->setPopupMode(QToolButton::MenuButtonPopup);
-            b->setToolTip(tip + "\n" + tr("%1: меню справа").arg(Plural(static_cast<int>(chip.versions.size()), tr("предыдущая версия"), tr("предыдущие версии"), tr("предыдущих версий"))));
+            const int old = static_cast<int>(std::count_if(chip.versions.begin(), chip.versions.end(), [](const ViewportSource& v) { return v.version != "preview"; }));
+            const QString menuText = old > 0 ? Plural(old, tr("предыдущая версия"), tr("предыдущие версии"), tr("предыдущих версий")) : tr("превью");  // PR-10
+            b->setToolTip(tip + "\n" + tr("%1: меню справа").arg(menuText));
         }
         chipsLayout_->addWidget(b);
         chips_.push_back(b);
@@ -141,7 +147,7 @@ void CompareBar::refresh() {
     const std::string shownPass = SplitSourceVersion(shown).first;
     for (size_t i = 0; i < chips_.size(); ++i) {
         const QSignalBlocker b(chips_[i]);
-        chips_[i]->setChecked(!shown.empty() && chipSources_[i] == shownPass);
+        chips_[i]->setChecked(!shown.empty() && (chipSources_[i] == shownPass || chipSources_[i] == shown));  // the preview's own chip too
     }
 }
 

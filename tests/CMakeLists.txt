@@ -45,6 +45,7 @@ add_executable(dlssvid_unit_tests
   unit/test_pass_fingerprint.cpp
   unit/test_pass_versions.cpp
   unit/test_control_mask.cpp
+  unit/test_nr_preview.cpp
   unit/MaskImages.h
   unit/test_param_schema.cpp
   unit/test_stage_preset.cpp
@@ -98,6 +99,7 @@ add_executable(dlssvid_integration_tests
   integration/test_cli_upscale.cpp
   integration/test_nr_stage.cpp
   integration/test_cli_nr.cpp
+  integration/test_nr_preview_flow.cpp
   integration/test_fg_stage.cpp
   integration/test_cli_fg.cpp
   integration/test_process.cpp

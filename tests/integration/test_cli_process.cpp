@@ -19,6 +19,7 @@
 #include "passes/PassSequence.h"
 #include "passes/formats/PngIO.h"
 #include "pipeline/ControlMask.h"
+#include "util/Sha256.h"
 #include "util/Subprocess.h"
 #include "viewport/Project.h"
 
@@ -136,6 +137,52 @@ TEST_CASE("dlssvid process --project runs the saved stages and encodes the resul
     // bad spec / unknown stage
     CHECK(RunCli({"process", "-i", clip.string(), "-o", (dir / "bad.mkv").string(), "--warp", "--stages", "bogus"}).code != 0);
     CHECK(RunCli({"process", "-i", clip.string(), "-o", (dir / "bad2.mkv").string(), "--warp", "--param", "nr=1"}).code != 0);
+}
+
+// PR-10: «Посчитать этапы до улучшения» of the preview runs the stages only - the project's result is not written, not created and
+// not cut short; the passes are stamped as by any run.
+TEST_CASE("dlssvid process --no-encode leaves the result untouched and stamps the passes; with --passthrough it is refused", "[integration][cli][process][preview]") {
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("no_encode");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    Project p = Project::Create(clip, dir / "passes");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        st.enabled = st.name != "fg";
+    }
+    p.resultVideo = dir / "result.mkv";
+    p.Save(dir / "clip.dlssvid.json");
+    const std::string project = (dir / "clip.dlssvid.json").string();
+    const auto json = dir / "report.json";
+    // no result yet: none after the run either; the passes are made and stamped
+    const CliResult r = RunCli({"process", "--project", project, "--warp", "--stages", "scenes,depth,flow,upscale", "--no-encode", "--json", json.string()});
+    INFO(r.out);
+    REQUIRE(r.code == 0);
+    CHECK(r.out.find("not encoded (--no-encode)") != std::string::npos);
+    CHECK_FALSE(std::filesystem::exists(dir / "result.mkv"));
+    CHECK_FALSE(Manifest::Load(dir / "passes" / "color_sr").fingerprint.empty());
+    CHECK_FALSE(std::filesystem::exists(dir / "passes" / "color_nr"));  // --stages: the stages before NR only
+    const nlohmann::json j = ReadJson(json);
+    CHECK(j["stages"].size() == 5);  // scenes .. upscale and encode, which says it was skipped
+    CHECK(StageJson(j, "encode")["status"] == "skipped");
+    CHECK(StageJson(j, "upscale")["status"] == "ran");
+    // a result of an earlier run: not touched by a --no-encode run, even one that recomputes a stage
+    REQUIRE(RunCli({"process", "--project", project, "--warp", "--codec", "ffv1"}).code == 0);
+    REQUIRE(std::filesystem::exists(dir / "result.mkv"));
+    const std::string before = "sha256:" + Sha256File(dir / "result.mkv");
+    const auto mtime = std::filesystem::last_write_time(dir / "result.mkv");
+    REQUIRE(RunCli({"process", "--project", project, "--warp", "--stages", "scenes,depth,flow,upscale", "--no-encode", "--param", "upscale.scale=1.5",
+                    "--json", json.string()}).code == 0);
+    CHECK(StageJson(ReadJson(json), "upscale")["status"] == "ran");
+    CHECK("sha256:" + Sha256File(dir / "result.mkv") == before);
+    CHECK(std::filesystem::last_write_time(dir / "result.mkv") == mtime);
+    // with --passthrough there is nothing to run
+    const CliResult both = RunCli({"process", "--project", project, "--warp", "--no-encode", "--passthrough"});
+    CHECK(both.code != 0);
 }
 
 // A project as a preset for another video (TASK-0043, found while studying Visual Enhancer): the other file got the
