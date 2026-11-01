@@ -77,6 +77,8 @@ struct NrPreviewJob {
     uint64_t estimatedBytes = 0;
     double estimatedSeconds = 0.0;   // with scanBytes / kNrPreviewScanRate
     uint64_t scanBytes = 0;          // the source's bytes the CLI demuxes before the model (colour from the video, a seek): 0 for none
+    bool lengthExact = true;         // the clip's length from the plan or the colour pass; false: the caller's estimate (mkv) - the
+                                     // run may end at the clip's real end, before first + frames
     bool warp = false;
     // The command line (without the program): dlssvid nr into workDir with the inputs, the params file and --json in workDir.
     std::vector<std::string> Args() const;

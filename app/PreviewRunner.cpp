@@ -474,6 +474,7 @@ void PreviewRunner::onFinished(int id, bool ok) {
         removeWork(job.workDir);
         QString text = Tr("Превью не удалось — подробности в логе");
         if (const QString vfr = appBlock(&job); !vfr.isEmpty() && vfrSources_.count(job.sourceHash)) text = vfr;  // the source cannot be sought
+        if (run.is_object() && run.value("code", std::string()) == "past_end") text = Tr("Курсор за концом клипа");  // its length was estimated
         if (!superseded) setStatus(text, "warn", lastLine_);
         Log()->warn("nr preview {} failed: {}", id, lastLine_.toStdString());
         runPending();
@@ -756,9 +757,16 @@ void PreviewRunner::clearCache() {
 }
 
 void PreviewRunner::saveFrame(const QString& file) {
+    saveFrame(file, shownEntry_ ? shownEntry_->dir : fs::path(), model_.store().FrameAt("source", model_.time()));
+}
+
+void PreviewRunner::saveFrame(const QString& file, const fs::path& dir, int64_t frame) {
     if (!shownEntry_ || file.isEmpty()) return;
+    if (shownEntry_->dir != dir) {  // a run ended or a request was shown while the dialog was open
+        setStatus(Tr("Превью сменилось, пока был открыт диалог — кадр не сохранён"), "warn");
+        return;
+    }
     const NrPreviewEntry entry = *shownEntry_;
-    const int64_t frame = model_.store().FrameAt("source", model_.time());
     if (frame < entry.first || frame > entry.last) {
         setStatus(Tr("Курсор вне превью (кадры %1–%2)").arg(entry.first).arg(entry.last), "warn");
         return;

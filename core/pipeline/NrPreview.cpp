@@ -249,13 +249,16 @@ NrPreviewJob PrepareNrPreview(const ProcessPlan& plan, NrPreviewMode mode, int64
     if (job.dirs.count("color_sr")) {
         try {
             const Manifest m = Manifest::Load(job.dirs.at("color_sr"));
-            if (clipFrames <= 0) clipFrames = m.lastFrame + 1;
+            if (clipFrames <= 0) clipFrames = m.lastFrame + 1;  // the pass of the whole clip: exact
             w = m.width;
             h = m.height;
         } catch (const std::exception&) {
         }
     }
-    if (clipFrames <= 0) clipFrames = env.clipFrames;
+    if (clipFrames <= 0) {  // the viewport's estimate (container duration x rate): may be a frame or two long
+        clipFrames = env.clipFrames;
+        job.lengthExact = false;
+    }
     if (first < 0 || (clipFrames > 0 && first >= clipFrames)) {
         job.gate.why = NrPreviewBlock::PastEnd;
         return job;
@@ -383,7 +386,10 @@ NrPreviewVerdict VerifyNrPreviewRun(const NrPreviewJob& job) {
     if (!run.is_object() || !run.contains("stats") || !run["stats"].is_object()) return reject(NrPreviewReject::NoSummary, "the run left no summary (nr.json)");
     const nlohmann::json& stats = run["stats"];
     const fs::path color = job.workDir / "color_nr";
-    const int64_t last = job.first + job.frames - 1;
+    // the length only estimated: a run the clip's real end cut short (it wrote at least one frame) is a preview of what there is
+    const int64_t told = Int(stats, "frames_written");
+    const int64_t frames = !job.lengthExact && told >= 1 && told < job.frames ? told : job.frames;
+    const int64_t last = job.first + frames - 1;
     Manifest m;
     try {
         m = Manifest::Load(color);
@@ -391,8 +397,8 @@ NrPreviewVerdict VerifyNrPreviewRun(const NrPreviewJob& job) {
         return reject(NrPreviewReject::Frames, std::string("the preview's colour does not read: ") + e.what());
     }
     v.written = m.frameCount;
-    if (m.firstFrame != job.first || m.lastFrame != last || m.frameCount != job.frames || !RangeOnDisk(color, job.first, last) ||
-        Int(stats, "frames_written") != job.frames || Int(stats, "warmup_frames") != job.warmup)
+    if (m.firstFrame != job.first || m.lastFrame != last || m.frameCount != frames || !RangeOnDisk(color, job.first, last) || told != frames ||
+        Int(stats, "warmup_frames") != job.warmup)
         return reject(NrPreviewReject::Frames, "written " + std::to_string(m.frameCount) + " of " + std::to_string(job.frames) + " frames (" +
                                                    std::to_string(m.firstFrame) + ".." + std::to_string(m.lastFrame) + ")");
     {  // the control mask the run applied against the key's - both ways, as process checks it: one written meanwhile is caught too
@@ -434,6 +440,9 @@ NrPreviewEntry PublishNrPreview(const NrPreviewJob& job, double seconds, bool ca
     e.last = job.first + job.frames - 1;
     e.warmup = job.warmup;
     e.cacheable = cacheable;
+    if (!job.lengthExact)  // the clip's real end may have cut it short (VerifyNrPreviewRun accepted that): the frames written
+        if (const nlohmann::json run = ReadJsonFile(job.workDir / kRunJson); run.is_object() && run.contains("stats") && run["stats"].is_object())
+            if (const int64_t written = Int(run["stats"], "frames_written"); written >= 1 && written < job.frames) e.last = job.first + written - 1;
     e.seconds = seconds;
     e.bytes = DirectoryBytes(job.workDir / "color_nr");
     if (const nlohmann::json run = ReadJsonFile(job.workDir / kRunJson); run.is_object() && run.contains("stats") && run["stats"].is_object()) e.stats = run["stats"];
@@ -487,7 +496,8 @@ std::optional<NrPreviewEntry> FindNrPreview(const NrPreviewJob& job) {
     if (!side.is_object() || Str(side, "format") != kSidecarFormat || Str(side, "key_json") != job.keyJson) return std::nullopt;
     NrPreviewEntry e = EntryFromSidecar(job.entryDir, side);
     const int64_t last = job.first + job.frames - 1;
-    if (!e.cacheable || e.first != job.first || e.last != last || !RangeOnDisk(e.ColorDir(), job.first, last)) return std::nullopt;
+    const bool range = e.last == last || (!job.lengthExact && e.last >= job.first && e.last < last);  // cut by the clip's real end
+    if (!e.cacheable || e.first != job.first || !range || !RangeOnDisk(e.ColorDir(), job.first, e.last)) return std::nullopt;
     std::error_code ec;
     fs::last_write_time(job.entryDir / kSidecar, fs::file_time_type::clock::now(), ec);  // shown now: the last the GC removes
     return e;

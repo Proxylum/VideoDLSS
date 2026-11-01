@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <functional>
 
 class QCheckBox;
 class QComboBox;
@@ -39,6 +40,7 @@ public:
     QMenu* frameMenu() const { return frameMenu_; }
     QMenu* segmentMenu() const { return segmentMenu_; }
     void setSaveFileForTests(QString file) { saveFile_ = std::move(file); }
+    void setSaveDialogForTests(std::function<QString()> dialog) { saveDialog_ = std::move(dialog); }  // in place of the file dialog
 
 private:
     AppModel& model_;
@@ -58,6 +60,7 @@ private:
     QPushButton* toPreview_;
     QTimer* timeTimer_;
     QString saveFile_;  // tests: the file of «Сохранить кадр…» without the dialog
+    std::function<QString()> saveDialog_;
 };
 
 }  // namespace dlssvid

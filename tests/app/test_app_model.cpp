@@ -3993,6 +3993,15 @@ TEST_CASE("AppModel shows an NR preview as color_nr@preview against the current 
     REQUIRE(model.state().CompareConfigured());
     CHECK(model.state().CompareSide(true)->source == "color_nr");
     CHECK_FALSE(model.store().FindSource(kNrPreviewSource));
+    {  // the same file over a root without color_nr: the «after» source instead, as on save (review of PR-10)
+        Project p = Project::Load(m.dir / "edited.dlssvid.json");
+        p.passesRoot = m.dir / "empty_passes";
+        p.Save(m.dir / "edited_empty.dlssvid.json");
+    }
+    model.openProject(Q(m.dir / "edited_empty.dlssvid.json"));
+    REQUIRE(model.state().CompareConfigured());
+    CHECK(model.state().CompareSide(true)->source != "color_nr");
+    CHECK(model.state().CompareSide(true)->source == model.afterSource());
 }
 
 TEST_CASE("AppModel: the preview's plan has no force marks of the stages above NR; the stages before it are one process --no-encode", "[app][preview][gpu]") {
@@ -4989,6 +4998,50 @@ TEST_CASE("NR preview: a save's report is of the project it was for", "[app][pre
     for (const auto& args : messages) reported = reported || args.at(0).toString().startsWith(QString::fromUtf8("Кадр 4 превью сохранён"));
     CHECK(reported);
     CHECK(std::filesystem::exists(m.dir / "saved.png"));
+}
+
+TEST_CASE("NR preview: Save frame saves the preview of the click - another one shown while the dialog is open is refused", "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_save_dialog");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.seekToSourceFrame(4);  // frame 4 in the cache
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    Pump([] { return false; }, 1600);
+    model.seekToSourceFrame(2);  // frame 2 shown
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && model.nrPreview()->first == 2 && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    REQUIRE(model.nrPreview()->first == 2);
+    NrPreviewBar bar(model, runner);
+    bar.setSaveDialogForTests([&] {
+        model.seekToSourceFrame(4);
+        runner.start({PreviewRunner::Kind::Frame, 0});  // frame 4 from the cache while the dialog is open
+        return Q(m.dir / "saved.png");
+    });
+    bar.saveButton()->click();
+    Pump([&] { return !runner.housekeeping(); }, 20000);
+    CHECK(model.nrPreview()->first == 4);
+    CHECK_FALSE(std::filesystem::exists(m.dir / "saved.png"));  // not frame 4 under the click's name
+    CHECK(runner.statusText() == QString::fromUtf8("Превью сменилось, пока был открыт диалог — кадр не сохранён"));
+}
+
+TEST_CASE("NR preview: a CLI refusal with code past_end reads as the cursor past the clip's end", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_past_end");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    runner.setCommandForTests([](const NrPreviewJob& job) {  // the CLI's refusal of a frame past the clip's real end
+        std::ofstream(job.workDir / "nr.json") << R"({"ok": false, "error": "nr: --start 11 is past the end of clip.mkv", "code": "past_end"})";
+        return std::pair<QString, QStringList>{"cmd", {"/c", "exit", "1"}};
+    });
+    model.seekToSourceFrame(11);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return !runner.running(); }, 20000);
+    CHECK(runner.statusText() == QString::fromUtf8("Курсор за концом клипа"));
 }
 
 TEST_CASE("NR preview: a request made during a save while a segment runs is taken up when the save ends - a cached frame shows and the segment goes",

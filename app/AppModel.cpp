@@ -100,9 +100,9 @@ void AppModel::openVideo(const QString& file) {
         project_.file = std::filesystem::path(file.toStdWString()).replace_extension(".dlssvid.json");
         const bool loaded = std::filesystem::exists(project_.file);
         if (loaded) project_ = Project::Load(project_.file);
-        DropPreviewSide(project_.viewport, "color_nr", "source");  // a file edited by hand: the preview lives in the session only
         const QString seeded = loaded ? QString() : seedNewProject();  // before the first plan: it is made with those settings
         reloadSources();
+        sanitizePreviewSide();
         dirty_ = !loaded;  // a project made from the video is not on disk yet: it is saved next to the video on close
         emit dirtyChanged(dirty_);
         emit projectChanged();
@@ -117,8 +117,8 @@ void AppModel::openProject(const QString& file) {
     try {
         dropNrPreview();
         project_ = Project::Load(std::filesystem::path(file.toStdWString()));
-        DropPreviewSide(project_.viewport, "color_nr", "source");  // a file edited by hand: the preview lives in the session only
         reloadSources();
+        sanitizePreviewSide();
         dirty_ = false;
         emit dirtyChanged(false);
         emit projectChanged();
@@ -202,6 +202,17 @@ std::vector<ViewportSource> AppModel::viewportSources(bool dropControlMask) cons
     return sources;
 }
 
+
+void AppModel::sanitizePreviewSide() {
+    // a file edited by hand (or of an older build) names the preview, which lives in the session only: as on save, the pass when
+    // there is one, else the «after» source - known once the sources are
+    ViewportState& st = state();
+    bool named = false;
+    for (const auto& l : st.layers) named = named || l.source == kNrPreviewSource;
+    if (!named) return;
+    DropPreviewSide(st, hasSource("color_nr") ? std::string("color_nr") : afterSource(), beforeSource());
+    notifyStateChanged(false);
+}
 
 void AppModel::dropNrPreview() {
     ++generation_;

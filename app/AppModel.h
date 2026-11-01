@@ -320,6 +320,7 @@ private:
     std::vector<ViewportSource> viewportSources(bool dropControlMask) const;
     ProcessOptions planOptions(bool withForce);  // the plan's options: with the force marks (plan_) or without (planNoForce_); hashes the source once
     void dropNrPreview();                              // another project or root: the preview state goes, generation_ + 1
+    void sanitizePreviewSide();                        // after a load: a layer naming the preview goes to color_nr, else afterSource()
     QString seedNewProject();  // openVideo of a video without a project: the preset marked for new projects; the message's tail
     nlohmann::json stageParamsOf(const std::string& stage) const;  // the project's, {} for a stage it lacks
     void noteScrubReady();  // a scrub jump's frames are all on the GPU: one latency sample

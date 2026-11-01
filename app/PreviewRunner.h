@@ -71,6 +71,8 @@ public:
     void hide();                              // «Убрать»: off the viewport, kept in the cache
     void clearCache();                        // «Очистить превью»: every preview of the project from the disk
     void saveFrame(const QString& file);      // «Сохранить кадр…»: the frame under the cursor (PNG 16 bit, EXR as it is)
+    // the same for the preview `dir` and the source `frame` of the click: refused when another preview is shown by now (the dialog)
+    void saveFrame(const QString& file, const std::filesystem::path& dir, int64_t frame);
     void setBefore(const QString& which);     // "nr" | "sr": the «before» side
     bool autoUpdate() const { return autoUpdate_; }
     void setAutoUpdate(bool on);              // QSettings card/nr/previewAuto, off by default

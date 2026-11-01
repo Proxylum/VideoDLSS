@@ -507,6 +507,33 @@ TEST_CASE("dlssvid nr --source-hash is taken as given; a malformed one is refuse
     }
 }
 
+TEST_CASE("dlssvid nr --color-dir: a colour pass that ends before an mkv clip of unknown length is refused, not taken for its end; --start past the end says code past_end",
+          "[integration][cli][nr][regression]") {
+    const auto dir = Dir("nr_short_pass");
+    ClipSpec spec;
+    spec.frames = 120;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);  // an mkv: no frame count in the container
+    REQUIRE(RunCli({"export", "-i", clip.string(), "-o", (dir / "color").string(), "--range", "0-59"}).code == 0);
+    const std::string color = (dir / "color").string();
+    auto run = [&](const char* name, std::vector<std::string> extra) {
+        std::vector<std::string> args{"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", (dir / name).string(), "--no-auto",
+                                      "--json", (dir / (std::string(name) + ".json")).string()};
+        args.insert(args.end(), extra.begin(), extra.end());
+        const CliResult r = RunCli(args);
+        INFO(name << ": " << r.out);
+        return r;
+    };
+    const CliResult cut = run("cut", {"--color-dir", color, "--start", "50", "--frames", "20", "--warmup", "6"});
+    CHECK(cut.code != 0);  // not «10 of 20 frames written» as if the clip ended at 59
+    CHECK(cut.out.find("has no frame 60") != std::string::npos);
+    CHECK(run("inside", {"--color-dir", color, "--start", "50", "--frames", "5", "--warmup", "6"}).code == 0);  // the pass covers it
+    const CliResult past = run("past", {"--start", "200", "--frames", "1"});
+    CHECK(past.code != 0);
+    CHECK(ReadJson(dir / "past.json")["code"] == "past_end");
+}
+
 TEST_CASE("dlssvid nr --json reports a failure whose text is not UTF-8 (regression: the summary was left empty)", "[integration][cli][nr][regression]") {
     const auto dir = Dir("nr_json_bytes");
     ClipSpec spec;

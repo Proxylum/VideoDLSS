@@ -34,6 +34,11 @@ class NrVfrError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
+// --start past the clip's last frame: --json says code "past_end" (the GUI's preview of a clip whose length it only estimated)
+class NrPastEndError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 // every frame of a short run (the preview's 1 or 1 + 6 frames would print one line only), every 10th of a long one
 void Progress(int64_t done, int64_t total) {
@@ -211,10 +216,11 @@ NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStage
     if (a.frames == 0) Throw("nr: --frames 0 with --start " + std::to_string(r.first) + " writes nothing: give N >= 1 or leave --frames out");
     const int64_t clipFrames = decoder.Info().frameCount;  // 0: unknown (mkv)
     if (clipFrames > 0 && r.first >= clipFrames)
-        Throw("nr: --start " + std::to_string(r.first) + " is past the end of the clip (" + std::to_string(clipFrames) + " frames)");
+        throw NrPastEndError("nr: --start " + std::to_string(r.first) + " is past the end of the clip (" + std::to_string(clipFrames) + " frames)");
     GuardProcessedPass(o, "the range");
     // the last frame the run reads: --frames is «at most N», the clip may end first; with the clip's length unknown (mkv) only
-    // the start of a pass is checked - a short colour pass still stops the run at «has no frame N» (review of TASK-0047)
+    // the start of a pass is checked - a short colour pass still stops the run at «has no frame N» (review of TASK-0047): through
+    // the video in NrStage, on the pass path by a count of the clip's packets past the pass (CmdNr, PR-10)
     int64_t last = a.frames > 0 ? r.first + a.frames - 1 : -1;
     if (clipFrames > 0) last = last < 0 ? clipFrames - 1 : std::min(last, clipFrames - 1);
     else last = -1;
@@ -239,7 +245,7 @@ NrRange PrepareRange(const NrCommands::NrArgs& a, VideoDecoder& decoder, NrStage
                                  " by seeking - give --color-dir with the upscaled pass, or process the clip from the start");
         }
         Log()->info("nr: frames from {} through the model (warm-up {}), written from {}", r.from, r.warmup, r.first);
-        if (!decoder.SeekToFrame(r.from)) Throw("nr: --start " + std::to_string(r.first) + " is past the end of " + a.input);
+        if (!decoder.SeekToFrame(r.from)) throw NrPastEndError("nr: --start " + std::to_string(r.first) + " is past the end of " + a.input);
     }
     return r;
 }
@@ -458,6 +464,12 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
         if (range.maxFrames >= 0) passFrames = std::min(passFrames, range.maxFrames);
         if (info.frameCount > 0) passFrames = std::min(passFrames, info.frameCount - range.from);
         passFrames = std::max<int64_t>(passFrames, 0);
+        // the clip's length unknown (mkv): a colour pass that ends where the run would go on is not the clip's end - the clip's
+        // packets past the pass are counted (demux only), and a short pass stops the run as it does through the video
+        const int64_t passLast = Manifest::Load(o.colorDir).lastFrame;
+        if (info.frameCount <= 0 && (range.maxFrames < 0 || passLast < range.from + range.maxFrames - 1) &&
+            ScanFrameIndex(a.input, passLast).frames > passLast + 1)
+            Throw("nr: the colour pass " + o.colorDir.string() + " has no frame " + std::to_string(passLast + 1) + " (the clip goes on past it)");
     }
     const int64_t total = fromPass ? passFrames : range.maxFrames >= 0 ? range.maxFrames : info.frameCount > 0 ? info.frameCount - range.from : 0;
     o.onFrame = [](int64_t frame, double ms) {
@@ -473,7 +485,8 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
         std::printf("nr:          disabled — %s\n", r.stats.disabledReason.c_str());
         return 1;
     }
-    if (range.Ranged() && r.stats.written == 0) Throw("nr: nothing written - --start " + std::to_string(range.first) + " is past the end of " + a.input);
+    if (range.Ranged() && r.stats.written == 0)
+        throw NrPastEndError("nr: nothing written - --start " + std::to_string(range.first) + " is past the end of " + a.input);
     if (a.frames > 0 && r.stats.written < a.frames)
         Log()->warn("nr: the clip ends at frame {}: {} of {} frames written", r.stats.lastWritten, r.stats.written, a.frames);
     Log()->info("nr done: {} frames in {:.1f} s ({:.1f} ms/frame wall, {:.1f} ms/frame GPU), backend {}", r.stats.frames, sec,
@@ -670,7 +683,8 @@ int NrCommands::Dispatch() {
         } catch (const std::exception& e) {
             // the GUI's preview reads why a run failed: the text, and a code it acts on («vfr»: no seek into this source)
             if (!na_.json.empty() && !na_.check) {
-                const nlohmann::json j = {{"ok", false}, {"error", e.what()}, {"code", dynamic_cast<const NrVfrError*>(&e) ? "vfr" : ""}};
+                const char* code = dynamic_cast<const NrVfrError*>(&e) ? "vfr" : dynamic_cast<const NrPastEndError*>(&e) ? "past_end" : "";
+                const nlohmann::json j = {{"ok", false}, {"error", e.what()}, {"code", code}};
                 const std::string text = NrReportJson(j);  // before the file is truncated
                 std::ofstream(na_.json) << text << "\n";
             }

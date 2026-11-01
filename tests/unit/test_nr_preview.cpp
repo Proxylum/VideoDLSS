@@ -611,6 +611,35 @@ TEST_CASE("NR preview: a key another instance publishes between the check and th
     CHECK(FindNrPreview(mine).has_value());
 }
 
+TEST_CASE("NR preview: with the clip's length only estimated, a segment the clip's real end cut short is accepted, published and found; with an exact length it is not",
+          "[unit][preview][regression]") {
+    const auto dir = Dir("cut_short");
+    const auto root = dir / "passes";
+    ProcessPlan plan = Plan(root);
+    plan.frames = 0;  // an mkv: no length in the plan
+    plan.stages.erase(plan.stages.begin());  // the colour from the video: no color_sr to take the length from
+    Nr(plan).inputs.clear();
+    NrPreviewEnv env = Env(dir);
+    env.clipFrames = 60;  // the viewport's estimate (container duration x rate)
+    const NrPreviewJob job = PrepareNrPreview(plan, NrPreviewMode::Segment, 50, 1.0, env);
+    REQUIRE(job.gate.ok());
+    CHECK_FALSE(job.lengthExact);
+    REQUIRE(job.frames == 10);
+    FakeRun(job, 9);  // the clip really ends at frame 58
+    const NrPreviewVerdict v = VerifyNrPreviewRun(job);
+    INFO(v.detail);
+    CHECK(v.ok());
+    const NrPreviewEntry e = PublishNrPreview(job, 1.0, v.cacheable);
+    CHECK(e.last == 58);
+    const auto found = FindNrPreview(job);
+    REQUIRE(found);
+    CHECK(found->last == 58);
+    NrPreviewJob exact = PrepareNrPreview(plan, NrPreviewMode::Segment, 40, 1.0, env);
+    exact.lengthExact = true;  // the length known: a short run is a broken one
+    FakeRun(exact, 9);
+    CHECK(VerifyNrPreviewRun(exact).why == NrPreviewReject::Frames);
+}
+
 TEST_CASE("NR preview: over the disk budget the key is still set - a preview in the cache needs no room", "[unit][preview][regression]") {
     const auto dir = Dir("disk_cached");
     const auto root = dir / "passes";

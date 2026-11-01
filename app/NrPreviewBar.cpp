@@ -111,15 +111,19 @@ NrPreviewBar::NrPreviewBar(AppModel& model, PreviewRunner& runner, QWidget* pare
     connect(prepare_, &QPushButton::clicked, this, [this] { runner_.prepareInputs(); });
     connect(before_, &QComboBox::currentIndexChanged, this, [this](int) { runner_.setBefore(before_->currentData().toString()); });
     connect(save_, &QPushButton::clicked, this, [this] {
+        // the preview and the frame of the click: the dialog's loop runs on, a run may end or the cursor move meanwhile
+        const auto& shown = model_.nrPreview();
+        const std::filesystem::path dir = shown ? shown->dir : std::filesystem::path();
+        const int64_t f = model_.store().FrameAt("source", model_.time());
         QString file = saveFile_;
         if (file.isEmpty()) {
-            const int64_t f = model_.store().FrameAt("source", model_.time());
-            file = QFileDialog::getSaveFileName(this, tr("Сохранить кадр превью"), QDir(model_.lastDir("preview")).filePath(QString("nr_preview_%1.png").arg(f)),
-                                                tr("PNG 16 бит (*.png);;EXR (*.exr)"));
+            file = saveDialog_ ? saveDialog_()
+                               : QFileDialog::getSaveFileName(this, tr("Сохранить кадр превью"), QDir(model_.lastDir("preview")).filePath(QString("nr_preview_%1.png").arg(f)),
+                                                              tr("PNG 16 бит (*.png);;EXR (*.exr)"));
             if (file.isEmpty()) return;
             model_.rememberDir("preview", file);
         }
-        runner_.saveFrame(file);
+        runner_.saveFrame(file, dir, f);
     });
     connect(hide_, &QPushButton::clicked, this, [this] { runner_.hide(); });
     connect(toPreview_, &QPushButton::clicked, this, [this] {
