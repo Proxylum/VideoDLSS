@@ -5,6 +5,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 #endif
 
 #include "util/Error.h"
@@ -35,6 +36,39 @@ std::filesystem::path CurrentExecutable() {
     return std::filesystem::path(std::wstring(buf.data(), n));
 #else
     return std::filesystem::read_symlink("/proc/self/exe");
+#endif
+}
+
+bool Utf8CodePage() {
+#ifdef _WIN32
+    return GetACP() == CP_UTF8;
+#else
+    return true;
+#endif
+}
+
+int FirstNonAsciiArgument(const wchar_t* commandLine) {
+#ifdef _WIN32
+    int n = 0;
+    LPWSTR* args = commandLine && *commandLine ? CommandLineToArgvW(commandLine, &n) : nullptr;
+    if (!args) return 0;
+    int found = 0;
+    for (int i = 1; i < n && !found; ++i)
+        for (const wchar_t* c = args[i]; *c && !found; ++c)
+            if (*c >= 0x80) found = i;
+    LocalFree(args);
+    return found;
+#else
+    (void)commandLine;
+    return 0;
+#endif
+}
+
+int FirstNonAsciiArgument() {
+#ifdef _WIN32
+    return FirstNonAsciiArgument(GetCommandLineW());
+#else
+    return 0;
 #endif
 }
 

@@ -31,6 +31,14 @@ if(MSVC AND CMAKE_GENERATOR MATCHES "Ninja" AND DEFINED CMAKE_CXX_CL_SHOWINCLUDE
 endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# UTF-8 as the process code page of an executable (cmake/utf8.manifest, Windows 10 1903+): argv, std::string paths and
+# path::string() are UTF-8. Every executable of the project gets it - the CLI and the GUI share project files and pass
+# paths to each other as std::string, the tests build those paths the same way. Before it the CLI got its arguments in
+# the ANSI code page and CLI11's path checks, which read them as UTF-8, aborted it on the first Cyrillic letter (TASK-0066).
+function(dlssvid_utf8_code_page target)
+  target_sources(${target} PRIVATE "${PROJECT_SOURCE_DIR}/cmake/utf8.manifest")
+endfunction()
+
 option(DLSSVID_BUILD_TESTS "Build unit and integration tests" ON)
 option(DLSSVID_WITH_CUDA "Enable CUDA <-> D3D12 interop (requires CUDA Toolkit 12.x)" ON)
 

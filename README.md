@@ -124,7 +124,7 @@ non-NVIDIA backends: NIS / bicubic upscale, the blend frame generator, the stub 
 
 | Component | Needed for | Notes |
 |---|---|---|
-| Windows 10/11 x64 | everything | the pipeline is D3D12 + CUDA, Windows only |
+| Windows 10/11 x64 | everything | the pipeline is D3D12 + CUDA, Windows only; paths with non-ASCII letters (Cyrillic and others) need Windows 10 version 1903 or newer |
 | NVIDIA GPU | DLSS SR and NIS: RTX 20 and newer · DLSS Frame Generation: RTX 40 and newer (x3/x4 on RTX 50) · Neural Rendering: RTX 50 with the official DLL, RTX 20/30/40 with a patched copy · TensorRT models (depth, flow, Real-ESRGAN, RIFE): RTX 20 and newer | engines are built for your GPU on first use; other GPUs and the WARP software adapter run the non-NVIDIA backends only |
 | NVIDIA driver | ≥ 616.56 for Neural Rendering; any recent driver for the rest | `nvofapi64.dll` (Optical Flow) and NVDEC / NVENC come with the driver |
 | CUDA 12 runtime (`cudart64_12.dll`) | NVDEC frames on the GPU, TensorRT | from the CUDA Toolkit 12.x installer (on `PATH`) or bundled in the full package |
@@ -282,6 +282,9 @@ build\release\bin\dlssvid process --passthrough -i input.mp4 -o output.mkv --cod
 ```
 
 `--hwaccel cuda` decodes with NVDEC; `--warp` runs on the D3D12 software adapter (tests, CI without a GPU).
+
+Paths may contain any letters: `dlssvid` and `dlssvid-gui` run with UTF-8 as their code page. The CLI prints UTF-8,
+so in a console with the OEM code page (866 on Russian Windows) Cyrillic in its output reads wrong; `chcp 65001` first.
 
 ```bat
 dlssvid export  -i input.mp4 -o passes\color --range 0-299            :: color_source as EXR half + manifest.json

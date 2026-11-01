@@ -58,8 +58,9 @@ std::filesystem::path TrtDepthEstimator::OnnxFor(const ModelInputSize& size) {
         Throw("ONNX for " + modelId_ + " at " + std::to_string(size.width) + "x" + std::to_string(size.height) + " not found (" + path.string() +
               ") and the export environment is missing: create models/export/.venv (see models/export/README.md) or export the ONNX manually");
     Log()->info("exporting {} to ONNX ({}x{}) with {} — first time only", modelId_, size.width, size.height, script.filename().string());
-    std::vector<std::string> args = {venvPython.string(), script.string(), "--model", modelId_, "--width", std::to_string(size.width),
-                                     "--height", std::to_string(size.height), "--out", path.string(), "--cache", registry_->CacheDir().string()};
+    std::vector<std::string> args = PythonCommand(venvPython, script);
+    args.insert(args.end(), {"--model", modelId_, "--width", std::to_string(size.width), "--height", std::to_string(size.height), "--out", path.string(),
+                             "--cache", registry_->CacheDir().string()});
     if (choice_.family == "vda") {  // always explicit: the script must not guess the window the engine is built for
         args.push_back("--window");
         args.push_back(std::to_string(window_));

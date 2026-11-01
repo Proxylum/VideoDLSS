@@ -6,8 +6,11 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
+#include <string>
 
 #include "TestClips.h"
 #include "convert/ColorConvert.h"
@@ -36,6 +39,21 @@ std::filesystem::path Dir(const char* name) {
     std::filesystem::create_directories(d);
     return d;
 }
+
+// TMP and TEMP for one test (temp_directory_path reads TMP first, the children inherit both); the values before come back.
+struct TempEnv {
+    std::optional<std::wstring> tmp, temp;
+    explicit TempEnv(const std::filesystem::path& dir) {
+        if (const wchar_t* e = _wgetenv(L"TMP")) tmp = e;
+        if (const wchar_t* e = _wgetenv(L"TEMP")) temp = e;
+        _wputenv_s(L"TMP", dir.c_str());
+        _wputenv_s(L"TEMP", dir.c_str());
+    }
+    ~TempEnv() {
+        _wputenv_s(L"TMP", tmp ? tmp->c_str() : L"");
+        _wputenv_s(L"TEMP", temp ? temp->c_str() : L"");
+    }
+};
 
 // Continuous test scene sampled at pixel centres (resolution independent): gradients, soft discs,
 // fine stripes and a moving disc, so a low-resolution clip is a true downscale of the reference.
@@ -458,6 +476,36 @@ TEST_CASE("UpscaleStage: the worker backend runs windows of frames with overlap 
         CHECK(r.stats.outputHeight == 48);
         CHECK(PassReader::Open(r.outDir).Man().width == 80);
     }
+}
+
+// Review of TASK-0066: sr_worker read its requests from the stdin pipe in the ANSI code page, so the UTF-8 paths of its
+// scratch frames came garbled - the worker backend failed under a Cyrillic TEMP (a Windows account named in Cyrillic).
+TEST_CASE("UpscaleStage: the worker backend takes non-ASCII paths - the clip, the pass and the scratch under a Cyrillic TEMP",
+          "[integration][upscale][worker][regression]") {
+    const UpscalerAvailability a = WorkerUpscaler::Available();
+    if (!a.available) SKIP("sr_worker unavailable: " << a.reason);
+    const auto dir = Dir("worker_utf8") / u8"Апскейл И";
+    std::filesystem::create_directories(dir / u8"временные");
+    const TempEnv env(dir / u8"временные");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 40;
+    spec.height = 24;
+    const auto clip = WriteClip(dir / u8"клип.mkv", spec);
+    D3D12Device dev({true, false});
+    VideoDecoder dec(clip);
+    UpscaleStageOptions o;
+    o.backend = "worker";
+    o.model = "stub";
+    o.window = 4;
+    o.overlap = 0;
+    o.scale = 2;
+    o.outputDir = dir / u8"пасс";
+    const UpscaleRunResult r = RunUpscale(dec, dev, o);
+    CHECK(r.stats.backend == "worker");
+    CHECK(!r.stats.fellBack);
+    CHECK(r.stats.frames == 4);
+    CHECK(PassReader::Open(r.outDir).Man().width == 80);
 }
 
 // RealBasicVSR itself, when its checkpoint is already in the cache (no downloads in tests): a short window on the GPU.

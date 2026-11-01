@@ -126,17 +126,17 @@ TEST_CASE("dlssnr-patcher command line and script lookup", "[nr][unit]") {
     o.cudaBin = "C:/cuda13/bin";
     o.archs = {"ada"};
     const std::vector<std::string> cmd = BuildPatchCommand(o, "C:/p/dlssnr_patcher.py", "C:/out/nvngx_dlssnr.dll");
-    CHECK(cmd == std::vector<std::string>{"py", "C:/p/dlssnr_patcher.py", "--ada", "-o", "C:/out/nvngx_dlssnr.dll", "--force", "--cuda-bin", "C:/cuda13/bin",
+    CHECK(cmd == std::vector<std::string>{"py", "-X", "utf8", "C:/p/dlssnr_patcher.py", "--ada", "-o", "C:/out/nvngx_dlssnr.dll", "--force", "--cuda-bin", "C:/cuda13/bin",
                                           "C:/dlls/nvngx_dlssnr.dll"});
     o.archs = {"ampere", "turing", "blackwell"};
     o.dryRun = true;
     o.cudaBin.clear();
     const std::vector<std::string> dry = BuildPatchCommand(o, "p.py", "out.dll");
-    CHECK(dry == std::vector<std::string>{"py", "p.py", "--ampere", "--turing", "--blackwell", "--dry-run", "C:/dlls/nvngx_dlssnr.dll"});
+    CHECK(dry == std::vector<std::string>{"py", "-X", "utf8", "p.py", "--ampere", "--turing", "--blackwell", "--dry-run", "C:/dlls/nvngx_dlssnr.dll"});
     o.archs = {"all"};
     o.dryRun = false;
     o.force = false;
-    CHECK(BuildPatchCommand(o, "p.py", "out.dll") == std::vector<std::string>{"py", "p.py", "-o", "out.dll", "C:/dlls/nvngx_dlssnr.dll"});
+    CHECK(BuildPatchCommand(o, "p.py", "out.dll") == std::vector<std::string>{"py", "-X", "utf8", "p.py", "-o", "out.dll", "C:/dlls/nvngx_dlssnr.dll"});
     o.archs = {"hopper"};
     CHECK_THROWS(BuildPatchCommand(o, "p.py", "out.dll"));
 

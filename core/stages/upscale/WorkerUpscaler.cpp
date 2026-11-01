@@ -104,7 +104,7 @@ void WorkerUpscaler::Init(D3D12Device&, const UpscalerConfig& config) {
     scratch_ = std::filesystem::temp_directory_path() / ("dlssvid_sr_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(reinterpret_cast<uintptr_t>(this) & 0xFFFF));
     std::filesystem::create_directories(scratch_);
     proc_ = std::make_unique<Subprocess>();
-    proc_->Start({python.string(), worker.string()}, root / "sr_worker");
+    proc_->Start(PythonCommand(python, worker), root / "sr_worker");
     nlohmann::json extra = nlohmann::json::object();
     if (config.extra.contains("window")) extra["window"] = config.extra["window"];
     if (config.extra.contains("overlap")) extra["overlap"] = config.extra["overlap"];

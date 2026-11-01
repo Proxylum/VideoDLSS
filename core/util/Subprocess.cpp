@@ -34,6 +34,10 @@ std::string Utf8Arg(const std::filesystem::path& p) {
     return std::string(u.begin(), u.end());
 }
 
+std::vector<std::string> PythonCommand(const std::filesystem::path& python, const std::filesystem::path& script) {
+    return {Utf8Arg(python), "-X", "utf8", Utf8Arg(script)};
+}
+
 namespace {
 std::wstring Widen(const std::string& s) {
     if (s.empty()) return {};

@@ -935,3 +935,38 @@ TEST_CASE("dlssvid process --param-file names what a card preset holds and is dr
         CHECK(r.out.find("holds no encode") != std::string::npos);
     }
 }
+
+TEST_CASE("dlssvid takes Cyrillic paths: the whole pipeline of a project in a Cyrillic folder, info on its result, a missing file refused",
+          "[integration][cli][process][regression]") {
+    // TASK-0066: the CLI got its arguments in the ANSI code page and CLI11's path check, which reads them as UTF-8,
+    // aborted it (0xC0000409) on the first Cyrillic letter. cmake/utf8.manifest makes the arguments UTF-8.
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("cyrillic") / u8"Видео проекта";
+    std::filesystem::create_directories(dir);
+    const auto clip = WriteClip(dir / u8"клип.mkv", spec);
+    Project p = Project::Create(clip, dir / u8"пассы");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.params["backend"] = "blend";
+    }
+    p.resultVideo = dir / u8"результат.mkv";
+    p.Save(dir / u8"проект.dlssvid.json");
+    const auto json = dir / u8"отчёт.json";
+    const CliResult r = RunCli({"process", "--project", (dir / u8"проект.dlssvid.json").string(), "--warp", "--codec", "ffv1", "--json", json.string()});
+    INFO(r.out);
+    REQUIRE(r.code == 0);
+    CHECK(DecodeAll(dir / u8"результат.mkv").size() == 7);
+    CHECK(std::filesystem::exists(dir / u8"пассы" / "color_fg" / Manifest::kFileName));
+    const nlohmann::json j = ReadJson(json);
+    CHECK(j["frames_out"] == 7);
+    const std::string output = j["output"].get<std::string>();  // the report's paths are UTF-8
+    CHECK(std::filesystem::path(std::u8string(output.begin(), output.end())) == dir / u8"результат.mkv");
+    const CliResult info = RunCli({"info", (dir / u8"результат.mkv").string(), "--warp"});
+    CHECK(info.code == 0);
+    CHECK(info.out.find((dir / u8"результат.mkv").string()) != std::string::npos);  // printed back as UTF-8
+    CHECK(RunCli({"info", (dir / u8"нет.mkv").string()}).code == 105);  // CLI11's «File does not exist» (stderr), not an abort
+}
