@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -101,7 +102,9 @@ int64_t WorkPid(const std::string& name) {
     if (pid.find_first_not_of("0123456789") != std::string::npos || dash + 1 >= name.size() ||
         name.find_first_not_of("0123456789", dash + 1) != std::string::npos)
         return -1;
-    return std::stoll(pid);
+    int64_t v = -1;  // a pid that does not fit is a name this code did not make: left alone, never thrown
+    const auto [end, err] = std::from_chars(pid.data(), pid.data() + pid.size(), v);
+    return err == std::errc{} && end == pid.data() + pid.size() ? v : -1;
 }
 
 std::string NextWorkSuffix() {

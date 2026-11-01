@@ -4963,6 +4963,34 @@ TEST_CASE("NR preview: a click stops the auto update of an edit made before it -
     Pump([&] { return !queue.previewBusy(); }, 20000);
 }
 
+TEST_CASE("NR preview: a save's report is of the project it was for", "[app][preview][gpu][regression]") {
+    App();
+    PreviewProject m("preview_save_switch");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.seekToSourceFrame(4);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    REQUIRE(model.nrPreview());
+    std::atomic<bool> release{false};
+    runner.setPoolGateForTests([&] {
+        while (!release) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    });
+    QSignalSpy messages(&model, &AppModel::message);
+    runner.saveFrame(Q(m.dir / "saved.png"));
+    REQUIRE(runner.housekeeping());
+    model.openProject(Q(m.dir / "proj.dlssvid.json"));  // another project (the same file again) while the save goes
+    release = true;
+    Pump([&] { return !runner.housekeeping(); }, 20000);
+    runner.setPoolGateForTests({});
+    CHECK_FALSE(runner.statusText().contains(QString::fromUtf8("сохранён")));  // not this project's card
+    bool reported = false;  // the window's status bar says what the user's save did
+    for (const auto& args : messages) reported = reported || args.at(0).toString().startsWith(QString::fromUtf8("Кадр 4 превью сохранён"));
+    CHECK(reported);
+    CHECK(std::filesystem::exists(m.dir / "saved.png"));
+}
+
 TEST_CASE("NR preview: a request made during a save while a segment runs is taken up when the save ends - a cached frame shows and the segment goes",
           "[app][preview][gpu][regression]") {
     App();

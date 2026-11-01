@@ -765,6 +765,7 @@ void PreviewRunner::saveFrame(const QString& file) {
     }
     const fs::path out(file.toStdWString());
     auto error = std::make_shared<std::string>();
+    const uint64_t generation = model_.generation();
     housekeep(
         [entry, frame, out, error] {
             try {
@@ -773,10 +774,11 @@ void PreviewRunner::saveFrame(const QString& file) {
                 *error = e.what();
             }
         },
-        [this, error, file, frame] {
-            if (error->empty()) setStatus(Tr("Кадр %1 превью сохранён: %2").arg(frame).arg(file), "ok");
-            else setStatus(Tr("Кадр превью не сохранён — подробности в логе"), "warn", QString::fromStdString(*error));
+        [this, error, file, frame, generation] {
+            const QString text = error->empty() ? Tr("Кадр %1 превью сохранён: %2").arg(frame).arg(file) : Tr("Кадр превью не сохранён — подробности в логе");
             if (!error->empty()) Log()->error("nr preview: save frame: {}", *error);
+            if (generation == model_.generation()) setStatus(text, error->empty() ? "ok" : "warn", QString::fromStdString(*error));
+            else emit model_.message(text);  // another project or root since: the window's status bar, not its card
         });
 }
 

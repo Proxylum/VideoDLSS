@@ -454,7 +454,8 @@ TEST_CASE("NR preview GC: at most 16 entries and the byte cap, pinned entries ke
     const fs::path theirsFresh = base / "aaaaaaaaaaac.part-999999-1";
     const fs::path theirsOld = base / "save-999999-2";
     const fs::path unknown = base / "notes";
-    for (const auto& d : {ours, running, theirsFresh, theirsOld, unknown}) fs::create_directories(d);
+    const fs::path overflow = base / "save-123456789012345678901-1";  // a pid no int64 holds: a name it does not know (no throw)
+    for (const auto& d : {ours, running, theirsFresh, theirsOld, unknown, overflow}) fs::create_directories(d);
     Age(theirsOld, std::chrono::minutes(11));
     GcNrPreviews(root, {running});
     CHECK_FALSE(fs::exists(ours));
@@ -462,6 +463,8 @@ TEST_CASE("NR preview GC: at most 16 entries and the byte cap, pinned entries ke
     CHECK(fs::exists(theirsFresh));
     CHECK_FALSE(fs::exists(theirsOld));
     CHECK(fs::exists(unknown));
+    CHECK(fs::exists(overflow));
+    fs::remove_all(overflow);
     // a file held by another program: reported, not thrown; removed at a later clean-up
     const fs::path held = e[17] / "color_nr" / "f.exr";
     const HANDLE h = CreateFileW(held.wstring().c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
