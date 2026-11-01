@@ -64,3 +64,16 @@ TEST_CASE("The process code page is UTF-8: a std::string path is UTF-8 both ways
     std::ofstream(dir.string() + "/файл.txt") << "ok";  // a narrow file name, as the code builds them
     CHECK(std::filesystem::exists(dir / u8"файл.txt"));
 }
+
+// Review of TASK-0066: on a Windows that ignores the manifest the CLI refuses a non-ASCII argument. It read the bytes of
+// the ANSI argv first, where a letter outside the code page is already a best-fit ASCII one or '?' - D:\Café passed
+// as D:\Cafe. The wide command line shows every such argument; the program's own path does not count.
+TEST_CASE("FirstNonAsciiArgument reads the wide command line, skips the program's path", "[unit][paths][regression]") {
+    CHECK(FirstNonAsciiArgument(L"dlssvid.exe info D:\\clips\\a.mp4") == 0);
+    CHECK(FirstNonAsciiArgument(L"dlssvid.exe process -o \"D:\\Caf\u00E9\\out.mkv\"") == 3);  // é: best-fit e in CP1251
+    CHECK(FirstNonAsciiArgument(L"dlssvid.exe info D:\\\u6771\u4EAC\\a.mp4") == 2);           // 東京: '?' in CP1251
+    CHECK(FirstNonAsciiArgument(L"dlssvid.exe info D:\\\u0412\u0438\u0434\u0435\u043E\\a.mp4 -v") == 2);
+    CHECK(FirstNonAsciiArgument(L"\"C:\\\u041F\u0440\u043E\u0433\u0440\u0430\u043C\u043C\u044B\\dlssvid.exe\" info a.mp4") == 0);
+    CHECK(FirstNonAsciiArgument(L"") == 0);
+    CHECK(FirstNonAsciiArgument() == 0);  // this test's own command line: ASCII
+}

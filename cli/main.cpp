@@ -767,14 +767,12 @@ void AddImportOptions(CLI::App* cmd, ImportArgs& a) {
 int main(int argc, char** argv) {
     // The arguments come in the process code page: UTF-8 with cmake/utf8.manifest. A Windows that ignores the manifest
     // (older than 10 1903) passes them in the ANSI code page, and CLI11's path checks read them as UTF-8 - a Cyrillic
-    // letter aborted the process (TASK-0066). There: a message instead.
+    // letter aborted the process (TASK-0066), a letter outside the code page became another one. There: a message instead.
     if (!Utf8CodePage())
-        for (int i = 1; i < argc; ++i)
-            for (const char* c = argv[i]; *c; ++c)
-                if (static_cast<unsigned char>(*c) >= 0x80) {
-                    std::fprintf(stderr, "dlssvid: argument %d is not ASCII; non-ASCII arguments and paths need Windows 10 version 1903 or newer\n", i);
-                    return 1;
-                }
+        if (const int bad = FirstNonAsciiArgument(); bad > 0) {
+            std::fprintf(stderr, "dlssvid: argument %d is not ASCII; non-ASCII arguments and paths need Windows 10 version 1903 or newer\n", bad);
+            return 1;
+        }
     CLI::App app{"dlssvid — offline DLSS video pipeline"};
     app.set_version_flag("--version", DLSSVID_VERSION);
     app.require_subcommand(1);

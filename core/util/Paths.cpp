@@ -5,6 +5,7 @@
 
 #ifdef _WIN32
 #include <windows.h>
+#include <shellapi.h>
 #endif
 
 #include "util/Error.h"
@@ -43,6 +44,31 @@ bool Utf8CodePage() {
     return GetACP() == CP_UTF8;
 #else
     return true;
+#endif
+}
+
+int FirstNonAsciiArgument(const wchar_t* commandLine) {
+#ifdef _WIN32
+    int n = 0;
+    LPWSTR* args = commandLine && *commandLine ? CommandLineToArgvW(commandLine, &n) : nullptr;
+    if (!args) return 0;
+    int found = 0;
+    for (int i = 1; i < n && !found; ++i)
+        for (const wchar_t* c = args[i]; *c && !found; ++c)
+            if (*c >= 0x80) found = i;
+    LocalFree(args);
+    return found;
+#else
+    (void)commandLine;
+    return 0;
+#endif
+}
+
+int FirstNonAsciiArgument() {
+#ifdef _WIN32
+    return FirstNonAsciiArgument(GetCommandLineW());
+#else
+    return 0;
 #endif
 }
 

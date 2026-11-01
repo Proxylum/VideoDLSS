@@ -19,4 +19,10 @@ std::filesystem::path CurrentExecutable();
 // False on a Windows older than 10 1903, which ignores the manifest: non-ASCII arguments and paths do not work there.
 bool Utf8CodePage();
 
+// The first argument after the program's own path with a character outside ASCII, by its index in argv; 0 if none.
+// Reads the wide command line (GetCommandLineW): the ANSI argv of a process without the UTF-8 code page holds a best-fit
+// ASCII letter or '?' for what the code page lacks (é -> e, 東 -> ?), so its bytes do not show every such argument.
+int FirstNonAsciiArgument(const wchar_t* commandLine);
+int FirstNonAsciiArgument();  // of this process
+
 }  // namespace dlssvid
