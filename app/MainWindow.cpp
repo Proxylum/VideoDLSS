@@ -127,6 +127,10 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     connect(&model_, &AppModel::framesUpdated, this, &MainWindow::updateCellLabels);  // «загрузка…» -> the frame
     connect(&model_, &AppModel::sourcesChanged, this, &MainWindow::updateCellLabels);
     connect(&model_, &AppModel::nrPreviewChanged, this, &MainWindow::updateCellLabels);  // PR-10
+    // a finished run's page does not stay over another project (projectChanged comes next); a running one does
+    connect(&model_, &AppModel::passesContextChanged, this, [this] {
+        if (processTaskId_ < 0) processingActive_ = false;
+    });
     connect(&model_, &AppModel::projectChanged, this, [this] {
         updatePage();
         updateTitle();

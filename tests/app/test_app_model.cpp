@@ -5580,6 +5580,25 @@ TEST_CASE("AppModel: the force marks belong to the open project - opening anothe
     CHECK_FALSE(rig.model.forced("flow"));
 }
 
+TEST_CASE("AppModel: the run time belongs to the open project - opening another one with a result does not show it there", "[app][model][gpu][regression]") {
+    // review of TASK-0067: lastRun_ went only with closeProject, so B's result line said «готов за …» of A's run
+    App();
+    const auto d = Dir("project_tasks_run_time");
+    const auto a = TaskProject(d, "a"), b = TaskProject(d, "b");
+    TaskRig rig;
+    rig.model.openProject(Q(a));
+    rig.processId = rig.enqueue();
+    rig.wait(rig.processId);
+    REQUIRE(rig.model.resultInfo().runSeconds > 0.0);
+    rig.model.openProject(Q(b));
+    REQUIRE(rig.model.resultInfo().exists);
+    CHECK(rig.model.resultInfo().runSeconds == 0.0);
+    rig.model.setLastRun(5.0);
+    rig.model.openVideo(Q(d / "a.mkv"));  // through the video: its project is next to it
+    REQUIRE(rig.model.resultInfo().exists);
+    CHECK(rig.model.resultInfo().runSeconds == 0.0);
+}
+
 TEST_CASE("ProjectTasks: the task's own project gets its marks cleared, its sources read, the run time and the comparison", "[app][model][gpu][regression]") {
     App();
     const auto d = Dir("project_tasks_own");
@@ -5599,9 +5618,11 @@ TEST_CASE("ProjectTasks: the task's own project gets its marks cleared, its sour
     rig.model.setForce("depth", true);
     rig.model.setCompareView(AppModel::CompareView::Grid);
     const double run = rig.model.resultInfo().runSeconds;
+    const int readBefore = sources.count();
     const int other = rig.enqueue();
     rig.wait(other);
     CHECK(rig.ended[other].ownProject);
+    CHECK(sources.count() > readBefore);
     CHECK_FALSE(rig.model.forced("depth"));
     CHECK(rig.model.resultInfo().runSeconds == run);
     CHECK(rig.model.compareView() == AppModel::CompareView::Grid);
@@ -5657,6 +5678,7 @@ TEST_CASE("AppModel: a file that cannot be read is no change of project - the ge
     TaskRig rig;
     rig.model.openProject(Q(a));
     rig.model.setForce("depth", true);
+    rig.model.setLastRun(7.0);
     const uint64_t generation = rig.model.generation();
     rig.processId = rig.enqueue();
     rig.model.openProject(Q(d / "broken.dlssvid.json"));
@@ -5665,7 +5687,8 @@ TEST_CASE("AppModel: a file that cannot be read is no change of project - the ge
     rig.model.openVideo(Q(d / "clip.mkv"));  // its project file next to it cannot be read
     CHECK(rig.model.generation() == generation);
     CHECK(std::filesystem::equivalent(rig.model.project().file, a));
-    CHECK(rig.model.forced("depth"));  // a failed open is no change of project: the marks stay
+    CHECK(rig.model.forced("depth"));  // a failed open is no change of project: the marks and the run time stay
+    CHECK(rig.model.resultInfo().runSeconds == 7.0);
     rig.wait(rig.processId);
     CHECK(rig.ended[rig.processId].ownProject);
     CHECK_FALSE(rig.model.forced("depth"));
