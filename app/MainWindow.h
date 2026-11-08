@@ -25,6 +25,7 @@ class StartPage;
 class ProcessingPanel;
 class ResultBar;
 class PreviewRunner;
+class ProjectTasks;
 
 // The application window: the start page until a project is open, then the work area (compare bar, cell labels,
 // viewport, timeline) with the project / inspector / log / task docks. Stage 9 (MR E): the window remembers its
@@ -83,6 +84,7 @@ private:
     LogPanel* log_;
     TaskQueue* tasks_;
     PreviewRunner* preview_;
+    ProjectTasks* projectTasks_;
     QDockWidget* projectDock_;
     QDockWidget* inspectorDock_;
     QDockWidget* logDock_;

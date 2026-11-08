@@ -66,6 +66,7 @@
 #include "PreviewRunner.h"
 #include "ProcessingPanel.h"
 #include "ProjectPanel.h"
+#include "ProjectTasks.h"
 #include "RecentPreviews.h"
 #include "ResultBar.h"
 #include "SceneCutsView.h"
@@ -5496,3 +5497,199 @@ TEST_CASE("dlssvid-gui and dlssvid carry the UTF-8 process code page in their ma
     }
 }
 #endif
+
+namespace {
+// A project over a short clip with a result of its own and nothing else: two sources, so its comparison can be switched.
+std::filesystem::path TaskProject(const std::filesystem::path& dir, const std::string& name) {
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    Project p = Project::Create(WriteClip(dir / (name + ".mkv"), spec), dir / (name + "_passes"));
+    p.resultVideo = WriteClip(dir / (name + "_result.mkv"), spec);
+    p.codec = "ffv1";
+    p.Save(dir / (name + ".dlssvid.json"));
+    return dir / (name + ".dlssvid.json");
+}
+
+// What MainWindow::onTaskFinished hands to ProjectTasks. A short real process: the task is still running when the test goes on.
+struct TaskRig {
+    AppModel model{true};
+    TaskQueue queue;
+    ProjectTasks tasks{model, queue};
+    int processId = -1;
+    std::map<int, ProjectTasks::Finished> ended;
+    TaskRig() {
+        QObject::connect(&queue, &TaskQueue::taskFinished, &queue, [this](int id, bool ok) { ended[id] = tasks.finish(id, id == processId && ok); });
+    }
+    int enqueue() { return queue.enqueue("t", "ping", {"-n", "2", "127.0.0.1"}); }
+    void wait(int id) {
+        Pump([&] { return ended.count(id) > 0; }, 30000);
+        REQUIRE(ended.count(id) > 0);
+    }
+};
+}  // namespace
+
+TEST_CASE("ProjectTasks: a task of project A ending after B was opened leaves B's marks, view, run time and sources alone", "[app][model][gpu][regression]") {
+    // TASK-0067: onTaskFinished cleared the «пересчитать» marks and read the sources of whatever project was open by then
+    App();
+    const auto d = Dir("project_tasks_foreign");
+    const auto a = TaskProject(d, "a"), b = TaskProject(d, "b");
+    TaskRig rig;
+    rig.model.openProject(Q(a));
+    rig.processId = rig.enqueue();
+    rig.model.openProject(Q(b));
+    rig.model.setForce("flow", true);
+    rig.model.setCompareView(AppModel::CompareView::Grid);
+    rig.model.refreshPlan();
+    QSignalSpy sources(&rig.model, &AppModel::sourcesChanged);
+    QSignalSpy plans(&rig.model, &AppModel::planChanged);
+    rig.wait(rig.processId);
+    const ProjectTasks::Finished f = rig.ended[rig.processId];
+    CHECK_FALSE(f.ownProject);
+    CHECK(f.video == "a.mkv");  // the messages name the video it ran for
+    CHECK(rig.model.forced("flow"));
+    CHECK(rig.model.compareView() == AppModel::CompareView::Grid);
+    CHECK(rig.model.resultInfo().runSeconds == 0.0);
+    CHECK(sources.count() == 0);
+    CHECK(plans.count() >= 1);  // a patched DLL concerns every project
+}
+
+TEST_CASE("AppModel: the force marks belong to the open project - opening another one drops them, a run of the first does not bring them back", "[app][model][gpu][regression]") {
+    // review of TASK-0067: force_ is one set for the model, only the end of any task used to empty it after a switch
+    App();
+    const auto d = Dir("project_tasks_marks_of_a");
+    const auto a = TaskProject(d, "a"), b = TaskProject(d, "b");
+    TaskRig rig;
+    rig.model.openProject(Q(a));
+    rig.model.setForce("depth", true);
+    rig.processId = rig.enqueue();
+    rig.model.openProject(Q(b));
+    CHECK_FALSE(rig.model.forced("depth"));  // not B's
+    CHECK_FALSE(rig.model.processArgs().contains("--force"));
+    rig.wait(rig.processId);
+    CHECK_FALSE(rig.model.forced("depth"));
+    rig.model.setForce("flow", true);
+    const auto video = d / "c.mkv";
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    WriteClip(video, spec);
+    rig.model.openVideo(Q(video));  // the same through a video
+    CHECK_FALSE(rig.model.forced("flow"));
+}
+
+TEST_CASE("AppModel: the run time belongs to the open project - opening another one with a result does not show it there", "[app][model][gpu][regression]") {
+    // review of TASK-0067: lastRun_ went only with closeProject, so B's result line said «готов за …» of A's run
+    App();
+    const auto d = Dir("project_tasks_run_time");
+    const auto a = TaskProject(d, "a"), b = TaskProject(d, "b");
+    TaskRig rig;
+    rig.model.openProject(Q(a));
+    rig.processId = rig.enqueue();
+    rig.wait(rig.processId);
+    REQUIRE(rig.model.resultInfo().runSeconds > 0.0);
+    rig.model.openProject(Q(b));
+    REQUIRE(rig.model.resultInfo().exists);
+    CHECK(rig.model.resultInfo().runSeconds == 0.0);
+    rig.model.setLastRun(5.0);
+    rig.model.openVideo(Q(d / "a.mkv"));  // through the video: its project is next to it
+    REQUIRE(rig.model.resultInfo().exists);
+    CHECK(rig.model.resultInfo().runSeconds == 0.0);
+}
+
+TEST_CASE("ProjectTasks: the task's own project gets its marks cleared, its sources read, the run time and the comparison", "[app][model][gpu][regression]") {
+    App();
+    const auto d = Dir("project_tasks_own");
+    TaskRig rig;
+    rig.model.openProject(Q(TaskProject(d, "a")));
+    rig.model.setForce("depth", true);
+    rig.model.setCompareView(AppModel::CompareView::Grid);
+    QSignalSpy sources(&rig.model, &AppModel::sourcesChanged);
+    rig.processId = rig.enqueue();
+    rig.wait(rig.processId);
+    CHECK(rig.ended[rig.processId].ownProject);
+    CHECK_FALSE(rig.model.forced("depth"));
+    CHECK(sources.count() >= 1);
+    CHECK(rig.model.resultInfo().runSeconds > 0.0);
+    CHECK(rig.model.compareView() == AppModel::CompareView::BeforeAfter);
+    // another Main task of the project (not the process run): the marks and the sources as before, no run time, no comparison
+    rig.model.setForce("depth", true);
+    rig.model.setCompareView(AppModel::CompareView::Grid);
+    const double run = rig.model.resultInfo().runSeconds;
+    const int readBefore = sources.count();
+    const int other = rig.enqueue();
+    rig.wait(other);
+    CHECK(rig.ended[other].ownProject);
+    CHECK(sources.count() > readBefore);
+    CHECK_FALSE(rig.model.forced("depth"));
+    CHECK(rig.model.resultInfo().runSeconds == run);
+    CHECK(rig.model.compareView() == AppModel::CompareView::Grid);
+}
+
+TEST_CASE("ProjectTasks: a task belongs to the project it was queued for, even if it starts after another one was opened", "[app][model][gpu][regression]") {
+    App();
+    const auto d = Dir("project_tasks_queued");
+    const auto a = TaskProject(d, "a"), b = TaskProject(d, "b");
+    TaskRig rig;
+    rig.model.openProject(Q(a));
+    const int running = rig.enqueue();
+    const int waiting = rig.enqueue();  // starts when the first has ended: B is open by then
+    rig.model.openProject(Q(b));
+    rig.model.setForce("flow", true);
+    rig.wait(waiting);
+    CHECK_FALSE(rig.ended[running].ownProject);
+    CHECK_FALSE(rig.ended[waiting].ownProject);
+    CHECK(rig.model.forced("flow"));
+    const int own = rig.enqueue();  // queued in B
+    rig.wait(own);
+    CHECK(rig.ended[own].ownProject);
+    CHECK(rig.ended[own].video == "b.mkv");
+    CHECK_FALSE(rig.model.forced("flow"));
+}
+
+TEST_CASE("ProjectTasks: a project opened again while its task ran reads its passes but keeps the marks set since", "[app][model][gpu][regression]") {
+    App();
+    const auto d = Dir("project_tasks_reopened");
+    const auto a = TaskProject(d, "a"), b = TaskProject(d, "b");
+    TaskRig rig;
+    rig.model.openProject(Q(a));
+    rig.processId = rig.enqueue();
+    rig.model.openProject(Q(b));
+    rig.model.openProject(Q(a));
+    rig.model.setForce("depth", true);
+    rig.model.setCompareView(AppModel::CompareView::Grid);
+    QSignalSpy sources(&rig.model, &AppModel::sourcesChanged);
+    rig.wait(rig.processId);
+    CHECK_FALSE(rig.ended[rig.processId].ownProject);
+    CHECK(sources.count() >= 1);  // the task wrote into these passes
+    CHECK(rig.model.forced("depth"));
+    CHECK(rig.model.compareView() == AppModel::CompareView::Grid);
+}
+
+TEST_CASE("AppModel: a file that cannot be read is no change of project - the generation, the project and the running task's ownership stay", "[app][model][gpu][regression]") {
+    App();
+    const auto d = Dir("project_tasks_failed_open");
+    const auto a = TaskProject(d, "a");
+    std::ofstream(d / "broken.dlssvid.json") << "{ not json";
+    std::ofstream(d / "clip.mkv") << "x";
+    std::ofstream(d / "clip.dlssvid.json") << "{ not json";
+    TaskRig rig;
+    rig.model.openProject(Q(a));
+    rig.model.setForce("depth", true);
+    rig.model.setLastRun(7.0);
+    const uint64_t generation = rig.model.generation();
+    rig.processId = rig.enqueue();
+    rig.model.openProject(Q(d / "broken.dlssvid.json"));
+    CHECK(rig.model.generation() == generation);
+    CHECK(std::filesystem::equivalent(rig.model.project().file, a));
+    rig.model.openVideo(Q(d / "clip.mkv"));  // its project file next to it cannot be read
+    CHECK(rig.model.generation() == generation);
+    CHECK(std::filesystem::equivalent(rig.model.project().file, a));
+    CHECK(rig.model.forced("depth"));  // a failed open is no change of project: the marks and the run time stay
+    CHECK(rig.model.resultInfo().runSeconds == 7.0);
+    rig.wait(rig.processId);
+    CHECK(rig.ended[rig.processId].ownProject);
+    CHECK_FALSE(rig.model.forced("depth"));
+}

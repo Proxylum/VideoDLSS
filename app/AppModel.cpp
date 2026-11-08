@@ -94,12 +94,12 @@ void DropPreviewSide(ViewportState& st, const std::string& pass, const std::stri
 
 void AppModel::openVideo(const QString& file) {
     try {
-        dropNrPreview();
-        project_ = Project::Create(std::filesystem::path(file.toStdWString()), {});
+        Project next = Project::Create(std::filesystem::path(file.toStdWString()), {});
         // default project file next to the video
-        project_.file = std::filesystem::path(file.toStdWString()).replace_extension(".dlssvid.json");
-        const bool loaded = std::filesystem::exists(project_.file);
-        if (loaded) project_ = Project::Load(project_.file);
+        next.file = std::filesystem::path(file.toStdWString()).replace_extension(".dlssvid.json");
+        const bool loaded = std::filesystem::exists(next.file);
+        if (loaded) next = Project::Load(next.file);
+        adoptProject(std::move(next));
         const QString seeded = loaded ? QString() : seedNewProject();  // before the first plan: it is made with those settings
         reloadSources();
         sanitizePreviewSide();
@@ -115,8 +115,8 @@ void AppModel::openVideo(const QString& file) {
 
 void AppModel::openProject(const QString& file) {
     try {
-        dropNrPreview();
-        project_ = Project::Load(std::filesystem::path(file.toStdWString()));
+        Project next = Project::Load(std::filesystem::path(file.toStdWString()));
+        adoptProject(std::move(next));
         reloadSources();
         sanitizePreviewSide();
         dirty_ = false;
@@ -213,6 +213,13 @@ void AppModel::sanitizePreviewSide() {
     if (!named) return;
     DropPreviewSide(st, hasSource("color_nr") ? std::string("color_nr") : afterSource(), beforeSource());
     notifyStateChanged(false);
+}
+
+void AppModel::adoptProject(Project next) {
+    dropNrPreview();
+    force_.clear();   // the «пересчитать» marks and the run time are the open project's (as in closeProject)
+    lastRun_ = 0.0;
+    project_ = std::move(next);
 }
 
 void AppModel::dropNrPreview() {

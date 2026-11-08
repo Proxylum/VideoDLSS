@@ -30,6 +30,7 @@
 #include "PreviewRunner.h"
 #include "ProcessingPanel.h"
 #include "ProjectPanel.h"
+#include "ProjectTasks.h"
 #include "ResultBar.h"
 #include "SourceNames.h"
 #include "StartPage.h"
@@ -82,6 +83,7 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     // docks (object names: QMainWindow::saveState needs them)
     tasks_ = new TaskQueue(this);
     preview_ = new PreviewRunner(model_, *tasks_, this);  // PR-10: the NR preview in the queue's Preview lane
+    projectTasks_ = new ProjectTasks(model_, *tasks_, this);
     processing_ = new ProcessingPanel(*tasks_, pages_);
     pages_->addWidget(processing_);
     projectPanel_ = new ProjectPanel(model_, *tasks_, this);
@@ -125,6 +127,10 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     connect(&model_, &AppModel::framesUpdated, this, &MainWindow::updateCellLabels);  // «загрузка…» -> the frame
     connect(&model_, &AppModel::sourcesChanged, this, &MainWindow::updateCellLabels);
     connect(&model_, &AppModel::nrPreviewChanged, this, &MainWindow::updateCellLabels);  // PR-10
+    // a finished run's page does not stay over another project (projectChanged comes next); a running one does
+    connect(&model_, &AppModel::passesContextChanged, this, [this] {
+        if (processTaskId_ < 0) processingActive_ = false;
+    });
     connect(&model_, &AppModel::projectChanged, this, [this] {
         updatePage();
         updateTitle();
@@ -463,27 +469,32 @@ void MainWindow::watchProcess(int taskId, const QString& what) {
 }
 
 void MainWindow::onTaskFinished(int taskId, bool ok) {
-    if (preview_->handleTaskFinished(taskId, ok)) return;  // PR-10: the stages before NR - no force marks cleared, then the preview
-    if (taskId == processTaskId_ && ok) model_.setLastRun(tasks_->progress(taskId).elapsed);  // «готов за …» in the result line
-    model_.clearForce();
-    model_.reloadSources();  // the new passes / the result: sources, the plan, the cards
+    if (preview_->handleTaskFinished(taskId, ok)) {  // PR-10: the stages before NR - no force marks cleared, then the preview
+        projectTasks_->forget(taskId);
+        return;
+    }
+    const ProjectTasks::Finished finished = projectTasks_->finish(taskId, taskId == processTaskId_ && ok);
     if (taskId != processTaskId_) return;
     processTaskId_ = -1;
-    const QString video = QString::fromStdWString(model_.project().sourceVideo.filename().wstring());
+    const QString video = finished.video;  // another project may be open by now
     const QString took = FormatClock(tasks_->progress(taskId).elapsed);
     const QStringList failedStages = ok ? tasks_->progress(taskId).failedStageTitles() : QStringList{};
     if (ok && !failedStages.isEmpty()) {
         // a stage failed and the result was encoded without it (fg in its own process, audit fg-2): the processing page
-        // stays and says so, «Показать результат» leads on
-        model_.setCompareView(AppModel::CompareView::BeforeAfter);
-        statusBar()->showMessage(tr("Обработка завершена за %1 без стадии «%2» — подробности на странице обработки").arg(took, failedStages.join(tr("», «"))),
+        // stays and says so, «Показать результат» leads on - to the project open now, so only if it is the run's own
+        if (!finished.ownProject) {
+            processingActive_ = false;
+            updatePage();
+        }
+        const QString stages = failedStages.join(tr("», «"));
+        statusBar()->showMessage(finished.ownProject ? tr("Обработка завершена за %1 без стадии «%2» — подробности на странице обработки").arg(took, stages)
+                                                     : tr("Обработка %1 завершена за %2 без стадии «%3»").arg(video, took, stages),
                                  15000);
         if (inBackground()) notify(tr("Обработка завершена с ошибкой стадии"), tr("%1 — результат без стадии «%2»").arg(video, failedStages.join(tr("», «"))));
     } else if (ok) {
-        model_.setCompareView(AppModel::CompareView::BeforeAfter);  // the result against the source
         processingActive_ = false;
         updatePage();
-        statusBar()->showMessage(tr("Обработка завершена за %1 — «До | После»").arg(took), 10000);
+        statusBar()->showMessage(finished.ownProject ? tr("Обработка завершена за %1 — «До | После»").arg(took) : tr("Обработка %1 завершена за %2").arg(video, took), 10000);
         if (inBackground()) notify(tr("Обработка завершена"), tr("%1 — результат готов за %2").arg(video, took));
     } else {
         // the processing page stays: it says what happened and leads back to the project
