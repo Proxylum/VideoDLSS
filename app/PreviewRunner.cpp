@@ -460,9 +460,12 @@ void PreviewRunner::onFinished(int id, bool ok) {
         if (preempted_) {  // the requests before the preemption went with it (previewPreempted); one made since runs below
             if (!superseded && !pending_) setStatus(Tr("Превью отменено: началась обработка"));
         } else if (watchdogFired_) {
-            // how far the CLI got is in its last line: a hang that cannot be reproduced can be read from a failed test's log (TASK-0069)
-            Log()->warn("nr preview {}: stopped after {}, the CLI's last line: {}", id, FormatDuration(seconds).toStdString(), lastLine_.isEmpty() ? "(none)" : lastLine_.toStdString());
-            if (!superseded) setStatus(Tr("Превью не ответило за %1 — остановлено").arg(FormatDuration(seconds)), "warn", lastLine_);
+            // how far the CLI got, so that a hang that cannot be reproduced can be read from a failed test's log (TASK-0069): its last line and
+            // what followed it - the frames count comes as "\r3/7 frames" with no line end, and the queue keeps the progress lines to itself
+            const QString tail = tasks_.unterminatedOutput();
+            const QString reached = tail.isEmpty() ? lastLine_ : lastLine_.isEmpty() ? tail : lastLine_ + " | " + tail;
+            Log()->warn("nr preview {}: stopped after {}, the CLI's last output: {}", id, FormatDuration(seconds).toStdString(), reached.isEmpty() ? "(none)" : reached.toStdString());
+            if (!superseded) setStatus(Tr("Превью не ответило за %1 — остановлено").arg(FormatDuration(seconds)), "warn", reached);
         } else if (!pending_ && !superseded) {
             setStatus(Tr("Превью отменено"));
         }

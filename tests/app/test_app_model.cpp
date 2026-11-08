@@ -4560,7 +4560,7 @@ TEST_CASE("NR preview: a request made after the watchdog stopped a hung run is s
     CHECK(runner.statusText().startsWith(QString::fromUtf8("Превью не ответило")));
 }
 
-TEST_CASE("NR preview: a run the watchdog stopped says how far the CLI got - its last line is the status tip", "[app][preview][regression]") {
+TEST_CASE("NR preview: a run the watchdog stopped says how far the CLI got - its last line and what followed it are the status tip", "[app][preview][regression]") {
     // TASK-0069: a `dlssvid nr` hung on the CI, 9500 runs outside it did not: the next one has to explain itself
     App();
     PreviewProject m("preview_watchdog_line");
@@ -4568,12 +4568,13 @@ TEST_CASE("NR preview: a run the watchdog stopped says how far the CLI got - its
     TaskQueue queue;
     PreviewRunner runner(model, queue);
     runner.setWatchdogMsForTests(3000);
-    runner.setCommandForTests([](const NrPreviewJob&) { return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "stage-marker", "&", "ping", "-n", "8", "127.0.0.1", ">nul"}}; });
+    runner.setCommandForTests([](const NrPreviewJob&) { return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "stage-marker", "&", "<nul", "set", "/p", "=partial-tail", "&", "ping", "-n", "8", "127.0.0.1", ">nul"}}; });
     model.seekToSourceFrame(2);
     REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
     Pump([&] { return !runner.running(); }, 20000);
     REQUIRE(runner.statusText().startsWith(QString::fromUtf8("Превью не ответило")));
     CHECK(runner.statusTip().contains("stage-marker"));
+    CHECK(runner.statusTip().contains("partial-tail"));  // no line end after it, as the CLI's "\r3/7 frames"
 }
 
 TEST_CASE("NR preview: processing preempts a run superseded by a cached frame and the bar keeps the cached frame's status", "[app][preview][gpu][regression]") {
