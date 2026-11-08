@@ -59,8 +59,8 @@ TEST_CASE("WarpedPsnrY scores a frame along the motion: right vectors high, wron
     CHECK(right.validFraction < 1.0);  // the pixels whose vectors leave the frame are out of the score
     CHECK(WarpedPsnrY(prev, cur, ConstMv(w, h, 0.f, 0.f)).psnrY < 30.0);
     CHECK(WarpedPsnrY(prev, cur, ConstMv(w, h, -1.5f, 1.f)).psnrY < right.psnrY - 10.0);  // half the motion (vectors in the wrong units)
-    const PassImage asU16 = cur.ConvertNormalizedTo(PixelType::U16);  // PNG16 passes: integer storage means [0,1]
-    CHECK(WarpedPsnrY(prev, asU16, ConstMv(w, h, -3.f, 2.f)).psnrY > 60.0);
+    // PNG16 passes: integer storage means [0,1]; the frame that is warped loses its type, so it has to be normalised first
+    CHECK(WarpedPsnrY(prev.ConvertNormalizedTo(PixelType::U16), cur.ConvertNormalizedTo(PixelType::U16), ConstMv(w, h, -3.f, 2.f)).psnrY > 60.0);
 }
 
 TEST_CASE("Psnr basics", "[warp]") {

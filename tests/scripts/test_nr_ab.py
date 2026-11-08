@@ -623,6 +623,7 @@ class Helpers(unittest.TestCase):
         self.assertFalse(nr_ab.reusable(prev, sig, ["i1", "i0.5"], False, "i1"))  # a stored --only subset does not answer more
         self.assertFalse(nr_ab.reusable(prev, sig, ["i1"], True, "i1"))
         self.assertFalse(nr_ab.reusable({**prev, "pairs_missing": [["i1", "i2"]]}, sig, ["i1"], False, "i1"))
+        self.assertFalse(nr_ab.reusable({**prev, "warp_error": "x"}, sig, ["i1"], False, "i1"))  # the compensated PSNR was not measured
         self.assertFalse(nr_ab.reusable({"variants": {"i1": {}}}, sig, ["i1"], False, "i1"))  # stored before signatures: redone
         self.assertFalse(nr_ab.reusable(None, sig, [], False))
         other = json.loads(json.dumps(sig))
@@ -690,9 +691,9 @@ class Helpers(unittest.TestCase):
 
     def test_a_folder_that_cannot_score_is_written_down_not_raised(self):
         res = {}
-        with mock.patch.object(nr_ab, "measure", side_effect=RuntimeError("compare: --warp-mv is 8x8")):
+        with mock.patch.object(nr_ab, "measure", side_effect=RuntimeError("dlssvid.exe compare failed (1):\n[14:46:39.828] [error] compare: --warp-mv is 8x8")):
             self.assertIsNone(nr_ab.measure_warp(res, "dlssvid", "a", "a", self.root / "c.json", 3, False, Path("mv"), offset=1))
-        self.assertIn("8x8", res["warp_error"])
+        self.assertEqual(res["warp_error"], "compare: --warp-mv is 8x8")  # one line of the report, no timestamp that changes per run
 
     def test_masks_need_mask_passes(self):
         passes = self.root / "passes"

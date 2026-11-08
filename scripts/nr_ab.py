@@ -598,7 +598,7 @@ def valid_stored(prev: Optional[dict], sig: dict, baseline: str) -> set:
 
 def reusable(prev: Optional[dict], sig: dict, want: list, force: bool, baseline: str = "") -> bool:
     """A stored experiment answers this invocation: every stored variant still true, every wanted one among them, no pair left unmeasured."""
-    if force or not prev or prev.get("pairs_missing") or prev.get("measured") is False or (prev.get("sig") or {}).get("common") != sig["common"]:
+    if force or not prev or prev.get("pairs_missing") or prev.get("measured") is False or prev.get("warp_error") or (prev.get("sig") or {}).get("common") != sig["common"]:
         return False  # an unmeasured check (a timeout, a crash, no JSON) is measured again
     stored = set(prev.get("variants", {})) | set(prev.get("failed", {}))
     return set(want) <= stored and valid_stored(prev, sig, baseline) == stored
@@ -689,7 +689,7 @@ def verdict_e3(res):
     same = abs(auto - target) <= E3_SAME_DB
     text = [f"PSNR Y с компенсацией: unit {fmt_db(unit)}, auto {fmt_db(auto)}, C {fmt_db(target)}" + (f", без векторов {fmt_db(none)}" if none is not None else "") + " дБ"]
     if none is not None and max(unit, auto, target, none) - min(unit, auto, target, none) < E3_GAIN_DB:
-        text.append(f"разброс всех вариантов с контролем без векторов меньше {E3_GAIN_DB:g} дБ: PSNR с компенсацией их не различает, об единицах этот вход не говорит")
+        text.append(f"разброс всех вариантов с контролем без векторов меньше {E3_GAIN_DB:g} дБ: PSNR с компенсацией их не различает")
     text.append(f"auto и C выше unit на {E3_GAIN_DB:g} дБ и сходятся в пределах {E3_SAME_DB:g} дБ — подачу менять" if better and same
                 else f"условие «auto и C выше unit на {E3_GAIN_DB:g} дБ и сходятся в пределах {E3_SAME_DB:g} дБ» не выполнено: подача остаётся unit")
     return {"auto_better": better and same, "text": text}
@@ -921,7 +921,7 @@ def measure_warp(res: dict, cli, ref, test, out_json: Path, expected: int, dry: 
     try:
         return measure(cli, ref, test, out_json, expected, dry, warp_mv=vectors, **kw)
     except RuntimeError as e:
-        res["warp_error"] = names_only(str(e))
+        res["warp_error"] = names_only(str(e).splitlines()[-1])  # the reason: run() puts the command's line first, the log's after it
         return None
 
 
