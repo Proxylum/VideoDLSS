@@ -49,6 +49,20 @@ TEST_CASE("WarpBackward reconstructs a shifted frame exactly and masks the borde
     CHECK_THROWS(WarpBackward(prev, MakePassImage(PassKind::DepthRaw, w, h)));
 }
 
+TEST_CASE("WarpedPsnrY scores a frame along the motion: right vectors high, wrong or none low; the border does not count", "[warp][regression]") {
+    const uint32_t w = 64, h = 40;
+    const PassImage prev = Image(w, h);
+    const PassImage cur = Image(w, h, 3, -2);
+    const WarpedPsnr right = WarpedPsnrY(prev, cur, ConstMv(w, h, -3.f, 2.f));
+    CHECK(right.psnrY > 60.0);
+    CHECK(right.validFraction > 0.85);
+    CHECK(right.validFraction < 1.0);  // the pixels whose vectors leave the frame are out of the score
+    CHECK(WarpedPsnrY(prev, cur, ConstMv(w, h, 0.f, 0.f)).psnrY < 30.0);
+    CHECK(WarpedPsnrY(prev, cur, ConstMv(w, h, -1.5f, 1.f)).psnrY < right.psnrY - 10.0);  // half the motion (vectors in the wrong units)
+    const PassImage asU16 = cur.ConvertNormalizedTo(PixelType::U16);  // PNG16 passes: integer storage means [0,1]
+    CHECK(WarpedPsnrY(prev, asU16, ConstMv(w, h, -3.f, 2.f)).psnrY > 60.0);
+}
+
 TEST_CASE("Psnr basics", "[warp]") {
     const PassImage a = Image(16, 16);
     CHECK(Psnr(a, a) == 99.0);

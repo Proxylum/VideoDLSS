@@ -49,6 +49,9 @@ public:
         // --edit-from <pass folder>: the input I of the edit (frames by the reference's frame numbers) - the PSNR of the low and the
         // high part of test - I against the reference, what a mask G = 1, B = 0 and G = 0, B = 1 would give
         std::string bands, editFrom;
+        // TASK-0068 (E3): --warp-mv <mv_dlss pass folder of the frames' size>, with --offset 1: also the PSNR Y of the test frame against the
+        // reference frame warped by the test frame's vectors (one frame following the other along the motion)
+        std::string warpMv;
     };
 
 private:

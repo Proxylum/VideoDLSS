@@ -38,6 +38,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SAME_DB = 45.0        # spec §2b / §2i: two outputs above it are one picture (E2 identity, E5 / E7 / E11 «no effect»)
 LINEAR_TOL = 0.05     # PR-7, E1: the edit at strength x <= 1 is x times the edit at 1 (our lerp, no clipping inside [input, model])
 GAIN_DB = 1.0         # spec §2e: an inter-frame PSNR gain this large makes an MV variant the default (E4)
+E3_GAIN_DB = 0.5      # TASK-0068, set before the measurement: auto and the vectors at the model's size both this much above unit...
+E3_SAME_DB = 0.3      # ...and this close to each other (spec §2e: «B ≈ C и оба лучше A») change how the vectors are fed
 IDENTICAL_DB = 100.0  # `dlssvid compare` counts an identical frame as 100 dB in its means and writes null for an infinite minimum
 # intensity 1: since PR-7 the strength is our blend after the model - a base intensity of --params / --project-params would scale every
 # difference between variants (0: every variant one bypass run); E1 / E2 set it in their variants
@@ -112,8 +114,9 @@ EXPERIMENTS = [
                ("edit", "base", "time")),
     Experiment("E3", "Единицы векторов движения (§2e)",
                [_v("unit", flags=["--mv-scale", "unit"]), _v("auto", flags=["--mv-scale", "auto"]),
-                _v("target", flags=["--mv-scale", "unit"], inputs={"mv": "@mv_target"}, optional=True)],
-               "unit", MODEL, ("temporal", "base", "time"), frames=30, needs=("mv",)),
+                _v("target", flags=["--mv-scale", "unit"], inputs={"mv": "@mv_target"}, optional=True),
+                _v("none", inputs={"mv": None}, expect={"mv_used": False})],  # the control: without vectors at all
+               "unit", MODEL, ("temporal", "warp", "base", "time"), frames=30, needs=("mv",)),
     Experiment("E4", "Фича с нулевыми векторами при создании (§2e)", [_v("null"), _v("create_mv", flags=["--create-with-mv"])], "null", MODEL,
                ("temporal", "base", "time"), frames=30, needs=("mv",)),
     Experiment("E5", "Глубина для модели (§2e)",
@@ -423,9 +426,10 @@ def nr_command(cli, inp: Inputs, v: Variant, root: Path, params_file: Path, star
     return cmd + (["--warp"] if warp else []) + list(extra) + list(v.flags)
 
 
-def compare_command(cli, ref, test, out_json, *, start: int = 0, offset: int = 0, frames: int = -1) -> list:
+def compare_command(cli, ref, test, out_json, *, start: int = 0, offset: int = 0, frames: int = -1, warp_mv: Optional[Path] = None) -> list:
     cmd = [str(cli), "compare", "--ref", str(ref), "--test", str(test), "-q", "--json", str(out_json)]
-    return cmd + (["--start", str(start)] if start else []) + (["--offset", str(offset)] if offset else []) + (["--frames", str(frames)] if frames > 0 else [])
+    return (cmd + (["--start", str(start)] if start else []) + (["--offset", str(offset)] if offset else []) + (["--frames", str(frames)] if frames > 0 else [])
+            + (["--warp-mv", str(warp_mv)] if warp_mv else []))
 
 
 def read_compare(path: Path, expected: Optional[int] = None) -> dict:
@@ -437,8 +441,11 @@ def read_compare(path: Path, expected: Optional[int] = None) -> dict:
     def db(v):
         return IDENTICAL_DB if v is None or v >= IDENTICAL_DB else float(v)  # null = infinite minimum (identical frames)
 
-    return {"frames": s["frames"], "psnr_y": db(s["psnr_y_mean"]), "psnr_y_min": db(s.get("psnr_y_min")), "psnr_rgb": db(s["psnr_rgb_mean"]),
-            "ssim_y": s["ssim_y_mean"], "mae_rgb": s.get("mae_rgb_mean")}
+    out = {"frames": s["frames"], "psnr_y": db(s["psnr_y_mean"]), "psnr_y_min": db(s.get("psnr_y_min")), "psnr_rgb": db(s["psnr_rgb_mean"]),
+           "ssim_y": s["ssim_y_mean"], "mae_rgb": s.get("mae_rgb_mean")}
+    if "warp_psnr_y_mean" in s:  # compare --warp-mv (E3)
+        out.update({"warp_psnr_y": db(s["warp_psnr_y_mean"]), "warp_psnr_y_min": db(s.get("warp_psnr_y_min")), "warp_valid_min": s.get("warp_valid_min")})
+    return out
 
 
 def read_nr(path: Path) -> dict:
@@ -559,7 +566,7 @@ def check_size(a, inp: Inputs) -> str:
 
 def run_signature(a, inp: Inputs, exp: Experiment, base_params: dict, build: dict) -> dict:
     """Everything a stored experiment's numbers depend on: `common` for every variant (range, inputs by content, the build, the baseline, the
-    metrics), `variants` per variant (its settings, flags, own inputs, expectations) - so --mv-target-dir changes E3 C only."""
+    metrics; the vectors of the compensated PSNR), `variants` per variant (its settings, flags, own inputs, expectations)."""
     common = {"kind": exp.kind, "backend": a.backend, "warp": bool(a.warp), "nr_arg": list(a.nr_arg), "build": build}
     variants = {}
     if exp.kind == "check":
@@ -570,7 +577,8 @@ def run_signature(a, inp: Inputs, exp: Experiment, base_params: dict, build: dic
         common.update({"start": a.start, "frames": a.frames or exp.frames, "warmup": 0 if still else min(a.warmup, a.start), "format": a.format,
                        "clip": file_identity(inp.clip),
                        "inputs": {k: pass_identity(d) for k, d in (("color", inp.color), ("depth", inp.depth), ("mv", inp.mv), ("scenes", inp.scenes))},
-                       "masks": masks_identity(inp.masks), "baseline": exp.baseline, "metrics": sorted(exp.metrics), "groups": exp.groups})
+                       "masks": masks_identity(inp.masks), "baseline": exp.baseline, "metrics": sorted(exp.metrics), "groups": exp.groups,
+                       **({"warp_mv": pass_identity(inp.mv_target)} if "warp" in exp.metrics else {})})
         variants = {v.name: {"params": run_params(base_params, exp.fixed, v.params), "flags": list(v.flags), "expect": run_expect(exp, v),
                              "inputs": {k: pass_identity(p) for k, p in own_inputs(inp, v).items()}, "optional": v.optional} for v in exp.variants}
     return json.loads(json.dumps({"common": common, "variants": variants}, sort_keys=True))  # the shape a results.json round trip gives
@@ -664,19 +672,25 @@ def verdict_e2(res):
 
 
 def verdict_e3(res):
-    """No decision yet: on identical frames (the breathing method) the vectors are zero and unit / auto / C hand the model the same 0 x scale,
-    on moving content the unaligned inter-frame PSNR measures the motion. The units need a PSNR compensated by mv on a pan (§2e, «Пока нет»)."""
-    a, b, c = (_get(res, n, "temporal", "psnr_y") for n in ("unit", "auto", "target"))
+    """Spec §2e: «B ≈ C и оба лучше A» changes how the vectors are fed. The score is the PSNR of the output with frame t-1 warped onto frame t by one
+    set of vectors at the model's size, the same for every variant (TASK-0068); the thresholds were set before the measurement. `none` is the control:
+    when no variant is apart from it the model does not use the vectors here and the units decide nothing."""
+    unit, auto, target, none = (_get(res, n, "warp", "warp_psnr_y") for n in ("unit", "auto", "target", "none"))
     sa, sb = _get(res, "unit", "nr", "mv_scale"), _get(res, "auto", "nr", "mv_scale")
-    text = []
     if sa is not None and sb is not None and sa == sb:
-        text.append("масштаб векторов у unit и auto одинаковый (размер mv = размер модели): E3 на этом входе ничего не меряет")
-    if c is None:
-        text.append("нет варианта C (--mv-target-dir: mv_dlss размера модели из `dlssvid flow --target`)")
-    if a is not None and b is not None:
-        text.append("вывода нет: на одинаковых кадрах векторы нулевые и unit / auto / C дают модели одно и то же, на движении межкадровый PSNR "
-                    "без компенсации меряет движение — нужен PSNR с компенсацией по mv (§2e); пока только таблица")
-    return {"auto_better": None, "text": text}
+        return {"auto_better": None, "text": ["масштаб векторов у unit и auto одинаковый (размер mv = размер модели): E3 на этом входе ничего не меряет"]}
+    if target is None:
+        return {"auto_better": None, "text": ["нет варианта C (--mv-target-dir: mv_dlss размера модели из `dlssvid flow --target`)"]}
+    if unit is None or auto is None:
+        return {"auto_better": None, "text": []}
+    better = auto - unit >= E3_GAIN_DB and target - unit >= E3_GAIN_DB
+    same = abs(auto - target) <= E3_SAME_DB
+    text = [f"PSNR Y с компенсацией: unit {fmt_db(unit)}, auto {fmt_db(auto)}, C {fmt_db(target)}" + (f", без векторов {fmt_db(none)}" if none is not None else "") + " дБ"]
+    if none is not None and max(abs(x - none) for x in (unit, auto, target)) < E3_GAIN_DB:
+        text.append(f"варианты отличаются от прогона без векторов меньше чем на {E3_GAIN_DB:g} дБ: на этом входе единицы ничего не решают")
+    text.append(f"auto и C выше unit на {E3_GAIN_DB:g} дБ и сходятся в пределах {E3_SAME_DB:g} дБ — подачу менять" if better and same
+                else f"условие «auto и C выше unit на {E3_GAIN_DB:g} дБ и сходятся в пределах {E3_SAME_DB:g} дБ» не выполнено: подача остаётся unit")
+    return {"auto_better": better and same, "text": text}
 
 
 def verdict_e4(res):
@@ -1037,10 +1051,14 @@ def run_experiment(a, cli: Path, inp: Inputs, exp: Experiment, base_params: dict
             entry["edit"] = measure(cli, vdir / "color_nr", own or inp.clip, vdir / "cmp_input.json", frames, dry, offset=frame_index(own, start))
         if "temporal" in exp.metrics and frames > 1:
             entry["temporal"] = measure(cli, vdir / "color_nr", vdir / "color_nr", vdir / "cmp_next.json", frames - 1, dry, offset=1)
+        if "warp" in exp.metrics and frames > 1 and inp.mv_target:  # one set of vectors for every variant, at the model's size
+            entry["warp"] = measure(cli, vdir / "color_nr", vdir / "color_nr", vdir / "cmp_warp.json", frames - 1, dry, offset=1, warp_mv=inp.mv_target)
     if "temporal" in exp.metrics and frames > 1:  # the «вход» row: what the baseline read (a variants file may give it its own color_sr)
         own = variant_dirs(inp, next(v for v in exp.variants if v.name == exp.baseline))["color"]
         res["input_temporal"] = measure(cli, own or inp.clip, own or inp.clip, edir / "cmp_input_next.json", frames - 1, dry,
                                         start=frame_index(own, start), offset=1)
+        if "warp" in exp.metrics and inp.mv_target and own:  # the same pairs of what the model read: at the size of the vectors
+            res["input_warp"] = measure(cli, own, own, edir / "cmp_input_warp.json", frames - 1, dry, start=frame_index(own, start), offset=1, warp_mv=inp.mv_target)
     valid = valid_stored(prev, sig, exp.baseline) if prev and sig else set()
     if valid:  # --only over a stored result: the variants not run now stay while true under this run's signature and of the same build
         base = (prev if dry else res)["variants"].get(exp.baseline)  # a dry run has no new baseline: it shows what the real one keeps
@@ -1230,6 +1248,8 @@ def render_experiment(exp_id: str, res: dict, own: tuple = ()) -> str:
             head += ["Правка: PSNR Y ко входу, дБ", r"mean \|out − in\| RGB"]
         if "temporal" in metrics:
             head += ["Межкадровый PSNR Y, дБ (min)"]
+        if "warp" in metrics:
+            head += ["PSNR Y с компенсацией по mv, дБ (min)"]
         if "time" in metrics:
             head += ["мс/кадр GPU", "мс/кадр wall", "прогон, с"] + (["init / create, мс", "фича, МиБ"] if timed else [])
         lines += ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
@@ -1237,6 +1257,9 @@ def render_experiment(exp_id: str, res: dict, own: tuple = ()) -> str:
             row = ["вход", "—"] + (["—", "—"] if "base" in metrics else []) + (["—", "—"] if "edit" in metrics else [])
             t = res["input_temporal"]
             row += [f"{fmt_db(t['psnr_y'])} ({fmt_db(t['psnr_y_min'])})"]
+            if "warp" in metrics:
+                w = res.get("input_warp")
+                row += [f"{fmt_db(w['warp_psnr_y'])} ({fmt_db(w['warp_psnr_y_min'])})" if w else "—"]
             row += (["—"] * (3 + (2 if timed else 0))) if "time" in metrics else []
             lines.append("| " + " | ".join(row) + " |")
         for name, e in variants.items():
@@ -1254,6 +1277,9 @@ def render_experiment(exp_id: str, res: dict, own: tuple = ()) -> str:
             if "temporal" in metrics:
                 t = e.get("temporal")
                 row += [f"{fmt_db(t['psnr_y'])} ({fmt_db(t['psnr_y_min'])})" if t else "—"]
+            if "warp" in metrics:
+                w = e.get("warp")
+                row += [f"{fmt_db(w['warp_psnr_y'])} ({fmt_db(w['warp_psnr_y_min'])})" if w else "—"]
             if "time" in metrics:
                 row += [fmt_num(nr.get("ms_per_frame_gpu")), fmt_num(nr.get("ms_per_frame_wall")), fmt_num(e.get("run_s"), 2)]
                 if timed:

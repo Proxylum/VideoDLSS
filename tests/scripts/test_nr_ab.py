@@ -516,13 +516,21 @@ class Helpers(unittest.TestCase):
         self.assertIsNone(blind["no_effect"])  # no effect with the mask either: the clip proves nothing
         self.assertIs(nr_ab.verdict_e11({**v(s0={"vs_base": {"psnr_y": 30}}, s1={"vs_base": {"psnr_y": 50}}, s2={"vs_base": {"psnr_y": 50}})})["no_effect"], False)
         self.assertTrue(nr_ab.names_only("[14:46:39.828] [error] nr: nr.passes must be one of 1 | 2 (got 3)").startswith("nr: nr.passes"))
-        e3 = nr_ab.verdict_e3(v(unit={"temporal": {"psnr_y": 40}, "nr": {"mv_scale": [1, 1]}}, auto={"temporal": {"psnr_y": 41}, "nr": {"mv_scale": [1, 1]}}))
+        w = lambda x: {"warp": {"warp_psnr_y": x}}
+        e3 = nr_ab.verdict_e3(v(unit={**w(30), "nr": {"mv_scale": [1, 1]}}, auto={**w(31), "nr": {"mv_scale": [1, 1]}}, target=w(31)))
+        self.assertIsNone(e3["auto_better"])
         self.assertTrue(any("ничего не меряет" in t for t in e3["text"]))
-        e3 = v(unit={"temporal": {"psnr_y": 44.0}}, auto={"temporal": {"psnr_y": 46.0}}, target={"temporal": {"psnr_y": 46.5}})
-        for inp in (static, {"input_temporal": {"psnr_y": 25.0, "psnr_y_min": 24.0}}):  # zero vectors on identical frames: units cannot matter
-            r = nr_ab.verdict_e3({**e3, **inp})
-            self.assertIsNone(r["auto_better"])
-            self.assertTrue(any("компенсаци" in t for t in r["text"]))
+        e3 = lambda **kw: nr_ab.verdict_e3(v(**{n: w(x) for n, x in kw.items()}))
+        self.assertIsNone(e3(unit=30, auto=31)["auto_better"])  # no C: nothing to agree with
+        self.assertTrue(any("нет варианта C" in t for t in e3(unit=30, auto=31)["text"]))
+        self.assertIs(e3(unit=30, auto=30.5, target=30.6, none=28)["auto_better"], True)    # both 0.5 above unit, 0.1 apart
+        self.assertIs(e3(unit=30, auto=30.4, target=30.6, none=28)["auto_better"], False)   # auto short of the gain
+        self.assertIs(e3(unit=30, auto=31, target=31.31, none=28)["auto_better"], False)    # B and C do not agree
+        self.assertIs(e3(unit=31, auto=30, target=30, none=28)["auto_better"], False)       # unit better: it stays
+        flat = e3(unit=30, auto=30.6, target=30.6, none=30.3)
+        self.assertTrue(any("ничего не решают" not in t for t in flat["text"]))
+        self.assertFalse(any("ничего не решают" in t for t in e3(unit=30, auto=31, target=31, none=30.2)["text"]))  # auto is 0.8 from none
+        self.assertTrue(any("ничего не решают" in t for t in e3(unit=30, auto=30.1, target=30.1, none=30.2)["text"]))
         e8 = nr_ab.verdict_e8({"checks": [{"ok": False}, {"ok": True, "init_ms": 1500.0, "create_ms": 200.0, "vram_mib": 249.0, "run_s": 3.1}]})
         self.assertIn("сбой в проверках 1", e8["text"])  # numbered as the table's «Прогон»
         self.assertEqual(e8["init_ms"], 1500.0)
@@ -586,9 +594,9 @@ class Helpers(unittest.TestCase):
         self.assertEqual(s, sig(self.args(warmup=2)))  # still mode runs without a warm-up
         self.assertNotEqual(sig(e=e3), sig(self.args(warmup=2), e=e3))
         with_target = nr_ab.Inputs(Path("clip.mp4"), color=sr, mv=mv, mv_target=manifest(self.root / "mvt", 0, 40))
-        self.assertEqual(sig(i=with_target), s)  # only E3 C reads --mv-target-dir
+        self.assertEqual(sig(i=with_target), s)  # E1 has no use for --mv-target-dir
         t0, t1 = sig(e=e3), sig(i=with_target, e=e3)
-        self.assertEqual(t0["common"], t1["common"])
+        self.assertNotEqual(t0["common"], t1["common"])  # TASK-0068: every variant of E3 is scored with those vectors
         self.assertEqual({n for n in t0["variants"] if t0["variants"][n] != t1["variants"][n]}, {"target"})
         changed = [sig(base={"local_tone": 0.5}), sig(b={"dlssvid": "exe2"}), sig(self.args(start=8)), sig(self.args(nr_arg=["--skip-driver-check"])),
                    sig(i=nr_ab.Inputs(Path("clip.mp4"), color=manifest(self.root / "sr2", 0, 41), mv=mv)),
@@ -649,8 +657,16 @@ class Helpers(unittest.TestCase):
         res, lines = self.dry(self.cat["E3"], inp)
         self.assertNotIn("target", res["variants"])
         self.assertIn("--mv-target-dir", res["failed"]["target"])
-        self.assertEqual(sum(" nr " in x for x in lines), 2)
+        self.assertEqual(sum(" nr " in x for x in lines), 3)  # unit, auto and the control without vectors
+        self.assertFalse(any("--warp-mv" in x for x in lines))  # no vectors of the model's size: nothing to score with
+        self.assertEqual(self.cat["E3"].variants[3].expect, {"mv_used": False})
+        self.assertNotIn("--mv-dir", next(x for x in lines if " nr " in x and "none" in x))
         self.assertTrue(any("нет варианта C" in t for t in nr_ab.verdict_e3(res)["text"]))
+        target = nr_ab.Inputs(Path("clip.mp4"), color=Path("sr"), mv=Path("m"), mv_target=Path("mvt"))
+        res2, lines2 = self.dry(self.cat["E3"], target)
+        scored = [x for x in lines2 if "--warp-mv" in x]
+        self.assertEqual(len(scored), 5)  # four variants and the input the model read
+        self.assertTrue(all("--offset 1" in x and "mvt" in x for x in scored))
         must = nr_ab.Experiment("m", "m", [nr_ab.Variant("a"), nr_ab.Variant("b", inputs={"mv": "@mv_target"})], "a")
         with self.assertRaises(RuntimeError):  # not optional: the experiment stops before any run
             self.dry(must, inp)

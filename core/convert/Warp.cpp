@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "passes/ImageMetrics.h"
 #include "util/Error.h"
 
 namespace dlssvid {
@@ -63,6 +64,12 @@ double WarpPsnr(const PassImage& prev, const PassImage& cur, const PassImage& mv
     const WarpResult w = WarpBackward(prev, mvBackward);
     const PassImage curF = cur.type == PixelType::F32 ? cur : cur.ConvertTo(PixelType::F32);
     return Psnr(w.image, curF, peak, &w.mask);
+}
+
+WarpedPsnr WarpedPsnrY(const PassImage& prev, const PassImage& cur, const PassImage& mvBackward) {
+    const auto normalized = [](const PassImage& i) { return i.type == PixelType::F32 ? i : i.ConvertNormalizedTo(PixelType::F32); };
+    const WarpResult w = WarpBackward(normalized(prev), mvBackward);
+    return {Psnr(LumaOf(w.image), LumaOf(normalized(cur)), 1.f, &w.mask), w.validFraction};
 }
 
 double TemporalAlignmentErrorWarped(const PassImage& prevDepth, const PassImage& curDepth, const PassImage& mvBackward) {

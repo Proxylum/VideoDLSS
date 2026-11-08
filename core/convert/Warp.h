@@ -21,6 +21,14 @@ double Psnr(const PassImage& a, const PassImage& b, float peak = 1.f, const Pass
 // Warp-test of ТЗ §8: previous frame warped by the current frame's backward vectors vs current frame.
 double WarpPsnr(const PassImage& prev, const PassImage& cur, const PassImage& mvBackward, float peak = 1.f);
 
+// How well one frame follows another along the motion: the luma PSNR of `cur` against `prev` warped by cur's backward vectors (TASK-0068, E3 of
+// the NR A/B), colour samples in [0,1]. Only the samples the warp could read count; validFraction says how many that is.
+struct WarpedPsnr {
+    double psnrY = 0.0;
+    double validFraction = 0.0;
+};
+WarpedPsnr WarpedPsnrY(const PassImage& prev, const PassImage& cur, const PassImage& mvBackward);
+
 // Temporal alignment error with motion compensation: mean |d_t(p) - d_{t-1}(p + mv(p))| / mean d_{t-1}
 // over valid, finite samples.
 double TemporalAlignmentErrorWarped(const PassImage& prevDepth, const PassImage& curDepth, const PassImage& mvBackward);
