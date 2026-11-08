@@ -671,6 +671,12 @@ def verdict_e2(res):
     return {"identity": identity, "bypass": bypass, "ms_gpu": [t0, t1], "text": text}
 
 
+def keep_warp_error(res: dict, prev: dict, merged: dict, ran) -> None:
+    """An --only merge keeps stored variants without their score: the error that explains them stays too, so that the experiment is measured again."""
+    if prev.get("warp_error") and any(n not in ran and isinstance(e, dict) and "warp" in e and e["warp"] is None for n, e in merged.items()):
+        res.setdefault("warp_error", prev["warp_error"])
+
+
 def verdict_e3(res):
     """Spec §2e: «B ≈ C и оба лучше A» changes how the vectors are fed. The score is the PSNR of the output with frame t-1 warped onto frame t by one
     set of vectors at the model's size, the same for every variant (TASK-0068); the thresholds were set before the measurement. `none` is the control
@@ -681,10 +687,13 @@ def verdict_e3(res):
         return {"auto_better": None, "text": ["масштаб векторов у unit и auto одинаковый (размер mv = размер модели): E3 на этом входе ничего не меряет"]}
     if res.get("warp_error"):  # first: without a score every variant reads as absent, also C
         return {"auto_better": None, "text": [f"PSNR с компенсацией не посчитан: {res['warp_error']}"]}
-    if target is None:
+    t, static = static_input(res)
+    if static:  # the rule is for clips with motion: zero vectors are the same in any units
+        return {"auto_better": None, "text": [f"вход статичен (межкадровый PSNR входа, min {fmt_db(t)} дБ): векторы нулевые, единицы на нём не различить"]}
+    if "target" not in res.get("variants", {}):
         return {"auto_better": None, "text": ["нет варианта C (--mv-target-dir: mv_dlss размера модели из `dlssvid flow --target`)"]}
-    if unit is None or auto is None:
-        return {"auto_better": None, "text": []}
+    if None in (unit, auto, target):
+        return {"auto_better": None, "text": ["PSNR с компенсацией не посчитан: нужны пары кадров (--frames больше 1) у unit, auto и C"]}
     better = auto - unit >= E3_GAIN_DB and target - unit >= E3_GAIN_DB
     same = abs(auto - target) <= E3_SAME_DB
     text = [f"PSNR Y с компенсацией: unit {fmt_db(unit)}, auto {fmt_db(auto)}, C {fmt_db(target)}" + (f", без векторов {fmt_db(none)}" if none is not None else "") + " дБ"]
@@ -1085,6 +1094,7 @@ def run_experiment(a, cli: Path, inp: Inputs, exp: Experiment, base_params: dict
         merged = {**{n: e for n, e in prev.get("variants", {}).items() if n in valid and n not in ran and _same_build(e, now, base)}, **res["variants"]}
         res["variants"] = {v.name: merged[v.name] for v in exp.variants if v.name in merged}
         res["failed"] = {**{n: w for n, w in prev.get("failed", {}).items() if n in valid and n not in ran}, **res["failed"]}
+        keep_warp_error(res, prev, merged, ran)
     if "pairs" in exp.metrics:
         res["groups"] = [list(g) for g in exp.groups]  # verdict_e7 counts the pairs they call for
         res["pairs"], res["pairs_missing"] = [], []

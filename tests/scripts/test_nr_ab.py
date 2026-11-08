@@ -535,6 +535,19 @@ class Helpers(unittest.TestCase):
         tight = e3(unit=30, auto=30.1, target=30.1, none=30.2)
         self.assertTrue(any("не различает" in t for t in tight["text"]))
         self.assertIs(tight["auto_better"], False)
+        still = nr_ab.verdict_e3({**v(unit=w(40), auto=w(40), target=w(40)), **static})
+        self.assertIsNone(still["auto_better"])  # review of TASK-0068: the rule is for clips with motion, zero vectors have no units
+        self.assertTrue(any("вход статичен" in t for t in still["text"]))
+        one = nr_ab.verdict_e3(v(unit={"nr": {}}, auto={"nr": {}}, target={"nr": {}}))  # --frames 1: C ran, there are no pairs to score
+        self.assertIsNone(one["auto_better"])
+        self.assertTrue(any("не посчитан" in t for t in one["text"]))
+        self.assertFalse(any("нет варианта C" in t for t in one["text"]))
+        res = {}
+        nr_ab.keep_warp_error(res, {"warp_error": "x"}, {"target": {"warp": None}, "unit": {"warp": {}}}, {"unit"})
+        self.assertEqual(res.get("warp_error"), "x")  # review of TASK-0068: a kept variant without its score: still to be measured
+        res = {}
+        nr_ab.keep_warp_error(res, {"warp_error": "x"}, {"target": {"warp": {}}, "unit": {"warp": None}}, {"unit"})
+        self.assertEqual(res, {})  # the one without a score ran now: this run's result says
         lost = nr_ab.verdict_e3({**v(unit={"warp": None}, auto={"warp": None}, target={"warp": None}), "warp_error": "compare: --warp-mv is 8x8, the frames 16x16"})
         self.assertIsNone(lost["auto_better"])
         self.assertTrue(any("не посчитан" in t and "8x8" in t for t in lost["text"]))
