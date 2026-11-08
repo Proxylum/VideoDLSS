@@ -111,6 +111,7 @@ std::string Sha256FileCached(const std::filesystem::path& path) {
     struct Entry {
         uintmax_t size = 0;
         std::filesystem::file_time_type mtime;
+        std::filesystem::file_time_type hashedAt;
         std::string hash;
     };
     static std::mutex mutex;
@@ -122,8 +123,12 @@ std::string Sha256FileCached(const std::filesystem::path& path) {
     const auto mtime = std::filesystem::last_write_time(abs, ec);
     std::lock_guard<std::mutex> lock(mutex);
     auto it = cache.find(abs.wstring());
-    if (it != cache.end() && it->second.size == size && it->second.mtime == mtime) return it->second.hash;
-    Entry e{size, mtime, Sha256File(abs)};
+    // A file written just before it was hashed can change again without its time changing (NTFS stamps by the ~16 ms clock tick, other file
+    // systems coarser): such an entry says nothing about the next read (TASK-0069: a mask edited in place read as unchanged). Hash it again.
+    const auto settled = [](const Entry& c) { return c.hashedAt - c.mtime > std::chrono::seconds(2); };
+    if (it != cache.end() && it->second.size == size && it->second.mtime == mtime && settled(it->second)) return it->second.hash;
+    const auto hashedAt = std::filesystem::file_time_type::clock::now();  // before the read: a write during it counts as after
+    Entry e{size, mtime, hashedAt, Sha256File(abs)};
     cache[abs.wstring()] = e;
     return e.hash;
 }

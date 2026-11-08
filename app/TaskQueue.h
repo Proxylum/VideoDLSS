@@ -70,6 +70,7 @@ public:
     bool previewBusy() const;                    // a Preview task runs or waits
     Lane laneOf(int id) const;                   // Main for an unknown id
     int currentId() const { return current_ >= 0 ? tasks_[static_cast<size_t>(current_)].id : -1; }
+    QString unterminatedOutput() const { return buffer_.trimmed(); }  // of the process that runs or has just ended: what it wrote since its last line end
     Progress progress(int id) const;  // the last progress of a task (empty for an unknown id)
     double elapsed(int id) const;     // seconds the task has run so far (live while it runs)
     bool finished(int id) const;
