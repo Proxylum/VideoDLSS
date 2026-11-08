@@ -261,6 +261,9 @@ TEST_CASE("dlssvid compare --warp-mv scores one frame along the motion to the ne
         writeMv("mv_dlss", w, h, 6);
         writeMv("mv_half", w / 2, h / 2, 6);
         writeMv("mv_short", w, h, 5);
+        PassWriter raw(dir / "mv_raw", Manifest::ForPass(PassKind::MvRaw, w, h, FileFormat::Exr));  // two channels of the right size, forward vectors
+        for (int f = 0; f < 6; ++f) raw.WriteFrame(f, MakePassImage(PassKind::MvRaw, w, h));
+        raw.Finish();
     }
     const auto color = dir / "color_sr";
     const std::string base = "compare --ref " + Q(color) + " --test " + Q(color) + " --offset 1 --frames 3 --json " + Q(dir / "r.json") + " --warp-mv ";
@@ -277,6 +280,7 @@ TEST_CASE("dlssvid compare --warp-mv scores one frame along the motion to the ne
     CHECK(Run(base + Q(dir / "nothing")) != 0);
     CHECK(Run("compare --ref " + Q(color) + " --test " + Q(color) + " --warp-mv " + Q(dir / "mv_dlss")) != 0);  // no --offset 1
     CHECK(Run(base + Q(color)) != 0);                                                                           // not an mv_dlss pass
+    CHECK(Run(base + Q(dir / "mv_raw")) != 0);                                                                  // forward vectors would warp the wrong way
     REQUIRE(Run("compare --ref " + Q(color) + " --test " + Q(color) + " --offset 1 --json " + Q(dir / "plain.json")) == 0);
     std::ifstream plain(dir / "plain.json");
     CHECK_FALSE(nlohmann::json::parse(plain)["summary"].contains("warp_psnr_y_mean"));  // only when asked

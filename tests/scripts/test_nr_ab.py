@@ -525,6 +525,7 @@ class Helpers(unittest.TestCase):
         self.assertTrue(any("нет варианта C" in t for t in e3(unit=30, auto=31)["text"]))
         self.assertIs(e3(unit=30, auto=30.5, target=30.6, none=28)["auto_better"], True)    # both 0.5 above unit, 0.1 apart
         self.assertIs(e3(unit=30, auto=30.4, target=30.6, none=28)["auto_better"], False)   # auto short of the gain
+        self.assertIs(e3(unit=30, auto=30.7, target=30.45, none=28)["auto_better"], False)  # C short of the gain, the two still agree
         self.assertIs(e3(unit=30, auto=31, target=31.31, none=28)["auto_better"], False)    # B and C do not agree
         self.assertIs(e3(unit=31, auto=30, target=30, none=28)["auto_better"], False)       # unit better: it stays
         flat = e3(unit=30, auto=30.6, target=30.6, none=30.3)
