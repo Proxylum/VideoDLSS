@@ -5555,6 +5555,31 @@ TEST_CASE("ProjectTasks: a task of project A ending after B was opened leaves B'
     CHECK(plans.count() >= 1);  // a patched DLL concerns every project
 }
 
+TEST_CASE("AppModel: the force marks belong to the open project - opening another one drops them, a run of the first does not bring them back", "[app][model][gpu][regression]") {
+    // review of TASK-0067: force_ is one set for the model, only the end of any task used to empty it after a switch
+    App();
+    const auto d = Dir("project_tasks_marks_of_a");
+    const auto a = TaskProject(d, "a"), b = TaskProject(d, "b");
+    TaskRig rig;
+    rig.model.openProject(Q(a));
+    rig.model.setForce("depth", true);
+    rig.processId = rig.enqueue();
+    rig.model.openProject(Q(b));
+    CHECK_FALSE(rig.model.forced("depth"));  // not B's
+    CHECK_FALSE(rig.model.processArgs().contains("--force"));
+    rig.wait(rig.processId);
+    CHECK_FALSE(rig.model.forced("depth"));
+    rig.model.setForce("flow", true);
+    const auto video = d / "c.mkv";
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    WriteClip(video, spec);
+    rig.model.openVideo(Q(video));  // the same through a video
+    CHECK_FALSE(rig.model.forced("flow"));
+}
+
 TEST_CASE("ProjectTasks: the task's own project gets its marks cleared, its sources read, the run time and the comparison", "[app][model][gpu][regression]") {
     App();
     const auto d = Dir("project_tasks_own");
@@ -5640,6 +5665,7 @@ TEST_CASE("AppModel: a file that cannot be read is no change of project - the ge
     rig.model.openVideo(Q(d / "clip.mkv"));  // its project file next to it cannot be read
     CHECK(rig.model.generation() == generation);
     CHECK(std::filesystem::equivalent(rig.model.project().file, a));
+    CHECK(rig.model.forced("depth"));  // a failed open is no change of project: the marks stay
     rig.wait(rig.processId);
     CHECK(rig.ended[rig.processId].ownProject);
     CHECK_FALSE(rig.model.forced("depth"));

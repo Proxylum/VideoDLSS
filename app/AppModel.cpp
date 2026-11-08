@@ -99,7 +99,8 @@ void AppModel::openVideo(const QString& file) {
         next.file = std::filesystem::path(file.toStdWString()).replace_extension(".dlssvid.json");
         const bool loaded = std::filesystem::exists(next.file);
         if (loaded) next = Project::Load(next.file);
-        dropNrPreview();  // after the reading: a file that cannot be read leaves the open project, its preview and its tasks as they were
+        dropNrPreview();  // after the reading: a project file that cannot be read leaves the open project, its preview and its tasks as they were
+        force_.clear();   // the «пересчитать» marks are the open project's (as in closeProject)
         project_ = std::move(next);
         const QString seeded = loaded ? QString() : seedNewProject();  // before the first plan: it is made with those settings
         reloadSources();
@@ -118,6 +119,7 @@ void AppModel::openProject(const QString& file) {
     try {
         Project next = Project::Load(std::filesystem::path(file.toStdWString()));
         dropNrPreview();  // after the reading, as in openVideo
+        force_.clear();
         project_ = std::move(next);
         reloadSources();
         sanitizePreviewSide();

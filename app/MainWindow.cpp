@@ -477,8 +477,14 @@ void MainWindow::onTaskFinished(int taskId, bool ok) {
     const QStringList failedStages = ok ? tasks_->progress(taskId).failedStageTitles() : QStringList{};
     if (ok && !failedStages.isEmpty()) {
         // a stage failed and the result was encoded without it (fg in its own process, audit fg-2): the processing page
-        // stays and says so, «Показать результат» leads on
-        statusBar()->showMessage(tr("Обработка завершена за %1 без стадии «%2» — подробности на странице обработки").arg(took, failedStages.join(tr("», «"))),
+        // stays and says so, «Показать результат» leads on - to the project open now, so only if it is the run's own
+        if (!finished.ownProject) {
+            processingActive_ = false;
+            updatePage();
+        }
+        const QString stages = failedStages.join(tr("», «"));
+        statusBar()->showMessage(finished.ownProject ? tr("Обработка завершена за %1 без стадии «%2» — подробности на странице обработки").arg(took, stages)
+                                                     : tr("Обработка %1 завершена за %2 без стадии «%3»").arg(video, took, stages),
                                  15000);
         if (inBackground()) notify(tr("Обработка завершена с ошибкой стадии"), tr("%1 — результат без стадии «%2»").arg(video, failedStages.join(tr("», «"))));
     } else if (ok) {
