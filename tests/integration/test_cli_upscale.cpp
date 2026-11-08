@@ -16,6 +16,7 @@
 #include "gpu/D3D12Device.h"
 #include "ml/TrtLoader.h"
 #endif
+#include "passes/Manifest.h"
 #include "passes/PassSequence.h"
 #include "passes/ScenesPass.h"
 
@@ -226,4 +227,65 @@ TEST_CASE("dlssvid upscale reads the scene list for DLSS SR, not for nis", "[int
     CHECK(m.stageParams["scene_cuts_id"] == SceneCutsId({2}));
     REQUIRE(Run("upscale --backend dlss --warp --no-scenes -i " + Q(clip) + " -o " + Q(out)) == 0);
     CHECK_FALSE(Manifest::Load(out / "color_sr").stageParams.contains("scene_cuts_id"));
+}
+
+TEST_CASE("dlssvid compare --warp-mv scores one frame along the motion to the next, by the test frame's number; bad use is refused", "[integration][cli][regression]") {
+    // TASK-0068: a shifted synthetic pass starting at frame 2, vectors from frame 0, so a wrong frame number would read other vectors
+    const auto dir = TempDir() / "cli_upscale" / "warp_mv";
+    std::filesystem::remove_all(dir);
+    const uint32_t w = 64, h = 40;
+    const auto frameAt = [&](int shift) {
+        PassImage img = MakePassImage(PassKind::ColorSr, w, h, PixelType::F32);
+        for (uint32_t y = 0; y < h; ++y)
+            for (uint32_t x = 0; x < w; ++x)
+                for (size_t c = 0; c < img.channels.size(); ++c)
+                    img.Set(x, y, c, 0.5f + 0.25f * std::sin((static_cast<float>(x) - static_cast<float>(shift)) * 0.31f + static_cast<float>(y) * 0.17f));
+        return img;
+    };
+    {
+        Manifest m = Manifest::ForPass(PassKind::ColorSr, w, h, FileFormat::Exr);
+        PassWriter color(dir / "color_sr", m);
+        for (int f = 2; f < 6; ++f) color.WriteFrame(f, frameAt(f * 3));
+        color.Finish();
+        PassWriter fromZero(dir / "color_from0", m);  // the same frames from another first number
+        for (int f = 0; f < 6; ++f) fromZero.WriteFrame(f, frameAt(f * 3));
+        fromZero.Finish();
+        const auto writeMv = [&](const char* name, uint32_t mw, uint32_t mh, int frames) {
+            PassWriter mv(dir / name, Manifest::ForPass(PassKind::MvDlss, mw, mh, FileFormat::Exr));
+            for (int f = 0; f < frames; ++f) {
+                PassImage img = MakePassImage(PassKind::MvDlss, mw, mh);
+                const float u = f >= 3 ? -3.f : 40.f;  // the frames the pairs read: their true motion; the others: far off
+                for (uint32_t y = 0; y < mh; ++y)
+                    for (uint32_t x = 0; x < mw; ++x) img.Set(x, y, 0, u);
+                mv.WriteFrame(f, img);
+            }
+            mv.Finish();
+        };
+        writeMv("mv_dlss", w, h, 6);
+        writeMv("mv_half", w / 2, h / 2, 6);
+        writeMv("mv_short", w, h, 5);
+        PassWriter raw(dir / "mv_raw", Manifest::ForPass(PassKind::MvRaw, w, h, FileFormat::Exr));  // two channels of the right size, forward vectors
+        for (int f = 0; f < 6; ++f) raw.WriteFrame(f, MakePassImage(PassKind::MvRaw, w, h));
+        raw.Finish();
+    }
+    const auto color = dir / "color_sr";
+    const std::string base = "compare --ref " + Q(color) + " --test " + Q(color) + " --offset 1 --frames 3 --json " + Q(dir / "r.json") + " --warp-mv ";
+    REQUIRE(Run(base + Q(dir / "mv_dlss")) == 0);
+    std::ifstream in(dir / "r.json");
+    const nlohmann::json j = nlohmann::json::parse(in);
+    CHECK(j["summary"]["frames"] == 3);
+    CHECK(j["summary"]["warp_psnr_y_mean"].get<double>() > 40.0);
+    CHECK(j["summary"]["warp_psnr_y_mean"].get<double>() > j["summary"]["psnr_y_mean"].get<double>() + 10.0);  // the unaligned one measures the motion
+    CHECK(j["summary"]["warp_valid_min"].get<double>() > 0.9);
+    CHECK(j["frames"][0].contains("warp_psnr_y"));
+    CHECK(Run(base + Q(dir / "mv_half")) != 0);   // vectors of another size
+    CHECK(Run(base + Q(dir / "mv_short")) != 0);  // no vectors for frame 5
+    CHECK(Run(base + Q(dir / "nothing")) != 0);
+    CHECK(Run("compare --ref " + Q(color) + " --test " + Q(color) + " --warp-mv " + Q(dir / "mv_dlss")) != 0);  // no --offset 1
+    CHECK(Run(base + Q(color)) != 0);                                                                           // not an mv_dlss pass
+    CHECK(Run("compare --ref " + Q(dir / "color_from0") + " --test " + Q(color) + " --offset 1 --warp-mv " + Q(dir / "mv_dlss")) != 0);  // pairs that are no neighbours
+    CHECK(Run(base + Q(dir / "mv_raw")) != 0);                                                                  // forward vectors would warp the wrong way
+    REQUIRE(Run("compare --ref " + Q(color) + " --test " + Q(color) + " --offset 1 --json " + Q(dir / "plain.json")) == 0);
+    std::ifstream plain(dir / "plain.json");
+    CHECK_FALSE(nlohmann::json::parse(plain)["summary"].contains("warp_psnr_y_mean"));  // only when asked
 }

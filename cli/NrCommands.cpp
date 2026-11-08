@@ -616,8 +616,8 @@ void NrCommands::Register(CLI::App& app) {
     nr_->add_option("--max-ratio,--max_ratio", na_.maxRatio, "ratio transfer guard")->default_val(4.f);
     nr_->add_flag("--no-guides,--no_guides,!--guides", na_.noGuides, "A/B: no depth / motion vectors to the model (still-image mode); --guides overrides --params-file");
     // A/B switches (spec §2e, E3-E5): standalone only, not schema keys - a project, a preset, --params-file or `process` never sets
-    // them, and a pass made with them (stage_params.ab) is never adopted by `process`; the winner waits for a PSNR compensated by mv
-    // (DECISION 2026-10-25: PR-2 could not tell the variants apart on identical frames)
+    // them, and a pass made with them (stage_params.ab) is never adopted by `process`. E3 / E4 are decided on motion (TASK-0068): the
+    // feed stays unit, no zero vectors at creation; the flags stay to re-check a new DLL
     nr_->add_option("--mv-scale,--mv_scale", na_.mvScale, "A/B: DLSSNR.MVecScale - unit (mv_dlss pixels as is, the sub-rect carries the size) | auto (x model size / mv size)")
         ->default_val("unit");
     nr_->add_flag("--create-with-mv,--create_with_mv", na_.createWithMv, "A/B: CreateFeature with zero motion vectors (and depth) bound instead of none (ComfyUI)");

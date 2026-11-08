@@ -13,6 +13,7 @@
 #include <sstream>
 
 #include "convert/ColorConvert.h"
+#include "convert/Warp.h"
 #include "gpu/D3D12Device.h"
 #include "io/VideoDecoder.h"
 #include "passes/ImageMetrics.h"
@@ -236,6 +237,18 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
             Throw("compare: --edit-from is " + std::to_string(input->Man().width) + "x" + std::to_string(input->Man().height) + ", the reference " +
                   std::to_string(ref.Width()) + "x" + std::to_string(ref.Height()));
     }
+    std::optional<PassReader> warpMv;
+    if (!a.warpMv.empty()) {
+        if (a.offset != 1 || a.step != 1) Throw("compare: --warp-mv reads the vectors from one frame to the next: it needs --offset 1 and --step 1");
+        if (ref.First() != test.First()) Throw("compare: --warp-mv needs --ref and --test to start at one frame number: the pairs would not be neighbours");
+        if (!std::filesystem::is_directory(a.warpMv)) Throw("compare: --warp-mv must be a pass folder (mv_dlss)");
+        warpMv.emplace(PassReader::Open(a.warpMv));
+        if (warpMv->Man().pass != "mv_dlss") Throw("compare: --warp-mv must be an mv_dlss pass (" + a.warpMv + " is " + warpMv->Man().pass + ")");
+        if (warpMv->Man().width != ref.Width() || warpMv->Man().height != ref.Height())
+            Throw("compare: --warp-mv is " + std::to_string(warpMv->Man().width) + "x" + std::to_string(warpMv->Man().height) + ", the frames " +
+                  std::to_string(ref.Width()) + "x" + std::to_string(ref.Height()) + " - vectors of the frames' size (dlssvid flow --target)");
+    }
+    double warpPsnr = 0, minWarpPsnr = std::numeric_limits<double>::infinity(), minWarpValid = 1.0;
     std::vector<nlohmann::json> bandSum(divs.size(), nlohmann::json{{"low_energy_rgb", 0.0}, {"low_energy_y", 0.0}, {"psnr_y_low", 0.0}, {"psnr_y_high", 0.0}});
     nlohmann::json frames = nlohmann::json::array();
     double psnrY = 0, psnrRgb = 0, ssim = 0, mae = 0, maeY = 0, minPsnr = std::numeric_limits<double>::infinity(), minSsim = 1.0;
@@ -249,6 +262,15 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
         const ImageMetrics m = CompareImages(r, t);
         if (!a.quiet) std::printf("frame %6lld  PSNR Y %7.3f dB  PSNR RGB %7.3f dB  SSIM %.4f\n", static_cast<long long>(ri), m.psnrY, m.psnrRgb, m.ssimY);
         frames.push_back({{"frame", ri}, {"psnr_y", m.psnrY}, {"psnr_rgb", m.psnrRgb}, {"ssim_y", m.ssimY}, {"mae_rgb", m.maeRgb}});
+        if (warpMv) {  // the test frame's number: its vectors lead to the frame before it, the reference one
+            const int64_t number = test.First() + ri + a.offset;
+            if (!warpMv->HasFrame(number)) Throw("compare: --warp-mv has no frame " + std::to_string(number));
+            const WarpedPsnr w = WarpedPsnrY(r, t, warpMv->ReadFrame(number));
+            frames.back()["warp_psnr_y"] = w.psnrY;
+            warpPsnr += w.psnrY;
+            minWarpPsnr = std::min(minWarpPsnr, w.psnrY);
+            minWarpValid = std::min(minWarpValid, w.validFraction);
+        }
         if (!divs.empty()) {
             // I by the reference's frame number (ref and I need not start at the same frame); a missing one is an error, not the end
             const int64_t number = ref.First() + ri;
@@ -282,6 +304,11 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
                               {"mae_rgb_mean", mae / n},  // mean |reference - test|: the size of an edit (NR A/B), not a quality score
                               {"mae_y_mean", maeY / n},
                               {"size", {ref.Width(), ref.Height()}}};
+    if (warpMv) {
+        summary["warp_psnr_y_mean"] = warpPsnr / n;
+        summary["warp_psnr_y_min"] = minWarpPsnr;
+        summary["warp_valid_min"] = minWarpValid;  // the smallest share of samples a warp could read
+    }
     if (!divs.empty()) {
         nlohmann::json bands = nlohmann::json::array();
         for (size_t k = 0; k < divs.size(); ++k) {
@@ -294,6 +321,7 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
     }
     std::printf("frames:      %lld\nPSNR Y:      %.3f dB (min %.3f)\nPSNR RGB:    %.3f dB\nSSIM Y:      %.4f (min %.4f)\nMAE RGB:     %.5f (Y %.5f)\n",
                 static_cast<long long>(n), psnrY / n, minPsnr, psnrRgb / n, ssim / n, minSsim, mae / n, maeY / n);
+    if (warpMv) std::printf("warp PSNR Y: %.3f dB (min %.3f, samples read at least %.1f%%)\n", warpPsnr / n, minWarpPsnr, minWarpValid * 100.0);
     if (summary.contains("bands"))
         for (const auto& b : summary["bands"]) {
             std::printf("bands:       d=%u low %.3f (Y %.3f)", b["d"].get<uint32_t>(), b["low_energy_rgb"].get<double>(), b["low_energy_y"].get<double>());
@@ -350,6 +378,8 @@ void UpscaleCommands::Register(CLI::App& app) {
     compare_->add_option("--start", ca_.start, "first reference frame index")->default_val(0);
     compare_->add_option("--step", ca_.step, "frame stride (e.g. --start 1 --step 2 = only the generated frames of an x2 color_fg)")->default_val(1);
     compare_->add_option("--json", ca_.json, "write per-frame metrics to this JSON file");
+    compare_->add_option("--warp-mv,--warp_mv", ca_.warpMv,
+                         "with --offset 1: an mv_dlss pass folder of the frames' size; also the PSNR Y of the test frame against the reference frame warped by its vectors");
     compare_->add_flag("-q,--quiet", ca_.quiet, "summary only");
     compare_->add_option("--bands", ca_.bands,
                          "d1,d2,...: the share of test - ref in the low band of the NR control mask's split at each cell size d (pixels), "
