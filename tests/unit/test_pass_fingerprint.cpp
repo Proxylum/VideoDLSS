@@ -8,6 +8,7 @@
 #endif
 #include <windows.h>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
@@ -288,4 +289,32 @@ TEST_CASE("Sha256File and Sha256FileCached throw on a file whose bytes do not re
     UnlockFileEx(locker, 0, 4, 0, &at);
     CloseHandle(locker);
     CHECK(Sha256FileCached(file) == whole);  // nothing of the failed read was kept
+}
+
+TEST_CASE("Sha256FileCached does not trust a file written just before it was hashed; a settled one stays cached", "[unit][fingerprint][regression]") {
+    // TASK-0069: the size and the time of a file rewritten within one clock tick are the same (the control mask's test on the CI:
+    // a frame edited in place read as unchanged)
+    const auto dir = std::filesystem::path(DLSSVID_TEST_TMP) / "sha_cached";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    const auto file = dir / "a.bin";
+    const auto write = [&](const char* text) {
+        std::ofstream(file, std::ios::binary) << text;
+    };
+    write("aaaa");
+    const auto fresh = std::filesystem::last_write_time(file);
+    CHECK(Sha256FileCached(file) == Sha256File(file));
+    write("bbbb");  // the same size...
+    std::filesystem::last_write_time(file, fresh);  // ...and the same time, as within one tick
+    CHECK(Sha256FileCached(file) == Sha256File(file));
+
+    const auto settled = dir / "b.bin";
+    std::ofstream(settled, std::ios::binary) << "cccc";
+    const auto old = std::filesystem::file_time_type::clock::now() - std::chrono::hours(1);
+    std::filesystem::last_write_time(settled, old);
+    const std::string first = Sha256FileCached(settled);
+    CHECK(first == Sha256File(settled));
+    std::ofstream(settled, std::ios::binary) << "dddd";
+    std::filesystem::last_write_time(settled, old);  // the cache's bargain for a file long written: the same size and time mean the same file
+    CHECK(Sha256FileCached(settled) == first);
 }
