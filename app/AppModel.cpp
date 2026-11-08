@@ -94,12 +94,13 @@ void DropPreviewSide(ViewportState& st, const std::string& pass, const std::stri
 
 void AppModel::openVideo(const QString& file) {
     try {
-        dropNrPreview();
-        project_ = Project::Create(std::filesystem::path(file.toStdWString()), {});
+        Project next = Project::Create(std::filesystem::path(file.toStdWString()), {});
         // default project file next to the video
-        project_.file = std::filesystem::path(file.toStdWString()).replace_extension(".dlssvid.json");
-        const bool loaded = std::filesystem::exists(project_.file);
-        if (loaded) project_ = Project::Load(project_.file);
+        next.file = std::filesystem::path(file.toStdWString()).replace_extension(".dlssvid.json");
+        const bool loaded = std::filesystem::exists(next.file);
+        if (loaded) next = Project::Load(next.file);
+        dropNrPreview();  // after the reading: a file that cannot be read leaves the open project, its preview and its tasks as they were
+        project_ = std::move(next);
         const QString seeded = loaded ? QString() : seedNewProject();  // before the first plan: it is made with those settings
         reloadSources();
         sanitizePreviewSide();
@@ -115,8 +116,9 @@ void AppModel::openVideo(const QString& file) {
 
 void AppModel::openProject(const QString& file) {
     try {
-        dropNrPreview();
-        project_ = Project::Load(std::filesystem::path(file.toStdWString()));
+        Project next = Project::Load(std::filesystem::path(file.toStdWString()));
+        dropNrPreview();  // after the reading, as in openVideo
+        project_ = std::move(next);
         reloadSources();
         sanitizePreviewSide();
         dirty_ = false;

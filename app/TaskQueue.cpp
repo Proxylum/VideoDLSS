@@ -133,6 +133,7 @@ int TaskQueue::enqueue(const QString& title, const QString& program, const QStri
     if (lane == Lane::Preview) previewRowOwner_ = id;
     tasks_.push_back(t);
     if (lane == Lane::Main) {
+        emit taskQueued(id);
         // processing goes first: every preview is preempted - the running one killed (this task starts when it has exited and let its
         // files go), a waiting one dropped
         std::vector<int> previews;

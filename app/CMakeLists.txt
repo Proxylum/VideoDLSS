@@ -21,6 +21,7 @@ qt_add_library(dlssvid_app STATIC
   ViewportWindow.h ViewportWindow.cpp
   TimelineWidget.h TimelineWidget.cpp
   ProjectPanel.h ProjectPanel.cpp
+  ProjectTasks.h ProjectTasks.cpp
   InspectorPanel.h InspectorPanel.cpp
   LogPanel.h LogPanel.cpp
   TaskQueue.h TaskQueue.cpp

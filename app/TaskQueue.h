@@ -78,6 +78,7 @@ public:
 
 signals:
     // Main tasks
+    void taskQueued(int id);  // from enqueue, before the task can start or end
     void taskStarted(int id);
     void taskProgress(int id, const Progress& progress);
     void taskFinished(int id, bool ok);
