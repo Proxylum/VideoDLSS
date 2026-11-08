@@ -4366,6 +4366,7 @@ TEST_CASE("NR preview: low on disk, a preview in the cache is shown and not mark
     model.seekToSourceFrame(4);
     REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
     Pump([&] { return model.nrPreview().has_value() && !runner.running() && !runner.housekeeping(); }, 60000);
+    INFO(runner.statusText().toStdString() << " | " << runner.statusTip().toStdString());
     REQUIRE(model.nrPreview());
     runner.hide();
     runner.setFreeSpaceForTests([] { return uint64_t{1} << 30; });  // under the 2 GiB the previews leave free
@@ -4535,6 +4536,7 @@ TEST_CASE("NR preview: a request made after the watchdog stopped a hung run is s
     runner.setCommandForTests([](const NrPreviewJob&) { return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "1/1 frames"}}; });
     bool asked = false;
     runner.setOnWatchdogForTests([&] {
+        runner.setWatchdogMsForTests(60000);  // only the first run hangs: on a busy machine `cmd /c echo` can outlast 300 ms (TASK-0069)
         model.seekToSourceFrame(5);
         asked = runner.start({PreviewRunner::Kind::Frame, 0});  // the killed process has not exited yet
     });
@@ -4545,6 +4547,7 @@ TEST_CASE("NR preview: a request made after the watchdog stopped a hung run is s
 
     // no request after the hang: the one made before it does not run after the kill
     runner.setOnWatchdogForTests({});
+    runner.setWatchdogMsForTests(300);
     runner.setCommandForTests(LongCommand);
     model.seekToSourceFrame(6);
     REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
@@ -4555,6 +4558,22 @@ TEST_CASE("NR preview: a request made after the watchdog stopped a hung run is s
     Pump([] { return false; }, 1800);
     CHECK(started.count() == 3);
     CHECK(runner.statusText().startsWith(QString::fromUtf8("Превью не ответило")));
+}
+
+TEST_CASE("NR preview: a run the watchdog stopped says how far the CLI got - its last line is the status tip", "[app][preview][regression]") {
+    // TASK-0069: a `dlssvid nr` hung on the CI, 9500 runs outside it did not: the next one has to explain itself
+    App();
+    PreviewProject m("preview_watchdog_line");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    runner.setWatchdogMsForTests(3000);
+    runner.setCommandForTests([](const NrPreviewJob&) { return std::pair<QString, QStringList>{"cmd", {"/c", "echo", "stage-marker", "&", "ping", "-n", "8", "127.0.0.1", ">nul"}}; });
+    model.seekToSourceFrame(2);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return !runner.running(); }, 20000);
+    REQUIRE(runner.statusText().startsWith(QString::fromUtf8("Превью не ответило")));
+    CHECK(runner.statusTip().contains("stage-marker"));
 }
 
 TEST_CASE("NR preview: processing preempts a run superseded by a cached frame and the bar keeps the cached frame's status", "[app][preview][gpu][regression]") {

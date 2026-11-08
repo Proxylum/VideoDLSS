@@ -460,8 +460,9 @@ void PreviewRunner::onFinished(int id, bool ok) {
         if (preempted_) {  // the requests before the preemption went with it (previewPreempted); one made since runs below
             if (!superseded && !pending_) setStatus(Tr("Превью отменено: началась обработка"));
         } else if (watchdogFired_) {
-            if (!superseded) setStatus(Tr("Превью не ответило за %1 — остановлено").arg(FormatDuration(seconds)), "warn");
-            else Log()->warn("nr preview {}: stopped after {}", id, FormatDuration(seconds).toStdString());
+            // how far the CLI got is in its last line: a hang that cannot be reproduced can be read from a failed test's log (TASK-0069)
+            Log()->warn("nr preview {}: stopped after {}, the CLI's last line: {}", id, FormatDuration(seconds).toStdString(), lastLine_.isEmpty() ? "(none)" : lastLine_.toStdString());
+            if (!superseded) setStatus(Tr("Превью не ответило за %1 — остановлено").arg(FormatDuration(seconds)), "warn", lastLine_);
         } else if (!pending_ && !superseded) {
             setStatus(Tr("Превью отменено"));
         }
