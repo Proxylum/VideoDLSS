@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -529,9 +530,14 @@ class Helpers(unittest.TestCase):
         self.assertIs(e3(unit=30, auto=31, target=31.31, none=28)["auto_better"], False)    # B and C do not agree
         self.assertIs(e3(unit=31, auto=30, target=30, none=28)["auto_better"], False)       # unit better: it stays
         flat = e3(unit=30, auto=30.6, target=30.6, none=30.3)
-        self.assertTrue(any("ничего не решают" not in t for t in flat["text"]))
-        self.assertFalse(any("ничего не решают" in t for t in e3(unit=30, auto=31, target=31, none=30.2)["text"]))  # auto is 0.8 from none
-        self.assertTrue(any("ничего не решают" in t for t in e3(unit=30, auto=30.1, target=30.1, none=30.2)["text"]))
+        self.assertFalse(any("не различает" in t for t in flat["text"]))  # a spread of 0.6: the control says nothing against the change
+        self.assertIs(flat["auto_better"], True)
+        tight = e3(unit=30, auto=30.1, target=30.1, none=30.2)
+        self.assertTrue(any("не различает" in t for t in tight["text"]))
+        self.assertIs(tight["auto_better"], False)
+        lost = nr_ab.verdict_e3({**v(unit={"warp": None}, auto={"warp": None}, target={"warp": None}), "warp_error": "compare: --warp-mv is 8x8, the frames 16x16"})
+        self.assertIsNone(lost["auto_better"])
+        self.assertTrue(any("не посчитан" in t and "8x8" in t for t in lost["text"]))
         e8 = nr_ab.verdict_e8({"checks": [{"ok": False}, {"ok": True, "init_ms": 1500.0, "create_ms": 200.0, "vram_mib": 249.0, "run_s": 3.1}]})
         self.assertIn("сбой в проверках 1", e8["text"])  # numbered as the table's «Прогон»
         self.assertEqual(e8["init_ms"], 1500.0)
@@ -671,6 +677,22 @@ class Helpers(unittest.TestCase):
         must = nr_ab.Experiment("m", "m", [nr_ab.Variant("a"), nr_ab.Variant("b", inputs={"mv": "@mv_target"})], "a")
         with self.assertRaises(RuntimeError):  # not optional: the experiment stops before any run
             self.dry(must, inp)
+
+    def test_compensated_psnr_needs_vectors_over_its_pairs(self):
+        full, short = manifest(self.root / "mvt", 0, 35), manifest(self.root / "mvs", 0, 20)
+        e3, e1 = self.cat["E3"], self.cat["E1"]
+        at = lambda mv, exp=e3, dry=False: nr_ab.warp_vectors(exp, nr_ab.Inputs(Path("clip.mp4"), mv_target=mv), 7, 35, dry)
+        self.assertEqual(at(full), full)
+        self.assertIsNone(at(short))  # review of TASK-0068: compare failed on the first missing frame, after every run on the GPU
+        self.assertEqual(at(short, dry=True), short)
+        self.assertIsNone(at(None))
+        self.assertIsNone(at(full, e1))  # E1 does not score with them
+
+    def test_a_folder_that_cannot_score_is_written_down_not_raised(self):
+        res = {}
+        with mock.patch.object(nr_ab, "measure", side_effect=RuntimeError("compare: --warp-mv is 8x8")):
+            self.assertIsNone(nr_ab.measure_warp(res, "dlssvid", "a", "a", self.root / "c.json", 3, False, Path("mv"), offset=1))
+        self.assertIn("8x8", res["warp_error"])
 
     def test_masks_need_mask_passes(self):
         passes = self.root / "passes"

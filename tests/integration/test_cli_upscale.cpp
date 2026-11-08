@@ -247,6 +247,9 @@ TEST_CASE("dlssvid compare --warp-mv scores one frame along the motion to the ne
         PassWriter color(dir / "color_sr", m);
         for (int f = 2; f < 6; ++f) color.WriteFrame(f, frameAt(f * 3));
         color.Finish();
+        PassWriter fromZero(dir / "color_from0", m);  // the same frames from another first number
+        for (int f = 0; f < 6; ++f) fromZero.WriteFrame(f, frameAt(f * 3));
+        fromZero.Finish();
         const auto writeMv = [&](const char* name, uint32_t mw, uint32_t mh, int frames) {
             PassWriter mv(dir / name, Manifest::ForPass(PassKind::MvDlss, mw, mh, FileFormat::Exr));
             for (int f = 0; f < frames; ++f) {
@@ -280,6 +283,7 @@ TEST_CASE("dlssvid compare --warp-mv scores one frame along the motion to the ne
     CHECK(Run(base + Q(dir / "nothing")) != 0);
     CHECK(Run("compare --ref " + Q(color) + " --test " + Q(color) + " --warp-mv " + Q(dir / "mv_dlss")) != 0);  // no --offset 1
     CHECK(Run(base + Q(color)) != 0);                                                                           // not an mv_dlss pass
+    CHECK(Run("compare --ref " + Q(dir / "color_from0") + " --test " + Q(color) + " --offset 1 --warp-mv " + Q(dir / "mv_dlss")) != 0);  // pairs that are no neighbours
     CHECK(Run(base + Q(dir / "mv_raw")) != 0);                                                                  // forward vectors would warp the wrong way
     REQUIRE(Run("compare --ref " + Q(color) + " --test " + Q(color) + " --offset 1 --json " + Q(dir / "plain.json")) == 0);
     std::ifstream plain(dir / "plain.json");

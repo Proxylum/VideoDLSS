@@ -240,6 +240,7 @@ int CmdCompare(const UpscaleCommands::CompareArgs& a) {
     std::optional<PassReader> warpMv;
     if (!a.warpMv.empty()) {
         if (a.offset != 1 || a.step != 1) Throw("compare: --warp-mv reads the vectors from one frame to the next: it needs --offset 1 and --step 1");
+        if (ref.First() != test.First()) Throw("compare: --warp-mv needs --ref and --test to start at one frame number: the pairs would not be neighbours");
         if (!std::filesystem::is_directory(a.warpMv)) Throw("compare: --warp-mv must be a pass folder (mv_dlss)");
         warpMv.emplace(PassReader::Open(a.warpMv));
         if (warpMv->Man().pass != "mv_dlss") Throw("compare: --warp-mv must be an mv_dlss pass (" + a.warpMv + " is " + warpMv->Man().pass + ")");

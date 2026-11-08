@@ -673,12 +673,14 @@ def verdict_e2(res):
 
 def verdict_e3(res):
     """Spec §2e: «B ≈ C и оба лучше A» changes how the vectors are fed. The score is the PSNR of the output with frame t-1 warped onto frame t by one
-    set of vectors at the model's size, the same for every variant (TASK-0068); the thresholds were set before the measurement. `none` is the control:
-    when no variant is apart from it the model does not use the vectors here and the units decide nothing."""
+    set of vectors at the model's size, the same for every variant (TASK-0068); the thresholds were set before the measurement. `none` is the control
+    (no vectors, so no model history either): a spread of all of them under the gain means the metric cannot tell them apart on this input."""
     unit, auto, target, none = (_get(res, n, "warp", "warp_psnr_y") for n in ("unit", "auto", "target", "none"))
     sa, sb = _get(res, "unit", "nr", "mv_scale"), _get(res, "auto", "nr", "mv_scale")
     if sa is not None and sb is not None and sa == sb:
         return {"auto_better": None, "text": ["масштаб векторов у unit и auto одинаковый (размер mv = размер модели): E3 на этом входе ничего не меряет"]}
+    if res.get("warp_error"):  # first: without a score every variant reads as absent, also C
+        return {"auto_better": None, "text": [f"PSNR с компенсацией не посчитан: {res['warp_error']}"]}
     if target is None:
         return {"auto_better": None, "text": ["нет варианта C (--mv-target-dir: mv_dlss размера модели из `dlssvid flow --target`)"]}
     if unit is None or auto is None:
@@ -686,8 +688,8 @@ def verdict_e3(res):
     better = auto - unit >= E3_GAIN_DB and target - unit >= E3_GAIN_DB
     same = abs(auto - target) <= E3_SAME_DB
     text = [f"PSNR Y с компенсацией: unit {fmt_db(unit)}, auto {fmt_db(auto)}, C {fmt_db(target)}" + (f", без векторов {fmt_db(none)}" if none is not None else "") + " дБ"]
-    if none is not None and max(abs(x - none) for x in (unit, auto, target)) < E3_GAIN_DB:
-        text.append(f"варианты отличаются от прогона без векторов меньше чем на {E3_GAIN_DB:g} дБ: на этом входе единицы ничего не решают")
+    if none is not None and max(unit, auto, target, none) - min(unit, auto, target, none) < E3_GAIN_DB:
+        text.append(f"разброс всех вариантов с контролем без векторов меньше {E3_GAIN_DB:g} дБ: PSNR с компенсацией их не различает, об единицах этот вход не говорит")
     text.append(f"auto и C выше unit на {E3_GAIN_DB:g} дБ и сходятся в пределах {E3_SAME_DB:g} дБ — подачу менять" if better and same
                 else f"условие «auto и C выше unit на {E3_GAIN_DB:g} дБ и сходятся в пределах {E3_SAME_DB:g} дБ» не выполнено: подача остаётся unit")
     return {"auto_better": better and same, "text": text}
@@ -907,6 +909,22 @@ def measure(cli, ref, test, out_json: Path, expected: int, dry: bool, **kw) -> O
     return None if dry else read_compare(out_json, expected)
 
 
+def warp_vectors(exp: Experiment, inp: Inputs, first: int, last: int, dry: bool) -> Optional[Path]:
+    """The vectors the compensated PSNR scores with, when they cover its pairs (first..last are the later frames of the pairs)."""
+    if "warp" not in exp.metrics or not inp.mv_target or not (dry or covers(inp.mv_target, first, last)):
+        return None
+    return inp.mv_target
+
+
+def measure_warp(res: dict, cli, ref, test, out_json: Path, expected: int, dry: bool, vectors: Path, **kw) -> Optional[dict]:
+    """A folder that cannot score (another size) is written down: it must not lose the runs the GPU has just done."""
+    try:
+        return measure(cli, ref, test, out_json, expected, dry, warp_mv=vectors, **kw)
+    except RuntimeError as e:
+        res["warp_error"] = names_only(str(e))
+        return None
+
+
 def prepare_root(out: Path, a, clip: Path) -> Path:
     """One folder per clip and backends: other --prepare-backends make other passes, never over the stored experiments' inputs; two clips of
     one name (another folder) get their own by a hash of the full path."""
@@ -1008,6 +1026,7 @@ def run_experiment(a, cli: Path, inp: Inputs, exp: Experiment, base_params: dict
             res["failed"][v.name] = why
         else:
             todo.append(v)
+    warp_mv = warp_vectors(exp, inp, start + 1, last, dry)
     for v in todo:
         vdir = edir / v.name
         params = run_params(base_params, exp.fixed, v.params)
@@ -1051,14 +1070,14 @@ def run_experiment(a, cli: Path, inp: Inputs, exp: Experiment, base_params: dict
             entry["edit"] = measure(cli, vdir / "color_nr", own or inp.clip, vdir / "cmp_input.json", frames, dry, offset=frame_index(own, start))
         if "temporal" in exp.metrics and frames > 1:
             entry["temporal"] = measure(cli, vdir / "color_nr", vdir / "color_nr", vdir / "cmp_next.json", frames - 1, dry, offset=1)
-        if "warp" in exp.metrics and frames > 1 and inp.mv_target:  # one set of vectors for every variant, at the model's size
-            entry["warp"] = measure(cli, vdir / "color_nr", vdir / "color_nr", vdir / "cmp_warp.json", frames - 1, dry, offset=1, warp_mv=inp.mv_target)
+        if warp_mv and frames > 1:  # one set of vectors for every variant, at the model's size
+            entry["warp"] = measure_warp(res, cli, vdir / "color_nr", vdir / "color_nr", vdir / "cmp_warp.json", frames - 1, dry, warp_mv, offset=1)
     if "temporal" in exp.metrics and frames > 1:  # the «вход» row: what the baseline read (a variants file may give it its own color_sr)
         own = variant_dirs(inp, next(v for v in exp.variants if v.name == exp.baseline))["color"]
         res["input_temporal"] = measure(cli, own or inp.clip, own or inp.clip, edir / "cmp_input_next.json", frames - 1, dry,
                                         start=frame_index(own, start), offset=1)
-        if "warp" in exp.metrics and inp.mv_target and own:  # the same pairs of what the model read: at the size of the vectors
-            res["input_warp"] = measure(cli, own, own, edir / "cmp_input_warp.json", frames - 1, dry, start=frame_index(own, start), offset=1, warp_mv=inp.mv_target)
+        if warp_mv and own:  # the same pairs of what the model read: at the size of the vectors
+            res["input_warp"] = measure_warp(res, cli, own, own, edir / "cmp_input_warp.json", frames - 1, dry, warp_mv, start=frame_index(own, start), offset=1)
     valid = valid_stored(prev, sig, exp.baseline) if prev and sig else set()
     if valid:  # --only over a stored result: the variants not run now stay while true under this run's signature and of the same build
         base = (prev if dry else res)["variants"].get(exp.baseline)  # a dry run has no new baseline: it shows what the real one keeps
@@ -1327,7 +1346,7 @@ def main(argv=None) -> int:
     ap.add_argument("--color-dir")
     ap.add_argument("--depth-dir")
     ap.add_argument("--mv-dir")
-    ap.add_argument("--mv-target-dir", help="mv_dlss at the model's size (E3 variant C)")
+    ap.add_argument("--mv-target-dir", help="mv_dlss at the model's size (E3: variant C and the compensated PSNR of every variant)")
     ap.add_argument("--masks", action="store_true", help="pass --masks-dir <passes root>, which must hold mask_* passes (off: protected pixels would "
                                                          "mask the differences)")
     ap.add_argument("--prepare", action="store_true", help="make scenes / color_sr / depth_dlss / mv_dlss with dlssvid process first (when they do not "
