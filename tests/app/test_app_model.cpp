@@ -23,6 +23,7 @@
 #include <QTextDocument>
 #include <QTimer>
 #include <QScrollBar>
+#include <QPointer>
 #include <QSignalSpy>
 #include <QSlider>
 #include <QTest>
@@ -1993,6 +1994,21 @@ TEST_CASE("TaskQueue and the processing page: a stage the runner skipped as unav
     CHECK(ProcessingPanel::EndSummary(p) == QString::fromUtf8("без стадии «Улучшение»"));
 }
 
+TEST_CASE("TaskQueue keeps the dashes of an option at the start of the runner's reason", "[app][tasks][regression]") {
+    // review of TASK-0071: the separator trim ate "--" of "--multiplier 3 needs ..."
+    App();
+    TaskQueue queue;
+    const int id = queue.enqueue("t", "cmd", {"/c", "echo", "[10:00:00.000]", "[warning]", "process:", "fg", "disabled", "-", "--multiplier", "3", "needs", "MFG;",
+                                              "the", "result", "is", "made", "without", "frame", "generation"},
+                                 {{"fg", "FG", 1.0, false}});
+    Pump([&] { return queue.finished(id); }, 30000);
+    REQUIRE(queue.succeeded(id));
+    const TaskQueue::Progress p = queue.progress(id);
+    REQUIRE(p.stages.size() == 1);
+    CHECK(p.stages[0].state == "disabled");
+    CHECK(p.stages[0].note == "--multiplier 3 needs MFG");
+}
+
 TEST_CASE("ProcessingPanel::EndSummary: what a run that ended ok is short of - the window keeps the page for it", "[app][tasks][regression]") {
     // review of TASK-0071: a run whose only trouble was an upscale that fell back left the page at once, «результат готов»
     TaskQueue::Progress p;
@@ -2109,6 +2125,11 @@ TEST_CASE("StageAvailabilityFor: what the card says of NR and FG before the run 
     CHECK(StageAvailabilityFor("fg", true, fg, old, nullptr, false).checkable);  // FG has no fixed minimum: NGX says
     old.driver = NvidiaDriverVersion{};  // unreadable: the run warns and goes on
     CHECK(StageAvailabilityFor("nr", true, nr, old, nullptr, false).checkable);
+    AvailabilityFacts noSdk = f;  // review of TASK-0071: a build without the DLSS SDK skips FG whatever the files
+    noSdk.fg = FgAvailability{false, "built without the DLSS SDK"};
+    a = StageAvailabilityFor("fg", true, fg, noSdk, nullptr, false);
+    CHECK(a.text == QString::fromUtf8("Frame Generation не собран в этой версии — стадия будет пропущена"));
+    CHECK_FALSE(a.checkable);
     AvailabilityFacts noFg = f;
     noFg.dlssgDll = false;
     noFg.dlssgInstruction = "copy nvngx_dlssg.dll";
@@ -2282,10 +2303,15 @@ TEST_CASE("AppModel::checkStage runs nr --check with the project's settings and 
     ProjectTasks tasks(model, queue);
     model.checkStage("nr");
     REQUIRE(model.checkRunning());
+    QPointer<QProcess> killed;
+    for (QProcess* p : model.findChildren<QProcess*>())
+        if (p->state() != QProcess::NotRunning && p->arguments().contains("--check")) killed = p;
+    REQUIRE(killed);
     const int task = queue.enqueue("t", "cmd", {"/c", "exit", "0"});
     CHECK_FALSE(model.checkRunning());
-    CHECK(model.availability("nr").text == before.text);
-    Pump([&] { return queue.finished(task); }, 30000);
+    Pump([&] { return queue.finished(task) && (!killed || killed->state() == QProcess::NotRunning); }, 30000);
+    QCoreApplication::processEvents();
+    CHECK(model.availability("nr").text == before.text);  // its end came and stored nothing
 }
 
 // Audit play-fg-rate (TASK-0038): playback is paced by a clock at the exact rational rate. Before, a QTimer of
@@ -5649,6 +5675,52 @@ TEST_CASE("AppModel::availability: a stage whose pass the plan reuses says only 
     const StageAvailability a = model.availability("nr");
     CHECK(a.text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — пересчитать здесь не получится"));
     CHECK(a.tone == "warn");
+}
+
+TEST_CASE("AppModel::availability: FG's reused pass is not promised when NR, planned to run, will be skipped - FG is decided again", "[app][availability][regression]") {
+    // review of TASK-0071: the run moves the skipped NR's color_nr aside, FG's input changes and it runs (or is skipped) - the card said
+    // «пересчитать здесь не получится» as if its color_fg went into the result
+    App();
+    PreviewProject m("availability_fg_after_nr");
+    AppModel& model = *m.model;
+    model.setStageEnabled("fg", true);
+    model.setStageParam("fg", "backend", "blend");
+    std::string out;  // color_fg made by blend
+    REQUIRE(model.saveProject());
+    QStringList args = model.processArgs();
+    std::vector<std::string> cmd{DLSSVID_CLI_PATH};
+    for (const QString& s : args) cmd.push_back(s.toStdString());
+    REQUIRE(Subprocess::Run(cmd, &out) == 0);
+    model.setStageParam("nr", "backend", "ngx");
+    model.setStageParam("fg", "backend", "dlssg");
+    model.refreshPlan();
+    auto fingerprintOf = [&](const char* stage) {
+        for (const auto& d : model.plan().stages)
+            if (d.name == stage) return d.fingerprint;
+        return std::string();
+    };
+    // the passes on disk stamped as the ngx / dlssg runs would (the same DLLs, the WARP adapter: neither can run here)
+    for (const auto& [stage, pass] : {std::pair<const char*, const char*>{"nr", "color_nr"}, {"fg", "color_fg"}}) {
+        Manifest man = Manifest::Load(m.root() / pass);
+        man.fingerprint = fingerprintOf(stage);
+        man.Save(m.root() / pass);
+        model.refreshPlan();
+    }
+    auto actionOf = [&](const char* stage) {
+        for (const auto& d : model.plan().stages)
+            if (d.name == stage) return d.action;
+        return std::string();
+    };
+    REQUIRE(actionOf("nr") == "reuse");
+    REQUIRE(actionOf("fg") == "reuse");
+    CHECK(model.availability("fg").tone == "warn");  // reused: in the result anyway
+    model.setForce("nr", true);  // NR planned to run - and skipped on WARP
+    model.refreshPlan();
+    REQUIRE(actionOf("nr") == "run");
+    REQUIRE(actionOf("fg") == "reuse");  // the plan takes NR's planned color_nr
+    const StageAvailability a = model.availability("fg");
+    CHECK(a.text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — стадия будет пропущена"));
+    CHECK(a.tone == "danger");
 }
 
 TEST_CASE("NR preview: the stages before NR whose upscale fell back from DLSS to NIS say so", "[app][preview][gpu][regression]") {

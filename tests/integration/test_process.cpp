@@ -1287,6 +1287,43 @@ TEST_CASE("RunProcess: nr disabled over a color_nr kept in place takes it out of
     CHECK(inHistory);
 }
 
+TEST_CASE("RunProcess: nr disabled over an unfinished color_nr removes it - nothing could restore it", "[integration][process][nr][regression]") {
+    // review of TASK-0071: an unfinished pass moved to the history is never restored (RestorableVersion takes complete ones)
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("nr_disabled_unfinished");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "r1.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    for (auto& st : o.stages) st.enabled = st.name != "fg";
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    // as a killed run leaves it: no fingerprint, the last frame missing
+    Manifest m = Manifest::Load(o.passesRoot / "color_nr");
+    m.fingerprint.clear();
+    m.Save(o.passesRoot / "color_nr");
+    std::vector<std::filesystem::path> frames;
+    for (const auto& e : std::filesystem::directory_iterator(o.passesRoot / "color_nr"))
+        if (e.path().filename() != Manifest::kFileName) frames.push_back(e.path());
+    REQUIRE(!frames.empty());
+    std::sort(frames.begin(), frames.end());
+    std::filesystem::remove(frames.back());
+    ApplyParamSpec(o.stages, "nr.backend=ngx");  // unavailable on WARP
+    o.disableUnavailable = true;
+    o.output = dir / "r2.mkv";
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "disabled");
+    CHECK(r.finalPass == o.passesRoot / "color_sr");
+    CHECK_FALSE(std::filesystem::exists(o.passesRoot / "color_nr"));
+    for (const auto& v : ListPassVersions(o.passesRoot, "color_nr")) CHECK(v.current);  // none in the history
+}
+
 TEST_CASE("RunProcess: fg disabled over an older color_fg encodes color_nr, not the stale pass", "[integration][process][fg]") {
     ClipSpec spec;
     spec.frames = 5;

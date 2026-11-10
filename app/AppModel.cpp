@@ -1917,6 +1917,7 @@ AvailabilityFacts AppModel::availabilityFacts() const {
     f.nrDll = !FindNrDll().empty();
     f.nrForwarder = !FindNrForwarder().empty();
     f.dlssgDll = !FindDlssgDll().empty();
+    f.fg = FgAvailable("dlssg");
     f.dlssgInstruction = DlssgDllInstruction();
     return f;
 }
@@ -1979,6 +1980,11 @@ StageAvailability AppModel::availability(const std::string& stage) const {
     bool reused = false;
     for (const auto& d : plan_.stages)
         if (d.name == stage) reused = d.action != "run";
+    // fg's decision takes NR's planned color_nr: an NR planned to run that will be skipped has its color_nr moved aside, fg is decided
+    // again on color_sr and runs (or is skipped) - not reused
+    if (stage == "fg" && reused)
+        for (const auto& d : plan_.stages)
+            if (d.name == "nr" && d.action == "run" && availability("nr").tone == "danger") reused = false;
     return StageAvailabilityFor(stage, e->enabled, p, availabilityFacts(), check, checkProcess_ && checkingStage_ == stage, reused);
 }
 

@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 
+#include "stages/fg/IFrameGenerator.h"
 #include "stages/nr/INrBackend.h"
 
 namespace dlssvid {
@@ -22,6 +23,7 @@ struct AvailabilityFacts {
     bool nrDll = false;       // FindNrDll
     bool nrForwarder = false; // FindNrForwarder
     bool dlssgDll = false;    // FindDlssgDll
+    FgAvailability fg{true, ""};  // FgAvailable("dlssg"): the SDK built in, the DLL there
     std::string dlssgInstruction;
 };
 

@@ -210,7 +210,10 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
         ++o.stagesTotal;
         if (d.action == "run") {
             e.seconds = seconds;
-            e.bytes = BytesPerFrame(d.name, source.width, source.height, d.name == "depth" || d.name == "flow" ? 1.0 : scale, multiplier) * static_cast<uint64_t>(frames);
+            // depth / flow at the source's size, the colour passes at the frame the upscale makes (a target of another aspect too)
+            e.bytes = (d.name == "depth" || d.name == "flow" ? BytesPerFrame(d.name, source.width, source.height, 1.0, multiplier)
+                                                             : BytesPerFrame(d.name, o.width, o.height, 1.0, multiplier)) *
+                      static_cast<uint64_t>(frames);
             o.seconds += seconds;
             o.newBytes += e.bytes;
             ++o.stagesToRun;

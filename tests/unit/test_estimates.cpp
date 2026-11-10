@@ -160,6 +160,19 @@ TEST_CASE("EstimateRun sizes the result as the upscale stage does: the 4K cap, a
     CHECK(o.width == 3840);
     CHECK(o.height == 2160);
     CHECK(o.newBytes == 3840ull * 2160 * 8 * 10);  // RGBA16F color_sr at the frame made
+    // a target of another aspect: the pass is the frame made, not the source times the width's scale
+    stages = DefaultProcessStages();
+    for (auto& s : stages) {
+        s.enabled = s.name == "upscale";
+        if (s.name == "upscale") s.params = {{"target_width", 1920}, {"target_height", 1080}};
+    }
+    plan.stages[0].params = EffectiveStageParams("upscale", {{"target_width", 1920}, {"target_height", 1080}});
+    src.width = 1440;
+    const UpscaleTarget made = UpscaleOutputFor(1440, 1080, plan.stages[0].params);
+    const RunOutcome o2 = EstimateRun(plan, stages, src);
+    CHECK(o2.width == made.width);
+    CHECK(o2.height == made.height);
+    CHECK(o2.newBytes == static_cast<uint64_t>(made.width) * made.height * 8 * 10);
 }
 
 // D8 (TASK-0049): a standalone `dlssvid nr` (the GUI's «Запустить отдельно») recorded its 16 ms GPU time as ms_per_frame and

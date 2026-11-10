@@ -1641,12 +1641,18 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             bool kept = false;
             if (name == "nr") {
                 // a color_nr left in place - a forced run with the same fingerprint, an incomplete one - is not this run's: fg and the encode
-                // would read it (fg's skipped pass is left out by fgSkipped). To the history: a later run with these settings and without
-                // --force restores it as a finished pass
+                // would read it (fg's skipped pass is left out by fgSkipped)
                 const std::filesystem::path cur = root / "color_nr";
                 std::error_code ec;
                 if (std::filesystem::exists(cur, ec)) {
-                    if (Manifest::Exists(cur) && RetirePassVersion(root, "color_nr", ec)) retiredAny = true;
+                    // a finished pass to the history (a later run without --force restores it); an unfinished one (no fingerprint, no
+                    // manifest) would never be restored: removed
+                    bool finished = false;
+                    try {
+                        finished = Manifest::Exists(cur) && !Manifest::Load(cur).fingerprint.empty();
+                    } catch (const std::exception&) {
+                    }
+                    if (finished && RetirePassVersion(root, "color_nr", ec)) retiredAny = true;
                     else if (!ec) std::filesystem::remove_all(cur, ec);
                     if (std::filesystem::exists(cur)) Log()->warn("process: cannot move the earlier color_nr aside ({})", ec.message());
                     kept = !ExistingPass(root, {"color_nr"}).empty();  // what fg and the encode read: a folder without a manifest is not

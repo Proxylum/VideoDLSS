@@ -44,6 +44,8 @@ StageAvailability StageAvailabilityFor(const std::string& stage, bool enabled, c
                            Tr("Обновите драйвер NVIDIA"), reused);
     } else if (!f.dlssgDll) {
         return Skipped(Tr("Нет nvngx_dlssg.dll"), QString::fromStdString(f.dlssgInstruction), reused);
+    } else if (!f.fg.available) {
+        return Skipped(Tr("Frame Generation не собран в этой версии"), QString::fromStdString(f.fg.reason), reused);
     }
     // the rest only NGX knows (an unpatched DLL on RTX 20/30/40, ×3/×4 on RTX 40, the feature's creation): the check says
     StageAvailability a;

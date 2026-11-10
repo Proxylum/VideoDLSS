@@ -446,6 +446,7 @@ void PreviewRunner::onFinished(int id, bool ok) {
     const double seconds = jobClock_.isValid() ? static_cast<double>(jobClock_.elapsed()) / 1000.0 : 0.0;
     jobSuperseded_ = false;
     upstreamNote_.clear();  // said while the run started; its end says what it gave
+    upstreamWarn_ = false;
     job_.reset();
     taskId_ = -1;
     watchdog_.stop();
@@ -583,7 +584,7 @@ void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, b
     text += NrPreviewDroppedText(job.gate.dropped);
     const QString tip = entry.cacheable ? QString() : uncachedTip_;
     if (!entry.cacheable && model_.engineerMode()) text += Tr(" · ") + tip;  // the engineer mode says it in the line (design §5)
-    const bool warn = cached && upstreamWarn_;
+    const bool warn = cached && upstreamWarn_ && !upstreamNote_.isEmpty();
     if (cached && !upstreamNote_.isEmpty()) text = upstreamNote_ + Tr(" — ") + text;  // the stages done, the preview from the cache
     upstreamNote_.clear();
     upstreamWarn_ = false;
@@ -746,7 +747,10 @@ void PreviewRunner::upstreamFinished(int id, bool ok) {
         }
     const int64_t frame = model_.store().FrameAt("source", model_.time());
     setStatus(Tr("%1 — считаю превью кадра %2").arg(upstreamNote_).arg(frame), upstreamWarn_ ? "warn" : "ok");
-    if (!start(next)) upstreamNote_.clear();  // the status says why
+    if (!start(next)) {  // the status says why
+        upstreamNote_.clear();
+        upstreamWarn_ = false;
+    }
 }
 
 void PreviewRunner::hide() {

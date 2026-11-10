@@ -41,7 +41,7 @@ void Recount(TaskQueue::Progress& p, bool finishedOk) {
 
 // What the runner says after a stage's verb: "— <why>; the result is ..." -> <why>.
 QString RunnerNote(const QString& rest) {
-    static const QRegularExpression lead(R"(^[\s:\-\x{2014}]+)");
+    static const QRegularExpression lead(R"(^\s*[:\-\x{2014}]?\s*)");  // one separator: "--multiplier 3 ..." keeps its dashes
     QString r = rest;
     r.remove(lead);
     if (const qsizetype at = r.indexOf(QLatin1String("; the result")); at >= 0) r.truncate(at);
