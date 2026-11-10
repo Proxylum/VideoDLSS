@@ -976,7 +976,7 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
     try {
         if (Manifest::Exists(ctx.root / "color_sr"))
             if (const Manifest sr = Manifest::Load(ctx.root / "color_sr");
-                PassOfClip(sr) && OrientationOfSourceFormat(sr.sourceFormat) == ctx.orientation) {
+                PassOfClip(sr) && !MadeFromStoredFrame(sr, ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
                 fw = sr.width;
                 fh = sr.height;
             }
@@ -1051,6 +1051,7 @@ void AdviseTurnedMasks(const RunContext& ctx, StageDecision& d) {
 // TASK-0072: an explicit target of the stored frame's proportions for a source shown turned stretches the picture.
 void AdviseTurnedTarget(const RunContext& ctx, StageDecision& d) {
     if (!ctx.orientation.SwapsAxes() || !ctx.codedWidth || !ctx.codedHeight || !ctx.sourceWidth || !ctx.sourceHeight) return;
+    if (Get<bool>(d.params, "artifact_reduction_only", false)) return;  // x1: the target is not used (UpscaleStage::Setup, UpscaleOutputFor)
     const uint32_t tw = Get<uint32_t>(d.params, "target_width", 0u), th = Get<uint32_t>(d.params, "target_height", 0u);
     if (!tw || !th) return;
     const double aspect = static_cast<double>(tw) / th;

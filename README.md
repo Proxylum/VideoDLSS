@@ -482,7 +482,8 @@ tagged with the matrix and range used (BT.709 / BT.601, limited / full) and the 
 MP4 / MOV gets the `hvc1` sample entry. A phone video stored landscape with a display matrix (or the old `rotate` tag) is
 processed as players show it: the decoder turns the frames (a 4:2:2 stream turned by 90 deg, or a subsampled one with an odd
 side reversed, decodes as 4:4:4 of the same bit depth; the result's «auto» chroma stays the stream's), every stage and the
-viewport see them upright, and the result
+viewport see them upright (a pass of a stage that is off, made from the stored frame by an earlier build or a standalone
+command, is not used: the plan refuses until that stage is switched on or the pass is deleted), and the result
 is written upright without a matrix (`dlssvid info` prints an `orientation:` line for such a file). The 4K cap of the
 upscale is by the long side: a portrait output goes up to 2160x3840. HDR (PQ / HLG) stays out of scope: such sources are treated as SDR. The NVIDIA
 passes keep the 10-bit gradations too: a shallow 10-bit ramp comes out of DLSS SR, NR and Frame Generation with one-code

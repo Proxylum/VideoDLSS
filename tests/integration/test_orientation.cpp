@@ -458,6 +458,10 @@ TEST_CASE("The plan warns of masks drawn over a turned source's stored frame and
     const StageDecision stored = Decision(PlanProcess(o), "upscale");
     for (const auto& w : stored.warnings) up += w;
     CHECK_THAT(up, ContainsSubstring("пропорции бокового кадра"));
+    ApplyParamSpec(o.stages, "upscale.artifact_reduction_only=true");  // x1: the target is not used - nothing stretches (review of TASK-0072)
+    const StageDecision unused = Decision(PlanProcess(o), "upscale");
+    for (const auto& w : unused.warnings) CHECK(w.find("пропорции бокового кадра") == std::string::npos);
+    ApplyParamSpec(o.stages, "upscale.artifact_reduction_only=false");
     ApplyParamSpec(o.stages, "upscale.target_width=72");
     ApplyParamSpec(o.stages, "upscale.target_height=128");
     up.clear();
@@ -510,6 +514,20 @@ TEST_CASE("The control mask advice measures a turned source's shown frame, not a
     for (const auto& w : nr.warnings) all += w + "\n";
     CHECK_THAT(all, ContainsSubstring("64×36 растянется на кадр 36×64"));  // the frame NR is to work at: the shown one
     CHECK_THAT(nr.error, ContainsSubstring("Пасс color_sr (стадия «Апскейл») сделан по боковому кадру"));  // the sideways color_sr is no input of it
+    // an unlabelled color_sr of the shown frame (a standalone upscale with a 3:4 target): NR's frame, as the plan takes it (review of TASK-0072)
+    std::filesystem::remove_all(o.passesRoot / "color_sr");
+    WritePass(o.passesRoot / "color_sr", PassKind::ColorSr, 48, 64, 3);
+    PassImage fits;
+    fits.Allocate(48, 64, PixelType::U16, {"A"});
+    for (uint32_t y = 0; y < 64; ++y)
+        for (uint32_t x = 0; x < 48; ++x) fits.Set(x, y, 0, 30000.f);
+    WritePng(d / "fits.png", fits);
+    ImportControlMask(d / "fits.png", o.passesRoot);
+    const StageDecision taken = Decision(PlanProcess(o), "nr");
+    CHECK(taken.error.empty());
+    std::string advice;
+    for (const auto& w : taken.warnings) advice += w + "\n";
+    CHECK(advice.find("растянется") == std::string::npos);  // measured on color_sr 48x64, not the source's 36x64
 }
 
 TEST_CASE("A stage refuses an input made from a turned source's stored frame that the run does not remake", "[integration][orientation][process][regression]") {
