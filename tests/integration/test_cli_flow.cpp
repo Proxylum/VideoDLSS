@@ -74,6 +74,26 @@ TEST_CASE("dlssvid flow --backend ofa on an HEVC 4:4:4 16-bit source whose NVDEC
     const PassReader raw = PassReader::Open(out / "mv_raw");
     raw.Validate({spec.width, spec.height, spec.frames, PassKind::MvRaw});
 }
+
+// TASK-0072: a phone video under NVDEC + OFA - the decoder's NV12 frame is the stored one; OFA was initialised for the turned host frame and
+// refused the device frame of the other size (or, turned by 180, made mirrored vectors). It takes the turned host frame now.
+TEST_CASE("dlssvid flow --backend ofa on a turned h264 stream: vectors of the shown frame", "[integration][cli][flow][gpu][orientation][regression]") {
+    std::string reason;
+    if (!OfaFlowEstimator::Available(&reason)) SKIP("OFA unavailable: " << reason);
+    if (!VideoEncoder::EncoderAvailable("h264_nvenc")) SKIP("h264_nvenc unavailable");
+    ClipSpec spec;
+    spec.frames = 6;
+    spec.width = 320;
+    spec.height = 192;
+    spec.codec = "h264_nvenc";
+    spec.orientation = {90, false};
+    const auto clip = WriteClip(TempDir() / "cli_flow_turned.mp4", spec);
+    const auto out = TempDir() / "cli_flow_turned_out";
+    std::filesystem::remove_all(out);
+    REQUIRE(Run("flow --backend ofa --hwaccel cuda -i " + Q(clip) + " -o " + Q(out)) == 0);
+    const PassReader raw = PassReader::Open(out / "mv_raw");
+    raw.Validate({spec.height, spec.width, spec.frames, PassKind::MvRaw});
+}
 #endif
 
 // PR-13: dlssvid flow reads the clip's scene list - <output>/scenes found by itself, --no-scenes, an explicit --scenes-dir of another

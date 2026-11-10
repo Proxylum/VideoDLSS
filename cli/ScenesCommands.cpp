@@ -6,6 +6,7 @@
 
 #include "io/VideoDecoder.h"
 #include "passes/ScenesPass.h"
+#include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/ScenesPlan.h"
 #include "stages/ParamSchema.h"
@@ -41,7 +42,7 @@ int CmdScenes(const ScenesCommands::Args& a) {
     o.outputDir = a.output;
     o.sourceFile = std::filesystem::path(a.input).filename().string();
     o.sourceHash = "sha256:" + Sha256File(a.input);
-    o.sourceFormat = info.decoded.Name();
+    o.sourceFormat = SourceFormatLabel(info.decoded, info.orientation);  // as process labels it (TASK-0072: "+r90" for a turned source)
     const int64_t needed = a.frames > 0 ? a.frames : 0;
     std::optional<ScenesSource> scores;
     if (!a.reanalyze) scores = FindSceneScores(a.output, o.sourceHash, o.sourceFormat, needed);

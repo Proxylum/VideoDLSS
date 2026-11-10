@@ -122,6 +122,7 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     sg->addWidget(Title(tr("Источник"), sourceCard), 0, 0, 1, 2);
     sourceFile_ = Value(sourceCard);
     sourceFrame_ = Value(sourceCard);
+    sourceFrame_->setObjectName("sourceFrame");
     sourceAudio_ = Value(sourceCard);
     sourcePasses_ = Value(sourceCard);
     sourceHash_ = Value(sourceCard);
@@ -365,9 +366,18 @@ void ProjectPanel::refresh() {
                             .arg(QString::number(src.fps, 'g', 5))
                             .arg(src.frames)
                             .arg(QString::number(src.fps > 0 ? src.frames / src.fps : 0.0, 'f', 1));
-        if (!src.codec.empty()) frame += " · " + AppModel::formatLabel(src.codec, src.decoded);  // «HEVC 10 бит 4:4:4»
+        if (!src.codec.empty()) frame += " · " + AppModel::formatLabel(src.codec, src.layout.width ? src.layout : src.decoded);  // «HEVC 10 бит 4:4:4»
+        // TASK-0072: a phone video stored landscape, shown turned - as in a player
+        if (!src.orientation.Identity())
+            frame += src.orientation.rotate ? tr(" · повёрнут на %1°").arg(src.orientation.rotate) + (src.orientation.hflip ? tr(" и отражён") : QString())
+                                            : tr(" · отражён");
         sourceFrame_->setText(frame);
-        sourceFrame_->setToolTip(src.codec.empty() ? QString() : tr("Поток: %1 бит %2; декодируется как %3").arg(src.bitDepth).arg(QString::fromStdString(src.chroma)).arg(QString::fromStdString(src.decoded.Name())));
+        QString tip = src.codec.empty() ? QString() : tr("Поток: %1 бит %2; декодируется как %3").arg(src.bitDepth).arg(QString::fromStdString(src.chroma)).arg(QString::fromStdString(src.decoded.Name()));
+        if (!src.orientation.Identity())
+            tip += tr("\nХранится %1×%2, показывается повёрнутым по матрице дисплея, как в плеере; обработка и результат — в этом виде")
+                       .arg(src.codedWidth)
+                       .arg(src.codedHeight);
+        sourceFrame_->setToolTip(tip);
     } else {
         sourceFrame_->setText("—");
         sourceFrame_->setToolTip(QString());

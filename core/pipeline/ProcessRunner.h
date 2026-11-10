@@ -124,7 +124,8 @@ struct StageDecision {
     std::string detail;  // human-readable: "intensity: 1 -> 1.4", "input changed: color_nr", ...
     nlohmann::json diff = nlohmann::json::object();  // {"params": {key: [old, new]}, "inputs": [pass...], "tool": {field: [old, new]}}
     std::string fingerprint;                         // the pass this run needs ("sha256:<hex>")
-    std::string sourceFormat;                        // the decoded source layout the fingerprint stands for ("yuv444p10"; PassFingerprint.h)
+    std::string sourceFormat;                        // the decoded source layout the fingerprint stands for ("yuv444p10", "yuv420p+r90" for a
+                                                     // source shown turned: SourceFormatLabel, PassFingerprint.h)
     bool current = false;                            // a pass folder with a manifest is on disk
     std::string currentFingerprint;                  // its fingerprint (empty for a legacy pass)
     std::string version;                             // restore: the history id that becomes current

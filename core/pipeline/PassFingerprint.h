@@ -4,7 +4,10 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "pipeline/Frame.h"
 
 namespace dlssvid {
 
@@ -75,6 +78,12 @@ PassFingerprint ComputeFingerprint(const std::string& stage, const std::string& 
 // The source layout a fingerprint stands for when the manifest does not say: 8-bit 4:2:0, what every pass was made from
 // before the decoder kept the source's bit depth.
 constexpr const char* kLegacySourceFormat = "yuv420p";
+// The source format of the passes (TASK-0072): the layout the source decodes into, "+<token>" when it is shown turned ("yuv420p+r90",
+// "yuv444p10+r270"): a pass made from the stored frame is not reused for the turned one, an unturned source keeps its label - and its
+// passes.
+std::string SourceFormatLabel(const FrameDesc& decoded, DisplayOrientation orientation);
+// The orientation a source format label carries (the identity without a token, or with one not known).
+DisplayOrientation OrientationOfSourceFormat(std::string_view label);
 // First 8 hex digits of a "sha256:<hex>" value ("legacy" when empty).
 std::string ShortFingerprint(const std::string& fingerprint);
 

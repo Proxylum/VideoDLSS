@@ -180,3 +180,39 @@ TEST_CASE("NVDEC frames that are not NV12 (HEVC 4:4:4 16-bit) go through the hos
     CHECK_FALSE(gpu2.Valid());
     CHECK_FALSE(cpu2.data.empty());
 }
+
+#ifdef DLSSVID_WITH_CUDA
+// TASK-0072: a phone video (h264 with a display matrix) under NVDEC - the NV12 frame on the device is the stored one, so no GpuFrame is
+// handed out (OFA would get a frame of the other size, or silently mirrored vectors); the host frame is turned, as the software decoder's.
+TEST_CASE("NVDEC on a turned stream hands out no GPU frame; the host frame is turned as the software decoder's", "[integration][gpu][nvdec][orientation]") {
+    D3D12Device dev;
+    std::string reason;
+    if (dev.IsWarp() || !dev.IsNvidia() || !CudaInterop::Available(&reason)) SKIP("no NVIDIA GPU / CUDA: " << reason);
+    if (!VideoEncoder::EncoderAvailable("h264_nvenc")) SKIP("h264_nvenc unavailable");
+    ClipSpec spec;
+    spec.frames = 6;
+    spec.width = 320;
+    spec.height = 192;
+    spec.codec = "h264_nvenc";
+    spec.orientation = {90, false};
+    const auto clip = WriteClip(TempDir() / "gpu_src_turned.mp4", spec);
+    VideoDecoder hw(clip, VideoDecoder::Options{HwAccel::Cuda});
+    if (!hw.UsingHwAccel()) SKIP("CUDA hwaccel not available");
+    CHECK(hw.Info().orientation == DisplayOrientation{90, false});
+    VideoDecoder sw(clip);
+    CpuFrame cpu, ref;
+    GpuFrame gpu;
+    int n = 0;
+    while (hw.NextFrame(cpu, &gpu, false)) {  // only the device frame asked for: the host frame comes anyway
+        REQUIRE(sw.NextFrame(ref));
+        CHECK_FALSE(gpu.Valid());
+        REQUIRE_FALSE(cpu.data.empty());
+        CHECK(cpu.desc.width == 192);
+        CHECK(cpu.desc.height == 320);
+        CHECK(cpu.desc == ref.desc);
+        CHECK(cpu.data == ref.data);
+        ++n;
+    }
+    CHECK(n == spec.frames);
+}
+#endif

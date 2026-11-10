@@ -150,9 +150,9 @@ uint64_t BytesPerFrame(const std::string& stage, uint32_t sourceW, uint32_t sour
     return 0;
 }
 
-UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& p) {
+UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& p, bool capByLongSide) {
     if (p.value("artifact_reduction_only", false)) return UpscaleTarget{sourceW, sourceH, 1.0, false};
-    return ResolveUpscaleTarget(sourceW, sourceH, Scale(p), p.value("target_width", 0u), p.value("target_height", 0u));
+    return ResolveUpscaleTarget(sourceW, sourceH, Scale(p), p.value("target_width", 0u), p.value("target_height", 0u), 3840, 2160, capByLongSide);
 }
 
 RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>& stages, const SourceInfo& source) {

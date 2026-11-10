@@ -152,7 +152,7 @@ BT.709: Kr = 0.2126, Kb = 0.0722;  BT.601: Kr = 0.299, Kb = 0.114;  Kg = 1 − K
   "colorspace": "",
   "convention": "raw",
   "model": {"name": "depth-anything-3", "version": "1.0"},
-  "source": {"file": "clip.mp4", "hash": "sha256:…"},
+  "source": {"file": "clip.mp4", "hash": "sha256:…", "format": "yuv420p10"},
   "stage_params": {},
   "depth": {"units": "meters", "relative": false, "near": 0.1, "far": 1000.0, "min": 0, "max": 0},
   "mv": {"direction": "forward", "y_up": false, "ref_width": 0, "ref_height": 0},
@@ -236,11 +236,19 @@ F…L: их называет `frame_range`, а `stage_params.range = {first, las
   (сегмент `scenes` — по первой метке списка, встреченной от кодируемого пасса назад; без неё сегмента нет)
   кодируемого пасса, значения из их `stage_params`; усыновлённый пасс — `(adopted)`, обход модели NR — `(no model)`;
 - `DLSSVID_SETTINGS` (только Matroska): `{"app": "VideoDLSS <версия>", "stages": {"upscale": {…}, "nr": {…}, "fg": {…}}}`.
+- Повёрнутый источник (TASK-0072): первый сегмент `source: rotate=90` (`rotate=180 hflip`, `hflip`), в JSON —
+  `"source": {"rotate": 90, "hflip": true}`; у неповёрнутого сегмента и ключа нет.
 
 `ReadContainerTags` (и `dlssvid info`) отдаёт ключи в нижнем регистре: Matroska хранит `COMMENT`. Цепочку стадий заметка
 берёт из `stage_params.color_source`: у FG — `pass:<папка>`, `slot:color_nr`, `slot:color_sr` или `video`.
 
 Путей машины в заметке нет. Ключ проекта `encode.settings_note` (по умолчанию `true`), в CLI — `process --no-settings-note`.
+
+**Метка источника `source.format`.** Раскладка, в которую декодируется источник (`FrameDesc::Name()`: `yuv420p`,
+`yuv444p10`), и, если источник показывается повёрнутым (матрица дисплея или тег `rotate`, TASK-0072), токен ориентации:
+`+r90 | +r180 | +r270 | +h | +r90h | +r180h | +r270h` — поворот по часовой, затем отражение слева направо
+(`yuv420p+r90`, `yuv444p10+r270h`). Входит в отпечаток, кроме `yuv420p` без токена. Сайдкар прокси
+(`.proxy/<имя>.proxy.json`) хранит `orientation` — тот же токен (пустая строка — без поворота).
 
 ### 6.2. Маска управления `mask_control` (PR-8)
 

@@ -3,6 +3,7 @@
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/display.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
 #include <libavutil/imgutils.h>
@@ -12,6 +13,7 @@ extern "C" {
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -86,6 +88,47 @@ FrameDesc DecodedFrameDescFor(const std::string& pixelFormat) {
         if (const auto lay = NativeLayoutFor(fmt, d ? d->comp[0].depth : 8)) return lay->desc;
     }
     return FrameDesc{0, 0, PixelFormat::Yuv420p, 8};
+}
+
+FrameDesc SourceLayout(const VideoStreamInfo& info) {
+    FrameDesc d = DecodedFrameDescFor(info.pixelFormat);
+    d.width = info.width;
+    d.height = info.height;
+    return d;
+}
+
+DisplayOrientation OrientationFromDisplayMatrix(const int32_t m[9], std::string* why) {
+    // fftools/cmdutils.c get_rotation and ffmpeg_filter.c (7.1): the angle the frame is turned clockwise for display, then by its sign
+    // bits the transpose / flip filters the command line inserts
+    const double got = av_display_rotation_get(m);
+    if (std::isnan(got)) {
+        if (why) *why = "a degenerate display matrix";
+        return {};
+    }
+    double theta = -std::round(got);
+    theta -= 360.0 * std::floor(theta / 360.0 + 0.9 / 360.0);
+    if (std::fabs(theta - 90.0) < 1.0) return m[3] > 0 ? DisplayOrientation{90, true} : DisplayOrientation{90, false};  // cclock_flip | clock
+    if (std::fabs(theta - 180.0) < 1.0) {
+        const bool h = m[0] < 0, v = m[4] < 0;  // hflip, vflip
+        if (h && v) return {180, false};
+        if (h) return {0, true};
+        if (v) return {180, true};
+        return {};
+    }
+    if (std::fabs(theta - 270.0) < 1.0) return m[3] < 0 ? DisplayOrientation{270, true} : DisplayOrientation{270, false};  // clock_flip | cclock
+    if (std::fabs(theta) < 1.0) return m[4] < 0 ? DisplayOrientation{180, true} : DisplayOrientation{};  // vflip
+    if (why) *why = "a rotation by " + std::to_string(static_cast<int>(theta)) + " deg (not a multiple of 90) is not applied";
+    return {};
+}
+
+DisplayOrientation OrientationFromRotateTag(std::string_view tag, std::string* why) {
+    long long deg = 0;
+    const auto [end, ec] = std::from_chars(tag.data(), tag.data() + tag.size(), deg);
+    if (ec != std::errc() || end != tag.data() + tag.size() || deg % 90 != 0) {
+        if (why) *why = "the rotate tag '" + std::string(tag) + "' is not a multiple of 90 deg: not applied";
+        return {};
+    }
+    return {static_cast<uint16_t>(((deg % 360) + 360) % 360), false};
 }
 
 std::map<std::string, std::string> ReadContainerTags(const std::filesystem::path& path) {
@@ -267,8 +310,22 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     packet_ = av_packet_alloc();
     if (!frame_ || !swFrame_ || !hwKeep_ || !packet_) Throw("av_frame_alloc/av_packet_alloc failed");
 
-    info_.width = static_cast<uint32_t>(codec_->width);
-    info_.height = static_cast<uint32_t>(codec_->height);
+    info_.codedWidth = static_cast<uint32_t>(codec_->width);
+    info_.codedHeight = static_cast<uint32_t>(codec_->height);
+    // TASK-0072: how players show the stream - the container's display matrix (MP4 / MOV tkhd, Matroska's projection), else the
+    // 'rotate' tag of older muxers; the frames are turned so (OrientFrame), and every size below is the shown one
+    std::string orientationWhy;
+    if (const AVPacketSideData* sd = av_packet_side_data_get(vs->codecpar->coded_side_data, vs->codecpar->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX);
+        sd && sd->size >= 9 * sizeof(int32_t)) {
+        info_.orientation = OrientationFromDisplayMatrix(reinterpret_cast<const int32_t*>(sd->data), &orientationWhy);
+        if (!info_.orientation.Identity()) info_.orientationFrom = "display matrix";
+    } else if (const AVDictionaryEntry* tag = av_dict_get(vs->metadata, "rotate", nullptr, 0)) {
+        info_.orientation = OrientationFromRotateTag(tag->value, &orientationWhy);
+        if (!info_.orientation.Identity()) info_.orientationFrom = "rotate tag";
+    }
+    if (!orientationWhy.empty()) Log()->warn("{}: {}", url, orientationWhy);
+    info_.width = info_.orientation.SwapsAxes() ? info_.codedHeight : info_.codedWidth;
+    info_.height = info_.orientation.SwapsAxes() ? info_.codedWidth : info_.codedHeight;
     const AVRational fr = av_guess_frame_rate(fmt_, vs, nullptr);
     info_.frameRate = Rational{fr.num, fr.den};
     info_.timeBase = Rational{vs->time_base.num, vs->time_base.den};
@@ -287,8 +344,9 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
                                                                                : "other";
     }
     info_.decoded = DecodedFrameDescFor(info_.pixelFormat);
-    info_.decoded.width = info_.width;
-    info_.decoded.height = info_.height;
+    info_.decoded.width = info_.codedWidth;
+    info_.decoded.height = info_.codedHeight;
+    info_.decoded = OrientedDesc(info_.decoded, info_.orientation);
     info_.colorSpace = static_cast<int>(vs->codecpar->color_space);
     info_.colorRange = static_cast<int>(vs->codecpar->color_range);
     info_.colorPrimaries = static_cast<int>(vs->codecpar->color_primaries);
@@ -302,6 +360,9 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "open {}: {}x{} {} {} ({}) {}/{} fps, {} frames{}{}", url, info_.width, info_.height,
                info_.codecName, info_.pixelFormat, info_.decoded.Describe(), fr.num, fr.den, info_.frameCount,
                info_.hasAudio ? ", audio " + info_.audioCodecName : "", hwDevice_ ? ", NVDEC" : "");
+    if (!info_.orientation.Identity())
+        Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "open {}: stored {}x{}, shown {} ({}): the frames are turned so", url,
+                   info_.codedWidth, info_.codedHeight, info_.orientation.Describe(), info_.orientationFrom);
 }
 
 VideoDecoder::~VideoDecoder() {
@@ -367,9 +428,27 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     nextIndex_ = index + 1;
     decodedSinceSeek_ = true;
     ++framesDecoded_;
+    if (!checkedFrameMatrix_) {  // an orientation in the bitstream (SEI) other than the container's: the container's is applied
+        checkedFrameMatrix_ = true;
+        if (const AVFrameSideData* sd = av_frame_get_side_data(frame_, AV_FRAME_DATA_DISPLAYMATRIX); sd && sd->size >= 9 * sizeof(int32_t)) {
+            const DisplayOrientation own = OrientationFromDisplayMatrix(reinterpret_cast<const int32_t*>(sd->data));
+            if (!(own == info_.orientation))
+                Log()->warn("the frames carry a display orientation '{}' other than the stream's '{}': the stream's is applied", own.Token(),
+                            info_.orientation.Token());
+        }
+    }
     AVFrame* src = frame_;
     if (frame_->format == AV_PIX_FMT_CUDA) {
-        if (gpu) {
+        if (gpu && !info_.orientation.Identity()) {
+            // a turned stream: the NV12 frame on the device is stored, not shown - no GpuFrame (OFA re-initialises for ABGR uploads of
+            // the turned CPU frame, as for 10-bit streams)
+            *gpu = GpuFrame{};
+            cpu = true;
+            if (!warnedTurnedGpu_) {
+                Log()->info("the stream is shown {}: frames are turned on the host, the on-device fast path is off", info_.orientation.Describe());
+                warnedTurnedGpu_ = true;
+            }
+        } else if (gpu) {
             // Keep a reference so the device memory stays valid until the next frame.
             av_frame_unref(hwKeep_);
             CheckAv(av_frame_ref(hwKeep_, frame_), "av_frame_ref");
@@ -397,9 +476,10 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
             }
         }
         if (!cpu) {
-            out.desc = info_.decoded;
-            out.desc.width = static_cast<uint32_t>(frame_->width);
-            out.desc.height = static_cast<uint32_t>(frame_->height);
+            out.desc = OrientedDesc(FrameDesc{static_cast<uint32_t>(frame_->width), static_cast<uint32_t>(frame_->height), info_.decoded.format,
+                                              info_.decoded.bitDepth},
+                                    info_.orientation);
+            out.desc.format = info_.decoded.format;
             out.data.clear();
             out.index = index;
             out.pts = pts;
@@ -411,16 +491,21 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         src = swFrame_;
     }
     if (!cpu) {  // software frame skipped by the caller (seeking): no conversion
-        out.desc = info_.decoded;
-        out.desc.width = static_cast<uint32_t>(src->width);
-        out.desc.height = static_cast<uint32_t>(src->height);
+        out.desc = OrientedDesc(FrameDesc{static_cast<uint32_t>(src->width), static_cast<uint32_t>(src->height), info_.decoded.format, info_.decoded.bitDepth},
+                                info_.orientation);
+        out.desc.format = info_.decoded.format;
         out.data.clear();
         out.index = index;
         out.pts = pts;
         av_frame_unref(frame_);
         return true;
     }
-    ConvertFrame(src, out);
+    if (info_.orientation.Identity()) {
+        ConvertFrame(src, out);
+    } else {
+        ConvertFrame(src, unturned_);
+        OrientFrame(unturned_, info_.orientation, out);  // TASK-0072: as players show it
+    }
     out.index = index;
     out.pts = pts;
     av_frame_unref(frame_);

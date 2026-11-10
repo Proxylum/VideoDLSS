@@ -80,14 +80,15 @@ std::unique_ptr<IUpscaler> CreateUpscaler(const std::string& backend);  // throw
 std::vector<std::string> UpscalerBackends();
 
 // Output resolution: `scale` (x1.5 / x2 / x3) or an explicit target; even dimensions, aspect ratio kept,
-// capped at maxW x maxH (4K in v1, ТЗ §3).
+// capped at maxW x maxH (4K in v1, ТЗ §3) - by the long side (TASK-0072): a portrait output is capped at maxH x maxW (2160x3840), not
+// at 2160 high; `capByLongSide = false` caps by the axes as before (the planner compares the two).
 struct UpscaleTarget {
     uint32_t width = 0, height = 0;
     double scale = 1.0;  // effective width scale
     bool capped = false;
 };
 UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uint32_t targetW = 0, uint32_t targetH = 0, uint32_t maxW = 3840,
-                                   uint32_t maxH = 2160);
+                                   uint32_t maxH = 2160, bool capByLongSide = true);
 
 // Folder searched for NVIDIA DLLs: DLSSVID_NVIDIA_DLL_DIR, then <exe dir>/nvidia, then <exe dir> (docs/dll-setup.md).
 std::vector<std::filesystem::path> NvidiaDllSearchPaths(const std::filesystem::path& override = {});

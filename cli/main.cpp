@@ -142,6 +142,8 @@ int CmdInfo(const std::string& input, bool warp) {
     std::printf("video:       %s %ux%u %s (%s, %s range)\n", i.codecName.c_str(), i.width, i.height, i.pixelFormat.c_str(),
                 std::string(ToString(ci.matrix)).c_str(), std::string(ToString(ci.range)).c_str());
     std::printf("samples:     %d-bit %s, decoded as %s (%s)\n", i.bitDepth, i.chroma.c_str(), i.decoded.Name().c_str(), i.decoded.Describe().c_str());
+    if (!i.orientation.Identity())  // TASK-0072: the frames are turned as players show them
+        std::printf("orientation: %s (%s), stored %ux%u\n", i.orientation.Describe().c_str(), i.orientationFrom.c_str(), i.codedWidth, i.codedHeight);
     std::printf("frame rate:  %d/%d (%.3f fps)\n", i.frameRate.num, i.frameRate.den, i.frameRate.ToDouble());
     std::printf("time base:   %d/%d\n", i.timeBase.num, i.timeBase.den);
     std::printf("frames:      %lld%s\n", static_cast<long long>(i.frameCount), i.frameCount ? "" : " (unknown)");

@@ -15,6 +15,7 @@
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
 #include "pipeline/ControlMask.h"
+#include "pipeline/Estimates.h"
 #include "pipeline/FgProcess.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
@@ -143,9 +144,11 @@ std::filesystem::path ExistingPass(const std::filesystem::path& root, std::initi
 struct RunContext {
     std::filesystem::path root;
     std::string sourceHash;
-    std::string sourceFormat;  // the layout the source decodes into (FrameDesc::Name()): part of the fingerprints
+    std::string sourceFormat;  // the layout the source decodes into (SourceFormatLabel: "yuv420p", "yuv420p+r90"): part of the fingerprints
     int64_t needed = -1;  // source frames the run covers (-1: unknown)
-    uint32_t sourceWidth = 0, sourceHeight = 0;  // the model input of depth follows from them (VRAM advice)
+    uint32_t sourceWidth = 0, sourceHeight = 0;  // as shown; the model input of depth follows from them (VRAM advice)
+    uint32_t codedWidth = 0, codedHeight = 0;    // as stored (TASK-0072: a phone video kept landscape, shown turned)
+    DisplayOrientation orientation;
     uint64_t vramBytes = 0;                      // 0: unknown, no VRAM error
     bool skipExisting = true;
     std::set<std::string> force;  // stages recomputed on request
@@ -465,6 +468,12 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     // TASK-0060 (C0): protect and skin / face masks of different sizes lost the UI protection before PR-8 - those NR passes are another
     // picture now; passes with masks of one size (or one group only) keep their fingerprint
     if (name == "nr" && NrMaskSizesDiffer(ctx.root, d.inputs)) stageTool.app += "+nr.msize";
+    // TASK-0072: the 4K cap of a portrait output is by its long side now - an upscale pass whose size that changes is another pass
+    // (1080x1920 x2: 2160x3840, was 1216x2160); every other one keeps its fingerprint
+    if (name == "upscale" && ctx.sourceWidth && ctx.sourceHeight) {
+        const UpscaleTarget now = UpscaleOutputFor(ctx.sourceWidth, ctx.sourceHeight, p), before = UpscaleOutputFor(ctx.sourceWidth, ctx.sourceHeight, p, false);
+        if (now.width != before.width || now.height != before.height) stageTool.app += "+sr.cap";
+    }
     const PassFingerprint fp = ComputeFingerprint(name, ctx.sourceHash, p, d.inputs, stageTool, ctx.sourceFormat);
     d.fingerprint = fp.value;
     d.sourceFormat = ctx.sourceFormat;
@@ -567,6 +576,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         } else if (m.sourceHash != ctx.sourceHash) {
             run("source_changed", m.sourceHash.empty() ? "the pass has no source hash" : "the pass was made from another source", true);
         } else if (madeFrom != sourceFormatNow) {
+            d.diff["source_format"] = {madeFrom, sourceFormatNow};  // the card names a turn (TASK-0072)
             run("source_changed", "the pass was made from the source decoded as " + madeFrom + " (now " + sourceFormatNow + ")", true);
         } else if (name == kScenesPass && (!m.stageParams.is_object() || !m.stageParams.contains("threshold") || !m.stageParams["threshold"].is_number() ||
                                            m.stageParams["threshold"].get<double>() != p.value("threshold", 0.24) ||
@@ -652,6 +662,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         return d;
     }
     if (madeFrom != sourceFormatNow) {
+        d.diff["source_format"] = {madeFrom, sourceFormatNow};  // the card names a turn (TASK-0072)
         run("source_changed", "the pass was made from the source decoded as " + madeFrom + " (now " + sourceFormatNow + ")", true);
         return d;
     }
@@ -781,9 +792,12 @@ Prepared Prepare(const ProcessOptions& options) {
             Throw("process: --force: unknown stage '" + f + "' " + PipelineStageNamesText());
     r.sourceFile = options.input.filename().string();
     r.ctx.sourceHash = options.sourceHash.rfind("sha256:", 0) == 0 ? options.sourceHash : "sha256:" + Sha256FileCached(options.input);
-    r.ctx.sourceFormat = r.info.decoded.Name();
+    r.ctx.sourceFormat = SourceFormatLabel(r.info.decoded, r.info.orientation);
     r.ctx.sourceWidth = r.info.width;
     r.ctx.sourceHeight = r.info.height;
+    r.ctx.codedWidth = r.info.codedWidth;
+    r.ctx.codedHeight = r.info.codedHeight;
+    r.ctx.orientation = r.info.orientation;
     r.ctx.vramBytes = options.vramBytes;
     return r;
 }
@@ -887,7 +901,8 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
     uint32_t fw = ctx.sourceWidth, fh = ctx.sourceHeight;
     try {
         if (Manifest::Exists(ctx.root / "color_sr"))
-            if (const Manifest sr = Manifest::Load(ctx.root / "color_sr"); PassOfClip(sr)) {
+            if (const Manifest sr = Manifest::Load(ctx.root / "color_sr");
+                PassOfClip(sr) && OrientationOfSourceFormat(sr.sourceFormat) == ctx.orientation) {  // made from the stored frame: recomputed
                 fw = sr.width;
                 fh = sr.height;
             }
@@ -899,6 +914,68 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
         d.warnings.push_back("Маска управления " + std::to_string(info->width) + "×" + std::to_string(info->height) + " растянется на кадр " +
                              std::to_string(fw) + "×" + std::to_string(fh) + " без сохранения пропорций (разница " +
                              std::to_string(static_cast<int>(std::lround(std::fabs(off) * 100.0))) + " %)");
+}
+
+// TASK-0072: a source shown turned (a phone video) is processed as shown - a mask drawn over its stored (sideways) frame does not fit:
+// NR's masks of the proportions of the stored frame, or any mask of a project whose passes were made before the turn was applied.
+// A warning in the card (the user's masks stay as they are). Texts in Russian: they go to the card.
+void AdviseTurnedMasks(const RunContext& ctx, StageDecision& d) {
+    if (ctx.orientation.Identity()) return;
+    std::vector<std::string> sideways;
+    bool any = false;
+    for (const char* pass : {kControlMaskPass, "mask_ui", "mask_ignore", "mask_face", "mask_skin"}) {
+        uint32_t mw = 0, mh = 0;
+        try {
+            if (std::string(pass) == kControlMaskPass) {
+                if (!Manifest::Exists(ctx.root / pass)) continue;
+                if (const auto info = ReadControlMaskInfo(ctx.root / pass)) {
+                    mw = info->width;
+                    mh = info->height;
+                }
+            } else if (d.inputs.count(pass)) {
+                const Manifest m = Manifest::Load(ctx.root / pass);
+                mw = m.width;
+                mh = m.height;
+            } else {
+                continue;
+            }
+        } catch (const std::exception&) {
+            continue;
+        }
+        any = true;
+        if (!ctx.orientation.SwapsAxes() || !mw || !mh || !ctx.codedWidth || !ctx.codedHeight) continue;
+        const double aspect = static_cast<double>(mw) / mh;
+        const double stored = static_cast<double>(ctx.codedWidth) / ctx.codedHeight, shown = static_cast<double>(ctx.sourceWidth) / ctx.sourceHeight;
+        if (std::fabs(aspect / stored - 1.0) <= 0.01 && std::fabs(aspect / shown - 1.0) > 0.01) sideways.push_back(pass);
+    }
+    if (!sideways.empty()) {
+        d.warnings.push_back("Маски " + Join(sideways) + " сделаны по боковому кадру: источник показывается повёрнутым (" + ctx.orientation.Describe() +
+                             "), маска ляжет неправильно — сделайте её заново по повёрнутому кадру");
+        return;
+    }
+    if (!any) return;
+    // 180 deg and mirrors keep the proportions: the passes on disk tell whether the project was processed before the turn was applied
+    for (const char* pass : {"color_sr", "color_nr"})
+        try {
+            if (Manifest::Exists(ctx.root / pass) && OrientationOfSourceFormat(Manifest::Load(ctx.root / pass).sourceFormat) != ctx.orientation) {
+                d.warnings.push_back("Проект обработан до учёта поворота источника (" + ctx.orientation.Describe() +
+                                     "): маски, сделанные по прежнему кадру, лягут неправильно — проверьте их по повёрнутому кадру");
+                return;
+            }
+        } catch (const std::exception&) {
+        }
+}
+
+// TASK-0072: an explicit target of the stored frame's proportions for a source shown turned stretches the picture.
+void AdviseTurnedTarget(const RunContext& ctx, StageDecision& d) {
+    if (!ctx.orientation.SwapsAxes() || !ctx.codedWidth || !ctx.codedHeight || !ctx.sourceWidth || !ctx.sourceHeight) return;
+    const uint32_t tw = Get<uint32_t>(d.params, "target_width", 0u), th = Get<uint32_t>(d.params, "target_height", 0u);
+    if (!tw || !th) return;
+    const double aspect = static_cast<double>(tw) / th;
+    const double stored = static_cast<double>(ctx.codedWidth) / ctx.codedHeight, shown = static_cast<double>(ctx.sourceWidth) / ctx.sourceHeight;
+    if (std::fabs(aspect / stored - 1.0) <= 0.01 && std::fabs(aspect / shown - 1.0) > 0.01)
+        d.warnings.push_back("Целевой размер " + std::to_string(tw) + "×" + std::to_string(th) + " — пропорции бокового кадра, а источник показывается повёрнутым (" +
+                             std::to_string(ctx.sourceWidth) + "×" + std::to_string(ctx.sourceHeight) + "): картинка растянется");
 }
 
 void AdviseStage(const RunContext& ctx, StageDecision& d) {
@@ -929,8 +1006,10 @@ void AdviseStage(const RunContext& ctx, StageDecision& d) {
             d.info = std::to_string(passes) + " прохода: модель повторно обрабатывает свой результат — картинка заметно синтетичнее; каждый проход — "
                      "своя копия модели (≈ 0.5 ГБ видеопамяти на 1440p, 0.9 ГБ на 4K) и её время";
         if (!NrBypassParams(d.params) && Manifest::Exists(ctx.root / kControlMaskPass)) AdviseControlMask(ctx, d);
+        if (!NrBypassParams(d.params)) AdviseTurnedMasks(ctx, d);
         return;
     }
+    if (d.name == "upscale") AdviseTurnedTarget(ctx, d);
     if (d.name != "depth") return;
     const std::string backend = Get<std::string>(d.params, "backend", "da3");
     if (DepthFamilyOf(backend).empty()) return;
@@ -1089,7 +1168,20 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     Rational fps = m.fps.num > 0 ? m.fps : sourceFps;
     int mult = 1;
     if (sourceFps.num > 0 && fps.num > 0) mult = std::max(1, static_cast<int>(std::lround(fps.ToDouble() / sourceFps.ToDouble())));
-    const OutputFormat of = ResolveOutputFormat(encode.codec, encode.format, info.decoded);
+    // TASK-0072: a source shown turned - a colour pass made from its stored (sideways) frame would give a sideways result: refused (the
+    // stages that would remake it are off, or a standalone command made it)
+    if (!info.orientation.Identity()) {
+        bool sideways = !m.sourceFormat.empty() && OrientationOfSourceFormat(m.sourceFormat) != info.orientation;
+        if (m.sourceFormat.empty() && info.orientation.SwapsAxes() && m.width && m.height && info.codedWidth && info.codedHeight) {
+            const double aspect = static_cast<double>(m.width) / m.height;
+            sideways = std::fabs(aspect / (static_cast<double>(info.codedWidth) / info.codedHeight) - 1.0) <= 0.01 &&
+                       std::fabs(aspect / (static_cast<double>(info.width) / info.height) - 1.0) > 0.01;
+        }
+        if (sideways)
+            Throw("process: " + passDir.string() + " was made from the stored frame of a source shown " + info.orientation.Describe() +
+                  ": the result would be sideways - recompute the stages (--force)");
+    }
+    const OutputFormat of = ResolveOutputFormat(encode.codec, encode.format, SourceLayout(info));  // the stream's chroma, not a turn's 4:4:4
     FrameDesc target = of.desc;
     target.width = m.width;
     target.height = m.height;
@@ -1219,13 +1311,14 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             eopt.timeBase = info.timeBase;
             eopt.codecOptions = EffectiveCodecOptions(options.codec, options.codecOptions, info.width, info.height, info.frameRate.ToDouble());
             eopt.color = ColorTagsFor(ColorInfoFromStream(info), info);
-            const OutputFormat of = ResolveOutputFormat(options.codec, options.outputFormat, info.decoded);
+            const OutputFormat of = ResolveOutputFormat(options.codec, options.outputFormat, SourceLayout(info));  // the stream's chroma (TASK-0072)
             FrameDesc target = of.desc;
             target.width = info.width;
             target.height = info.height;
             VideoEncoder encoder(partial.Path(), target, eopt);
-            Log()->info("passthrough: {} as {} ({}) from a {} source{}{}", options.codec, target.Describe(), encoder.PixelFormatName(), info.decoded.Describe(),
-                        target == info.decoded ? ", bit-exact" : ", converted", of.reason.empty() ? "" : " — " + of.reason);
+            Log()->info("passthrough: {} as {} ({}) from a {} source{}{}{}", options.codec, target.Describe(), encoder.PixelFormatName(), info.decoded.Describe(),
+                        target == info.decoded ? ", bit-exact" : ", converted", info.orientation.Identity() ? "" : ", " + info.orientation.Describe(),
+                        of.reason.empty() ? "" : " — " + of.reason);
             result.codec = options.codec;
             result.outputFormat = target;
             result.outputPixelFormat = encoder.PixelFormatName();

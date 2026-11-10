@@ -59,7 +59,9 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         t.scale = 1.0;
     } else {
         t = ResolveUpscaleTarget(w, h, options_.scale, options_.targetWidth, options_.targetHeight, options_.maxWidth, options_.maxHeight);
-        if (t.capped) Log()->warn("upscale: target capped to {}x{} (v1 limit {}x{}, ТЗ §3)", t.width, t.height, options_.maxWidth, options_.maxHeight);
+        if (t.capped)
+            Log()->warn("upscale: target capped to {}x{} (v1 limit {}x{} by the long side, ТЗ §3)", t.width, t.height, std::max(options_.maxWidth, options_.maxHeight),
+                        std::min(options_.maxWidth, options_.maxHeight));
     }
     inW_ = w;
     inH_ = h;
