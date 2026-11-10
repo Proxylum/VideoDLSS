@@ -1287,6 +1287,46 @@ TEST_CASE("RunProcess: nr disabled over a color_nr kept in place takes it out of
     CHECK(inHistory);
 }
 
+TEST_CASE("PlanProcess with planSkipped: the stages below a skipped NR are decided as the run decides them", "[integration][process][nr][regression]") {
+    // review of TASK-0071: the GUI's card of FG after an NR that cannot run here - the plan with NR's color_nr gave FG's action of another run
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("plan_skipped_nr");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "r1.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    for (auto& st : o.stages) st.enabled = st.name != "nr";
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);  // color_fg from color_sr
+    for (auto& st : o.stages) st.enabled = true;
+    ApplyParamSpec(o.stages, "nr.backend=ngx");  // unavailable on WARP
+    auto actionOf = [](const ProcessPlan& plan, const char* stage) {
+        for (const auto& d : plan.stages)
+            if (d.name == stage) return d.action;
+        return std::string();
+    };
+    const ProcessPlan withNr = PlanProcess(o);
+    REQUIRE(actionOf(withNr, "nr") == "run");
+    CHECK(actionOf(withNr, "fg") == "run");  // on NR's planned color_nr
+    ProcessOptions skipped = o;
+    skipped.planSkipped = {"nr"};
+    const ProcessPlan plan = PlanProcess(skipped);
+    CHECK(actionOf(plan, "nr") == "run");
+    CHECK(actionOf(plan, "fg") == "reuse");
+    CHECK(plan.finalPass == "color_fg");
+    o.disableUnavailable = true;
+    o.output = dir / "r2.mkv";
+    const ProcessResult r = RunProcess(o);  // the run does as the plan said
+    CHECK(Report(r, "nr").status == "disabled");
+    CHECK(Report(r, "fg").status == "reused");
+}
+
 TEST_CASE("RunProcess: nr disabled over an unfinished color_nr removes it - nothing could restore it", "[integration][process][nr][regression]") {
     // review of TASK-0071: an unfinished pass moved to the history is never restored (RestorableVersion takes complete ones)
     ClipSpec spec;

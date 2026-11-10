@@ -272,8 +272,11 @@ QString ProcessingPanel::doneNote(const TaskQueue::Progress& p, const QStringLis
             lines << tr("Стадия «%1» пропущена: на этом компьютере она не запускается (%2). Результат сделан без неё — подробности в "
                         "подсказке строки и в логе.")
                          .arg(s.title, s.note.isEmpty() ? tr("причина в логе") : s.note);
-        else if (s.fellBack)
+        else if (s.fellBack && s.name == "upscale")
             lines << tr("Стадия «%1» сделана запасным способом (NIS): %2.").arg(s.title, s.note.isEmpty() ? tr("причина в логе") : s.note);
+        else if (s.fellBack)  // a skipped NR whose earlier color_nr could not be moved aside (review of TASK-0071: it read «(NIS)»)
+            lines << tr("Стадия «%1» на этом компьютере не запустилась (%2) — в результате её прежний проход.")
+                         .arg(s.title, s.note.isEmpty() ? tr("причина в логе") : s.note);
     }
     if (lines.isEmpty()) return tr("Вьюпорт показывает «До | После»: исходник слева, результат справа.");
     return lines.join("\n");

@@ -1165,7 +1165,11 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
         DecidePending(pr.ctx, it->second, state, d);
         ProjectScenes(pr.ctx, d);
         AdviseStage(pr.ctx, d);
-        Advance(state, d);
+        if (d.action == "run" && options.planSkipped.count(name)) {
+            for (const auto& fam : StageFamilyPasses(name)) state.fp.erase(fam);  // retired or removed by the run (the disabled stage's block)
+        } else {
+            Advance(state, d);
+        }
         (d.action == "run" ? plan.runCount : plan.reuseCount)++;
         plan.stages.push_back(std::move(d));
     }

@@ -2031,19 +2031,45 @@ TEST_CASE("ProcessingPanel::EndSummary: what a run that ended ok is short of - t
 }
 
 TEST_CASE("TaskQueue: a skipped NR whose earlier color_nr stays in the result is not shown done - the window keeps the page", "[app][tasks][regression]") {
-    // review of TASK-0071: "process: nr could not run - ...; the earlier color_nr is used" matched nothing, the row read «готово»
+    // review of TASK-0071: "process: nr could not run - ...; the earlier color_nr is used" matched nothing, the row read «готово»; then the
+    // page's note said NR was made by NIS
     App();
     TaskQueue queue;
-    const int id = queue.enqueue("t", "cmd", {"/c", "echo", "[10:00:00.000]", "[warning]", "process:", "nr", "could", "not", "run", "-", "no", "feature;", "the",
-                                              "earlier", "color_nr", "is", "used"},
-                                 {{"nr", QString::fromUtf8("Улучшение"), 1.0, false}});
+    ProcessingPanel panel(queue);
+    const int id = queue.enqueue("t", "cmd",
+                                 {"/c", "echo", "nr:", "3/3", "frames", "&", "echo", "[10:00:00.000]", "[warning]", "process:", "nr", "could", "not", "run", "-", "no",
+                                  "feature;", "the", "earlier", "color_nr", "is", "used", "&", "echo", "encode:", "3/3", "frames"},
+                                 {{"nr", QString::fromUtf8("Улучшение"), 1.0, false}, {"encode", QString::fromUtf8("Кодирование"), 1.0, false}});
+    panel.watch(id, "a → b");
     Pump([&] { return queue.finished(id); }, 30000);
     REQUIRE(queue.succeeded(id));
     const TaskQueue::Progress p = queue.progress(id);
-    REQUIRE(p.stages.size() == 1);
+    REQUIRE(p.stages.size() == 2);
     CHECK(p.stages[0].fellBack);
-    CHECK(p.stages[0].note == "no feature; the earlier color_nr is used");
+    CHECK(p.stages[0].state == "done");
+    CHECK(p.stages[0].note == "no feature");
     CHECK(ProcessingPanel::EndSummary(p) == QString::fromUtf8("стадия «Улучшение» — запасным способом"));
+    CHECK(panel.note().contains(QString::fromUtf8("Стадия «Улучшение» на этом компьютере не запустилась (no feature) — в результате её прежний проход.")));
+    CHECK_FALSE(panel.note().contains("NIS"));
+}
+
+TEST_CASE("TaskQueue: the kept NR's line ends the stage - a failure after it is not put on NR", "[app][tasks][regression]") {
+    // review of TASK-0071: a kept NR prints no done line - it stayed «running», and the encode's failure before its first progress line
+    // made it «ошибка»
+    App();
+    TaskQueue queue;
+    const int id = queue.enqueue("t", "cmd",
+                                 {"/c", "echo", "nr:", "3/3", "frames", "&", "echo", "[10:00:00.000]", "[warning]", "process:", "nr", "could", "not", "run", "-", "no",
+                                  "feature;", "the", "earlier", "color_nr", "is", "used", "&", "echo", "[10:00:00.100]", "[error]", "encoder", "failed", "&", "exit", "1"},
+                                 {{"nr", QString::fromUtf8("Улучшение"), 1.0, false}, {"encode", QString::fromUtf8("Кодирование"), 1.0, false}});
+    Pump([&] { return queue.finished(id); }, 30000);
+    REQUIRE(queue.finished(id));
+    CHECK_FALSE(queue.succeeded(id));
+    const TaskQueue::Progress p = queue.progress(id);
+    REQUIRE(p.stages.size() == 2);
+    CHECK(p.stages[0].state == "done");
+    CHECK(p.stages[0].fellBack);
+    CHECK(p.stages[1].state != "done");
 }
 
 TEST_CASE("TaskQueue reads the CLI's UTF-8 across reads: an em dash split between two of them stays whole", "[app][tasks][regression]") {
@@ -5778,6 +5804,54 @@ TEST_CASE("AppModel::availability: FG's reused pass is not promised when NR, pla
     CHECK(a.tone == "danger");
 }
 
+TEST_CASE("AppModel::availability: FG planned on NR's pass, NR to be skipped - the run reuses FG's pass made from color_sr, the card says so", "[app][availability][regression]") {
+    // review of TASK-0071: the card took FG's action from the plan with NR's planned color_nr - «будет пропущена»; the run moves the skipped
+    // NR's color_nr aside, decides FG on color_sr and reuses its color_fg
+    App();
+    PreviewProject m("availability_fg_reused_after_nr");
+    AppModel& model = *m.model;
+    std::filesystem::remove_all(m.root() / "color_nr");  // NR never ran here
+    model.setStageEnabled("nr", false);
+    model.setStageEnabled("fg", true);
+    model.setStageParam("fg", "backend", "blend");
+    auto run = [&] {
+        REQUIRE(model.saveProject());
+        std::vector<std::string> cmd{DLSSVID_CLI_PATH};
+        for (const QString& s : model.processArgs()) cmd.push_back(s.toStdString());
+        std::string out;
+        REQUIRE(Subprocess::Run(cmd, &out) == 0);
+        return out;
+    };
+    run();  // color_fg made by blend from color_sr
+    REQUIRE_FALSE(std::filesystem::exists(m.root() / "color_nr"));
+    auto decision = [&](const char* stage) {
+        for (const auto& d : model.plan().stages)
+            if (d.name == stage) return d;
+        return StageDecision{};
+    };
+    model.setStageParam("fg", "backend", "dlssg");
+    model.refreshPlan();
+    Manifest man = Manifest::Load(m.root() / "color_fg");  // stamped as the dlssg run on color_sr would (WARP: it cannot run here)
+    man.fingerprint = decision("fg").fingerprint;
+    man.Save(m.root() / "color_fg");
+    model.refreshPlan();
+    REQUIRE(decision("fg").action == "reuse");
+    model.setStageEnabled("nr", true);
+    model.setStageParam("nr", "backend", "ngx");  // planned to run - and skipped on WARP
+    model.refreshPlan();
+    REQUIRE(decision("nr").action == "run");
+    REQUIRE(decision("fg").action == "run");  // on NR's planned color_nr
+    REQUIRE(model.availability("nr").tone == "danger");
+    const StageAvailability a = model.availability("fg");
+    CHECK(a.text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — пересчитать здесь не получится"));
+    CHECK(a.tone == "warn");
+    // the run agrees: NR skipped, FG's pass reused
+    const std::string out = run();
+    INFO(out);
+    CHECK(out.find("process: nr disabled") != std::string::npos);
+    CHECK(QString::fromStdString(out).contains(QRegularExpression(R"(process: fg \S+ .*is complete, reused)")));
+}
+
 TEST_CASE("NR preview: the stages before NR whose upscale fell back from DLSS to NIS say so", "[app][preview][gpu][regression]") {
     // review of TASK-0071: the same `process --disable-unavailable`, its fallback only in the log
     App();
@@ -5794,7 +5868,8 @@ TEST_CASE("NR preview: the stages before NR whose upscale fell back from DLSS to
     Pump([&] { return queue.finished(id); }, 120000);
     REQUIRE(queue.succeeded(id));
     bool said = false;
-    for (const auto& args : messages) said = said || args.at(0).toString().contains(QString::fromUtf8("запасным способом (NIS)"));
+    for (const auto& args : messages)  // «стадия «Апскейл ×2» сделана»: the title is masculine (review of TASK-0071)
+        said = said || args.at(0).toString().contains(QRegularExpression(QString::fromUtf8("Этапы до улучшения: стадия «[^»]+» сделана запасным способом \\(NIS\\)")));
     CHECK(said);
     CHECK(runner.statusText().contains(QString::fromUtf8("запасным способом (NIS)")));
     Pump([&] { return !runner.running(); }, 60000);

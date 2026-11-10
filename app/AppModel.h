@@ -371,6 +371,7 @@ private:
     bool dirty_ = false;
     ProcessPlan plan_;
     std::optional<ProcessPlan> planNoForce_;  // PR-10: when a stage above NR is marked «пересчитать»
+    std::optional<ProcessPlan> planNrSkipped_;  // TASK-0071: NR planned to run and FG on - the run's plan if NR is skipped (FG's card)
     std::optional<NrPreviewShown> nrPreview_;
     uint64_t generation_ = 0;
     RunOutcome outcome_;

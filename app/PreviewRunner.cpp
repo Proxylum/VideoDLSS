@@ -743,7 +743,7 @@ void PreviewRunner::upstreamFinished(int id, bool ok) {
         if (s.fellBack) {
             upstreamNote_ += Tr(" · «%1» запасным способом (NIS)").arg(s.title);
             upstreamWarn_ = true;
-            emit model_.message(Tr("Этапы до улучшения: «%1» сделана запасным способом (NIS) — %2").arg(s.title, s.note.isEmpty() ? Tr("причина в логе") : s.note));
+            emit model_.message(Tr("Этапы до улучшения: стадия «%1» сделана запасным способом (NIS) — %2").arg(s.title, s.note.isEmpty() ? Tr("причина в логе") : s.note));
         }
     const int64_t frame = model_.store().FrameAt("source", model_.time());
     setStatus(Tr("%1 — считаю превью кадра %2").arg(upstreamNote_).arg(frame), upstreamWarn_ ? "warn" : "ok");

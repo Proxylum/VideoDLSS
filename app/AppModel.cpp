@@ -903,6 +903,7 @@ void AppModel::refreshPlan() {
     planTimer_.stop();
     plan_ = ProcessPlan{};
     planNoForce_.reset();
+    planNrSkipped_.reset();
     outcome_ = RunOutcome{};
     sourceInfo_ = SourceInfo{};
     planError_.clear();
@@ -933,6 +934,18 @@ void AppModel::refreshPlan() {
                 planNoForce_ = PlanProcess(planOptions(false));
                 break;
             }
+        // TASK-0071: an NR planned to run that cannot run here is skipped and its color_nr moved aside - the run decides FG again on what is
+        // left, either way: a planned run may become a reuse, a reuse a run. Planned whatever the card says now: a check may say it later
+        bool nrRuns = false, fgOn = false;
+        for (const auto& d : plan_.stages) {
+            if (d.name == "nr" && d.action == "run") nrRuns = true;
+            if (d.name == "fg") fgOn = true;
+        }
+        if (nrRuns && fgOn) {
+            ProcessOptions skipped = o;
+            skipped.planSkipped = {"nr"};
+            planNrSkipped_ = PlanProcess(skipped);
+        }
         outcome_ = EstimateRun(plan_, o.stages, sourceInfo_);
         // the result's layout: the encoder card's choice against the codec and the source (an impossible pair is a plan error)
         const OutputFormat of = ResolveOutputFormat(project_.codec, project_.outputFormat, sourceInfo_.decoded);
@@ -1988,11 +2001,11 @@ StageAvailability AppModel::availability(const std::string& stage) const {
     bool reused = false;
     for (const auto& d : plan_.stages)
         if (d.name == stage) reused = d.action != "run";
-    // fg's decision takes NR's planned color_nr: an NR planned to run that will be skipped has its color_nr moved aside, fg is decided
-    // again on color_sr and runs (or is skipped) - not reused
-    if (stage == "fg" && reused)
-        for (const auto& d : plan_.stages)
-            if (d.name == "nr" && d.action == "run" && availability("nr").tone == "danger") reused = false;
+    // fg's decision takes NR's planned color_nr: an NR planned to run that will be skipped has its color_nr moved aside, and the run decides
+    // fg again on what is left - the plan with NR skipped says what it will do (review of TASK-0071: either way, a run or a reuse)
+    if (stage == "fg" && planNrSkipped_ && availability("nr").tone == "danger")
+        for (const auto& d : planNrSkipped_->stages)
+            if (d.name == "fg") reused = d.action != "run";
     return StageAvailabilityFor(stage, e->enabled, p, availabilityFacts(), check, checkProcess_ && checkingStage_ == stage, reused);
 }
 

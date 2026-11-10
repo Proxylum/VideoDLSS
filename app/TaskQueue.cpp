@@ -45,6 +45,7 @@ QString RunnerNote(const QString& rest) {
     QString r = rest;
     r.remove(lead);
     if (const qsizetype at = r.indexOf(QLatin1String("; the result")); at >= 0) r.truncate(at);
+    if (const qsizetype at = r.indexOf(QLatin1String("; the earlier")); at >= 0) r.truncate(at);  // "; the earlier color_nr is used": the page says it
     return r.trimmed();
 }
 
@@ -470,6 +471,15 @@ void TaskQueue::stageFellBack(Task& t, const QString& stage, const QString& note
     StageStatus* s = FindStage(p, stage);
     s->fellBack = true;
     s->note = note;
+    // the stage has ended: a kept NR prints no done line - left running, a cancel or a failure after it was put on it (review of TASK-0071);
+    // the upscale's done line follows with its time
+    if (s->state == "running") {
+        s->state = "done";
+        s->percent = 100;
+        s->seconds = static_cast<double>(t.timer.elapsed() - t.stageStartMs) / 1000.0;
+    }
+    if (t.stage == stage) t.stage.clear();
+    Recount(p, false);
     publish(t);
 }
 
