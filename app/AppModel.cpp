@@ -234,6 +234,7 @@ void AppModel::adoptProject(Project next) {
     cancelCheck();  // TASK-0071: its result is of the settings of the project before
     releasedFile_.clear();  // a run encoding the result of the project before: this project's videos are shown, the next encode line decides
     project_ = std::move(next);
+    adoptedView_ = true;
 }
 
 void AppModel::dropNrPreview() {
@@ -414,8 +415,9 @@ void AppModel::reloadSources() {
     timelineFps_ = Rational{0, 1};
     state().ResolveLegacyFrame(store_->FpsOf(baseSource()));  // projects before stage 9: frame -> time at the base rate
     state().time = std::clamp(state().time, 0.0, lastTime());
-    // a zoomed view saved over another frame (TASK-0072: the stored frame of a source shown turned now): its centre back on the image
-    if (ViewTransform& v = state().view; !v.IsFit() && store_->ImageWidth() && store_->ImageHeight()) {
+    // a zoomed view saved over another frame (TASK-0072: the stored frame of a source shown turned now): its centre back on the image - once,
+    // when the project is adopted; a centre the user panned off the image later stays where it is (review of TASK-0072)
+    if (ViewTransform& v = state().view; std::exchange(adoptedView_, false) && !v.IsFit() && store_->ImageWidth() && store_->ImageHeight()) {
         v.centerX = std::clamp(v.centerX, 0.f, static_cast<float>(store_->ImageWidth()));
         v.centerY = std::clamp(v.centerY, 0.f, static_cast<float>(store_->ImageHeight()));
     }

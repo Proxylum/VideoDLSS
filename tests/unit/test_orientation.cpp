@@ -314,4 +314,9 @@ TEST_CASE("Settings note: a turned source says so first - source: rotate=90; an 
     save("yuv420p");
     CHECK(BuildSettingsNote(root, "color_sr") == std::string("VideoDLSS ") + DLSSVID_VERSION + " | upscale: nis x2");
     CHECK_FALSE(BuildSettingsJson(root, "color_sr").contains("source"));
+    CHECK_FALSE(BuildSettingsJson(root, "color_sr", {90, false}).contains("source"));  // a label says it: unturned
+    // a pass without a label (a standalone command's, from the shown frame): the source's turn (review of TASK-0072)
+    save("");
+    CHECK(BuildSettingsNote(root, "color_sr", {90, false}).find("| source: rotate=90 |") != std::string::npos);
+    CHECK_FALSE(BuildSettingsJson(root, "color_sr").contains("source"));
 }

@@ -1908,7 +1908,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         es.format = options.outputFormat;
         if (options.settingsNote) {
             // PR-11 (spec §2g): what made the result, from the stages' own records - the result is not a pass, no fingerprint changes
-            const nlohmann::json settings = BuildSettingsJson(root, result.finalPass.filename().string());
+            const nlohmann::json settings = BuildSettingsJson(root, result.finalPass.filename().string(), ctx.orientation);
             es.metadata["comment"] = SettingsNoteText(settings);
             std::string ext = options.output.extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });

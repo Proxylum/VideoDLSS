@@ -1406,11 +1406,17 @@ TEST_CASE("AppModel opens a turned clip as shown: the viewport, the source info,
     CHECK(label->text().startsWith(QString::fromUtf8("32×48")));
     CHECK(label->text().contains(QString::fromUtf8(" · повёрнут на 90°")));
     CHECK(label->toolTip().contains(QString::fromUtf8("Хранится 48×32, показывается повёрнутым по матрице дисплея")));
-    // a zoomed view saved over the stored frame: its centre back on the shown one (review of TASK-0072)
+    // a zoomed view saved over the stored frame: its centre back on the shown one when the project is opened (review of TASK-0072)
     model.state().view = ViewTransform{2.f, 46.f, 30.f};
-    model.reloadSources();
+    REQUIRE(model.saveProject());
+    model.openProject(Q(model.project().file));
     CHECK(model.state().view.centerX == 32.f);
     CHECK(model.state().view.centerY == 30.f);
+    // ... once: a centre the user pans off the image later stays at the end of a task
+    model.state().view.centerX = -10.f;
+    model.reloadSources();
+    CHECK(model.state().view.centerX == -10.f);
+    model.state().view = ViewTransform{};
     // the old rotate tag, a mirror: the tooltip says where the turn comes from and what it is (review of TASK-0072)
     spec.orientation = {};
     spec.rotateTag = "90";

@@ -130,7 +130,7 @@ nlohmann::json Fg(const Manifest& m) {
 
 }  // namespace
 
-nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::string& finalPass) {
+nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::string& finalPass, DisplayOrientation sourceOrientation) {
     nlohmann::json out = {{"app", std::string("VideoDLSS ") + DLSSVID_VERSION}, {"stages", nlohmann::json::object()}};
     nlohmann::json& stages = out["stages"];
     auto mark = [](nlohmann::json s, const Manifest& m) {
@@ -149,7 +149,7 @@ nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::s
     std::optional<Manifest> m = stage(pass).empty() ? std::nullopt : Load(root / pass);
     // TASK-0072: a source shown turned (a phone video): the frames were turned before every stage - the encoded pass's source format says
     if (m)
-        if (const DisplayOrientation o = OrientationOfSourceFormat(m->sourceFormat); !o.Identity()) {
+        if (const DisplayOrientation o = m->sourceFormat.empty() ? sourceOrientation : OrientationOfSourceFormat(m->sourceFormat); !o.Identity()) {
             out["source"] = nlohmann::json::object();
             if (o.rotate) out["source"]["rotate"] = o.rotate;
             if (o.hflip) out["source"]["hflip"] = true;
