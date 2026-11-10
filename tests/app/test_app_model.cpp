@@ -5811,7 +5811,7 @@ TEST_CASE("AppModel::releaseResult stops a proxy build that reads the result; wh
     AppModel model{true};
     model.openProject(Q(TaskProject(d, "a")));  // no proxies yet: a build of both starts
     REQUIRE(model.proxyBuildSources().contains("result"));
-    model.releaseResult();  // no event loop in between: the build is still running
+    model.releaseResult(d / "a_result.mkv");  // no event loop in between: the build is still running
     CHECK(model.resultReleased());
     CHECK_FALSE(model.proxyBuildSources().contains("result"));
     model.startProxies();  // a reload of the sources while the run encodes
@@ -5819,6 +5819,13 @@ TEST_CASE("AppModel::releaseResult stops a proxy build that reads the result; wh
     model.restoreResult();
     model.startProxies();
     CHECK(model.proxyBuildSources().contains("result"));
+    // the file a run writes is this project's source (made from an earlier result): `proxy` opens the source for any proxy
+    model.releaseResult(d / "a.mkv");
+    CHECK_FALSE(model.sourceNames().contains("source"));
+    CHECK_FALSE(model.proxyBuilding());
+    model.startProxies();
+    CHECK_FALSE(model.proxyBuilding());
+    model.restoreResult();
     model.cancelProxies();
     QSettings().remove("view/autoProxy");
 }
@@ -5901,6 +5908,39 @@ TEST_CASE("ProjectTasks: a project opened again before its run encodes has its r
     rig.wait(rig.processId);
     CHECK_FALSE(rig.model.resultReleased());
     CHECK(rig.model.sourceNames().contains("result"));
+}
+
+TEST_CASE("ProjectTasks: a run's result file opened as the video of another project is let go at its encode step too", "[app][model][gpu][regression]") {
+    // review of TASK-0070: the viewer let go only the source named «result» - the same file as B's source stayed open, the rename failed
+    App();
+    const auto d = Dir("project_tasks_release_as_source");
+    const auto a = TaskProject(d, "a");
+    const auto aResult = d / "a_result.mkv";
+    TaskRig rig;
+    rig.model.openProject(Q(a));
+    const int blocker = rig.queue.enqueue("t", "cmd", QStringList{"/c", "echo", "depth:", "1/3", "frames"} + kWaitForCancel);
+    rig.processId = rig.queue.enqueue("t", "cmd", kEncodingRun);  // A's run: starts when the blocker is cancelled
+    rig.model.openVideo(Q(aResult));                               // project B: A's previous result is its source
+    rig.model.setCompareView(AppModel::CompareView::BeforeAfter);
+    Pump([&] { return rig.model.framesReadyAt(rig.model.time()); }, 10000);
+    REQUIRE(rig.model.sourceNames().contains("source"));
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto fresh = WriteClip(d / "fresh.mkv", spec);
+    REQUIRE_FALSE(Renames(fresh, aResult));  // B's viewer holds it
+    rig.queue.cancel(blocker);
+    Pump([&] { return rig.model.resultReleased(); }, 15000);
+    REQUIRE(rig.model.resultReleased());
+    CHECK_FALSE(rig.model.sourceNames().contains("source"));
+    CHECK_FALSE(rig.model.resultBeingReplaced());  // B's own result is another file: its line and «Сохранить как…» as they were
+    CHECK(rig.model.proxyBuildSources().isEmpty());
+    CHECK(Renames(fresh, aResult));
+    rig.queue.cancel(rig.processId);
+    rig.wait(rig.processId);
+    CHECK_FALSE(rig.model.resultReleased());
+    CHECK(rig.model.sourceNames().contains("source"));
 }
 
 TEST_CASE("ProjectTasks: a run of project A at its encode step leaves B's result shown", "[app][model][gpu][regression]") {

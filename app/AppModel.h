@@ -194,11 +194,13 @@ public slots:
     bool closeProject();                   // forget the project (unsaved changes are settled by the caller): the start page
     void setLastRun(double seconds);       // the run that has just produced the result
     void reloadSources();  // after a stage finished: rescan pass folders
-    // TASK-0070: a run encodes the new result: the viewer lets the result file go (no side shows it, its proxy is not built) - Windows
-    // does not rename the new file over one that is open. restoreResult when the run has ended, before the sources are read again.
-    void releaseResult();
-    void restoreResult() { resultReleased_ = false; }
-    bool resultReleased() const { return resultReleased_; }
+    // TASK-0070: a run encodes a new result into `file`: the viewer lets every video of that file go - the result, or the source of a
+    // project made from an earlier result - and builds no proxy of it (no side shows it); Windows does not rename the new file over one
+    // that is open. Nothing when no video shown is that file. restoreResult when the run has ended, before the sources are read again.
+    void releaseResult(const std::filesystem::path& file);
+    void restoreResult() { releasedFile_.clear(); }
+    bool resultReleased() const { return !releasedFile_.empty(); }
+    bool resultBeingReplaced() const { return isReleased(project_.resultVideo); }  // the file let go is this project's result
     void setTime(double seconds);
     // The time of frame `frame` of the source (its rate, not the base layer's: color_fg may run at twice it), in the middle of the
     // frame - the chips of the scene list (PR-13)
@@ -371,7 +373,8 @@ private:
     std::vector<double> scrubMs_;
     ControlMaskState controlMask_;
     bool controlMaskBusy_ = false;
-    bool resultReleased_ = false;  // releaseResult: not a source until restoreResult
+    std::filesystem::path releasedFile_;  // releaseResult: its videos are no sources until restoreResult
+    bool isReleased(const std::filesystem::path& video) const;
     QThreadPool maskPool_;  // one thread: the control mask's import (decoding and a PNG16 write take seconds on 4K)
 };
 

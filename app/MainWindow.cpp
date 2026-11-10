@@ -565,7 +565,7 @@ void MainWindow::closeProject() {
 }
 
 void MainWindow::saveResultAs() {
-    if (model_.resultReleased()) {  // a copy now would hold the file the run renames its new one over (TASK-0070)
+    if (model_.resultBeingReplaced()) {  // a copy now would hold the file the run renames its new one over (TASK-0070)
         statusBar()->showMessage(tr("Результат заменяется новым — сохраните его, когда обработка закончится"), 5000);
         return;
     }
@@ -585,7 +585,7 @@ void MainWindow::saveResultAs() {
 void MainWindow::openResultFolder() {
     const AppModel::ResultInfo r = model_.resultInfo();
     const QString folder = r.exists ? QFileInfo(r.path).absolutePath()
-                           : model_.resultReleased() ? QString::fromStdWString(model_.project().resultVideo.parent_path().wstring())  // being replaced
+                           : model_.resultBeingReplaced() ? QString::fromStdWString(model_.project().resultVideo.parent_path().wstring())  // being replaced
                            : (model_.hasProject() ? QString::fromStdWString(model_.project().sourceVideo.parent_path().wstring()) : QString());
     if (folder.isEmpty()) return;
     QDesktopServices::openUrl(QUrl::fromLocalFile(folder));

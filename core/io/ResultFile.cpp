@@ -9,12 +9,17 @@
 #include "io/VideoDecoder.h"
 #include "util/Error.h"
 #include "util/Log.h"
+#include "util/Paths.h"
 
 namespace dlssvid {
 
 namespace fs = std::filesystem;
 
 namespace {
+// The partial file's name is 13 characters longer than the result's: FFmpeg writes paths past MAX_PATH by itself (its `\\?\` prefix),
+// the std::filesystem calls here need it too, as absolute paths (a relative -o)
+fs::path Long(const fs::path& p) { return Win32LongPath(fs::absolute(p)); }
+
 // An operation the file system refused for a moment: an antivirus opens a file that has just been written, the GUI's viewer lets the
 // result go on the run's first encode line (TASK-0070). A file held for good still fails.
 template <class Op>
@@ -63,38 +68,40 @@ void PublishResult(const fs::path& partial, const fs::path& output, const Result
     if (const std::string why = CheckEncodedResult(partial, expect); !why.empty())
         Throw("process: the new result " + partial.string() + " is not right (" + why + "); it is left there, " + output.string() + " is as it was");
     std::error_code ec;
-    Retrying(ec, 40, [&](std::error_code& e) { fs::rename(partial, output, e); });
+    Retrying(ec, 40, [&](std::error_code& e) { fs::rename(Long(partial), Long(output), e); });
     if (!ec) return;
     // Windows replaces no file another program has open without letting it be deleted - FFmpeg's readers, so most players (measured:
     // MoveFileExW and ReplaceFileW fail, a POSIX rename too). Overwriting it in place would not be atomic: a cancel or a fault in the
     // middle would lose both results. Both stay.
+    // dlssvid's own viewer shows the old result again when the run has ended: running again once the player is closed always works
     const std::string why = ReadOnlyFile(output) ? "it is read-only: clear the attribute and rename the new file over it"
-                                                 : "is it open in a player? Close it and rename the new file over it, or run again";
+                                                 : "is it open in a player? Run again once it is closed, or close every program that shows it "
+                                                   "(dlssvid too: close the project) and rename the new file over it";
     Throw("process: the new result is " + partial.string() + " - " + output.string() + " could not be replaced (" + ec.message() + "): " + why);
 }
 
 bool ReadOnlyFile(const fs::path& file) {
     std::error_code ec;
-    const fs::file_status st = fs::status(file, ec);  // MSVC: FILE_ATTRIBUTE_READONLY is a file without the write permissions
+    const fs::file_status st = fs::status(Long(file), ec);  // MSVC: FILE_ATTRIBUTE_READONLY is a file without the write permissions
     return !ec && fs::is_regular_file(st) && (st.permissions() & fs::perms::owner_write) == fs::perms::none;
 }
 
 PartialResult::PartialResult(fs::path partial) : path_(std::move(partial)) {
     std::error_code ec;
-    existed_ = fs::exists(path_, ec);
-    if (existed_) time_ = fs::last_write_time(path_, ec);
+    existed_ = fs::exists(Long(path_), ec);
+    if (existed_) time_ = fs::last_write_time(Long(path_), ec);
 }
 
 void PartialResult::DiscardIfWritten() const {
     std::error_code ec;
-    if (existed_ && fs::exists(path_, ec) && fs::last_write_time(path_, ec) == time_ && !ec) return;  // not touched by this run
+    if (existed_ && fs::exists(Long(path_), ec) && fs::last_write_time(Long(path_), ec) == time_ && !ec) return;  // not touched by this run
     RemovePartialResult(path_);
 }
 
 void RemovePartialResult(const fs::path& partial) {
     std::error_code ec;
-    if (!fs::exists(partial, ec)) return;
-    Retrying(ec, 10, [&](std::error_code& e) { fs::remove(partial, e); });
+    if (!fs::exists(Long(partial), ec)) return;
+    Retrying(ec, 10, [&](std::error_code& e) { fs::remove(Long(partial), e); });
     if (ec) Log()->warn("process: cannot remove the unfinished result {}: {}", partial.string(), ec.message());
 }
 

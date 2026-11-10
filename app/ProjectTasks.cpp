@@ -27,7 +27,7 @@ ProjectTasks::ProjectTasks(AppModel& model, TaskQueue& tasks, QObject* parent) :
         const auto it = origins_.find(id);
         if (progress.stage != "encode" || it == origins_.end() || it->second.result.empty()) return;
         it->second.encoding = true;
-        if (!model_.resultReleased() && SamePath(it->second.result, model_.project().resultVideo)) model_.releaseResult();
+        if (!model_.resultReleased()) model_.releaseResult(it->second.result);  // when a video shown is that file
     });
 }
 

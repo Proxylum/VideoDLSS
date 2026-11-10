@@ -21,6 +21,7 @@
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
 #include "pipeline/ProcessRunner.h"
+#include "util/Paths.h"
 
 using namespace dlssvid;
 using namespace dlssvid::test;
@@ -323,4 +324,35 @@ TEST_CASE("RunProcess: a run that fails before it opens its file leaves the fini
         CHECK_FALSE(std::filesystem::exists(partial));
     }
     CHECK(Bytes(o.output) == "the previous result");
+}
+
+TEST_CASE("PublishResult and the clean-up reach a partial file past MAX_PATH: the result's path is 13 characters shorter", "[integration][result][regression]") {
+    // review of TASK-0070: FFmpeg wrote and read "<stem>.dlssvid-part<ext>" past 260 characters by itself, the rename and the removal
+    // could not reach it - an output that worked before never got its result
+    const auto base = std::filesystem::absolute(TempDir() / "result_file" / "long_path");
+    std::error_code ec;
+    std::filesystem::remove_all(Win32LongPath(base), ec);  // a tree past MAX_PATH: Dir() could not remove it
+    std::filesystem::path dir = base;
+    while (dir.native().size() < 232) dir /= "nested_folder";
+    std::filesystem::create_directories(Win32LongPath(dir));
+    std::filesystem::path output = dir / "r.mkv";
+    while (output.native().size() < 252) output.replace_filename("x" + output.filename().string());
+    const auto partial = PartialResultPath(output);
+    REQUIRE(output.native().size() < 260);
+    REQUIRE(partial.native().size() >= 260);
+    std::ofstream(Win32LongPath(output), std::ios::binary) << "the previous result";
+    WriteClip(partial, Small(3));  // through FFmpeg
+    CHECK_FALSE(ReadOnlyFile(output));
+    {
+        const PartialResult found(partial);
+        found.DiscardIfWritten();  // untouched since: stays
+    }
+    REQUIRE(std::filesystem::exists(Win32LongPath(partial)));
+    PublishResult(partial, output, {48, 32, 3, false});
+    CHECK(DecodeAll(output).size() == 3);
+    CHECK_FALSE(std::filesystem::exists(Win32LongPath(partial)));
+    std::ofstream(Win32LongPath(partial), std::ios::binary) << "half written";
+    RemovePartialResult(partial);
+    CHECK_FALSE(std::filesystem::exists(Win32LongPath(partial)));
+    std::filesystem::remove_all(Win32LongPath(base), ec);
 }
