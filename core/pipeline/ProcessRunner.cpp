@@ -1166,7 +1166,13 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
         ProjectScenes(pr.ctx, d);
         AdviseStage(pr.ctx, d);
         if (d.action == "run" && options.planSkipped.count(name)) {
-            for (const auto& fam : StageFamilyPasses(name)) state.fp.erase(fam);  // retired or removed by the run (the disabled stage's block)
+            // as the run: its pass retired or removed (the disabled stage's block), a stale one discarded first - what was made from it
+            // goes too (review of TASK-0071); the pass planned with the scene list is no case of the stages below either
+            for (const auto& fam : StageFamilyPasses(name)) {
+                state.fp.erase(fam);
+                state.provisional.erase(fam);
+                if (d.stale && d.current) state.discarded.insert(fam);
+            }
         } else {
             Advance(state, d);
         }
