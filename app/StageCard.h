@@ -89,6 +89,9 @@ private:
     QLabel* sub_;
     QLabel* version_;
     QLabel* warning_;
+    // TASK-0071: NR / FG - can the stage run here (AppModel::availability) and «Проверить»
+    QLabel* availability_ = nullptr;
+    QPushButton* check_ = nullptr;
     QLabel* scenes_;  // a stage that reads the scene list: what its cuts do (StageCardState::scenes, PR-13)
     QCheckBox* force_;
     QWidget* engineer_;

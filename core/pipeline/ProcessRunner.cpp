@@ -1408,6 +1408,11 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 rep.frames = r.stats.frames;
                 rep.outDir = r.outDir;
                 rep.details = {{"upscaler", r.upscaler}, {"fallback", r.stats.fellBack}, {"size", {r.stats.outputWidth, r.stats.outputHeight}}};
+                if (r.stats.fellBack) {  // TASK-0071: the result is made with another upscaler than the one asked for - said, not only logged
+                    rep.details["fallback_reason"] = r.stats.fallbackReason;
+                    result.warnings.push_back("upscale: " + r.stats.fallbackReason + "; nis used instead");
+                    Log()->warn("process: upscale fell back to nis — {}", r.stats.fallbackReason);  // TaskQueue parses this line
+                }
             } else if (name == "nr") {
                 VideoDecoder decoder(options.input);
                 NrStageOptions o;
@@ -1609,6 +1614,15 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             if (d.stale) state.staleRan.insert(d.outputs.begin(), d.outputs.end());
         } else {
             rep.fingerprint.clear();  // disabled / failed: no pass of this run
+        }
+        if (rep.status == "disabled") {
+            // TASK-0071: a stage skipped as unavailable (no DLL, an old driver, no NVIDIA GPU, NGX refused it) made the run «done» in the GUI
+            // with nothing said: a line the GUI parses, after the stage's progress lines, and the warnings of the report
+            std::string why = rep.reason;
+            if (why.rfind(name + ": ", 0) == 0) why.erase(0, name.size() + 2);
+            const std::string without = name == "nr" ? "without Neural Rendering" : name == "fg" ? "without frame generation" : "without " + name;
+            result.warnings.push_back(name + " disabled: " + why + "; the result is made " + without);
+            Log()->warn("process: {} disabled — {}; the result is made {}", name, why, without);  // TaskQueue parses this line
         }
         if (rep.status == "ran")
             Log()->info("process: {} done — {} frames in {:.1f} s ({:.1f} ms/frame), {} ({})", name, rep.frames, rep.seconds, rep.msPerFrame, ShortFingerprint(d.fingerprint),

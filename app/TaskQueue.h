@@ -3,6 +3,7 @@
 #include <QElapsedTimer>
 #include <QMetaType>
 #include <QProcess>
+#include <QStringDecoder>
 #include <QStringList>
 #include <QTableWidget>
 #include <QWidget>
@@ -36,9 +37,15 @@ public:
     };
     struct StageStatus {
         QString name, title;
-        QString state;         // reused | queued | running | done | cancelled | failed | skipped (never ran: the task failed before it)
+        // reused | queued | running | done | cancelled | failed | skipped (never ran: the task failed before it) | disabled (TASK-0071: the
+        // runner skipped it as unavailable - no DLL, an old driver, no NVIDIA GPU - and the run went on without it)
+        QString state;
         double seconds = 0.0;  // measured when running / done, the estimate when queued
         int percent = 0;
+        // what the runner said of it: why it failed or was skipped; a done stage made with another backend than asked for (upscale fell
+        // back to nis). Empty when it said nothing
+        QString note;
+        bool fellBack = false;  // done with another backend
     };
     struct Progress {
         int id = 0;
@@ -52,6 +59,8 @@ public:
         // stages the runner reported failed while the task went on (`process: fg failed - ...`: the result is encoded
         // without it, audit fg-2); their titles, in run order
         QStringList failedStageTitles() const;
+        // the stages the result is made without: failed, or skipped as unavailable (`process: nr disabled - ...`, TASK-0071)
+        QStringList missingStageTitles() const;
     };
 
     enum class Lane { Main, Preview };
@@ -123,7 +132,10 @@ private:
     void updateProgress(Task& t, const QString& stage, int done, int total);
     void stageDone(Task& t, const QString& stage, double seconds);
     void stageReused(Task& t, const QString& stage);
-    void stageFailed(Task& t, const QString& stage);
+    void stageFailed(Task& t, const QString& stage, const QString& note = {});
+    void stageDisabled(Task& t, const QString& stage, const QString& note);
+    void stageFellBack(Task& t, const QString& stage, const QString& note);
+    void endStage(Task& t, const QString& stage, const QString& state, const QString& note);
     void publish(Task& t);  // the row and the taskProgress signal
     // the signals of a task's lane
     void emitStarted(const Task& t);
@@ -140,6 +152,8 @@ private:
     int current_ = -1;
     std::unique_ptr<QProcess> process_;
     QString buffer_;
+    // the process's output as UTF-8 across reads: a character split between two of them (the em dash of "stage disabled — ") stays whole
+    QStringDecoder decoder_{QStringDecoder::Utf8};
     int nextId_ = 1;
     int previewRow_ = -1;       // the one row of the previews
     int previewRowOwner_ = -1;  // the preview that writes it

@@ -1085,10 +1085,34 @@ TEST_CASE("RunProcess: --frames, passthrough, an unavailable nr stage and a run 
         CHECK(Report(r, "fg").status == "ran");
         CHECK(r.finalPass == dir / "passes" / "color_fg");
         CHECK(r.framesOut == FgFrameCount(6, 3));
+        // TASK-0071: said in the report's warnings (the GUI reads the runner's line), not only in the stage's own log
+        CHECK(std::any_of(r.warnings.begin(), r.warnings.end(), [](const std::string& w) {
+            return w.rfind("nr disabled: ", 0) == 0 && w.rfind("nr disabled: nr:", 0) != 0 && w.find("without Neural Rendering") != std::string::npos;
+        }));
         o.disableUnavailable = false;
         o.output = dir / "nongx_fail.mkv";
         o.passesRoot = dir / "passes_fail";
         CHECK_THROWS_WITH(RunProcess(o), Catch::Matchers::ContainsSubstring("stage 'nr' failed"));
+    }
+    SECTION("fg dlssg and upscale dlss on WARP: fg skipped, the upscale fell back to nis - both in the warnings") {
+        // TASK-0071: the run went on without them and the GUI said «готово»
+        o.output = dir / "nodlssg.mkv";
+        o.passesRoot = dir / "passes_dlssg";
+        ApplyParamSpec(o.stages, "fg.backend=dlssg");
+        ApplyParamSpec(o.stages, "upscale.backend=dlss");
+        o.disableUnavailable = true;
+        const ProcessResult r = RunProcess(o);
+        CHECK(Report(r, "fg").status == "disabled");
+        CHECK(Report(r, "upscale").status == "ran");
+        CHECK(Report(r, "upscale").details.value("fallback", false));
+        CHECK_FALSE(Report(r, "upscale").details.value("fallback_reason", std::string()).empty());
+        auto has = [&](const char* start, const char* also) {
+            return std::any_of(r.warnings.begin(), r.warnings.end(),
+                               [&](const std::string& w) { return w.rfind(start, 0) == 0 && w.find(also) != std::string::npos; });
+        };
+        CHECK(has("fg disabled: ", "without frame generation"));
+        CHECK(has("upscale: dlss ", "nis used instead"));
+        CHECK(r.finalPass == dir / "passes_dlssg" / "color_nr");
     }
     SECTION("no colour stage: the source is encoded unchanged") {
         o.output = dir / "guides_only.mkv";
