@@ -1299,6 +1299,10 @@ unsigned long long AppModel::freeSpace() const {
 }
 
 bool AppModel::exportResult(const QString& to) {
+    if (resultReleased_) {  // a run let it go while a save dialog was open; a copy now would hold the file it renames over (TASK-0070)
+        emit message(tr("Результат заменяется новым — сохраните его, когда обработка закончится"));
+        return false;
+    }
     const ResultInfo r = resultInfo();
     if (!r.exists) {
         emit message(tr("Результата ещё нет"));

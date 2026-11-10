@@ -27,6 +27,9 @@ std::string CheckEncodedResult(const std::filesystem::path& file, const ResultEx
 // the GUI lets its viewer's file go while a run encodes), and overwriting it in place would not be atomic.
 void PublishResult(const std::filesystem::path& partial, const std::filesystem::path& output, const ResultExpectation& expect);
 
+// An existing file with the read-only attribute: nothing renames over it. `process` refuses such a result before it runs anything.
+bool ReadOnlyFile(const std::filesystem::path& file);
+
 // Removes `partial` of a run that ended without publishing it; quiet when there is none or it cannot go.
 void RemovePartialResult(const std::filesystem::path& partial);
 

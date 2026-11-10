@@ -68,8 +68,15 @@ void PublishResult(const fs::path& partial, const fs::path& output, const Result
     // Windows replaces no file another program has open without letting it be deleted - FFmpeg's readers, so most players (measured:
     // MoveFileExW and ReplaceFileW fail, a POSIX rename too). Overwriting it in place would not be atomic: a cancel or a fault in the
     // middle would lose both results. Both stay.
-    Throw("process: the new result is " + partial.string() + " - " + output.string() + " could not be replaced (" + ec.message() +
-          "): is it open in a player? Close it and rename the new file over it, or run again");
+    const std::string why = ReadOnlyFile(output) ? "it is read-only: clear the attribute and rename the new file over it"
+                                                 : "is it open in a player? Close it and rename the new file over it, or run again";
+    Throw("process: the new result is " + partial.string() + " - " + output.string() + " could not be replaced (" + ec.message() + "): " + why);
+}
+
+bool ReadOnlyFile(const fs::path& file) {
+    std::error_code ec;
+    const fs::file_status st = fs::status(file, ec);  // MSVC: FILE_ATTRIBUTE_READONLY is a file without the write permissions
+    return !ec && fs::is_regular_file(st) && (st.permissions() & fs::perms::owner_write) == fs::perms::none;
 }
 
 void RemovePartialResult(const fs::path& partial) {

@@ -308,6 +308,7 @@ void TaskQueue::onOutput() {
     else buffer_.clear();
     for (const QString& line : lines) {
         Task& t = tasks_[static_cast<size_t>(current_)];  // re-fetched: a slot may have queued a task (vector growth)
+        if (line.contains(QLatin1String("] [error] "))) t.reportedError = true;  // dlssvid logs the error it ends on
         if (const auto f = failedRe.match(line); f.hasMatch()) {  // first: a progress update may be glued to this line
             stageFailed(t, f.captured(1));
             emitOutput(tasks_[static_cast<size_t>(current_)], line);
@@ -474,7 +475,8 @@ void TaskQueue::onFinished(int exitCode, QProcess::ExitStatus status) {
     current_ = -1;
     Task& t = tasks_[static_cast<size_t>(index)];
     const bool ok = !t.cancelled && status == QProcess::NormalExit && exitCode == 0;
-    t.abnormal = status == QProcess::CrashExit || (exitCode != 0 && exitCode != 1);  // dlssvid's own errors end with 1
+    // dlssvid's own errors end with 1 after an "[error]" line; Task Manager and `taskkill /F` end a process with 1 too, saying nothing
+    t.abnormal = status == QProcess::CrashExit || (exitCode != 0 && !(exitCode == 1 && t.reportedError));
     QString text;
     if (t.cancelled) text = tr("отменена");
     else if (ok) text = tr("готово");

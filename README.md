@@ -415,7 +415,8 @@ The result is written next to its place as `<name>.dlssvid-part<ext>` and replac
 only when it is complete and reads back as what was encoded (the frame size, the frame count in MP4 and MOV, the audio):
 a run that is cancelled or fails leaves the previous result as it was. Windows cannot replace a file that a player has
 open: then the previous result stays, the new one stays as `.dlssvid-part` and the error says where - close the player
-and rename it, or run again (a run with stages reuses its passes). The GUI lets its own viewer's copy go while a run encodes;
+and rename it, or run again (a run with stages reuses its passes). A read-only previous result is refused before
+anything runs. The GUI lets its own viewer's copy go while a run encodes;
 a run that is cancelled, crashes or is ended with the window removes its unfinished file.
 
 ```bat

@@ -5723,6 +5723,13 @@ TEST_CASE("ProjectTasks: a run lets the shown result go at its encode step, so t
     CHECK_FALSE(rig.model.sourceNames().contains("result"));
     CHECK_FALSE(rig.model.resultInfo().exists);
     CHECK(rig.model.resultSummary() == QString::fromUtf8("заменяется новым — идёт кодирование"));  // the result line stays, says why
+    {  // «Сохранить результат как…» confirmed after the run let it go (the dialog was open meanwhile): no copy that would hold the file
+        QSignalSpy messages(&rig.model, &AppModel::message);
+        CHECK_FALSE(rig.model.exportResult(Q(d / "copy.mkv")));
+        CHECK_FALSE(std::filesystem::exists(d / "copy.mkv"));
+        REQUIRE(messages.count() == 1);
+        CHECK(messages.at(0).at(0).toString().contains(QString::fromUtf8("заменяется новым")));
+    }
     // the end of another task (one waiting behind the run, dropped) does not bring it back under the run (review of TASK-0070)
     const int waiting = rig.enqueue();
     rig.queue.cancel(waiting);
@@ -5754,7 +5761,8 @@ TEST_CASE("ProjectTasks: a run cancelled while it encodes leaves no half-written
 
     // a failed run removed its own, or kept a finished one it could not put in place and said where: not the GUI's to delete
     std::ofstream(partial, std::ios::binary) << "kept by the CLI";
-    const int failed = rig.queue.enqueue("t", "cmd", {"/c", "echo", "encode:", "1/3", "frames", "&", "ping", "-n", "2", "127.0.0.1", ">nul", "&", "exit", "1"});
+    const int failed = rig.queue.enqueue("t", "cmd", {"/c", "echo", "encode:", "1/3", "frames", "&", "echo", "[10:00:00.000]", "[error]", "process:", "kept", "&", "ping",
+                                                      "-n", "2", "127.0.0.1", ">nul", "&", "exit", "1"});
     rig.wait(failed);
     REQUIRE_FALSE(rig.queue.succeeded(failed));
     CHECK(std::filesystem::exists(partial));
@@ -5770,6 +5778,12 @@ TEST_CASE("ProjectTasks: a run cancelled while it encodes leaves no half-written
     CHECK_FALSE(rig.queue.cancelled(crashed));
     CHECK_FALSE(std::filesystem::exists(partial));
     CHECK_FALSE(rig.queue.endedAbnormally(failed));
+    // ended from outside - Task Manager, `taskkill /F`: code 1 as well, but no error of dlssvid's said first (review of TASK-0070)
+    std::ofstream(partial, std::ios::binary) << "half written";
+    const int killed = rig.queue.enqueue("t", "cmd", {"/c", "echo", "encode:", "1/3", "frames", "&", "ping", "-n", "2", "127.0.0.1", ">nul", "&", "exit", "1"});
+    rig.wait(killed);
+    CHECK(rig.queue.endedAbnormally(killed));
+    CHECK_FALSE(std::filesystem::exists(partial));
 }
 
 TEST_CASE("ProjectTasks: a run whose source keeps neither a frame count nor a duration lets the result go too - its encode line has no total", "[app][model][gpu][regression]") {
@@ -5810,6 +5824,44 @@ TEST_CASE("TaskQueue::stopAll: the waiting tasks dropped, the running one killed
     CHECK_FALSE(rig.queue.busy());
     CHECK_FALSE(std::filesystem::exists(partial));
     CHECK_FALSE(rig.model.resultReleased());
+}
+
+TEST_CASE("ProjectTasks: a run of project A cancelled at its encode step while B is open removes A's unfinished file, B's result stays shown", "[app][model][gpu][regression]") {
+    // review of TASK-0070: what a cancel removes goes by the run's encode step, not by the open project's result being let go
+    App();
+    const auto d = Dir("project_tasks_cancel_foreign");
+    const auto a = TaskProject(d, "a"), b = TaskProject(d, "b");
+    TaskRig rig;
+    rig.model.openProject(Q(a));
+    const auto partial = PartialResultPath(d / "a_result.mkv");
+    std::ofstream(partial, std::ios::binary) << "half written";
+    rig.processId = rig.queue.enqueue("t", "cmd", kEncodingRun);
+    rig.model.openProject(Q(b));
+    Pump([&] { return rig.queue.progress(rig.processId).stage == "encode"; }, 15000);
+    REQUIRE(rig.queue.progress(rig.processId).stage == "encode");
+    rig.queue.cancel(rig.processId);
+    rig.wait(rig.processId);
+    CHECK_FALSE(std::filesystem::exists(partial));
+    CHECK(std::filesystem::exists(d / "b_result.mkv"));
+    CHECK_FALSE(rig.model.resultReleased());
+    CHECK(rig.model.sourceNames().contains("result"));
+}
+
+TEST_CASE("ProjectTasks: a project opened again before its run encodes has its result let go - by the file, not the project's generation", "[app][model][gpu][regression]") {
+    App();
+    const auto d = Dir("project_tasks_release_reopened");
+    const auto a = TaskProject(d, "a"), b = TaskProject(d, "b");
+    TaskRig rig;
+    rig.model.openProject(Q(a));
+    rig.processId = rig.queue.enqueue("t", "cmd", kEncodingRun);
+    rig.model.openProject(Q(b));
+    rig.model.openProject(Q(a));
+    Pump([&] { return rig.model.resultReleased(); }, 15000);
+    REQUIRE(rig.model.resultReleased());
+    CHECK_FALSE(rig.model.sourceNames().contains("result"));
+    rig.wait(rig.processId);
+    CHECK_FALSE(rig.model.resultReleased());
+    CHECK(rig.model.sourceNames().contains("result"));
 }
 
 TEST_CASE("ProjectTasks: a run of project A at its encode step leaves B's result shown", "[app][model][gpu][regression]") {

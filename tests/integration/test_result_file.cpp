@@ -264,3 +264,24 @@ TEST_CASE("RunProcess: a passthrough into AVI from an MKV source puts its result
     CHECK(DecodeAll(o.output).size() == 4);
     CHECK_FALSE(std::filesystem::exists(PartialResultPath(o.output)));
 }
+
+TEST_CASE("RunProcess: a read-only previous result is refused before anything runs; PublishResult names the cause", "[integration][process][result][regression]") {
+    // review of TASK-0070: nothing renames over a read-only file - the run failed only after the whole encode, asking about a player
+    const auto dir = Dir("read_only");
+    const auto clip = WriteClip(dir / "clip.mkv", Small(3));
+    ProcessOptions o = Options(dir, clip);
+    std::ofstream(o.output, std::ios::binary) << "the previous result";
+    constexpr auto kWrite = std::filesystem::perms::owner_write | std::filesystem::perms::group_write | std::filesystem::perms::others_write;
+    std::filesystem::permissions(o.output, kWrite, std::filesystem::perm_options::remove);  // MSVC: the read-only attribute
+    REQUIRE(ReadOnlyFile(o.output));
+    CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("read-only"));
+    CHECK_FALSE(std::filesystem::exists(o.passesRoot / "color_nr"));  // refused before the stages
+    CHECK_FALSE(std::filesystem::exists(PartialResultPath(o.output)));
+
+    const auto partial = WriteClip(PartialResultPath(o.output), Small(3));
+    CHECK_THROWS_WITH(PublishResult(partial, o.output, {48, 32, 3, false}), ContainsSubstring("read-only") && !ContainsSubstring("player"));
+    std::filesystem::permissions(o.output, kWrite, std::filesystem::perm_options::add);
+    CHECK_FALSE(ReadOnlyFile(o.output));
+    CHECK(Bytes(o.output) == "the previous result");
+    CHECK(std::filesystem::exists(partial));
+}

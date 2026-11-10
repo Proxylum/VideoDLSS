@@ -1181,6 +1181,9 @@ ProcessResult RunProcess(const ProcessOptions& options) {
     if (options.passthrough && !options.encode) Throw("process: --no-encode and --passthrough exclude each other");
     if (options.output.empty() && options.encode) Throw("process: -o/--output is required");
     if (options.encode) std::filesystem::create_directories(std::filesystem::absolute(options.output).parent_path());
+    // the new result is renamed over the old one at the end (TASK-0070): a read-only one would fail it only after the whole run
+    if (options.encode && ReadOnlyFile(options.output))
+        Throw("process: " + options.output.string() + " is read-only - the new result could not replace it; clear the attribute or choose another file");
 
     VideoStreamInfo info;
     {
