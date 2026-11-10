@@ -151,7 +151,8 @@ public:
     // valid until the next NextFrame() call. `cpu = false` skips the device->host copy (the
     // CpuFrame then only carries index/pts/desc) — only allowed when gpu is requested. When NVDEC
     // yields a layout other than NV12 (10/12-bit, 4:4:4), or the stream is shown turned, `gpu` stays invalid and the CpuFrame is
-    // always filled (in the source's own bit depth and chroma layout, turned), whatever `cpu` says.
+    // always filled (as Info().decoded: the source's bit depth and chroma layout, turned - 4:4:4 where the turn does not map the chroma
+    // grid onto itself, OrientedDesc), whatever `cpu` says.
     bool NextFrame(CpuFrame& out, GpuFrame* gpu = nullptr, bool cpu = true);
 
     // Random access: positions the decoder so that the next NextFrame() returns `index`

@@ -216,6 +216,7 @@ void PrintPlan(const ProcessPlan& p) {
         if (!s.info.empty()) std::printf("note: %s: %s\n", s.name.c_str(), s.info.c_str());
         if (!s.error.empty()) std::printf("error: %s: %s\n", s.name.c_str(), s.error.c_str());
     }
+    if (!p.error.empty()) std::printf("error: %s\n", p.error.c_str());  // no stage's (TASK-0072)
     // PR-13: the scene-cut list and the stages that reset at it
     const StageDecision* scenes = nullptr;
     std::string readers, unlisted;
@@ -345,6 +346,7 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
                            {"output", PathText(o.output)}};
             std::ofstream(a.json) << DumpJson(j) << "\n";
         }
+        if (!plan.error.empty()) return 1;
         for (const auto& s : plan.stages)
             if (!s.error.empty()) return 1;  // the run would be refused
         return 0;

@@ -976,7 +976,7 @@ void AppModel::schedulePlan() { planTimer_.start(); }
 QString AppModel::planBlocker() const {
     for (const auto& d : plan_.stages)
         if (!d.error.empty()) return QString::fromStdString(d.error);
-    return {};
+    return QString::fromStdString(plan_.error);  // TASK-0072: no stage's
 }
 
 void AppModel::setStageEnabled(const std::string& stage, bool on) {
@@ -1205,8 +1205,12 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
             if (d->diff.contains("source_format") && d->diff["source_format"].is_array() && d->diff["source_format"].size() == 2) {
                 const auto was = d->diff["source_format"][0], now = d->diff["source_format"][1];
                 if (was.is_string() && now.is_string() &&
-                    !(OrientationOfSourceFormat(was.get<std::string>()) == OrientationOfSourceFormat(now.get<std::string>())))
-                    st.state = tr("пересчёт: источник теперь показывается повёрнутым");
+                    !(OrientationOfSourceFormat(was.get<std::string>()) == OrientationOfSourceFormat(now.get<std::string>()))) {
+                    const DisplayOrientation o = OrientationOfSourceFormat(now.get<std::string>());
+                    st.state = !o.rotate && o.hflip ? tr("пересчёт: источник теперь показывается отражённым")
+                               : o.hflip            ? tr("пересчёт: источник теперь показывается повёрнутым и отражённым")
+                                                    : tr("пересчёт: источник теперь показывается повёрнутым");
+                }
             }
         } else if (d->kind == "forced") {
             st.state = tr("пересчёт (принудительно)");

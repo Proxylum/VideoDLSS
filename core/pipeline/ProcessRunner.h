@@ -169,6 +169,9 @@ struct ProcessPlan {
     std::string finalPass;              // colour pass the encode step would use ("" -> the source is passed through)
     int runCount = 0, reuseCount = 0;   // reuseCount includes restores
     std::optional<SceneListOnDisk> scenesOnDisk;  // a readable list of this source under the root (PR-13)
+    // what the run would refuse that no stage owns (TASK-0072: the result would come from a pass of a stage that is off, made from the
+    // stored frame of a source shown turned); RunProcess throws it before any stage runs
+    std::string error;
     nlohmann::json ToJson() const;
 };
 

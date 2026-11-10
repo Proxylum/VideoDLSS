@@ -157,6 +157,23 @@ std::string TurnRu(DisplayOrientation o) {
     return "повёрнут на " + std::to_string(o.rotate) + "°" + (o.hflip ? " и отражён" : "");
 }
 
+// The stage that makes a pass, as the cards name it: " (стадия «Апскейл»)"; "" for another pass
+std::string StageRu(const std::string& pass) {
+    const char* title = pass == "color_sr"                             ? "Апскейл"
+                        : pass == "color_nr"                           ? "Улучшение"
+                        : pass == "color_fg"                           ? "Генерация кадров"
+                        : pass == "depth_raw" || pass == "depth_dlss" ? "Глубина"
+                        : pass == "mv_raw" || pass == "mv_dlss"       ? "Векторы движения"
+                                                                       : nullptr;
+    return title ? std::string(" (стадия «") + title + "»)" : std::string();
+}
+
+// "сделан по боковому кадру, а источник повёрнут на 90°" (90 / 270: the stored frame is the sideways one), "сделан без учёта поворота
+// источника, а источник повёрнут на 180°"
+std::string MadeFromStoredRu(DisplayOrientation o) {
+    return std::string(o.SwapsAxes() ? "сделан по боковому кадру" : "сделан без учёта поворота источника") + ", а источник " + TurnRu(o);
+}
+
 struct RunContext {
     std::filesystem::path root;
     std::string sourceHash;
@@ -481,8 +498,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             if (state.ran.count(input) || input == kScenesPass || input.rfind("mask_", 0) == 0) continue;  // the masks: the user's (advised)
             try {
                 if (MadeFromStoredFrame(Manifest::Load(ctx.root / input), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
-                    d.error = input + " сделан по боковому кадру, а источник показывается " + TurnRu(ctx.orientation) +
-                              ": включите стадию, которая его делает, или пересчитайте её";
+                    d.error = "Пасс " + input + StageRu(input) + " " + MadeFromStoredRu(ctx.orientation) + ": включите эту стадию или удалите пасс";
                     break;
                 }
             } catch (const std::exception&) {
@@ -924,6 +940,24 @@ std::optional<ScenesSource> ProjectScenes(const RunContext& ctx, StageDecision& 
 // PR-8: the control mask NR will read. Unreadable stops NR before it runs (the plan would otherwise reuse a pass of the old stamp: the
 // mask's fingerprint comes from its manifest, RefreshFromDisk does not reread the file); a mask file edited in place stops it at reuse
 // too. Proportions more than 1 % off the frame: a warning - the mask stretches. Texts in Russian: they go to the card as they are.
+// TASK-0072: the colour pass the result would come from when it is of a stage the run does not run (off) and was made from the stored frame
+// of a source shown turned - what to say; empty otherwise. `runs`: whether the run runs a stage (makes or reuses its pass as shown).
+std::string StoredFrameResult(const RunContext& ctx, const std::function<bool(const std::string&)>& runs) {
+    if (ctx.orientation.Identity()) return {};
+    for (const auto& [pass, stage] : {std::pair<const char*, const char*>{"color_fg", "fg"}, {"color_nr", "nr"}, {"color_sr", "upscale"}}) {
+        if (runs(stage)) return {};  // its pass, or a later one, is the result
+        if (!Manifest::Exists(ctx.root / pass) || !PassOfClip(ctx.root / pass)) continue;
+        try {
+            if (MadeFromStoredFrame(Manifest::Load(ctx.root / pass), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight))
+                return "Результат взялся бы из пасса " + std::string(pass) + StageRu(pass) + ": он " + MadeFromStoredRu(ctx.orientation) +
+                       ". Включите эту стадию или удалите пасс";
+        } catch (const std::exception&) {
+        }
+        return {};
+    }
+    return {};
+}
+
 void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
     std::string why;
     const auto info = ReadControlMaskInfo(ctx.root / kControlMaskPass, &why);
@@ -1113,6 +1147,7 @@ nlohmann::json ProcessPlan::ToJson() const {
     for (const auto& s : stages) st.push_back(s.ToJson());
     nlohmann::json j = {{"passes_root", passesRoot.string()}, {"source_hash", sourceHash}, {"frames", frames},       {"stages", st},
                         {"final_pass", finalPass},            {"run_count", runCount},    {"reuse_count", reuseCount}};
+    if (!error.empty()) j["error"] = error;
     if (scenesOnDisk)
         j["scenes_on_disk"] = {{"count", scenesOnDisk->count}, {"frames", scenesOnDisk->frames}, {"threshold", scenesOnDisk->threshold}, {"off", scenesOnDisk->off}};
     return j;
@@ -1214,7 +1249,7 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     // stages that would remake it are off, or a standalone command made it)
     if (MadeFromStoredFrame(m, info.orientation, info.width, info.height, info.codedWidth, info.codedHeight))
         Throw("process: " + passDir.string() + " was made from the stored frame of a source shown " + info.orientation.Describe() +
-              ": the result would be sideways - recompute the stages (--force)");
+              ": the result would not be shown so - enable the stage that makes it or remove the pass");
     const OutputFormat of = ResolveOutputFormat(encode.codec, encode.format, SourceLayout(info));  // the stream's chroma, not a turn's 4:4:4
     FrameDesc target = of.desc;
     target.width = m.width;
@@ -1306,6 +1341,7 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
         plan.stages.push_back(std::move(d));
     }
     plan.finalPass = ProjectedFinalPass(state);
+    plan.error = StoredFrameResult(pr.ctx, [&](const std::string& stage) { return pr.wanted.count(stage) > 0; });
     return plan;
 }
 
@@ -1413,6 +1449,10 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         };
     };
 
+    // TASK-0072: the result would come from a pass of a stage that is off, made from the stored frame of a turned source - refused before
+    // any stage runs (the plan says it: ProcessPlan::error)
+    if (const std::string why = StoredFrameResult(ctx, [&](const std::string& stage) { return pr.wanted.count(stage) > 0; }); !why.empty())
+        Throw("process: " + why);
     PlanState state;
     bool retiredAny = false;
     // TASK-0071: a color_sr made by NIS because DLSS could not run is stamped with the fingerprint of the settings asked for - a later

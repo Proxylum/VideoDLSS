@@ -333,17 +333,22 @@ TEST_CASE("A colour pass of a turned source's stored frame is not encoded: the r
     m.sourceFormat = "yuv420p";
     m.Save(sr);
     o.output = d / "r_label.mkv";
-    CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("made from the stored frame"));
+    CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("Результат взялся бы из пасса color_sr"));  // refused before the stages (review of TASK-0072)
     CHECK_FALSE(std::filesystem::exists(o.output));
+    EncodeSettings es;
+    es.codec = "ffv1";
+    CHECK_THROWS_WITH(EncodePassToVideo(sr, clip, d / "direct_label.mkv", es), ContainsSubstring("made from the stored frame"));  // the encode's own guard
     // no label (a standalone command's pass): its proportions tell - the stored frame's are refused, the shown frame's taken
     std::filesystem::remove_all(sr);
     WritePass(sr, PassKind::ColorSr, 128, 72, 3);
     o.output = d / "r_stored.mkv";
-    CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("made from the stored frame"));
+    CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("Результат взялся бы из пасса color_sr"));
+    CHECK_THROWS_WITH(EncodePassToVideo(sr, clip, d / "direct_stored.mkv", es), ContainsSubstring("made from the stored frame"));
     std::filesystem::remove_all(sr);
     WritePass(sr, PassKind::ColorSr, 72, 128, 3);
     o.output = d / "r_shown.mkv";
     CHECK_NOTHROW(RunProcess(o));
+    CHECK_NOTHROW(EncodePassToVideo(sr, clip, d / "direct_shown.mkv", es));
 }
 
 TEST_CASE("A proxy of a turned clip holds its frames as shown; one made before the turn was applied is not used", "[integration][orientation][viewport][proxy]") {
@@ -496,7 +501,7 @@ TEST_CASE("The control mask advice measures a turned source's shown frame, not a
     const StageDecision nr = Decision(PlanProcess(o), "nr");
     for (const auto& w : nr.warnings) all += w + "\n";
     CHECK_THAT(all, ContainsSubstring("64×36 растянется на кадр 36×64"));  // the frame NR is to work at: the shown one
-    CHECK_THAT(nr.error, ContainsSubstring("color_sr сделан по боковому кадру"));  // and the sideways color_sr is no input of it (review of TASK-0072)
+    CHECK_THAT(nr.error, ContainsSubstring("Пасс color_sr (стадия «Апскейл») сделан по боковому кадру"));  // the sideways color_sr is no input of it
 }
 
 TEST_CASE("A stage refuses an input made from a turned source's stored frame that the run does not remake", "[integration][orientation][process][regression]") {
@@ -520,9 +525,10 @@ TEST_CASE("A stage refuses an input made from a turned source's stored frame tha
     };
     for (auto& s : o.stages) s.enabled = s.name == "nr";  // upscale off: color_sr is read from the disk
     pass("color_sr", PassKind::ColorSr, 128, 72, "yuv420p");  // the build before: the stored frame x2
-    CHECK_THAT(Decision(PlanProcess(o), "nr").error, ContainsSubstring("color_sr сделан по боковому кадру, а источник показывается повёрнут на 90°"));
+    CHECK_THAT(Decision(PlanProcess(o), "nr").error,
+               ContainsSubstring("Пасс color_sr (стадия «Апскейл») сделан по боковому кадру, а источник повёрнут на 90°: включите эту стадию или удалите пасс"));
     o.output = d / "r_labelled.mkv";
-    CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("color_sr сделан по боковому кадру"));
+    CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("Пасс color_sr (стадия «Апскейл») сделан по боковому кадру"));
     CHECK_FALSE(std::filesystem::exists(o.output));
     CHECK_FALSE(std::filesystem::exists(o.passesRoot / "color_nr"));  // refused before anything ran
     pass("color_sr", PassKind::ColorSr, 128, 72, "");  // a standalone command's: the stored frame's proportions
@@ -540,7 +546,72 @@ TEST_CASE("A stage refuses an input made from a turned source's stored frame tha
     // fg alone over the color_nr of the build before
     for (auto& s : o.stages) s.enabled = s.name == "fg";
     pass("color_nr", PassKind::ColorNr, 128, 72, "yuv420p");
-    CHECK_THAT(Decision(PlanProcess(o), "fg").error, ContainsSubstring("color_nr сделан по боковому кадру"));
+    CHECK_THAT(Decision(PlanProcess(o), "fg").error, ContainsSubstring("Пасс color_nr (стадия «Улучшение») сделан по боковому кадру"));
+    // turned by 180: not sideways - made without the turn (review of TASK-0072)
+    spec.orientation = {180, false};
+    const auto clip180 = WriteClip(d / "clip180.mkv", spec);
+    ProcessOptions o180 = Options(clip180, d / "p180");
+    for (auto& s : o180.stages) s.enabled = s.name == "nr";
+    std::filesystem::create_directories(d / "p180");
+    {
+        Manifest m = Manifest::ForPass(PassKind::ColorSr, 128, 72, FileFormat::Exr);
+        m.sourceFormat = "yuv420p";
+        PassWriter wr(o180.passesRoot / "color_sr", m);
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 128, 72));
+        wr.Finish();
+    }
+    CHECK_THAT(Decision(PlanProcess(o180), "nr").error,
+               ContainsSubstring("Пасс color_sr (стадия «Апскейл») сделан без учёта поворота источника, а источник повёрнут на 180°"));
+}
+
+TEST_CASE("The result is not taken from a pass of a stage that is off made from a turned source's stored frame: the plan says so, the run refuses at once", "[integration][orientation][process][regression]") {
+    // review of TASK-0072: the plan was silent, the run remade every stage and only the encode refused - with advice (--force) that could not help
+    const auto d = Dir("stored_result");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 64;
+    spec.height = 36;
+    spec.orientation = {90, false};
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    ProcessOptions o = Options(clip, d);
+    for (auto& s : o.stages) s.enabled = s.name == "upscale" || s.name == "nr";  // fg off: its old color_fg would be the result
+    {
+        Manifest m = Manifest::ForPass(PassKind::ColorFg, 128, 72, FileFormat::Exr);
+        m.sourceFormat = "yuv420p";  // the build before: the stored frame
+        PassWriter wr(o.passesRoot / "color_fg", m);
+        for (int64_t f = 0; f < 5; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorFg, 128, 72));
+        wr.Finish();
+    }
+    const ProcessPlan plan = PlanProcess(o);
+    CHECK(plan.error == "Результат взялся бы из пасса color_fg (стадия «Генерация кадров»): он сделан по боковому кадру, а источник повёрнут на 90°. "
+                        "Включите эту стадию или удалите пасс");
+    CHECK(plan.ToJson()["error"] == plan.error);
+    for (const auto& s : plan.stages) CHECK(s.error.empty());  // no stage's
+    CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("Результат взялся бы из пасса color_fg"));
+    CHECK_FALSE(std::filesystem::exists(o.passesRoot / "color_sr"));  // before any stage ran
+    CHECK_FALSE(std::filesystem::exists(o.output));
+    // `process --plan` says it and exits 1
+    const auto out = d / "plan.txt";
+    const std::string cmd = "\"\"" DLSSVID_CLI_PATH "\" process -i \"" + clip.string() + "\" -o \"" + o.output.string() + "\" --passes \"" + o.passesRoot.string() +
+                            "\" --warp --stages upscale,nr --param upscale.backend=nis --param nr.backend=stub --plan >\"" + out.string() + "\" 2>&1\"";
+    CHECK(std::system(cmd.c_str()) == 1);
+    std::ifstream in(out);
+    std::stringstream text;
+    text << in.rdbuf();
+    CHECK_THAT(text.str(), ContainsSubstring("error: Результат взялся бы из пасса color_fg"));
+    // fg on: it remakes its pass - no error
+    for (auto& s : o.stages) s.enabled = s.name == "upscale" || s.name == "nr" || s.name == "fg";
+    CHECK(PlanProcess(o).error.empty());
+    // nr and fg off: color_nr of the build before would be the result
+    std::filesystem::remove_all(o.passesRoot / "color_fg");
+    for (auto& s : o.stages) s.enabled = s.name == "upscale";
+    {
+        Manifest m = Manifest::ForPass(PassKind::ColorNr, 72, 128, FileFormat::Exr);  // unlabelled, the shown frame's proportions: taken
+        PassWriter wr(o.passesRoot / "color_nr", m);
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorNr, 72, 128));
+        wr.Finish();
+    }
+    CHECK(PlanProcess(o).error.empty());
 }
 
 TEST_CASE("A standalone upscale pass made under the 4K cap by the axes is not adopted under the long-side cap", "[integration][orientation][upscale][regression]") {

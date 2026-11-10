@@ -1445,6 +1445,32 @@ TEST_CASE("AppModel opens a turned clip as shown: the viewport, the source info,
     CHECK(label->text().contains(QString::fromUtf8("4:2:2")));
 }
 
+TEST_CASE("The plan blocks the run when the result would come from a turned source's stored-frame pass of a stage that is off", "[app][orientation][regression]") {
+    // review of TASK-0072: a plan-level refusal (no stage's) - the GUI blocks the run and says why
+    App();
+    const auto d = Dir("turned_blocker");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    spec.orientation = {90, false};
+    AppModel model(true);
+    model.openVideo(Q(WriteClip(d / "clip.mkv", spec)));
+    for (const char* stage : {"scenes", "depth", "flow", "upscale", "nr", "fg"}) model.setStageEnabled(stage, false);
+    const auto sr = model.project().passesRoot / "color_sr";
+    Manifest m = Manifest::ForPass(PassKind::ColorSr, 96, 64, FileFormat::Exr);  // the build before: the stored frame x2
+    m.sourceFormat = "yuv420p";
+    PassWriter wr(sr, m);
+    for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 96, 64));
+    wr.Finish();
+    model.refreshPlan();
+    CHECK(model.planBlocker().startsWith(QString::fromUtf8("Результат взялся бы из пасса color_sr (стадия «Апскейл»)")));
+    model.setStageEnabled("upscale", true);  // it remakes its pass
+    model.setStageParam("upscale", "backend", "nis");
+    model.refreshPlan();
+    CHECK(model.planBlocker().isEmpty());
+}
+
 TEST_CASE("RecentPreviews: a turned clip's thumbnail and line as shown; one the build before cached is not reused", "[app][orientation][previews][regression]") {
     App();
     const auto d = Dir("previews_turned");
@@ -1504,6 +1530,22 @@ TEST_CASE("Stage cards name the recompute of a source now shown turned and of th
         model.openProject(Q(d / "proj.dlssvid.json"));
         model.refreshPlan();
         CHECK(model.cardState("depth").state == QString::fromUtf8("пересчёт: источник теперь показывается повёрнутым"));
+    }
+    // a mirror only: «отражённым», as the source line says (review of TASK-0072)
+    const auto m = Dir("mirrored_cards");
+    spec.orientation = {0, true};
+    processed(m, spec, [](Project&) {});
+    Manifest mirrored = Manifest::Load(m / "passes" / "depth_dlss");
+    REQUIRE(mirrored.sourceFormat == "yuv420p+h");
+    mirrored.sourceFormat = "yuv420p";
+    mirrored.fingerprint =
+        ComputeFingerprint("depth", mirrored.sourceHash, mirrored.paramsCanonical, mirrored.inputs, ToolInfo::FromJson(mirrored.tool), "yuv420p").value;
+    mirrored.Save(m / "passes" / "depth_dlss");
+    {
+        AppModel model(true);
+        model.openProject(Q(m / "proj.dlssvid.json"));
+        model.refreshPlan();
+        CHECK(model.cardState("depth").state == QString::fromUtf8("пересчёт: источник теперь показывается отражённым"));
     }
     // a portrait clip with a target 2400 high: capped at 2160 by the axes before (1216x2160), 1350x2400 now
     const auto c = Dir("cap_cards");

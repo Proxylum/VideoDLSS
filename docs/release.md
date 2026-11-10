@@ -90,7 +90,8 @@ C:\dlss-video\bin\dlssvid_golden_tests.exe "[golden]~[gpu]"   :: только д
    пассы остальных стадий остаются валидными. Ревизии сейчас: `depth.2`, `nr.ev`, `png.2`, `nr.gain` и `nr.i0` (PR-7: сила
    правки NR после модели); карточка пересчёта называет добавленную ревизию (`AddedToolRevisions`). Ревизии, зависящие от
    входов, добавляет `DecideStage` (`ProcessRunner`), а не `PassToolVersionFor`: `nr.msize` (TASK-0060) — у NR с масками защиты и
-   кожи разного размера, `kNrControlMaskRevision` — у NR с маской управления (пока пустая).
+   кожи разного размера, `kNrControlMaskRevision` — у NR с маской управления (пока пустая), `sr.cap` (TASK-0072) — у апскейла,
+   чей размер меняет предел 4K по длинной стороне (вертикальный кадр).
 2. Локально: сборка, `ctest`, `scripts\package.cmd` (и `full`), распаковать ZIP во временную папку, golden на распакованной
    копии (`DLSSVID_CLI`, `DLSSVID_GOLDEN_DIR`; для `[gpu]`-части положить DLL NVIDIA в её `bin\nvidia`).
 3. Pull request → CI → слияние в `main` → аннотированный тег `vX.Y.Z` на merge-коммите → push тега: workflow тега собирает
