@@ -418,11 +418,18 @@ TEST_CASE("The plan warns of masks drawn over a turned source's stored frame and
         return all;
     };
     WritePass(d / "passes" / "mask_ui", PassKind::Mask, 64, 36, 3, FileFormat::Png);  // drawn over the stored frame
-    CHECK_THAT(nrWarnings(), ContainsSubstring("Сделаны по боковому кадру: маска ui. Источник повёрнут на 90°"));
+    CHECK_THAT(nrWarnings(), ContainsSubstring("Сделана по боковому кадру: маска ui. Источник повёрнут на 90° — маска ляжет неправильно"));
+    WritePass(d / "passes" / "mask_skin", PassKind::Mask, 64, 36, 3, FileFormat::Png);  // two: the plural (review of TASK-0072)
+    CHECK_THAT(nrWarnings(), ContainsSubstring("Сделаны по боковому кадру: маска ui, маска skin. Источник повёрнут на 90° — маски лягут неправильно"));
+    std::filesystem::remove_all(d / "passes" / "mask_skin");
     std::filesystem::remove_all(d / "passes" / "mask_ui");
     WritePass(d / "passes" / "mask_ui", PassKind::Mask, 36, 64, 3, FileFormat::Png);  // over the shown one
     CHECK_THAT(nrWarnings(), !ContainsSubstring("по боковому кадру"));
     CHECK_THAT(nrWarnings(), !ContainsSubstring("до учёта поворота"));
+    // an unlabelled color_sr of the shown frame's proportions (a standalone command of this build): no word of a project from before
+    WritePass(d / "passes" / "color_sr", PassKind::ColorSr, 72, 128, 3);
+    CHECK_THAT(nrWarnings(), !ContainsSubstring("до учёта поворота"));
+    std::filesystem::remove_all(d / "passes" / "color_sr");
     // 180 deg keeps the proportions: a project processed before the turn was applied is what tells
     spec.orientation = {180, false};
     const auto clip180 = WriteClip(d / "clip180.mkv", spec);
@@ -443,6 +450,7 @@ TEST_CASE("The plan warns of masks drawn over a turned source's stored frame and
     nr.sourceFormat = "yuv420p";
     nr.Save(d180 / "passes" / "color_nr");
     CHECK_THAT(warnings180(), ContainsSubstring("Проект обработан до учёта поворота источника (источник повёрнут на 180°)"));
+    CHECK_THAT(warnings180(), ContainsSubstring("проверьте их по повёрнутому кадру"));
     // an explicit target of the stored frame's proportions
     ApplyParamSpec(o.stages, "upscale.target_width=128");
     ApplyParamSpec(o.stages, "upscale.target_height=72");
@@ -599,6 +607,12 @@ TEST_CASE("The result is not taken from a pass of a stage that is off made from 
     std::stringstream text;
     text << in.rdbuf();
     CHECK_THAT(text.str(), ContainsSubstring("error: Результат взялся бы из пасса color_fg"));
+    // a run that encodes nothing (the stages before NR for the preview, --no-encode) takes no result: no refusal (review of TASK-0072)
+    o.encode = false;
+    CHECK(PlanProcess(o).error.empty());
+    CHECK_NOTHROW(RunProcess(o));
+    CHECK(std::filesystem::exists(o.passesRoot / "color_sr"));
+    o.encode = true;
     // fg on: it remakes its pass - no error
     for (auto& s : o.stages) s.enabled = s.name == "upscale" || s.name == "nr" || s.name == "fg";
     CHECK(PlanProcess(o).error.empty());

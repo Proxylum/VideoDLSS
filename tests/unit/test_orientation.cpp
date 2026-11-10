@@ -84,7 +84,7 @@ void CheckOriented(const CpuFrame& in, DisplayOrientation o, const CpuFrame& out
                     want = Sample(in, p, lx >> ChromaShiftX(in.desc.format), ly >> ChromaShiftY(in.desc.format));
                 }
                 same = Sample(out, p, x, y) == want;
-                if (!same) INFO("at " << x << "," << y);
+                if (!same) UNSCOPED_INFO("at " << x << "," << y);  // reported with the CHECK below
             }
         CHECK(same);
     }

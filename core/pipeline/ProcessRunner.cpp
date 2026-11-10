@@ -1025,17 +1025,23 @@ void AdviseTurnedMasks(const RunContext& ctx, StageDecision& d) {
     if (!sideways.empty()) {
         std::vector<std::string> names;  // as the GUI names them: «маска управления», «маска ui»
         for (const std::string& pass : sideways) names.push_back(pass == kControlMaskPass ? "маска управления" : "маска " + pass.substr(5));
-        d.warnings.push_back("Сделаны по боковому кадру: " + Join(names) + ". Источник " + TurnRu(ctx.orientation) +
-                             " — маска ляжет неправильно, сделайте её заново по повёрнутому кадру");
+        const bool one = names.size() == 1;
+        d.warnings.push_back(std::string(one ? "Сделана по боковому кадру: " : "Сделаны по боковому кадру: ") + Join(names) + ". Источник " +
+                             TurnRu(ctx.orientation) +
+                             (one ? " — маска ляжет неправильно, сделайте её заново по повёрнутому кадру"
+                                  : " — маски лягут неправильно, сделайте их заново по повёрнутому кадру"));
         return;
     }
     if (!any) return;
     // 180 deg and mirrors keep the proportions: the passes on disk tell whether the project was processed before the turn was applied
     for (const char* pass : {"color_sr", "color_nr"})
         try {
-            if (Manifest::Exists(ctx.root / pass) && OrientationOfSourceFormat(Manifest::Load(ctx.root / pass).sourceFormat) != ctx.orientation) {
+            // judged as the plan judges an input: the label, or (no label) the stored frame's proportions (review of TASK-0072)
+            if (Manifest::Exists(ctx.root / pass) &&
+                MadeFromStoredFrame(Manifest::Load(ctx.root / pass), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
+                const char* shown = ctx.orientation.rotate ? (ctx.orientation.hflip ? "повёрнутому и отражённому" : "повёрнутому") : "отражённому";
                 d.warnings.push_back("Проект обработан до учёта поворота источника (источник " + TurnRu(ctx.orientation) +
-                                     "): маски, сделанные по прежнему кадру, лягут неправильно — проверьте их по повёрнутому кадру");
+                                     "): маски, сделанные по прежнему кадру, лягут неправильно — проверьте их по " + shown + " кадру");
                 return;
             }
         } catch (const std::exception&) {
@@ -1341,7 +1347,8 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
         plan.stages.push_back(std::move(d));
     }
     plan.finalPass = ProjectedFinalPass(state);
-    plan.error = StoredFrameResult(pr.ctx, [&](const std::string& stage) { return pr.wanted.count(stage) > 0; });
+    // a run that encodes nothing (--no-encode: the stages before NR for the preview) takes no result (review of TASK-0072)
+    if (options.encode) plan.error = StoredFrameResult(pr.ctx, [&](const std::string& stage) { return pr.wanted.count(stage) > 0; });
     return plan;
 }
 
@@ -1451,8 +1458,9 @@ ProcessResult RunProcess(const ProcessOptions& options) {
 
     // TASK-0072: the result would come from a pass of a stage that is off, made from the stored frame of a turned source - refused before
     // any stage runs (the plan says it: ProcessPlan::error)
-    if (const std::string why = StoredFrameResult(ctx, [&](const std::string& stage) { return pr.wanted.count(stage) > 0; }); !why.empty())
-        Throw("process: " + why);
+    if (options.encode)  // --no-encode takes no result
+        if (const std::string why = StoredFrameResult(ctx, [&](const std::string& stage) { return pr.wanted.count(stage) > 0; }); !why.empty())
+            Throw("process: " + why);
     PlanState state;
     bool retiredAny = false;
     // TASK-0071: a color_sr made by NIS because DLSS could not run is stamped with the fingerprint of the settings asked for - a later
