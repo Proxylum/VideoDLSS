@@ -104,6 +104,7 @@ add_executable(dlssvid_integration_tests
   integration/test_fg_stage.cpp
   integration/test_cli_fg.cpp
   integration/test_process.cpp
+  integration/test_result_file.cpp
   integration/test_cli_process.cpp
   integration/test_process_versions.cpp
   integration/test_cli_pass_versions.cpp

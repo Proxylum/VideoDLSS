@@ -86,6 +86,7 @@ add_library(dlssvid_core STATIC
   io/VideoEncoder.h io/VideoEncoder.cpp
   io/EncodeDefaults.h io/EncodeDefaults.cpp
   io/OutputFormat.h io/OutputFormat.cpp
+  io/ResultFile.h io/ResultFile.cpp
   stages/passthrough/PassthroughStage.h stages/passthrough/PassthroughStage.cpp
   passes/PassImage.h passes/PassImage.cpp
   passes/Manifest.h passes/Manifest.cpp

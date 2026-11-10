@@ -11,6 +11,7 @@
 #include "gpu/D3D12Device.h"
 #include "io/EncodeDefaults.h"
 #include "io/OutputFormat.h"
+#include "io/ResultFile.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
 #include "pipeline/ControlMask.h"
@@ -1117,7 +1118,10 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
         r.audio = true;
     }
     encoder.Open();
-    const int64_t total = maxSourceFrames > 0 ? std::min<int64_t>(maxSourceFrames, info.frameCount) : info.frameCount;
+    // MKV keeps no frame count: the pass's, in source frames. Without a total the GUI reads no "encode: N/M frames" line - it would not
+    // know the encode step has begun (TASK-0070: it lets the old result go then)
+    int64_t total = info.frameCount > 0 ? info.frameCount : (m.frameCount + mult - 1) / mult;
+    if (maxSourceFrames > 0) total = std::min<int64_t>(maxSourceFrames, total);
     CpuFrame src;
     int64_t s = 0;
     while ((maxSourceFrames < 0 || s < maxSourceFrames) && decoder.NextFrame(src)) {  // decoding the source pumps its audio packets
@@ -1187,47 +1191,57 @@ ProcessResult RunProcess(const ProcessOptions& options) {
 
     // ---- passthrough (stage 0) ----
     if (options.passthrough) {
-        VideoDecoder::Options dopt;
-        dopt.hwaccel = ParseHwaccel(options.hwaccel);
-        VideoDecoder decoder(options.input, dopt);
-        VideoEncoder::Options eopt;
-        eopt.codec = options.codec;
-        eopt.frameRate = info.frameRate;
-        eopt.timeBase = info.timeBase;
-        eopt.codecOptions = EffectiveCodecOptions(options.codec, options.codecOptions, info.width, info.height, info.frameRate.ToDouble());
-        eopt.color = ColorTagsFor(ColorInfoFromStream(info), info);
-        const OutputFormat of = ResolveOutputFormat(options.codec, options.outputFormat, info.decoded);
-        FrameDesc target = of.desc;
-        target.width = info.width;
-        target.height = info.height;
-        VideoEncoder encoder(options.output, target, eopt);
-        Log()->info("passthrough: {} as {} ({}) from a {} source{}{}", options.codec, target.Describe(), encoder.PixelFormatName(), info.decoded.Describe(),
-                    target == info.decoded ? ", bit-exact" : ", converted", of.reason.empty() ? "" : " — " + of.reason);
-        result.codec = options.codec;
-        result.outputFormat = target;
-        result.outputPixelFormat = encoder.PixelFormatName();
-        D3D12Device device({options.warp, false});
-        Pipeline pipeline(device, 4);
-        StageConfig cfg;
-        cfg.name = "passthrough";
-        cfg.params["gpu_roundtrip"] = options.gpuRoundtrip;
-        pipeline.AddStage(std::make_unique<PassthroughStage>(), cfg);
-        pipeline.Init();
-        const auto t0 = Clock::now();
-        const RunStats stats = RunPipeline(
-            pipeline, decoder, encoder, [&](int64_t n) { if (options.progress) options.progress("passthrough", n, needed); }, options.frames);
-        pipeline.Shutdown();
-        ProcessStageReport rep;
-        rep.name = "passthrough";
-        rep.status = "passthrough";
-        rep.frames = stats.framesOut;
-        rep.seconds = Seconds(t0);
-        rep.msPerFrame = rep.frames ? 1000.0 * rep.seconds / static_cast<double>(rep.frames) : 0.0;
-        result.stages.push_back(rep);
-        result.framesOut = stats.framesOut;
-        result.framesIn = stats.framesOut;
-        result.outputFps = info.frameRate;
-        result.audio = decoder.HasAudio();
+        // TASK-0070: written next to the result, put in its place only when complete - a cancel or a failure keeps the previous one
+        const std::filesystem::path partial = PartialResultPath(options.output);
+        ResultExpectation expect;
+        try {
+            VideoDecoder::Options dopt;
+            dopt.hwaccel = ParseHwaccel(options.hwaccel);
+            VideoDecoder decoder(options.input, dopt);
+            VideoEncoder::Options eopt;
+            eopt.codec = options.codec;
+            eopt.frameRate = info.frameRate;
+            eopt.timeBase = info.timeBase;
+            eopt.codecOptions = EffectiveCodecOptions(options.codec, options.codecOptions, info.width, info.height, info.frameRate.ToDouble());
+            eopt.color = ColorTagsFor(ColorInfoFromStream(info), info);
+            const OutputFormat of = ResolveOutputFormat(options.codec, options.outputFormat, info.decoded);
+            FrameDesc target = of.desc;
+            target.width = info.width;
+            target.height = info.height;
+            VideoEncoder encoder(partial, target, eopt);
+            Log()->info("passthrough: {} as {} ({}) from a {} source{}{}", options.codec, target.Describe(), encoder.PixelFormatName(), info.decoded.Describe(),
+                        target == info.decoded ? ", bit-exact" : ", converted", of.reason.empty() ? "" : " — " + of.reason);
+            result.codec = options.codec;
+            result.outputFormat = target;
+            result.outputPixelFormat = encoder.PixelFormatName();
+            D3D12Device device({options.warp, false});
+            Pipeline pipeline(device, 4);
+            StageConfig cfg;
+            cfg.name = "passthrough";
+            cfg.params["gpu_roundtrip"] = options.gpuRoundtrip;
+            pipeline.AddStage(std::make_unique<PassthroughStage>(), cfg);
+            pipeline.Init();
+            const auto t0 = Clock::now();
+            const RunStats stats = RunPipeline(
+                pipeline, decoder, encoder, [&](int64_t n) { if (options.progress) options.progress("passthrough", n, needed); }, options.frames);
+            pipeline.Shutdown();
+            ProcessStageReport rep;
+            rep.name = "passthrough";
+            rep.status = "passthrough";
+            rep.frames = stats.framesOut;
+            rep.seconds = Seconds(t0);
+            rep.msPerFrame = rep.frames ? 1000.0 * rep.seconds / static_cast<double>(rep.frames) : 0.0;
+            result.stages.push_back(rep);
+            result.framesOut = stats.framesOut;
+            result.framesIn = stats.framesOut;
+            result.outputFps = info.frameRate;
+            result.audio = decoder.HasAudio();
+            expect = ResultExpectation{target.width, target.height, stats.framesOut, result.audio};
+        } catch (...) {
+            RemovePartialResult(partial);  // the encoder is gone with its scope: the file is closed
+            throw;
+        }
+        if (PublishResult(partial, options.output, expect).copied) result.warnings.push_back(kResultCopiedWarning);
         result.seconds = Seconds(tAll);
         return result;
     }
@@ -1615,7 +1629,10 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         ProcessOptions pt = options;
         pt.passthrough = true;
         pt.progress = nullptr;
+        if (options.progress)  // it is this run's encode step: the GUI lets the old result go on its progress (TASK-0070)
+            pt.progress = [&options](const std::string&, int64_t n, int64_t total) { options.progress("encode", n, total); };
         const ProcessResult r = RunProcess(pt);
+        result.warnings.insert(result.warnings.end(), r.warnings.begin(), r.warnings.end());  // the result copied over an open one
         enc.status = "passthrough";
         enc.frames = r.framesOut;
         result.framesOut = r.framesOut;
@@ -1639,11 +1656,21 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             if (ext == ".mkv") es.metadata["DLSSVID_SETTINGS"] = settings.dump();
             Log()->info("encode: settings note: {}", es.metadata["comment"]);
         }
-        const EncodeReport r = EncodePassToVideo(result.finalPass, options.input, options.output, es, options.frames,
-                                                 [&](int64_t n, int64_t total) {
-                                                     if (options.progress) options.progress("encode", n, total);
-                                                 },
-                                                 options.hwaccel);
+        // TASK-0070: written next to the result, put in its place only when complete - a cancel or a failure keeps the previous one
+        const std::filesystem::path partial = PartialResultPath(options.output);
+        EncodeReport r;
+        try {
+            r = EncodePassToVideo(result.finalPass, options.input, partial, es, options.frames,
+                                  [&](int64_t n, int64_t total) {
+                                      if (options.progress) options.progress("encode", n, total);
+                                  },
+                                  options.hwaccel);
+        } catch (...) {
+            RemovePartialResult(partial);  // the encoder is gone with its scope: the file is closed
+            throw;
+        }
+        if (PublishResult(partial, options.output, {r.format.width, r.format.height, r.frames, r.audio}).copied)
+            result.warnings.push_back(kResultCopiedWarning);
         enc.status = "ran";
         enc.outDir = result.finalPass;
         enc.frames = r.frames;

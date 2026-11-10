@@ -192,6 +192,8 @@ std::vector<ViewportSource> AppModel::viewportSources(bool dropControlMask) cons
         sources.erase(std::remove_if(sources.begin(), sources.end(), [](const ViewportSource& s) { return s.pass == kControlMaskPass; }), sources.end());
     // a history folder named «preview» (made by hand) would be a second color_nr@preview: the store keys its sources by name
     sources.erase(std::remove_if(sources.begin(), sources.end(), [](const ViewportSource& s) { return s.version == "preview"; }), sources.end());
+    if (resultReleased_)  // a run is encoding the new one (TASK-0070)
+        sources.erase(std::remove_if(sources.begin(), sources.end(), [](const ViewportSource& s) { return s.name == "result"; }), sources.end());
     if (nrPreview_ && nrPreview_->root == project_.passesRoot) {
         try {
             if (auto s = FrameStore::PassFolderSource(nrPreview_->dir / "color_nr", kNrPreviewSource, "color_nr", "preview")) sources.push_back(std::move(*s));
@@ -219,6 +221,7 @@ void AppModel::adoptProject(Project next) {
     dropNrPreview();
     force_.clear();   // the «пересчитать» marks and the run time are the open project's (as in closeProject)
     lastRun_ = 0.0;
+    resultReleased_ = false;  // a run encoding the result of the project before keeps the file of that one
     project_ = std::move(next);
 }
 
@@ -387,7 +390,7 @@ void AppModel::reloadSources() {
     resultAudio_ = false;
     resultCodec_.clear();
     resultFormat_ = FrameDesc{};
-    if (!project_.resultVideo.empty() && std::filesystem::exists(project_.resultVideo)) {
+    if (!resultReleased_ && !project_.resultVideo.empty() && std::filesystem::exists(project_.resultVideo)) {
         try {
             VideoDecoder probe(project_.resultVideo, VideoDecoder::Probe());
             resultAudio_ = probe.HasAudio();
@@ -407,6 +410,20 @@ void AppModel::reloadSources() {
     startProxies();
 }
 
+void AppModel::releaseResult() {
+    if (resultReleased_ || !hasProject()) return;
+    resultReleased_ = true;
+    const int sources = proxyArgs_.indexOf("--sources");  // a build started since the run was queued (it cancelled the one before)
+    if (proxyBuilding() && sources >= 0 && proxyArgs_.value(sources + 1).split(',').contains("result")) cancelProxies();
+    if (!hasSource("result")) return;
+    store_->SetSources(viewportSources(controlMaskBusy_));  // waits for the loads in flight: the file is let go
+    Log()->info("viewport: the result is let go while a run encodes the new one");
+    emit resultChanged();
+    emit sourcesChanged();
+    requestFrames();  // the other sources again: SetSources cleared the cache
+    emit stateChanged();
+}
+
 void AppModel::requestFrames() { store_->SetCurrentTime(state().time, neededSources()); }
 
 void AppModel::startProxies() {
@@ -416,6 +433,7 @@ void AppModel::startProxies() {
     for (const char* name : {"source", "result"}) {
         const std::filesystem::path video = std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo;
         if (video.empty() || !std::filesystem::exists(video) || ValidProxy(video, project_.passesRoot, name)) continue;
+        if (resultReleased_ && std::string(name) == "result") continue;  // being replaced (TASK-0070)
         names << name;
     }
     if (names.isEmpty()) return;
@@ -1311,6 +1329,7 @@ bool AppModel::closeProject() {
     force_.clear();
     lastRun_ = 0.0;
     resultAudio_ = false;
+    resultReleased_ = false;
     cancelProxies();
     store_->SetSources({});
     if (!controlMaskBusy_) controlMask_ = {};
