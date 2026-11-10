@@ -2725,7 +2725,11 @@ TEST_CASE("AppModel: the same list names the stages made with another one; the l
         std::vector<std::string> cmd{DLSSVID_CLI_PATH};
         for (const QString& a : args) cmd.push_back(a.toStdString());
         std::string out;
+        // as the GUI does at the encode step (TASK-0070): the viewer and its proxy build let the result go - the run renames the new
+        // one over it
+        model.releaseResult(model.project().resultVideo);
         REQUIRE(Subprocess::Run(cmd, &out) == 0);
+        model.restoreResult();
         model.reloadSources();
     };
     run();  // the list {3}: flow, nr, fg made with it
