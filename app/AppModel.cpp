@@ -410,11 +410,15 @@ void AppModel::reloadSources() {
     startProxies();
 }
 
+QStringList AppModel::proxyBuildSources() const {
+    const int at = proxyArgs_.indexOf("--sources");
+    return proxyBuilding() && at >= 0 ? proxyArgs_.value(at + 1).split(',') : QStringList{};
+}
+
 void AppModel::releaseResult() {
     if (resultReleased_ || !hasSource("result")) return;  // a source exactly while the file is there
     resultReleased_ = true;
-    const int sources = proxyArgs_.indexOf("--sources");  // a build started since the run was queued (it cancelled the one before)
-    if (proxyBuilding() && sources >= 0 && proxyArgs_.value(sources + 1).split(',').contains("result")) cancelProxies();
+    if (proxyBuildSources().contains("result")) cancelProxies();  // a build started since the run was queued (it cancelled the one before)
     store_->SetSources(viewportSources(controlMaskBusy_));  // waits for the loads in flight: the file is let go
     Log()->info("viewport: the result is let go while a run encodes the new one");
     emit resultChanged();

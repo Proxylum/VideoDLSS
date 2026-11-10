@@ -79,6 +79,18 @@ bool ReadOnlyFile(const fs::path& file) {
     return !ec && fs::is_regular_file(st) && (st.permissions() & fs::perms::owner_write) == fs::perms::none;
 }
 
+PartialResult::PartialResult(fs::path partial) : path_(std::move(partial)) {
+    std::error_code ec;
+    existed_ = fs::exists(path_, ec);
+    if (existed_) time_ = fs::last_write_time(path_, ec);
+}
+
+void PartialResult::DiscardIfWritten() const {
+    std::error_code ec;
+    if (existed_ && fs::exists(path_, ec) && fs::last_write_time(path_, ec) == time_ && !ec) return;  // not touched by this run
+    RemovePartialResult(path_);
+}
+
 void RemovePartialResult(const fs::path& partial) {
     std::error_code ec;
     if (!fs::exists(partial, ec)) return;

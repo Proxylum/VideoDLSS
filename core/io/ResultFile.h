@@ -33,4 +33,19 @@ bool ReadOnlyFile(const std::filesystem::path& file);
 // Removes `partial` of a run that ended without publishing it; quiet when there is none or it cannot go.
 void RemovePartialResult(const std::filesystem::path& partial);
 
+// The partial file as a run found it before writing. A run that fails removes it only if it wrote it: one that failed before opening
+// the file (a codec option refused, a pass that does not read) leaves the finished new result an earlier run kept there when its
+// rename failed - the file that run's error told the user to rename.
+class PartialResult {
+public:
+    explicit PartialResult(std::filesystem::path partial);
+    const std::filesystem::path& Path() const { return path_; }
+    void DiscardIfWritten() const;
+
+private:
+    std::filesystem::path path_;
+    bool existed_ = false;
+    std::filesystem::file_time_type time_{};
+};
+
 }  // namespace dlssvid

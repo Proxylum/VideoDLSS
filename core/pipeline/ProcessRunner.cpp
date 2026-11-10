@@ -1116,9 +1116,9 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
         encoder.AddAudioStreamCopy(decoder.AudioCodecParameters(), decoder.AudioTimeBase());
         decoder.SetAudioPacketSink([&encoder](AVPacket* pkt) { encoder.WriteAudioPacket(pkt); });
     }
-    // MKV keeps no frame count: the pass's, in source frames. Without a total the GUI reads no "encode: N/M frames" line - it would not
-    // know the encode step has begun (TASK-0070: it lets the old result go then, and removes the file a cancel leaves). Frame 0 is
-    // reported before the file is made.
+    // MKV keeps no frame count: the pass's, in source frames, so that the GUI shows how far the step is. The GUI knows the encode step
+    // by its progress line, with a total or without (TASK-0070: it lets the old result go then, and removes the file a cancel leaves);
+    // frame 0 is reported before the file is made.
     int64_t total = info.frameCount > 0 ? info.frameCount : (m.frameCount + mult - 1) / mult;
     if (maxSourceFrames > 0) total = std::min<int64_t>(maxSourceFrames, total);
     if (progress) progress(0, total);
@@ -1197,7 +1197,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
     // ---- passthrough (stage 0) ----
     if (options.passthrough) {
         // TASK-0070: written next to the result, put in its place only when complete - a cancel or a failure keeps the previous one
-        const std::filesystem::path partial = PartialResultPath(options.output);
+        const PartialResult partial(PartialResultPath(options.output));
         ResultExpectation expect;
         try {
             VideoDecoder::Options dopt;
@@ -1213,7 +1213,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             FrameDesc target = of.desc;
             target.width = info.width;
             target.height = info.height;
-            VideoEncoder encoder(partial, target, eopt);
+            VideoEncoder encoder(partial.Path(), target, eopt);
             Log()->info("passthrough: {} as {} ({}) from a {} source{}{}", options.codec, target.Describe(), encoder.PixelFormatName(), info.decoded.Describe(),
                         target == info.decoded ? ", bit-exact" : ", converted", of.reason.empty() ? "" : " — " + of.reason);
             result.codec = options.codec;
@@ -1227,7 +1227,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             pipeline.AddStage(std::make_unique<PassthroughStage>(), cfg);
             pipeline.Init();
             const auto t0 = Clock::now();
-            // MKV keeps no frame count: estimated from the duration, never below the frames done. The GUI reads only "N/M frames" lines (the
+            // MKV keeps no frame count: estimated from the duration, never below the frames done, so that the GUI shows how far it is (the
             // fallback below reports these as its encode step, TASK-0070); frame 0 is reported before the file is made
             int64_t total = needed;
             if (total <= 0 && info.durationUs > 0 && info.frameRate.num > 0) {
@@ -1253,10 +1253,10 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             result.audio = encoder.AudioPacketsWritten() > 0;  // a source track without packets: MP4 and MOV leave the track out
             expect = ResultExpectation{target.width, target.height, stats.framesOut, result.audio};
         } catch (...) {
-            RemovePartialResult(partial);  // the encoder is gone with its scope: the file is closed
+            partial.DiscardIfWritten();  // the encoder is gone with its scope: the file is closed
             throw;
         }
-        PublishResult(partial, options.output, expect);
+        PublishResult(partial.Path(), options.output, expect);
         result.seconds = Seconds(tAll);
         return result;
     }
@@ -1671,19 +1671,19 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             Log()->info("encode: settings note: {}", es.metadata["comment"]);
         }
         // TASK-0070: written next to the result, put in its place only when complete - a cancel or a failure keeps the previous one
-        const std::filesystem::path partial = PartialResultPath(options.output);
+        const PartialResult partial(PartialResultPath(options.output));
         EncodeReport r;
         try {
-            r = EncodePassToVideo(result.finalPass, options.input, partial, es, options.frames,
+            r = EncodePassToVideo(result.finalPass, options.input, partial.Path(), es, options.frames,
                                   [&](int64_t n, int64_t total) {
                                       if (options.progress) options.progress("encode", n, total);
                                   },
                                   options.hwaccel);
         } catch (...) {
-            RemovePartialResult(partial);  // the encoder is gone with its scope: the file is closed
+            partial.DiscardIfWritten();  // the encoder is gone with its scope: the file is closed
             throw;
         }
-        PublishResult(partial, options.output, {r.format.width, r.format.height, r.frames, r.audio});
+        PublishResult(partial.Path(), options.output, {r.format.width, r.format.height, r.frames, r.audio});
         enc.status = "ran";
         enc.outDir = result.finalPass;
         enc.frames = r.frames;

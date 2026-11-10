@@ -245,6 +245,7 @@ public slots:
     void startProxies();
     void cancelProxies();
     QString proxyState(const std::string& source) const;  // "ready" | "building" | "none"
+    QStringList proxyBuildSources() const;                // the sources a running build makes proxies for ("source", "result")
     bool proxyBuilding() const { return proxyProcess_ && proxyProcess_->state() != QProcess::NotRunning; }
     // Scrubbing latency: a time set by the user (not playback) until the exact frames of every needed source are on
     // the GPU; logged as p50 / p90 every 30 jumps («viewport scrub» in the log). The samples since the last log line.

@@ -79,8 +79,8 @@ public:
     bool finished(int id) const;
     bool succeeded(int id) const;
     bool cancelled(int id) const;
-    // Its process crashed or was ended from outside (Task Manager, `taskkill /F`): any exit code but 0, and dlssvid's 1 after the
-    // "[error]" line it logs for the errors it handles. Nothing it meant to clean up was (TASK-0070).
+    // Its process crashed or was ended from outside (Task Manager, `taskkill /F`): any exit code but 0, and dlssvid's 1 when its last
+    // line was the "[error]" it logs for the error it handles and ends on. Nothing it meant to clean up was (TASK-0070).
     bool endedAbnormally(int id) const;
 
 signals:
@@ -108,7 +108,7 @@ private:
         bool ok = false;
         bool cancelled = false;
         bool abnormal = false;       // endedAbnormally
-        bool reportedError = false;  // an "[error]" line of dlssvid's log came
+        bool reportedError = false;  // the last line was an "[error]" of dlssvid's log
         std::vector<StagePlan> plan;
         Progress progress;
         QElapsedTimer timer;

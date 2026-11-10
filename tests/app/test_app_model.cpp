@@ -5690,8 +5690,12 @@ TEST_CASE("ProjectTasks: a project opened again while its task ran reads its pas
 }
 
 namespace {
-// A run at its encode step as the CLI reports it, then busy for a while (what `process` writes meanwhile is the test's to make).
-const QStringList kEncodingRun{"/c", "echo", "encode:", "1/3", "frames", "&", "ping", "-n", "4", "127.0.0.1", ">nul"};
+// A run at its encode step as the CLI reports it, then busy until a test ends it by a cancel (what `process` writes meanwhile is the
+// test's to make). A run that ends by itself could end before the test looks - opening a project takes seconds on a loaded machine,
+// and the line and the end of the process could be handled in one pass of the event loop. It waits in cmd's own `set /p` for a line
+// on its standard input, which the queue keeps open: a child process (ping) killed with nothing would hold the test's handles.
+const QStringList kWaitForCancel{"&", "set", "/p", "wait="};
+const QStringList kEncodingRun = QStringList{"/c", "echo", "encode:", "1/3", "frames"} + kWaitForCancel;
 
 bool Renames(const std::filesystem::path& from, const std::filesystem::path& to) {
     std::error_code ec;
@@ -5737,6 +5741,7 @@ TEST_CASE("ProjectTasks: a run lets the shown result go at its encode step, so t
     CHECK(rig.model.resultReleased());
     CHECK_FALSE(rig.model.sourceNames().contains("result"));
     CHECK(Renames(fresh, result));
+    rig.queue.cancel(rig.processId);
     rig.wait(rig.processId);
     CHECK_FALSE(rig.model.resultReleased());
     CHECK(rig.model.sourceNames().contains("result"));
@@ -5766,8 +5771,12 @@ TEST_CASE("ProjectTasks: a run cancelled while it encodes leaves no half-written
     rig.wait(failed);
     REQUIRE_FALSE(rig.queue.succeeded(failed));
     CHECK(std::filesystem::exists(partial));
-    // a cancelled task that never reached the encode step wrote nothing beside it
-    const int early = rig.queue.enqueue("t", "ping", {"-n", "4", "127.0.0.1"});
+    // a run cancelled at a stage before its encode step wrote nothing beside it, and its result stayed shown (review of TASK-0070)
+    const int early = rig.queue.enqueue("t", "cmd", QStringList{"/c", "echo", "depth:", "1/3", "frames"} + kWaitForCancel);
+    Pump([&] { return rig.queue.progress(early).stage == "depth"; }, 15000);
+    REQUIRE(rig.queue.progress(early).stage == "depth");
+    CHECK_FALSE(rig.model.resultReleased());
+    CHECK(rig.model.sourceNames().contains("result"));
     rig.queue.cancel(early);
     rig.wait(early);
     CHECK(std::filesystem::exists(partial));
@@ -5784,6 +5793,34 @@ TEST_CASE("ProjectTasks: a run cancelled while it encodes leaves no half-written
     rig.wait(killed);
     CHECK(rig.queue.endedAbnormally(killed));
     CHECK_FALSE(std::filesystem::exists(partial));
+    // ... also after the error line of the fg process the run went on after: only the error dlssvid ends on, its last line, counts
+    std::ofstream(partial, std::ios::binary) << "half written";
+    const int afterFg = rig.queue.enqueue("t", "cmd", {"/c", "echo", "[10:00:00.000]", "[error]", "fg:", "DLSS-G", "failed", "&", "echo", "[10:00:01.000]", "[warning]",
+                                                       "process:", "fg", "failed", "&", "echo", "encode:", "1/3", "frames", "&", "ping", "-n", "2", "127.0.0.1", ">nul", "&",
+                                                       "exit", "1"});
+    rig.wait(afterFg);
+    CHECK(rig.queue.endedAbnormally(afterFg));
+    CHECK_FALSE(std::filesystem::exists(partial));
+}
+
+TEST_CASE("AppModel::releaseResult stops a proxy build that reads the result; while it is let go no build takes the result up", "[app][model][gpu][regression]") {
+    // review of TASK-0070: a proxy build holds the result as long as a player - the rename at the end of the run would fail
+    App();
+    QSettings().setValue("view/autoProxy", true);
+    const auto d = Dir("release_result_proxy");
+    AppModel model{true};
+    model.openProject(Q(TaskProject(d, "a")));  // no proxies yet: a build of both starts
+    REQUIRE(model.proxyBuildSources().contains("result"));
+    model.releaseResult();  // no event loop in between: the build is still running
+    CHECK(model.resultReleased());
+    CHECK_FALSE(model.proxyBuildSources().contains("result"));
+    model.startProxies();  // a reload of the sources while the run encodes
+    CHECK_FALSE(model.proxyBuildSources().contains("result"));
+    model.restoreResult();
+    model.startProxies();
+    CHECK(model.proxyBuildSources().contains("result"));
+    model.cancelProxies();
+    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("ProjectTasks: a run whose source keeps neither a frame count nor a duration lets the result go too - its encode line has no total", "[app][model][gpu][regression]") {
@@ -5793,10 +5830,11 @@ TEST_CASE("ProjectTasks: a run whose source keeps neither a frame count nor a du
     TaskRig rig;
     rig.model.openProject(Q(TaskProject(d, "a")));
     REQUIRE(rig.model.sourceNames().contains("result"));
-    rig.processId = rig.queue.enqueue("t", "cmd", {"/c", "echo", "encode:", "0", "frames", "&", "ping", "-n", "4", "127.0.0.1", ">nul"});
+    rig.processId = rig.queue.enqueue("t", "cmd", QStringList{"/c", "echo", "encode:", "0", "frames"} + kWaitForCancel);
     Pump([&] { return rig.model.resultReleased(); }, 15000);
     CHECK(rig.model.resultReleased());
     CHECK(rig.queue.progress(rig.processId).stage == "encode");
+    rig.queue.cancel(rig.processId);
     rig.wait(rig.processId);
     CHECK_FALSE(rig.model.resultReleased());
     // a log line that ends in "frames" is no progress: only a whole "stage: N frames" line
@@ -5859,6 +5897,7 @@ TEST_CASE("ProjectTasks: a project opened again before its run encodes has its r
     Pump([&] { return rig.model.resultReleased(); }, 15000);
     REQUIRE(rig.model.resultReleased());
     CHECK_FALSE(rig.model.sourceNames().contains("result"));
+    rig.queue.cancel(rig.processId);
     rig.wait(rig.processId);
     CHECK_FALSE(rig.model.resultReleased());
     CHECK(rig.model.sourceNames().contains("result"));
@@ -5872,11 +5911,11 @@ TEST_CASE("ProjectTasks: a run of project A at its encode step leaves B's result
     rig.model.openProject(Q(a));
     rig.processId = rig.queue.enqueue("t", "cmd", kEncodingRun);
     rig.model.openProject(Q(b));
-    QSignalSpy progress(&rig.queue, &TaskQueue::taskProgress);
-    Pump([&] { return progress.count() > 0; }, 15000);
-    REQUIRE(progress.count() > 0);
+    Pump([&] { return rig.queue.progress(rig.processId).stage == "encode"; }, 15000);
+    REQUIRE(rig.queue.progress(rig.processId).stage == "encode");
     CHECK_FALSE(rig.model.resultReleased());
     CHECK(rig.model.sourceNames().contains("result"));
+    rig.queue.cancel(rig.processId);
     rig.wait(rig.processId);
     CHECK(rig.model.sourceNames().contains("result"));
 }

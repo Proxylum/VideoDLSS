@@ -308,7 +308,8 @@ void TaskQueue::onOutput() {
     else buffer_.clear();
     for (const QString& line : lines) {
         Task& t = tasks_[static_cast<size_t>(current_)];  // re-fetched: a slot may have queued a task (vector growth)
-        if (line.contains(QLatin1String("] [error] "))) t.reportedError = true;  // dlssvid logs the error it ends on
+        // dlssvid logs the error it ends on as its last line; an error of a child it went on after (the fg process) is followed by more
+        if (!line.trimmed().isEmpty()) t.reportedError = line.contains(QLatin1String("] [error] "));
         if (const auto f = failedRe.match(line); f.hasMatch()) {  // first: a progress update may be glued to this line
             stageFailed(t, f.captured(1));
             emitOutput(tasks_[static_cast<size_t>(current_)], line);

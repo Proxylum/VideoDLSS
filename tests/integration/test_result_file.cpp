@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -66,8 +67,7 @@ ProcessOptions Options(const std::filesystem::path& dir, const std::filesystem::
     return o;
 }
 
-// A handle that lets others read only - what a program that opens a file for itself does. Windows then neither renames over it nor
-// writes into it.
+// A reader's handle with the sharing given: without FILE_SHARE_DELETE (FFmpeg opens files so) Windows renames nothing over the file.
 struct Held {
     HANDLE h;
     explicit Held(const std::filesystem::path& p, DWORD share) : h(CreateFileW(p.c_str(), GENERIC_READ, share, nullptr, OPEN_EXISTING, 0, nullptr)) {
@@ -284,4 +284,43 @@ TEST_CASE("RunProcess: a read-only previous result is refused before anything ru
     CHECK_FALSE(ReadOnlyFile(o.output));
     CHECK(Bytes(o.output) == "the previous result");
     CHECK(std::filesystem::exists(partial));
+}
+
+TEST_CASE("RunProcess: a run that fails before it opens its file leaves the finished new result an earlier run kept beside the old one", "[integration][process][result][regression]") {
+    // review of TASK-0070: the error of a run whose rename failed tells the user to rename its file - a later run that failed early
+    // (a codec option refused, a pass that does not read) deleted it
+    const auto dir = Dir("kept_partial");
+    const auto clip = WriteClip(dir / "clip.mkv", Small(3));
+    ProcessOptions o = Options(dir, clip);
+    std::ofstream(o.output, std::ios::binary) << "the previous result";
+    const auto partial = PartialResultPath(o.output);
+    const auto keep = [&] {
+        std::ofstream(partial, std::ios::binary) << "kept by an earlier run";
+        std::filesystem::last_write_time(partial, std::filesystem::file_time_type::clock::now() - std::chrono::hours(1));
+    };
+    const auto failAt = [](const char* step, int64_t at) {
+        return [step, at](const std::string& stage, int64_t done, int64_t) {
+            if (stage == step && done == at) throw std::runtime_error("stopped");
+        };
+    };
+    SECTION("from the passes") {
+        keep();
+        o.progress = failAt("encode", 0);  // frame 0 is reported before the file is opened
+        CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("stopped"));
+        CHECK(Bytes(partial) == "kept by an earlier run");
+        o.progress = failAt("encode", 2);  // one that wrote it removes what it wrote
+        CHECK_THROWS(RunProcess(o));
+        CHECK_FALSE(std::filesystem::exists(partial));
+    }
+    SECTION("passed through") {
+        o.passthrough = true;
+        keep();
+        o.progress = failAt("passthrough", 0);
+        CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("stopped"));
+        CHECK(Bytes(partial) == "kept by an earlier run");
+        o.progress = failAt("passthrough", 2);
+        CHECK_THROWS(RunProcess(o));
+        CHECK_FALSE(std::filesystem::exists(partial));
+    }
+    CHECK(Bytes(o.output) == "the previous result");
 }
