@@ -207,6 +207,17 @@ void TaskQueue::cancel(int id) {
     }
 }
 
+void TaskQueue::stopAll(int waitMs) {
+    std::vector<int> waiting;  // first: none of them starts when the running one has ended
+    for (const auto& t : tasks_)
+        if (!t.done && t.id != currentId()) waiting.push_back(t.id);
+    for (const int id : waiting) cancel(id);
+    if (current_ < 0) return;
+    QProcess* p = process_.get();  // onFinished hands it to deleteLater: alive until the event loop runs again
+    cancel(currentId());
+    if (p && p->state() != QProcess::NotRunning) p->waitForFinished(waitMs);  // emits finished from here: the task's end is handled now
+}
+
 const TaskQueue::Task* TaskQueue::find(int id) const {
     for (const auto& t : tasks_)
         if (t.id == id) return &t;
@@ -237,6 +248,11 @@ bool TaskQueue::succeeded(int id) const {
 bool TaskQueue::cancelled(int id) const {
     const Task* t = find(id);
     return t && t->cancelled;
+}
+
+bool TaskQueue::endedAbnormally(int id) const {
+    const Task* t = find(id);
+    return t && t->abnormal;
 }
 
 double TaskQueue::plannedSeconds(const Task& t, const QString& stage) const {
@@ -278,6 +294,9 @@ void TaskQueue::onOutput() {
     // progress lines look like "\rdepth: 12/90 frames" (process) or "\r12/90 frames" (a single stage); the runner
     // also tells when a stage is done or reused
     static const QRegularExpression progressRe(R"((?:([A-Za-z_]+): )?(\d+)/(\d+) frames)");
+    // a stage's line without a total (a source that keeps neither a frame count nor a duration): the whole line, so that a log line
+    // such as "process: depth done — 7 frames in 0.3 s" is not one (TASK-0070: the GUI knows the encode step by its progress)
+    static const QRegularExpression countRe(R"(^([A-Za-z_]+): (\d+) frames$)");
     static const QRegularExpression doneRe(R"(process: ([A-Za-z_]+) done \S+ (\d+) frames in ([0-9.]+) s)");
     static const QRegularExpression reusedRe(R"(process: ([A-Za-z_]+) \S+ .*(is complete, reused|restored from the history))");
     // a stage that failed while the run went on (fg in its own process, audit fg-2); "process: stage 'fg' failed" - the
@@ -289,6 +308,8 @@ void TaskQueue::onOutput() {
     else buffer_.clear();
     for (const QString& line : lines) {
         Task& t = tasks_[static_cast<size_t>(current_)];  // re-fetched: a slot may have queued a task (vector growth)
+        // dlssvid logs the error it ends on as its last line; an error of a child it went on after (the fg process) is followed by more
+        if (!line.trimmed().isEmpty()) t.reportedError = line.contains(QLatin1String("] [error] "));
         if (const auto f = failedRe.match(line); f.hasMatch()) {  // first: a progress update may be glued to this line
             stageFailed(t, f.captured(1));
             emitOutput(tasks_[static_cast<size_t>(current_)], line);
@@ -296,6 +317,10 @@ void TaskQueue::onOutput() {
         }
         if (const auto m = progressRe.match(line); m.hasMatch()) {
             updateProgress(t, m.captured(1), m.captured(2).toInt(), m.captured(3).toInt());
+            continue;
+        }
+        if (const auto m = countRe.match(line.trimmed()); m.hasMatch()) {
+            updateProgress(t, m.captured(1), m.captured(2).toInt(), 0);
             continue;
         }
         if (line.trimmed().isEmpty()) continue;
@@ -451,6 +476,8 @@ void TaskQueue::onFinished(int exitCode, QProcess::ExitStatus status) {
     current_ = -1;
     Task& t = tasks_[static_cast<size_t>(index)];
     const bool ok = !t.cancelled && status == QProcess::NormalExit && exitCode == 0;
+    // dlssvid's own errors end with 1 after an "[error]" line; Task Manager and `taskkill /F` end a process with 1 too, saying nothing
+    t.abnormal = status == QProcess::CrashExit || (exitCode != 0 && !(exitCode == 1 && t.reportedError));
     QString text;
     if (t.cancelled) text = tr("отменена");
     else if (ok) text = tr("готово");

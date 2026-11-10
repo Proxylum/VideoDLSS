@@ -24,7 +24,10 @@ public:
 
     // Task `id` has ended. Its own project: the «пересчитать» marks go and the sources are read again; `processDone` (the `process`
     // run of the processing page, ended ok) also records its time and shows the result against the source. Another project is open:
-    // its marks and view stay, its sources are read again only if the task wrote into its passes folder.
+    // its marks and view stay, its sources are read again only if the task wrote into its passes folder. The file the task writes, let
+    // go wherever the viewer shows it while the task encoded (TASK-0070: from its "encode" progress on - the open project's result, or
+    // its source when it was opened from an earlier result), is back; a task cancelled or crashed while it encoded leaves no
+    // half-written result beside the old one.
     Finished finish(int id, bool processDone);
     void forget(int id) { origins_.erase(id); }  // a task whose end was handled elsewhere
 
@@ -33,6 +36,8 @@ private:
         uint64_t generation = 0;
         std::filesystem::path passesRoot;
         QString video;
+        std::filesystem::path result;  // the project's result file when it was queued
+        bool encoding = false;         // it has reported "encode" progress: it has written the new result beside that file
     };
 
     AppModel& model_;

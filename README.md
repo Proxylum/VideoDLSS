@@ -411,6 +411,16 @@ parameters return. `process --plan` shows the decisions first; `passes list|use|
 `dlssvid fg`): if DLSS-G or the driver crashes there, `--disable-unavailable` (which the GUI always passes) marks the
 stage `failed`, encodes the result from `color_nr` and prints a `warning:` line; without the flag the run fails.
 
+The result is written next to its place as `<name>.dlssvid-part<ext>` and replaces the previous result in one rename,
+only when it is complete and reads back as what was encoded (the frame size, the frame count in MP4 and MOV, the audio):
+a run that is cancelled or fails leaves the previous result as it was. Windows cannot replace a file that a player has
+open: then the previous result stays, the new one stays as `.dlssvid-part` and the error says where - run again once
+the player is closed (a run with stages reuses its passes), or close every program that shows the file (in dlssvid:
+close the project, its viewer shows the old result again) and rename the new one over it. A read-only previous result
+is refused before anything runs. The GUI lets its own viewer's copies of the file go while a run encodes - as the
+result, or as the source of a project made from an earlier result; a run that is cancelled, crashes or is ended with
+the window removes its unfinished file.
+
 ```bat
 dlssvid process -i input.mp4 -o result.mp4                                            :: depth -> flow -> upscale x2 -> nr -> fg x2 -> encode (+ audio)
 dlssvid process --project clip.dlssvid.json                                           :: the stages and parameters the GUI saved (button «Обработать → result»)

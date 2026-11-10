@@ -192,6 +192,8 @@ std::vector<ViewportSource> AppModel::viewportSources(bool dropControlMask) cons
         sources.erase(std::remove_if(sources.begin(), sources.end(), [](const ViewportSource& s) { return s.pass == kControlMaskPass; }), sources.end());
     // a history folder named «preview» (made by hand) would be a second color_nr@preview: the store keys its sources by name
     sources.erase(std::remove_if(sources.begin(), sources.end(), [](const ViewportSource& s) { return s.version == "preview"; }), sources.end());
+    if (!releasedFile_.empty())  // a run is encoding a new result into it (TASK-0070)
+        sources.erase(std::remove_if(sources.begin(), sources.end(), [this](const ViewportSource& s) { return s.isVideo && isReleased(s.path); }), sources.end());
     if (nrPreview_ && nrPreview_->root == project_.passesRoot) {
         try {
             if (auto s = FrameStore::PassFolderSource(nrPreview_->dir / "color_nr", kNrPreviewSource, "color_nr", "preview")) sources.push_back(std::move(*s));
@@ -219,6 +221,7 @@ void AppModel::adoptProject(Project next) {
     dropNrPreview();
     force_.clear();   // the «пересчитать» marks and the run time are the open project's (as in closeProject)
     lastRun_ = 0.0;
+    releasedFile_.clear();  // a run encoding the result of the project before: this project's videos are shown, the next encode line decides
     project_ = std::move(next);
 }
 
@@ -387,7 +390,7 @@ void AppModel::reloadSources() {
     resultAudio_ = false;
     resultCodec_.clear();
     resultFormat_ = FrameDesc{};
-    if (!project_.resultVideo.empty() && std::filesystem::exists(project_.resultVideo)) {
+    if (!isReleased(project_.resultVideo) && !project_.resultVideo.empty() && std::filesystem::exists(project_.resultVideo)) {
         try {
             VideoDecoder probe(project_.resultVideo, VideoDecoder::Probe());
             resultAudio_ = probe.HasAudio();
@@ -407,15 +410,54 @@ void AppModel::reloadSources() {
     startProxies();
 }
 
+QStringList AppModel::proxyBuildSources() const {
+    const int at = proxyArgs_.indexOf("--sources");
+    return proxyBuilding() && at >= 0 ? proxyArgs_.value(at + 1).split(',') : QStringList{};
+}
+
+namespace {
+bool SameFile(const std::filesystem::path& a, const std::filesystem::path& b) {
+    std::error_code ec;
+    return !a.empty() && !b.empty() && (a == b || (std::filesystem::equivalent(a, b, ec) && !ec));
+}
+}  // namespace
+
+bool AppModel::isReleased(const std::filesystem::path& video) const { return SameFile(video, releasedFile_); }
+
+void AppModel::releaseResult(const std::filesystem::path& file) {
+    if (!releasedFile_.empty() || file.empty()) return;
+    // a proxy build that reads the file holds it as long as a player: one started since the run was queued (it cancelled the one before),
+    // or one of a project open before - opening another project does not stop it. `proxy` opens its -i in any case
+    if (proxyBuilding()) {
+        const auto arg = [this](const char* flag) {
+            const int at = proxyArgs_.indexOf(flag);
+            return at >= 0 ? std::filesystem::path(proxyArgs_.value(at + 1).toStdWString()) : std::filesystem::path();
+        };
+        if (SameFile(arg("-i"), file) || (SameFile(arg("--result"), file) && proxyBuildSources().contains("result"))) cancelProxies();
+    }
+    bool shown = false;  // a video source exactly while its file is there
+    for (const auto& s : store_->Sources()) shown = shown || (s.isVideo && SameFile(s.path, file));
+    if (!shown) return;
+    releasedFile_ = file;
+    store_->SetSources(viewportSources(controlMaskBusy_));  // waits for the loads in flight: the file is let go
+    Log()->info("viewport: {} is let go while a run encodes a new result into it", releasedFile_.string());
+    emit resultChanged();
+    emit sourcesChanged();
+    requestFrames();  // the other sources again: SetSources cleared the cache
+    emit stateChanged();
+}
+
 void AppModel::requestFrames() { store_->SetCurrentTime(state().time, neededSources()); }
 
 void AppModel::startProxies() {
     if (!hasProject() || project_.passesRoot.empty() || !std::filesystem::exists(project_.sourceVideo)) return;
     if (!QSettings().value("view/autoProxy", true).toBool()) return;
+    if (isReleased(project_.sourceVideo)) return;  // a run writes it (TASK-0070): `proxy` opens the source for any proxy
     QStringList names;
     for (const char* name : {"source", "result"}) {
         const std::filesystem::path video = std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo;
         if (video.empty() || !std::filesystem::exists(video) || ValidProxy(video, project_.passesRoot, name)) continue;
+        if (isReleased(video)) continue;  // being replaced (TASK-0070)
         names << name;
     }
     if (names.isEmpty()) return;
@@ -1238,6 +1280,7 @@ QString AppModel::formatLabel(const std::string& codec, const FrameDesc& format)
 }
 
 QString AppModel::resultSummary() const {
+    if (resultBeingReplaced()) return tr("заменяется новым — идёт кодирование");  // the file is there, the viewer has let it go (TASK-0070)
     const ResultInfo r = resultInfo();
     if (!r.exists) return {};
     QStringList parts;
@@ -1281,6 +1324,10 @@ unsigned long long AppModel::freeSpace() const {
 }
 
 bool AppModel::exportResult(const QString& to) {
+    if (resultBeingReplaced()) {  // a run let it go while a save dialog was open; a copy now would hold the file it renames over (TASK-0070)
+        emit message(tr("Результат заменяется новым — сохраните его, когда обработка закончится"));
+        return false;
+    }
     const ResultInfo r = resultInfo();
     if (!r.exists) {
         emit message(tr("Результата ещё нет"));
@@ -1311,6 +1358,7 @@ bool AppModel::closeProject() {
     force_.clear();
     lastRun_ = 0.0;
     resultAudio_ = false;
+    releasedFile_.clear();
     cancelProxies();
     store_->SetSources({});
     if (!controlMaskBusy_) controlMask_ = {};

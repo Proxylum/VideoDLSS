@@ -65,6 +65,9 @@ public:
     int enqueue(const QString& title, const QString& program, const QStringList& args, const std::vector<StagePlan>& plan = {}, Lane lane = Lane::Main);
     // The running task is killed, a queued one is dropped; both finish with ok = false.
     void cancel(int id);
+    // Every task: the waiting ones dropped, the running one killed and waited for (up to waitMs), so that the ends of all are handled
+    // before the caller goes on - the window closing (TASK-0070: a run killed while it encoded leaves no file behind).
+    void stopAll(int waitMs);
     bool busy() const { return current_ >= 0; }  // a process of either lane runs
     bool mainBusy() const;                       // a Main task runs or waits
     bool previewBusy() const;                    // a Preview task runs or waits
@@ -76,6 +79,9 @@ public:
     bool finished(int id) const;
     bool succeeded(int id) const;
     bool cancelled(int id) const;
+    // Its process crashed or was ended from outside (Task Manager, `taskkill /F`): any exit code but 0, and dlssvid's 1 when its last
+    // line was the "[error]" it logs for the error it handles and ends on. Nothing it meant to clean up was (TASK-0070).
+    bool endedAbnormally(int id) const;
 
 signals:
     // Main tasks
@@ -101,6 +107,8 @@ private:
         bool done = false;
         bool ok = false;
         bool cancelled = false;
+        bool abnormal = false;       // endedAbnormally
+        bool reportedError = false;  // the last line was an "[error]" of dlssvid's log
         std::vector<StagePlan> plan;
         Progress progress;
         QElapsedTimer timer;
