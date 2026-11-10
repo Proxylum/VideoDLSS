@@ -426,12 +426,19 @@ bool AppModel::isReleased(const std::filesystem::path& video) const { return Sam
 
 void AppModel::releaseResult(const std::filesystem::path& file) {
     if (!releasedFile_.empty() || file.empty()) return;
+    // a proxy build that reads the file holds it as long as a player: one started since the run was queued (it cancelled the one before),
+    // or one of a project open before - opening another project does not stop it. `proxy` opens its -i in any case
+    if (proxyBuilding()) {
+        const auto arg = [this](const char* flag) {
+            const int at = proxyArgs_.indexOf(flag);
+            return at >= 0 ? std::filesystem::path(proxyArgs_.value(at + 1).toStdWString()) : std::filesystem::path();
+        };
+        if (SameFile(arg("-i"), file) || (SameFile(arg("--result"), file) && proxyBuildSources().contains("result"))) cancelProxies();
+    }
     bool shown = false;  // a video source exactly while its file is there
     for (const auto& s : store_->Sources()) shown = shown || (s.isVideo && SameFile(s.path, file));
     if (!shown) return;
     releasedFile_ = file;
-    // a build started since the run was queued (it cancelled the one before): `proxy` opens the source in any case
-    if (isReleased(project_.sourceVideo) || (isReleased(project_.resultVideo) && proxyBuildSources().contains("result"))) cancelProxies();
     store_->SetSources(viewportSources(controlMaskBusy_));  // waits for the loads in flight: the file is let go
     Log()->info("viewport: {} is let go while a run encodes a new result into it", releasedFile_.string());
     emit resultChanged();

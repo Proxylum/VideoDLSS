@@ -5827,6 +5827,16 @@ TEST_CASE("AppModel::releaseResult stops a proxy build that reads the result; wh
     CHECK_FALSE(model.proxyBuilding());
     model.restoreResult();
     model.cancelProxies();
+    // a build left from the project open before (opening another one does not stop it) reads the run's result: stopped too, though
+    // no video shown is that file (review of TASK-0070)
+    model.openProject(Q(TaskProject(d, "c")));
+    REQUIRE(model.proxyBuildSources().contains("result"));
+    QSettings().setValue("view/autoProxy", false);  // the next project builds nothing: c's build goes on
+    model.openProject(Q(TaskProject(d, "e")));
+    REQUIRE(model.proxyBuilding());
+    model.releaseResult(d / "c_result.mkv");
+    CHECK_FALSE(model.resultReleased());  // not shown here
+    CHECK_FALSE(model.proxyBuilding());
     QSettings().remove("view/autoProxy");
 }
 

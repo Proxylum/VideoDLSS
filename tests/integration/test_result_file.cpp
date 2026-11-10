@@ -84,6 +84,31 @@ TEST_CASE("PartialResultPath: next to the result, its extension kept for the con
     CHECK(PartialResultPath(out) == std::filesystem::path("D:/v") / u8"клип_result.dlssvid-part.mp4");
     CHECK(PartialResultPath(out).extension() == ".mp4");
     CHECK(PartialResultPath("r.mkv") == std::filesystem::path("r.dlssvid-part.mkv"));
+
+    // NTFS takes 255 UTF-16 units in one name: a result name of 243 or more gets a shorter stem (review of TASK-0070)
+    const std::wstring stem(242, L'a');
+    const std::filesystem::path longName = std::filesystem::path(L"D:/v") / (stem + L".mp4");  // 246 units: valid
+    const std::wstring partialName = PartialResultPath(longName).filename().wstring();
+    CHECK(partialName.size() == 255);
+    CHECK(partialName.ends_with(L".dlssvid-part.mp4"));
+    CHECK(PartialResultPath(longName).parent_path() == longName.parent_path());
+    std::wstring pair(237, L'b');  // a surrogate pair (U+1F600) across the cut: it goes whole
+    pair += static_cast<wchar_t>(0xD83D);
+    pair += static_cast<wchar_t>(0xDE00);
+    pair += std::wstring(5, L'c');
+    const std::wstring cut = PartialResultPath(std::filesystem::path(L"D:/v") / (pair + L".mp4")).filename().wstring();
+    CHECK(cut.size() == 254);
+    CHECK(cut.substr(0, 237) == std::wstring(237, L'b'));
+    CHECK(cut[237] == L'.');
+    // and it can be made where the result can
+    const auto dir = std::filesystem::absolute(TempDir() / "result_file" / "long_name");
+    std::error_code ec;
+    std::filesystem::remove_all(Win32LongPath(dir), ec);  // its file is past MAX_PATH: Dir() could not remove it
+    std::filesystem::create_directories(dir);
+    const auto made = PartialResultPath(dir / (stem + L".mkv"));
+    CHECK(std::ofstream(Win32LongPath(made), std::ios::binary).write("x", 1).good());
+    CHECK(std::filesystem::exists(Win32LongPath(made)));
+    std::filesystem::remove_all(Win32LongPath(dir), ec);
 }
 
 TEST_CASE("CheckEncodedResult: the size, the frame count where the container counts its samples, the audio", "[integration][result]") {

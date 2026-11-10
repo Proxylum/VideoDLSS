@@ -42,10 +42,16 @@ bool CountsFrames(const fs::path& file) {
 }  // namespace
 
 fs::path PartialResultPath(const fs::path& output) {
-    fs::path name = output.stem();
-    name += ".dlssvid-part";
-    name += output.extension();
-    return output.parent_path() / name;
+    // NTFS takes at most 255 UTF-16 units in one name: a result name of 243 or more would make the partial one impossible - its
+    // stem is cut instead (not inside a surrogate pair)
+    constexpr size_t kMaxName = 255;
+    std::wstring stem = output.stem().wstring();
+    const std::wstring tail = L".dlssvid-part" + output.extension().wstring();
+    if (stem.size() + tail.size() > kMaxName) {
+        stem.resize(tail.size() < kMaxName ? kMaxName - tail.size() : 0);
+        if (!stem.empty() && stem.back() >= 0xD800 && stem.back() <= 0xDBFF) stem.pop_back();
+    }
+    return output.parent_path() / (stem + tail);
 }
 
 std::string CheckEncodedResult(const fs::path& file, const ResultExpectation& expect) {
