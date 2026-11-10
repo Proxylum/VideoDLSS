@@ -17,6 +17,7 @@ namespace dlssvid {
 // What the GUI process knows without NGX.
 struct AvailabilityFacts {
     bool software = false;  // the WARP adapter
+    bool ngxBuilt = true;   // DLSSVID_WITH_DLSS: the NGX stages are built in
     bool nvidia = false;
     NvidiaDriverVersion driver;
     NrAvailability nr;        // NrAvailable("ngx"): the SDK built in, the DLL and the forwarder there

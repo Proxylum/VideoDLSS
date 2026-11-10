@@ -1912,6 +1912,11 @@ AvailabilityFacts AppModel::availabilityFacts() const {
     AvailabilityFacts f;
     f.software = device_->IsWarp();
     f.nvidia = device_->IsNvidia();
+#if defined(DLSSVID_WITH_DLSS)
+    f.ngxBuilt = true;
+#else
+    f.ngxBuilt = false;
+#endif
     f.driver = NvidiaDriverFromUmd(device_->UmdDriverVersion());
     f.nr = NrAvailable("ngx");
     f.nrDll = !FindNrDll().empty();
@@ -1927,7 +1932,9 @@ QString AppModel::nrCheckSize() const {
     const StageEntry* e = FindEntry(project_, "nr");
     if (!e || outcome_.width == 0 || outcome_.height == 0) return {};
     const nlohmann::json p = EffectiveStageParams("nr", e->params);
-    const auto [w, h] = NrWorkSize(outcome_.width, outcome_.height, p.value("model_scale", 1.0));
+    // a malformed value is the plan's error, not a throw at every refresh of the card (review of TASK-0071)
+    const double modelScale = p.contains("model_scale") && p["model_scale"].is_number() ? p["model_scale"].get<double>() : 1.0;
+    const auto [w, h] = NrWorkSize(outcome_.width, outcome_.height, modelScale);
     return QString("%1x%2").arg(w).arg(h);
 }
 
@@ -1939,7 +1946,8 @@ QStringList AppModel::checkArgs(const std::string& stage, const QString& paramsF
         args = {"nr", "--check", "--backend", "ngx", "--params-file", paramsFile, "--json", jsonFile};
         if (const QString size = nrCheckSize(); !size.isEmpty()) args << "--check-size" << size;
     } else {
-        args = {"fg", "--check", "--backend", "dlssg", "--multiplier", QString::number(p.value("multiplier", 2)), "--json", jsonFile};
+        const int multiplier = p.contains("multiplier") && p["multiplier"].is_number() ? p["multiplier"].get<int>() : 2;
+        args = {"fg", "--check", "--backend", "dlssg", "--multiplier", QString::number(multiplier), "--json", jsonFile};
     }
     if (device_->IsWarp()) args << "--warp";
     return args;

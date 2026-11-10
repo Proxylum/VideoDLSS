@@ -330,6 +330,8 @@ void TaskQueue::onOutput() {
     // prints these after the stage's progress lines
     static const QRegularExpression disabledRe(R"((?:^|\] )process: (depth|flow|upscale|nr|fg) disabled\b(.*)$)");
     static const QRegularExpression fellBackRe(R"((?:^|\] )process: (upscale) fell back to [a-z]+\b(.*)$)");
+    // a skipped NR whose earlier color_nr could not be moved aside: the result has that pass, not this run's (review of TASK-0071)
+    static const QRegularExpression keptRe(R"((?:^|\] )process: (nr) could not run\b(.*)$)");
     static const QRegularExpression newline("[\r\n]");
     QStringList lines = buffer_.split(newline, Qt::SkipEmptyParts);
     if (!buffer_.endsWith('\n') && !buffer_.endsWith('\r') && !lines.isEmpty()) buffer_ = lines.takeLast();
@@ -349,6 +351,11 @@ void TaskQueue::onOutput() {
             continue;
         }
         if (const auto f = fellBackRe.match(line); f.hasMatch()) {
+            stageFellBack(t, f.captured(1), RunnerNote(f.captured(2)));
+            emitOutput(tasks_[static_cast<size_t>(current_)], line);
+            continue;
+        }
+        if (const auto f = keptRe.match(line); f.hasMatch()) {
             stageFellBack(t, f.captured(1), RunnerNote(f.captured(2)));
             emitOutput(tasks_[static_cast<size_t>(current_)], line);
             continue;

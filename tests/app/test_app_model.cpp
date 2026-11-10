@@ -2030,6 +2030,22 @@ TEST_CASE("ProcessingPanel::EndSummary: what a run that ended ok is short of - t
     CHECK(ProcessingPanel::EndSummary(p) == QString::fromUtf8("без стадии «Улучшение»"));
 }
 
+TEST_CASE("TaskQueue: a skipped NR whose earlier color_nr stays in the result is not shown done - the window keeps the page", "[app][tasks][regression]") {
+    // review of TASK-0071: "process: nr could not run - ...; the earlier color_nr is used" matched nothing, the row read «готово»
+    App();
+    TaskQueue queue;
+    const int id = queue.enqueue("t", "cmd", {"/c", "echo", "[10:00:00.000]", "[warning]", "process:", "nr", "could", "not", "run", "-", "no", "feature;", "the",
+                                              "earlier", "color_nr", "is", "used"},
+                                 {{"nr", QString::fromUtf8("Улучшение"), 1.0, false}});
+    Pump([&] { return queue.finished(id); }, 30000);
+    REQUIRE(queue.succeeded(id));
+    const TaskQueue::Progress p = queue.progress(id);
+    REQUIRE(p.stages.size() == 1);
+    CHECK(p.stages[0].fellBack);
+    CHECK(p.stages[0].note == "no feature; the earlier color_nr is used");
+    CHECK(ProcessingPanel::EndSummary(p) == QString::fromUtf8("стадия «Улучшение» — запасным способом"));
+}
+
 TEST_CASE("TaskQueue reads the CLI's UTF-8 across reads: an em dash split between two of them stays whole", "[app][tasks][regression]") {
     // TASK-0071: each read was decoded on its own - a character cut by the pipe became three replacement characters
     App();
@@ -2079,6 +2095,8 @@ TEST_CASE("TaskQueue runs dlssvid process with NR, FG and DLSS on the software a
             CHECK(s.state == "disabled");
             CHECK_FALSE(s.note.isEmpty());
             CHECK_FALSE(s.note.startsWith(s.name + ":"));  // the runner drops the stage's own prefix
+            // exactly the reason of the runner's line: its separator, its tail, the pipe's decoding (review of TASK-0071)
+            CHECK(output.join("\n").contains(QString::fromUtf8("process: %1 disabled — ").arg(s.name) + s.note + "; the result is made"));
         }
         if (s.name == "upscale") CHECK(s.fellBack);
         if (s.name == "encode") CHECK(s.state == "done");
@@ -2130,6 +2148,22 @@ TEST_CASE("StageAvailabilityFor: what the card says of NR and FG before the run 
     a = StageAvailabilityFor("fg", true, fg, noSdk, nullptr, false);
     CHECK(a.text == QString::fromUtf8("Frame Generation не собран в этой версии — стадия будет пропущена"));
     CHECK_FALSE(a.checkable);
+    // review of TASK-0071: without the SDK the DLLs are not copied either - the build is the reason, not a missing DLL
+    noSdk.ngxBuilt = false;
+    noSdk.dlssgDll = false;
+    noSdk.nrDll = false;
+    noSdk.nr = NrAvailability{false, "built without the DLSS SDK (NGX headers)"};
+    a = StageAvailabilityFor("fg", true, fg, noSdk, nullptr, false);
+    CHECK(a.text == QString::fromUtf8("Frame Generation не собран в этой версии — стадия будет пропущена"));
+    CHECK(a.tip == "built without the DLSS SDK");
+    a = StageAvailabilityFor("nr", true, nr, noSdk, nullptr, false);
+    CHECK(a.text == QString::fromUtf8("Neural Rendering не собран в этой версии — стадия будет пропущена"));
+    CHECK(a.tip == "built without the DLSS SDK (NGX headers)");
+    CHECK_FALSE(a.checkable);
+    // a backend that is not a string is no NGX stage: no line, no throw (review of TASK-0071: the card's refresh threw)
+    CHECK_FALSE(StageNeedsNgx("nr", {{"backend", nullptr}}));
+    CHECK_FALSE(StageNeedsNgx("fg", {{"backend", 1}}));
+    CHECK(StageAvailabilityFor("nr", true, {{"backend", nullptr}}, noSdk, nullptr, false).text.isEmpty());
     AvailabilityFacts noFg = f;
     noFg.dlssgDll = false;
     noFg.dlssgInstruction = "copy nvngx_dlssg.dll";
@@ -2234,6 +2268,20 @@ TEST_CASE("AppModel::checkArgs: the check runs the run's NR settings without the
     const QStringList fg = model.checkArgs("fg", "P.json", "J.json");
     CHECK(fg[fg.indexOf("--multiplier") + 1] == "3");
     CHECK_FALSE(fg.contains("--params-file"));
+    // review of TASK-0071: a malformed value of a hand-edited project or the JSON field threw at every refresh of the card
+    model.setStageParams("fg", {{"backend", "dlssg"}, {"multiplier", "three"}});
+    const QStringList fg2 = model.checkArgs("fg", "P.json", "J.json");
+    CHECK(fg2[fg2.indexOf("--multiplier") + 1] == "2");
+    model.setStageParams("nr", {{"backend", "ngx"}, {"model_scale", "half"}});
+    QStringList nr2;
+    CHECK_NOTHROW(nr2 = model.checkArgs("nr", "P.json", "J.json"));
+    if (model.outcome().width) {  // the model's frame: scale 1
+        REQUIRE(nr2.contains("--check-size"));
+        CHECK(nr2[nr2.indexOf("--check-size") + 1] == QString("%1x%2").arg(model.outcome().width).arg(model.outcome().height));
+    }
+    CHECK_NOTHROW(model.availability("nr"));
+    model.setStageParams("nr", {{"backend", nullptr}});
+    CHECK(model.availability("nr").text.isEmpty());
 }
 
 TEST_CASE("AppModel::checkStage runs nr --check with the project's settings and says what it found", "[app][availability][gpu]") {
@@ -2307,9 +2355,16 @@ TEST_CASE("AppModel::checkStage runs nr --check with the project's settings and 
     for (QProcess* p : model.findChildren<QProcess*>())
         if (p->state() != QProcess::NotRunning && p->arguments().contains("--check")) killed = p;
     REQUIRE(killed);
+    bool ended = false;
+    QProcess::ExitStatus endedAs = QProcess::NormalExit;
+    QObject::connect(killed, &QProcess::finished, [&](int, QProcess::ExitStatus s) {
+        ended = true;
+        endedAs = s;
+    });
     const int task = queue.enqueue("t", "cmd", {"/c", "exit", "0"});
     CHECK_FALSE(model.checkRunning());
-    Pump([&] { return queue.finished(task) && (!killed || killed->state() == QProcess::NotRunning); }, 30000);
+    Pump([&] { return queue.finished(task) && ended; }, 30000);
+    CHECK(endedAs == QProcess::CrashExit);  // killed: the feature is off the GPU before the task (review of TASK-0071)
     QCoreApplication::processEvents();
     CHECK(model.availability("nr").text == before.text);  // its end came and stored nothing
 }

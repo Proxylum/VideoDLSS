@@ -173,6 +173,13 @@ TEST_CASE("EstimateRun sizes the result as the upscale stage does: the 4K cap, a
     CHECK(o2.width == made.width);
     CHECK(o2.height == made.height);
     CHECK(o2.newBytes == static_cast<uint64_t>(made.width) * made.height * 8 * 10);
+    // a size not known yet (review of TASK-0071: ResolveUpscaleTarget threw "empty input" - the whole plan failed)
+    SourceInfo unknown = src;
+    unknown.width = unknown.height = 0;
+    RunOutcome o3;
+    REQUIRE_NOTHROW(o3 = EstimateRun(plan, stages, unknown));
+    CHECK(o3.width == 0);
+    CHECK(o3.height == 0);
 }
 
 // D8 (TASK-0049): a standalone `dlssvid nr` (the GUI's «Запустить отдельно») recorded its 16 ms GPU time as ms_per_frame and

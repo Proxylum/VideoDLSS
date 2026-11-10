@@ -19,7 +19,10 @@ StageAvailability Skipped(const QString& why, const QString& tip, bool reused, b
 }  // namespace
 
 bool StageNeedsNgx(const std::string& stage, const nlohmann::json& params) {
-    const std::string backend = params.is_object() ? params.value("backend", std::string()) : std::string();
+    // not StageBackend: a missing or malformed backend is not the default one here - the plan reports a malformed one (review of TASK-0071:
+    // json's value() threw on {"backend": null} at every refresh of the card)
+    const std::string backend =
+        params.is_object() && params.contains("backend") && params["backend"].is_string() ? params["backend"].get<std::string>() : std::string();
     if (stage == "nr") return backend == "ngx" && !NrBypassParams(params);
     if (stage == "fg") return backend == "dlssg";
     return false;
@@ -31,6 +34,10 @@ StageAvailability StageAvailabilityFor(const std::string& stage, bool enabled, c
     // known without NGX: the run skips the stage for any of these (NgxNrBackend::Init, DlssgFrameGenerator::Init)
     if (f.software) return Skipped(Tr("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер"), {}, reused);
     if (!f.nvidia) return Skipped(Tr("Нужна видеокарта NVIDIA RTX"), {}, reused);
+    // only the build knows this: without the SDK the DLLs are not copied either, a missing DLL is not the reason (review of TASK-0071)
+    if (!f.ngxBuilt)
+        return Skipped(stage == "nr" ? Tr("Neural Rendering не собран в этой версии") : Tr("Frame Generation не собран в этой версии"),
+                       QString::fromStdString(stage == "nr" ? f.nr.reason : f.fg.reason), reused);
     if (stage == "nr") {
         if (!f.nr.available) {
             const QString tip = QString::fromStdString(f.nr.reason);

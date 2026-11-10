@@ -174,7 +174,7 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
         if (s.name == "upscale") scale = Scale(p);
         if (s.name == "fg") multiplier = std::clamp(p.value("multiplier", 2), 1, 4);
     }
-    if (!params[2].is_null()) {
+    if (!params[2].is_null() && source.width && source.height) {  // a size not known yet (the store's entry missing): 0x0, no throw
         // the frame UpscaleStage::Setup makes: «только подавление артефактов» keeps the source's, else the scale or the target, even, capped
         // at 3840x2160 (TASK-0071: 1080p x3 was shown 5760x3240 and NR's check ran at a frame the run never makes)
         const UpscaleTarget t = UpscaleOutputFor(source.width, source.height, params[2]);
