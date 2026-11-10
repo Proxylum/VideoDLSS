@@ -13,6 +13,7 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -34,6 +35,13 @@ std::filesystem::path Dir(const char* name) {
     std::filesystem::remove_all(d);
     std::filesystem::create_directories(d);
     return d;
+}
+
+// A folder whose files' paths are past MAX_PATH: removed from its `\\?\` root - remove_all builds the children's paths from it
+// (Win32LongPath prefixes only paths of 248 characters or more).
+void RemoveLongTree(const std::filesystem::path& dir) {
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::path(L"\\\\?\\" + std::filesystem::absolute(dir).lexically_normal().make_preferred().wstring()), ec);
 }
 
 std::string Bytes(const std::filesystem::path& p) {
@@ -102,13 +110,13 @@ TEST_CASE("PartialResultPath: next to the result, its extension kept for the con
     CHECK(cut[237] == L'.');
     // and it can be made where the result can
     const auto dir = std::filesystem::absolute(TempDir() / "result_file" / "long_name");
-    std::error_code ec;
-    std::filesystem::remove_all(Win32LongPath(dir), ec);  // its file is past MAX_PATH: Dir() could not remove it
+    RemoveLongTree(dir);  // its file is past MAX_PATH: Dir() could not remove it
     std::filesystem::create_directories(dir);
     const auto made = PartialResultPath(dir / (stem + L".mkv"));
     CHECK(std::ofstream(Win32LongPath(made), std::ios::binary).write("x", 1).good());
     CHECK(std::filesystem::exists(Win32LongPath(made)));
-    std::filesystem::remove_all(Win32LongPath(dir), ec);
+    RemoveLongTree(dir);
+    CHECK_FALSE(std::filesystem::exists(dir));
 }
 
 TEST_CASE("CheckEncodedResult: the size, the frame count where the container counts its samples, the audio", "[integration][result]") {
@@ -236,6 +244,22 @@ TEST_CASE("PublishResult: a previous result that cannot be replaced stays; the n
         CHECK(DecodeAll(output).size() == 3);
         CHECK_FALSE(std::filesystem::exists(partial));
     }
+    SECTION("held for a moment - the GUI's viewer lets it go on the run's first encode line: the rename is tried again") {
+        // review of TASK-0070: nothing tested the retry the GUI depends on
+        const HANDLE reader = CreateFileW(output.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        REQUIRE(reader != INVALID_HANDLE_VALUE);
+        std::thread letGo([reader] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            CloseHandle(reader);
+        });
+        const auto t0 = std::chrono::steady_clock::now();
+        CHECK_NOTHROW(PublishResult(partial, output, {48, 32, 3, false}));
+        const auto waited = std::chrono::steady_clock::now() - t0;
+        letGo.join();
+        CHECK(waited >= std::chrono::milliseconds(300));  // it did meet the reader
+        CHECK(DecodeAll(output).size() == 3);
+        CHECK_FALSE(std::filesystem::exists(partial));
+    }
 }
 
 namespace {
@@ -355,8 +379,7 @@ TEST_CASE("PublishResult and the clean-up reach a partial file past MAX_PATH: th
     // review of TASK-0070: FFmpeg wrote and read "<stem>.dlssvid-part<ext>" past 260 characters by itself, the rename and the removal
     // could not reach it - an output that worked before never got its result
     const auto base = std::filesystem::absolute(TempDir() / "result_file" / "long_path");
-    std::error_code ec;
-    std::filesystem::remove_all(Win32LongPath(base), ec);  // a tree past MAX_PATH: Dir() could not remove it
+    RemoveLongTree(base);  // a tree past MAX_PATH: Dir() could not remove it
     std::filesystem::path dir = base;
     while (dir.native().size() < 232) dir /= "nested_folder";
     std::filesystem::create_directories(Win32LongPath(dir));
@@ -379,5 +402,6 @@ TEST_CASE("PublishResult and the clean-up reach a partial file past MAX_PATH: th
     std::ofstream(Win32LongPath(partial), std::ios::binary) << "half written";
     RemovePartialResult(partial);
     CHECK_FALSE(std::filesystem::exists(Win32LongPath(partial)));
-    std::filesystem::remove_all(Win32LongPath(base), ec);
+    RemoveLongTree(base);
+    CHECK_FALSE(std::filesystem::exists(base));
 }

@@ -196,7 +196,9 @@ public slots:
     void reloadSources();  // after a stage finished: rescan pass folders
     // TASK-0070: a run encodes a new result into `file`: the viewer lets every video of that file go - the result, or the source of a
     // project made from an earlier result - and builds no proxy of it (no side shows it); Windows does not rename the new file over one
-    // that is open. Nothing when no video shown is that file. restoreResult when the run has ended, before the sources are read again.
+    // that is open. A running proxy build that reads the file is stopped in any case (one of a project open before too); when no video
+    // shown is that file nothing else happens (resultReleased stays false). restoreResult when the run has ended, before the sources
+    // are read again.
     void releaseResult(const std::filesystem::path& file);
     void restoreResult() { releasedFile_.clear(); }
     bool resultReleased() const { return !releasedFile_.empty(); }

@@ -76,9 +76,9 @@ void PublishResult(const fs::path& partial, const fs::path& output, const Result
     std::error_code ec;
     Retrying(ec, 40, [&](std::error_code& e) { fs::rename(Long(partial), Long(output), e); });
     if (!ec) return;
-    // Windows replaces no file another program has open without letting it be deleted - FFmpeg's readers, so most players (measured:
-    // MoveFileExW and ReplaceFileW fail, a POSIX rename too). Overwriting it in place would not be atomic: a cancel or a fault in the
-    // middle would lose both results. Both stay.
+    // Windows replaces no file another program has open (measured: MoveFileExW, which fs::rename calls, fails even when the reader
+    // shares delete; ReplaceFileW and a POSIX rename fail when it does not - FFmpeg's readers, so most players). Overwriting it in
+    // place would not be atomic: a cancel or a fault in the middle would lose both results. Both stay.
     // dlssvid's own viewer shows the old result again when the run has ended: running again once the player is closed always works
     const std::string why = ReadOnlyFile(output) ? "it is read-only: clear the attribute and rename the new file over it"
                                                  : "is it open in a player? Run again once it is closed, or close every program that shows it "
