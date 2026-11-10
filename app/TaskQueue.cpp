@@ -207,6 +207,17 @@ void TaskQueue::cancel(int id) {
     }
 }
 
+void TaskQueue::stopAll(int waitMs) {
+    std::vector<int> waiting;  // first: none of them starts when the running one has ended
+    for (const auto& t : tasks_)
+        if (!t.done && t.id != currentId()) waiting.push_back(t.id);
+    for (const int id : waiting) cancel(id);
+    if (current_ < 0) return;
+    QProcess* p = process_.get();  // onFinished hands it to deleteLater: alive until the event loop runs again
+    cancel(currentId());
+    if (p && p->state() != QProcess::NotRunning) p->waitForFinished(waitMs);  // emits finished from here: the task's end is handled now
+}
+
 const TaskQueue::Task* TaskQueue::find(int id) const {
     for (const auto& t : tasks_)
         if (t.id == id) return &t;

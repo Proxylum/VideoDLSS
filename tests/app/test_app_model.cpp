@@ -5722,6 +5722,12 @@ TEST_CASE("ProjectTasks: a run lets the shown result go at its encode step, so t
     REQUIRE(rig.model.resultReleased());
     CHECK_FALSE(rig.model.sourceNames().contains("result"));
     CHECK_FALSE(rig.model.resultInfo().exists);
+    // the end of another task (one waiting behind the run, dropped) does not bring it back under the run (review of TASK-0070)
+    const int waiting = rig.enqueue();
+    rig.queue.cancel(waiting);
+    REQUIRE(rig.ended.count(waiting) > 0);
+    CHECK(rig.model.resultReleased());
+    CHECK_FALSE(rig.model.sourceNames().contains("result"));
     CHECK(Renames(fresh, result));
     rig.wait(rig.processId);
     CHECK_FALSE(rig.model.resultReleased());
@@ -5756,6 +5762,27 @@ TEST_CASE("ProjectTasks: a run cancelled while it encodes leaves no half-written
     rig.queue.cancel(early);
     rig.wait(early);
     CHECK(std::filesystem::exists(partial));
+}
+
+TEST_CASE("TaskQueue::stopAll: the waiting tasks dropped, the running one killed and its end handled before it returns", "[app][model][gpu][regression]") {
+    // review of TASK-0070: the window closing killed the run and went away before its end was handled - the file beside the result stayed
+    App();
+    const auto d = Dir("project_tasks_stop_all");
+    TaskRig rig;
+    rig.model.openProject(Q(TaskProject(d, "a")));
+    const auto partial = PartialResultPath(d / "a_result.mkv");
+    rig.processId = rig.queue.enqueue("t", "cmd", kEncodingRun);
+    const int waiting = rig.enqueue();
+    Pump([&] { return rig.model.resultReleased(); }, 15000);
+    REQUIRE(rig.model.resultReleased());
+    std::ofstream(partial, std::ios::binary) << "half written";
+    rig.queue.stopAll(5000);
+    CHECK(rig.ended.count(rig.processId) > 0);  // no event loop in between
+    CHECK(rig.ended.count(waiting) > 0);
+    CHECK(rig.queue.cancelled(rig.processId));
+    CHECK_FALSE(rig.queue.busy());
+    CHECK_FALSE(std::filesystem::exists(partial));
+    CHECK_FALSE(rig.model.resultReleased());
 }
 
 TEST_CASE("ProjectTasks: a run of project A at its encode step leaves B's result shown", "[app][model][gpu][regression]") {

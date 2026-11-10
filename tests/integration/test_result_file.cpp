@@ -12,10 +12,13 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "TestClips.h"
 #include "io/ResultFile.h"
 #include "io/VideoDecoder.h"
+#include "io/VideoEncoder.h"
 #include "pipeline/ProcessRunner.h"
 
 using namespace dlssvid;
@@ -82,7 +85,7 @@ TEST_CASE("PartialResultPath: next to the result, its extension kept for the con
     CHECK(PartialResultPath("r.mkv") == std::filesystem::path("r.dlssvid-part.mkv"));
 }
 
-TEST_CASE("CheckEncodedResult: the size, the frame count where the container keeps one, the audio", "[integration][result]") {
+TEST_CASE("CheckEncodedResult: the size, the frame count where the container counts its samples, the audio", "[integration][result]") {
     const auto dir = Dir("check");
     ClipSpec spec = Small(4);
     spec.audio = true;
@@ -93,11 +96,18 @@ TEST_CASE("CheckEncodedResult: the size, the frame count where the container kee
     const auto silent = WriteClip(dir / "b.mkv", Small(4));
     CHECK_THAT(CheckEncodedResult(silent, {48, 32, 4, true}), ContainsSubstring("no audio"));
     CHECK(CheckEncodedResult(silent, {48, 32, 4, false}).empty());
-    const auto avi = WriteClip(dir / "c.avi", Small(4));  // AVI counts its frames
-    CHECK(CheckEncodedResult(avi, {48, 32, 4, false}).empty());
-    CHECK_THAT(CheckEncodedResult(avi, {48, 32, 5, false}), ContainsSubstring("4 frames") && ContainsSubstring("5 were encoded"));
+    // AVI's count takes in the empty frames its muxer pads time gaps with: not checked (review of TASK-0070)
+    const auto avi = WriteClip(dir / "c.avi", Small(4));
+    CHECK(CheckEncodedResult(avi, {48, 32, 5, false}).empty());
     std::ofstream(dir / "junk.mkv", std::ios::binary) << "not a video";
     CHECK_THAT(CheckEncodedResult(dir / "junk.mkv", {48, 32, 4, false}), ContainsSubstring("does not open"));
+    if (!VideoEncoder::EncoderAvailable("prores_ks")) SKIP("prores_ks unavailable: MOV not checked");
+    ClipSpec prores = Small(4);
+    prores.codec = "prores_ks";
+    prores.pixFmt = "yuv422p10le";
+    const auto mov = WriteClip(dir / "d.mov", prores);  // MOV counts its samples, one per frame
+    CHECK(CheckEncodedResult(mov, {48, 32, 4, false}).empty());
+    CHECK_THAT(CheckEncodedResult(mov, {48, 32, 5, false}), ContainsSubstring("4 frames") && ContainsSubstring("5 were encoded"));
 }
 
 TEST_CASE("RunProcess: a run that fails while it encodes keeps the previous result and leaves no unfinished file", "[integration][process][result][regression]") {
@@ -114,6 +124,15 @@ TEST_CASE("RunProcess: a run that fails while it encodes keeps the previous resu
     CHECK(Bytes(o.output) == "the previous result");
     CHECK_FALSE(std::filesystem::exists(PartialResultPath(o.output)));
 
+    // what the GUI goes by: "encode: N/M frames" lines, the first one (frame 0) before the file is made - it lets the shown result go
+    // then and removes the file a cancel leaves (review of TASK-0070: MKV sources gave no total, the first line came at frame 10)
+    std::vector<std::pair<int64_t, int64_t>> encodeSteps;
+    bool fileBeforeFirst = true;
+    const auto track = [&](const std::string& stage, int64_t done, int64_t total) {
+        if (stage != "encode") return;
+        if (encodeSteps.empty()) fileBeforeFirst = std::filesystem::exists(PartialResultPath(o.output));
+        encodeSteps.emplace_back(done, total);
+    };
     SECTION("the same for a run without stages (the source passed through)") {
         o.passthrough = true;
         o.progress = [](const std::string& stage, int64_t done, int64_t) {
@@ -129,38 +148,44 @@ TEST_CASE("RunProcess: a run that fails while it encodes keeps the previous resu
         CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("stopped at the encode"));
         CHECK(Bytes(o.output) == "the previous result");
         CHECK_FALSE(std::filesystem::exists(PartialResultPath(o.output)));
+        o.progress = track;
+        RunProcess(o);
+        REQUIRE(encodeSteps.size() >= 2);
+        CHECK(encodeSteps.front().first == 0);
+        CHECK_FALSE(fileBeforeFirst);
+        for (const auto& [done, total] : encodeSteps) CHECK((total >= 3 && done <= total));  // estimated from the MKV's duration
     }
     SECTION("and a run that ends puts its result in place, nothing left beside it") {
-        int64_t encodeTotal = -1;
-        o.progress = [&](const std::string& stage, int64_t, int64_t total) {
-            if (stage == "encode") encodeTotal = total;
-        };
+        o.progress = track;
         const ProcessResult r = RunProcess(o);
         CHECK(r.warnings.empty());
         CHECK(DecodeAll(o.output).size() == 3);
         CHECK_FALSE(std::filesystem::exists(PartialResultPath(o.output)));
-        CHECK(encodeTotal == 3);  // an MKV source counts no frames: the pass's - the GUI knows the encode step by its "N/M frames"
+        REQUIRE(encodeSteps.size() == 4);
+        CHECK(encodeSteps.front() == std::pair<int64_t, int64_t>{0, 3});  // an MKV source counts no frames: the pass's
+        CHECK(encodeSteps.back() == std::pair<int64_t, int64_t>{3, 3});
+        CHECK_FALSE(fileBeforeFirst);
     }
 }
 
-TEST_CASE("RunProcess: a previous result open in a player is overwritten by a copy of the new one", "[integration][process][result][regression]") {
-    // Windows renames nothing over an open file; FFmpeg's readers (the GUI's viewer, players) let others write, so a copy goes in
+TEST_CASE("RunProcess: a previous result open in a player stays; the new one stays beside it and the error says where", "[integration][process][result][regression]") {
+    // Windows renames nothing over a file a reader without delete sharing has open - FFmpeg's readers, so most players; overwriting it in
+    // place would not be atomic (review of TASK-0070: a cancel during such a copy lost both results)
     const auto dir = Dir("open_in_player");
     const auto clip = WriteClip(dir / "clip.mkv", Small(3));
     ProcessOptions o = Options(dir, clip);
     WriteClip(o.output, Small(5));
+    const auto partial = PartialResultPath(o.output);
     {
         VideoDecoder player(o.output);
-        const ProcessResult r = RunProcess(o);
-        CHECK(std::find(r.warnings.begin(), r.warnings.end(), std::string(kResultCopiedWarning)) != r.warnings.end());
+        CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring(partial.string()) && ContainsSubstring("could not be replaced"));
     }
+    CHECK(DecodeAll(o.output).size() == 5);
+    CHECK(DecodeAll(partial).size() == 3);
+    // closed: the run again puts it in place (the passes are reused)
+    CHECK(RunProcess(o).warnings.empty());
     CHECK(DecodeAll(o.output).size() == 3);
-    CHECK_FALSE(std::filesystem::exists(PartialResultPath(o.output)));
-
-    SECTION("not open: renamed, no warning") {
-        CHECK(RunProcess(o).warnings.empty());
-        CHECK(DecodeAll(o.output).size() == 3);
-    }
+    CHECK_FALSE(std::filesystem::exists(partial));
 }
 
 TEST_CASE("PublishResult: a previous result that cannot be replaced stays; the new one stays beside it and the error says where", "[integration][result][regression]") {
@@ -169,7 +194,7 @@ TEST_CASE("PublishResult: a previous result that cannot be replaced stays; the n
     std::ofstream(output, std::ios::binary) << "the previous result";
     const auto partial = WriteClip(PartialResultPath(output), Small(3));
     {
-        const Held held(output, FILE_SHARE_READ);  // no rename over it, no write into it
+        const Held held(output, FILE_SHARE_READ | FILE_SHARE_WRITE);  // as FFmpeg opens it
         CHECK_THROWS_WITH(PublishResult(partial, output, {48, 32, 3, false}), ContainsSubstring(partial.string()) && ContainsSubstring("could not be replaced"));
     }
     CHECK(Bytes(output) == "the previous result");
@@ -181,8 +206,61 @@ TEST_CASE("PublishResult: a previous result that cannot be replaced stays; the n
         CHECK(std::filesystem::exists(partial));  // left for a look
     }
     SECTION("free: it goes in place") {
-        CHECK_FALSE(PublishResult(partial, output, {48, 32, 3, false}).copied);
+        PublishResult(partial, output, {48, 32, 3, false});
         CHECK(DecodeAll(output).size() == 3);
         CHECK_FALSE(std::filesystem::exists(partial));
     }
+}
+
+namespace {
+// A clip whose audio track has no packets: MKV keeps such a track, MP4 and MOV leave it out.
+std::filesystem::path ClipWithEmptyAudio(const std::filesystem::path& dir) {
+    ClipSpec donorSpec = Small(1);
+    donorSpec.audio = true;
+    VideoDecoder donor(WriteClip(dir / "donor.mkv", donorSpec));
+    VideoEncoder::Options eo;
+    eo.codec = "ffv1";
+    eo.frameRate = Rational{24, 1};
+    const auto path = dir / "empty_audio.mkv";
+    VideoEncoder enc(path, FrameDesc{48, 32, PixelFormat::Yuv420p}, eo);
+    enc.AddAudioStreamCopy(donor.AudioCodecParameters(), donor.AudioTimeBase());
+    enc.Open();
+    for (int64_t i = 0; i < 3; ++i) {
+        CpuFrame f = SyntheticFrame(i, 48, 32);
+        f.index = i;
+        f.pts = i;
+        enc.WriteFrame(f);
+    }
+    enc.Close();
+    return path;
+}
+}  // namespace
+
+TEST_CASE("RunProcess: a source with an empty audio track gives a MOV result without audio, not a rejected one", "[integration][process][result][regression]") {
+    // review of TASK-0070: audio was expected whenever the source had a track, and MOV leaves a track without packets out
+    if (!VideoEncoder::EncoderAvailable("prores_ks")) SKIP("prores_ks unavailable");
+    const auto dir = Dir("empty_audio");
+    const auto clip = ClipWithEmptyAudio(dir);
+    REQUIRE(VideoDecoder(clip, VideoDecoder::Probe()).HasAudio());
+    ProcessOptions o = Options(dir, clip);
+    o.output = dir / "result.mov";
+    o.codec = "prores_ks";
+    SECTION("from the passes") {}
+    SECTION("passed through") { o.passthrough = true; }
+    const ProcessResult r = RunProcess(o);
+    CHECK_FALSE(r.audio);
+    CHECK(Summarize(o.output).audioStreams == 0);
+    CHECK(DecodeAll(o.output).size() == 3);
+}
+
+TEST_CASE("RunProcess: a passthrough into AVI from an MKV source puts its result in place", "[integration][process][result][regression]") {
+    // review of TASK-0070: the source's time base is kept, AVI pads the gaps with empty frames and counts them - the check rejected it
+    const auto dir = Dir("avi");
+    const auto clip = WriteClip(dir / "clip.mkv", Small(4));
+    ProcessOptions o = Options(dir, clip);
+    o.output = dir / "result.avi";
+    o.passthrough = true;
+    RunProcess(o);
+    CHECK(DecodeAll(o.output).size() == 4);
+    CHECK_FALSE(std::filesystem::exists(PartialResultPath(o.output)));
 }

@@ -1115,13 +1115,14 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     if (decoder.HasAudio()) {
         encoder.AddAudioStreamCopy(decoder.AudioCodecParameters(), decoder.AudioTimeBase());
         decoder.SetAudioPacketSink([&encoder](AVPacket* pkt) { encoder.WriteAudioPacket(pkt); });
-        r.audio = true;
     }
-    encoder.Open();
     // MKV keeps no frame count: the pass's, in source frames. Without a total the GUI reads no "encode: N/M frames" line - it would not
-    // know the encode step has begun (TASK-0070: it lets the old result go then)
+    // know the encode step has begun (TASK-0070: it lets the old result go then, and removes the file a cancel leaves). Frame 0 is
+    // reported before the file is made.
     int64_t total = info.frameCount > 0 ? info.frameCount : (m.frameCount + mult - 1) / mult;
     if (maxSourceFrames > 0) total = std::min<int64_t>(maxSourceFrames, total);
+    if (progress) progress(0, total);
+    encoder.Open();
     CpuFrame src;
     int64_t s = 0;
     while ((maxSourceFrames < 0 || s < maxSourceFrames) && decoder.NextFrame(src)) {  // decoding the source pumps its audio packets
@@ -1140,6 +1141,7 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
         if (progress) progress(s, total);
     }
     encoder.Close();
+    r.audio = encoder.AudioPacketsWritten() > 0;  // a source track without packets in the range: MP4 and MOV leave the track out
     r.sourceFrames = s;
     r.seconds = Seconds(t0);
     return r;
@@ -1222,8 +1224,18 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             pipeline.AddStage(std::make_unique<PassthroughStage>(), cfg);
             pipeline.Init();
             const auto t0 = Clock::now();
-            const RunStats stats = RunPipeline(
-                pipeline, decoder, encoder, [&](int64_t n) { if (options.progress) options.progress("passthrough", n, needed); }, options.frames);
+            // MKV keeps no frame count: estimated from the duration, never below the frames done. The GUI reads only "N/M frames" lines (the
+            // fallback below reports these as its encode step, TASK-0070); frame 0 is reported before the file is made
+            int64_t total = needed;
+            if (total <= 0 && info.durationUs > 0 && info.frameRate.num > 0) {
+                total = std::llround(static_cast<double>(info.durationUs) * 1e-6 * info.frameRate.ToDouble());
+                if (options.frames > 0) total = std::min<int64_t>(total, options.frames);
+            }
+            const auto report = [&](int64_t n) {
+                if (options.progress) options.progress("passthrough", n, total > 0 ? std::max(total, n) : total);
+            };
+            report(0);
+            const RunStats stats = RunPipeline(pipeline, decoder, encoder, report, options.frames);
             pipeline.Shutdown();
             ProcessStageReport rep;
             rep.name = "passthrough";
@@ -1235,13 +1247,13 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             result.framesOut = stats.framesOut;
             result.framesIn = stats.framesOut;
             result.outputFps = info.frameRate;
-            result.audio = decoder.HasAudio();
+            result.audio = encoder.AudioPacketsWritten() > 0;  // a source track without packets: MP4 and MOV leave the track out
             expect = ResultExpectation{target.width, target.height, stats.framesOut, result.audio};
         } catch (...) {
             RemovePartialResult(partial);  // the encoder is gone with its scope: the file is closed
             throw;
         }
-        if (PublishResult(partial, options.output, expect).copied) result.warnings.push_back(kResultCopiedWarning);
+        PublishResult(partial, options.output, expect);
         result.seconds = Seconds(tAll);
         return result;
     }
@@ -1632,7 +1644,6 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         if (options.progress)  // it is this run's encode step: the GUI lets the old result go on its progress (TASK-0070)
             pt.progress = [&options](const std::string&, int64_t n, int64_t total) { options.progress("encode", n, total); };
         const ProcessResult r = RunProcess(pt);
-        result.warnings.insert(result.warnings.end(), r.warnings.begin(), r.warnings.end());  // the result copied over an open one
         enc.status = "passthrough";
         enc.frames = r.framesOut;
         result.framesOut = r.framesOut;
@@ -1669,8 +1680,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             RemovePartialResult(partial);  // the encoder is gone with its scope: the file is closed
             throw;
         }
-        if (PublishResult(partial, options.output, {r.format.width, r.format.height, r.frames, r.audio}).copied)
-            result.warnings.push_back(kResultCopiedWarning);
+        PublishResult(partial, options.output, {r.format.width, r.format.height, r.frames, r.audio});
         enc.status = "ran";
         enc.outDir = result.finalPass;
         enc.frames = r.frames;

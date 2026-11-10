@@ -37,13 +37,13 @@ ProjectTasks::Finished ProjectTasks::finish(int id, bool processDone) {
     const Origin origin = it->second;
     origins_.erase(it);
     const Finished finished{origin.generation == model_.generation(), origin.video};
-    // a run cancelled while it encoded was killed with the new result half written beside the old one (TASK-0070): that file goes. A run
-    // that failed removed its own, or kept a finished one it could not put in place - its message says where
+    // a run cancelled while it encoded was killed with the new result beside the old one, which it had not touched (TASK-0070): that file
+    // goes. A run that failed removed its own, or kept a finished one it could not put in place - its message says where
     if (origin.encoding && tasks_.cancelled(id)) RemovePartialResult(PartialResultPath(origin.result));
-    // the result again - the new one or the old one, as the run ended. Released by this task: one Main task runs at a time and only a
-    // running one reports progress
-    const bool released = model_.resultReleased();
-    model_.restoreResult();
+    // the result again - the new one or the old one, as the run ended - when this task let it go: one Main task runs at a time, the end
+    // of another (a waiting one dropped) leaves it to the run still encoding
+    const bool released = origin.encoding && model_.resultReleased();
+    if (released) model_.restoreResult();
     if (!finished.ownProject) {
         if (released || SamePath(origin.passesRoot, model_.project().passesRoot)) model_.reloadSources();  // reopened, or the same passes
         else model_.refreshPlan();  // its passes are not ours, but `nr-patch` changes what every project can run

@@ -612,7 +612,8 @@ void MainWindow::closeEvent(QCloseEvent* e) {
             e->ignore();
             return;
         }
-        tasks_->cancel(tasks_->currentId());
+        // waited for: its end is handled before the window goes (TASK-0070: a run killed while it encoded leaves no file beside the result)
+        tasks_->stopAll(5000);
     }
     if (!settleUnsaved()) {
         e->ignore();
