@@ -79,6 +79,9 @@ public:
     bool finished(int id) const;
     bool succeeded(int id) const;
     bool cancelled(int id) const;
+    // Its process crashed or was ended from outside (an exit code other than 0 and dlssvid's 1 for the errors it handles): nothing it
+    // meant to clean up was (TASK-0070).
+    bool endedAbnormally(int id) const;
 
 signals:
     // Main tasks
@@ -104,6 +107,7 @@ private:
         bool done = false;
         bool ok = false;
         bool cancelled = false;
+        bool abnormal = false;  // endedAbnormally
         std::vector<StagePlan> plan;
         Progress progress;
         QElapsedTimer timer;

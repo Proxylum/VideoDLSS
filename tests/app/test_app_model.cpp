@@ -5722,6 +5722,7 @@ TEST_CASE("ProjectTasks: a run lets the shown result go at its encode step, so t
     REQUIRE(rig.model.resultReleased());
     CHECK_FALSE(rig.model.sourceNames().contains("result"));
     CHECK_FALSE(rig.model.resultInfo().exists);
+    CHECK(rig.model.resultSummary() == QString::fromUtf8("заменяется новым — идёт кодирование"));  // the result line stays, says why
     // the end of another task (one waiting behind the run, dropped) does not bring it back under the run (review of TASK-0070)
     const int waiting = rig.enqueue();
     rig.queue.cancel(waiting);
@@ -5762,6 +5763,32 @@ TEST_CASE("ProjectTasks: a run cancelled while it encodes leaves no half-written
     rig.queue.cancel(early);
     rig.wait(early);
     CHECK(std::filesystem::exists(partial));
+    // a run that crashed while it encoded (an exit code other than dlssvid's 1) cleaned up nothing (review of TASK-0070)
+    const int crashed = rig.queue.enqueue("t", "cmd", {"/c", "echo", "encode:", "1/3", "frames", "&", "ping", "-n", "2", "127.0.0.1", ">nul", "&", "exit", "3"});
+    rig.wait(crashed);
+    REQUIRE(rig.queue.endedAbnormally(crashed));
+    CHECK_FALSE(rig.queue.cancelled(crashed));
+    CHECK_FALSE(std::filesystem::exists(partial));
+    CHECK_FALSE(rig.queue.endedAbnormally(failed));
+}
+
+TEST_CASE("ProjectTasks: a run whose source keeps neither a frame count nor a duration lets the result go too - its encode line has no total", "[app][model][gpu][regression]") {
+    // review of TASK-0070: "encode: N frames" (no "/M") was not progress for the queue, so the encode step went unseen
+    App();
+    const auto d = Dir("project_tasks_release_no_total");
+    TaskRig rig;
+    rig.model.openProject(Q(TaskProject(d, "a")));
+    REQUIRE(rig.model.sourceNames().contains("result"));
+    rig.processId = rig.queue.enqueue("t", "cmd", {"/c", "echo", "encode:", "0", "frames", "&", "ping", "-n", "4", "127.0.0.1", ">nul"});
+    Pump([&] { return rig.model.resultReleased(); }, 15000);
+    CHECK(rig.model.resultReleased());
+    CHECK(rig.queue.progress(rig.processId).stage == "encode");
+    rig.wait(rig.processId);
+    CHECK_FALSE(rig.model.resultReleased());
+    // a log line that ends in "frames" is no progress: only a whole "stage: N frames" line
+    const int log = rig.queue.enqueue("t", "cmd", {"/c", "echo", "process:", "depth", "done", "-", "7", "frames", "in", "0.3", "s", "&", "echo", "encode:", "7", "frames,", "7", "windows"});
+    rig.wait(log);
+    CHECK(rig.queue.progress(log).stage.isEmpty());
 }
 
 TEST_CASE("TaskQueue::stopAll: the waiting tasks dropped, the running one killed and its end handled before it returns", "[app][model][gpu][regression]") {

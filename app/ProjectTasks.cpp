@@ -37,9 +37,10 @@ ProjectTasks::Finished ProjectTasks::finish(int id, bool processDone) {
     const Origin origin = it->second;
     origins_.erase(it);
     const Finished finished{origin.generation == model_.generation(), origin.video};
-    // a run cancelled while it encoded was killed with the new result beside the old one, which it had not touched (TASK-0070): that file
-    // goes. A run that failed removed its own, or kept a finished one it could not put in place - its message says where
-    if (origin.encoding && tasks_.cancelled(id)) RemovePartialResult(PartialResultPath(origin.result));
+    // a run cancelled (killed) or crashed while it encoded left the new result beside the old one, which it had not touched (TASK-0070):
+    // that file goes. A run that failed on an error it handled removed its own, or kept a finished one it could not put in place - its
+    // message says where
+    if (origin.encoding && (tasks_.cancelled(id) || tasks_.endedAbnormally(id))) RemovePartialResult(PartialResultPath(origin.result));
     // the result again - the new one or the old one, as the run ended - when this task let it go: one Main task runs at a time, the end
     // of another (a waiting one dropped) leaves it to the run still encoding
     const bool released = origin.encoding && model_.resultReleased();

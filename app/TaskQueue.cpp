@@ -250,6 +250,11 @@ bool TaskQueue::cancelled(int id) const {
     return t && t->cancelled;
 }
 
+bool TaskQueue::endedAbnormally(int id) const {
+    const Task* t = find(id);
+    return t && t->abnormal;
+}
+
 double TaskQueue::plannedSeconds(const Task& t, const QString& stage) const {
     for (const auto& s : t.plan)
         if (s.name == stage) return s.seconds;
@@ -289,6 +294,9 @@ void TaskQueue::onOutput() {
     // progress lines look like "\rdepth: 12/90 frames" (process) or "\r12/90 frames" (a single stage); the runner
     // also tells when a stage is done or reused
     static const QRegularExpression progressRe(R"((?:([A-Za-z_]+): )?(\d+)/(\d+) frames)");
+    // a stage's line without a total (a source that keeps neither a frame count nor a duration): the whole line, so that a log line
+    // such as "process: depth done — 7 frames in 0.3 s" is not one (TASK-0070: the GUI knows the encode step by its progress)
+    static const QRegularExpression countRe(R"(^([A-Za-z_]+): (\d+) frames$)");
     static const QRegularExpression doneRe(R"(process: ([A-Za-z_]+) done \S+ (\d+) frames in ([0-9.]+) s)");
     static const QRegularExpression reusedRe(R"(process: ([A-Za-z_]+) \S+ .*(is complete, reused|restored from the history))");
     // a stage that failed while the run went on (fg in its own process, audit fg-2); "process: stage 'fg' failed" - the
@@ -307,6 +315,10 @@ void TaskQueue::onOutput() {
         }
         if (const auto m = progressRe.match(line); m.hasMatch()) {
             updateProgress(t, m.captured(1), m.captured(2).toInt(), m.captured(3).toInt());
+            continue;
+        }
+        if (const auto m = countRe.match(line.trimmed()); m.hasMatch()) {
+            updateProgress(t, m.captured(1), m.captured(2).toInt(), 0);
             continue;
         }
         if (line.trimmed().isEmpty()) continue;
@@ -462,6 +474,7 @@ void TaskQueue::onFinished(int exitCode, QProcess::ExitStatus status) {
     current_ = -1;
     Task& t = tasks_[static_cast<size_t>(index)];
     const bool ok = !t.cancelled && status == QProcess::NormalExit && exitCode == 0;
+    t.abnormal = status == QProcess::CrashExit || (exitCode != 0 && exitCode != 1);  // dlssvid's own errors end with 1
     QString text;
     if (t.cancelled) text = tr("отменена");
     else if (ok) text = tr("готово");

@@ -69,7 +69,7 @@ void PublishResult(const fs::path& partial, const fs::path& output, const Result
     // MoveFileExW and ReplaceFileW fail, a POSIX rename too). Overwriting it in place would not be atomic: a cancel or a fault in the
     // middle would lose both results. Both stay.
     Throw("process: the new result is " + partial.string() + " - " + output.string() + " could not be replaced (" + ec.message() +
-          "): is it open in a player? Close it and rename the new file over it, or run again (the passes are reused)");
+          "): is it open in a player? Close it and rename the new file over it, or run again");
 }
 
 void RemovePartialResult(const fs::path& partial) {

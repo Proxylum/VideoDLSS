@@ -565,6 +565,10 @@ void MainWindow::closeProject() {
 }
 
 void MainWindow::saveResultAs() {
+    if (model_.resultReleased()) {  // a copy now would hold the file the run renames its new one over (TASK-0070)
+        statusBar()->showMessage(tr("Результат заменяется новым — сохраните его, когда обработка закончится"), 5000);
+        return;
+    }
     const AppModel::ResultInfo r = model_.resultInfo();
     if (!r.exists) {
         statusBar()->showMessage(tr("Результата ещё нет — сначала «Обработать»"), 5000);
@@ -580,7 +584,9 @@ void MainWindow::saveResultAs() {
 
 void MainWindow::openResultFolder() {
     const AppModel::ResultInfo r = model_.resultInfo();
-    const QString folder = r.exists ? QFileInfo(r.path).absolutePath() : (model_.hasProject() ? QString::fromStdWString(model_.project().sourceVideo.parent_path().wstring()) : QString());
+    const QString folder = r.exists ? QFileInfo(r.path).absolutePath()
+                           : model_.resultReleased() ? QString::fromStdWString(model_.project().resultVideo.parent_path().wstring())  // being replaced
+                           : (model_.hasProject() ? QString::fromStdWString(model_.project().sourceVideo.parent_path().wstring()) : QString());
     if (folder.isEmpty()) return;
     QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
 }
