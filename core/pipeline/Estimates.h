@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "pipeline/ProcessRunner.h"
+#include "stages/upscale/IUpscaler.h"
 
 namespace dlssvid {
 
@@ -75,6 +76,10 @@ struct RunOutcome {
     std::string codec;                // the result's encoder and layout (filled by the caller from the project: AppModel::refreshPlan)
     FrameDesc format;
 };
+
+// The frame the upscale stage makes of a source of that size with these (effective) parameters - as UpscaleStage::Setup: the source's with
+// artifact_reduction_only, else the scale or target_width / target_height, even, capped at 3840x2160.
+UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& params);
 
 // Combines the plan, the enabled stages' parameters and the source: resolution and rate after upscale / frame
 // generation, time and disk of what runs, time of a full run.

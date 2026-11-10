@@ -1165,7 +1165,17 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
         DecidePending(pr.ctx, it->second, state, d);
         ProjectScenes(pr.ctx, d);
         AdviseStage(pr.ctx, d);
-        Advance(state, d);
+        if (d.action == "run" && options.planSkipped.count(name)) {
+            // as the run: its pass retired or removed (the disabled stage's block), a stale one discarded first - what was made from it
+            // goes too (review of TASK-0071); the pass planned with the scene list is no case of the stages below either
+            for (const auto& fam : StageFamilyPasses(name)) {
+                state.fp.erase(fam);
+                state.provisional.erase(fam);
+                if (d.stale && d.current) state.discarded.insert(fam);
+            }
+        } else {
+            Advance(state, d);
+        }
         (d.action == "run" ? plan.runCount : plan.reuseCount)++;
         plan.stages.push_back(std::move(d));
     }
@@ -1278,6 +1288,24 @@ ProcessResult RunProcess(const ProcessOptions& options) {
 
     PlanState state;
     bool retiredAny = false;
+    // TASK-0071: a color_sr made by NIS because DLSS could not run is stamped with the fingerprint of the settings asked for - a later
+    // run that reuses it says so too, not only the run that fell back
+    auto sayReusedFallback = [&](const std::string& name, const nlohmann::json& p, ProcessStageReport& rep) {
+        if (name != "upscale" || rep.outDir.empty()) return;
+        // nis asked now: the pass is what was asked (a pass without a fingerprint is adopted whatever it was made for - a standalone
+        // `dlssvid upscale` that fell back; review of TASK-0071)
+        if (Get<std::string>(p, "backend", "dlss") == "nis") return;
+        try {
+            const Manifest m = Manifest::Load(rep.outDir);
+            if (!m.stageParams.is_object() || !m.stageParams.value("fallback", false)) return;
+            const std::string why = m.stageParams.value("fallback_reason", std::string("the backend asked for could not run"));
+            rep.details["fallback"] = true;
+            rep.details["fallback_reason"] = why;
+            result.warnings.push_back("upscale: " + why + "; nis used instead (the color_sr reused was made so)");
+            Log()->warn("process: upscale fell back to nis — the color_sr reused was made so: {}", why);  // TaskQueue parses this line
+        } catch (const std::exception&) {
+        }
+    };
     bool fgSkipped = false;           // fg was wanted but failed or is disabled: the result comes from its input, not color_fg
     std::filesystem::path fgColorDir;  // that input (color_nr / color_sr; empty: the source)
     for (const std::string& name : ProcessStageOrder()) {
@@ -1310,6 +1338,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                     if (Manifest::Exists(root / pass)) StampPass(root / pass, d, FileTimeIso8601(root / pass / Manifest::kFileName), 0.0, true);
             }
             Log()->info("process: {} — {} is complete, reused{}", name, d.outDir.string(), d.kind == "legacy" ? " (adopted)" : "");
+            sayReusedFallback(name, p, rep);
             result.stages.push_back(rep);
             continue;
         }
@@ -1326,6 +1355,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             rep.frames = framesOf();
             state.ran.insert(d.outputs.begin(), d.outputs.end());
             Log()->info("process: {} — version {} restored from the history", name, d.version);
+            sayReusedFallback(name, p, rep);
             result.stages.push_back(rep);
             continue;
         }
@@ -1408,6 +1438,11 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 rep.frames = r.stats.frames;
                 rep.outDir = r.outDir;
                 rep.details = {{"upscaler", r.upscaler}, {"fallback", r.stats.fellBack}, {"size", {r.stats.outputWidth, r.stats.outputHeight}}};
+                if (r.stats.fellBack) {  // TASK-0071: the result is made with another upscaler than the one asked for - said, not only logged
+                    rep.details["fallback_reason"] = r.stats.fallbackReason;
+                    result.warnings.push_back("upscale: " + r.stats.fallbackReason + "; nis used instead");
+                    Log()->warn("process: upscale fell back to nis — {}", r.stats.fallbackReason);  // TaskQueue parses this line
+                }
             } else if (name == "nr") {
                 VideoDecoder decoder(options.input);
                 NrStageOptions o;
@@ -1609,6 +1644,40 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             if (d.stale) state.staleRan.insert(d.outputs.begin(), d.outputs.end());
         } else {
             rep.fingerprint.clear();  // disabled / failed: no pass of this run
+        }
+        if (rep.status == "disabled") {
+            // TASK-0071: a stage skipped as unavailable (no DLL, an old driver, no NVIDIA GPU, NGX refused it) made the run «done» in the GUI
+            // with nothing said: a line the GUI parses, after the stage's progress lines, and the warnings of the report
+            std::string why = rep.reason;
+            if (why.rfind(name + ": ", 0) == 0) why.erase(0, name.size() + 2);
+            const std::string without = name == "nr" ? "without Neural Rendering" : name == "fg" ? "without frame generation" : "without " + name;
+            bool kept = false;
+            if (name == "nr") {
+                // a color_nr left in place - a forced run with the same fingerprint, an incomplete one - is not this run's: fg and the encode
+                // would read it (fg's skipped pass is left out by fgSkipped)
+                const std::filesystem::path cur = root / "color_nr";
+                std::error_code ec;
+                if (std::filesystem::exists(cur, ec)) {
+                    // a finished pass to the history (a later run without --force restores it); an unfinished one (no fingerprint, no
+                    // manifest) would never be restored: removed
+                    bool finished = false;
+                    try {
+                        finished = Manifest::Exists(cur) && !Manifest::Load(cur).fingerprint.empty();
+                    } catch (const std::exception&) {
+                    }
+                    if (finished && RetirePassVersion(root, "color_nr", ec)) retiredAny = true;
+                    else if (!ec) std::filesystem::remove_all(cur, ec);
+                    if (std::filesystem::exists(cur)) Log()->warn("process: cannot move the earlier color_nr aside ({})", ec.message());
+                    kept = !ExistingPass(root, {"color_nr"}).empty();  // what fg and the encode read: a folder without a manifest is not
+                }
+            }
+            if (kept) {  // NR's earlier output is in the result after all: not «without» it
+                result.warnings.push_back("nr disabled: " + why + "; the earlier color_nr is used");
+                Log()->warn("process: nr could not run — {}; the earlier color_nr is used", why);
+            } else {
+                result.warnings.push_back(name + " disabled: " + why + "; the result is made " + without);
+                Log()->warn("process: {} disabled — {}; the result is made {}", name, why, without);  // TaskQueue parses this line
+            }
         }
         if (rep.status == "ran")
             Log()->info("process: {} done — {} frames in {:.1f} s ({:.1f} ms/frame), {} ({})", name, rep.frames, rep.seconds, rep.msPerFrame, ShortFingerprint(d.fingerprint),

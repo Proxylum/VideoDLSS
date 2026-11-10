@@ -23,6 +23,7 @@
 #include <QTextDocument>
 #include <QTimer>
 #include <QScrollBar>
+#include <QPointer>
 #include <QSignalSpy>
 #include <QSlider>
 #include <QTest>
@@ -70,6 +71,8 @@
 #include "RecentPreviews.h"
 #include "ResultBar.h"
 #include "SceneCutsView.h"
+#include "StageAvailability.h"
+#include "stages/nr/NrStage.h"
 #include "StageCard.h"
 #include "StartPage.h"
 #include "Theme.h"
@@ -623,8 +626,8 @@ TEST_CASE("AppModel plans the project screen: card states, outcome, forced stage
     // the pipeline as the GUI runs it (dlssvid process --project), then everything is reused
     REQUIRE(model.saveProject());
     QStringList args = model.processArgs();
-    CHECK(args.size() == 4);
-    args << "--warp";
+    CHECK(args.size() == 5);
+    CHECK(args.last() == "--warp");  // the adapter the model runs on (TASK-0071: the cards' availability is of it)
     std::vector<std::string> cmd{DLSSVID_CLI_PATH};
     for (const QString& a : args) cmd.push_back(a.toStdString());
     std::string out;
@@ -1944,6 +1947,493 @@ TEST_CASE("TaskQueue runs dlssvid process whose fg process crashes: fg failed, e
     CHECK(std::any_of(output.begin(), output.end(), [](const QString& l) { return l.contains("process: fg failed"); }));
 }
 
+// ---- TASK-0071: NR / FG skipped as unavailable are said, not «готово» -------------------------------------------------------------
+
+TEST_CASE("TaskQueue and the processing page: a stage the runner skipped as unavailable is shown skipped with its reason, the run done without it", "[app][tasks][regression]") {
+    // TASK-0071: the GUI always passes --disable-unavailable - NR without a DLL went on as «готово», the page said nothing
+    App();
+    TaskQueue queue;
+    ProcessingPanel panel(queue);
+    const std::vector<TaskQueue::StagePlan> plan{{"upscale", "Апскейл ×2", 1.0, false}, {"nr", "Улучшение", 1.0, false}, {"fg", "Генерация кадров ×2", 1.0, false},
+                                                  {"encode", "Кодирование", 1.0, false}};
+    const QStringList lines{"/c", "echo", "upscale:", "3/3", "frames", "&", "echo", "[10:00:00.000]", "[warning]", "process:", "upscale", "fell", "back", "to", "nis",
+                            "-", "dlss", "unavailable:", "no", "nvngx_dlss.dll", "&", "echo", "nr:", "3/3", "frames", "&", "echo", "[10:00:01.000]", "[warning]",
+                            "process:", "nr", "disabled", "-", "nvngx_dlssnr.dll", "not", "found;", "the", "result", "is", "made", "without", "Neural", "Rendering",
+                            "&", "echo", "fg:", "3/3", "frames", "&", "echo", "encode:", "3/3", "frames"};
+    const int id = queue.enqueue("Обработка", "cmd", lines, plan);
+    panel.watch(id, "a → b");
+    Pump([&] { return queue.finished(id); }, 30000);
+    REQUIRE(queue.succeeded(id));
+    const TaskQueue::Progress p = queue.progress(id);
+    CHECK(p.failedStageTitles().isEmpty());
+    CHECK(p.missingStageTitles() == QStringList{"Улучшение"});
+    for (const auto& s : p.stages) {
+        INFO(s.name.toStdString());
+        if (s.name == "nr") {
+            CHECK(s.state == "disabled");
+            CHECK(s.note == "nvngx_dlssnr.dll not found");
+        } else if (s.name == "upscale") {
+            CHECK(s.state == "done");
+            CHECK(s.fellBack);
+            CHECK(s.note == "dlss unavailable: no nvngx_dlss.dll");
+        } else {
+            CHECK(s.state == "done");  // a stage after the skipped one runs on: the line keeps it from being taken for «running»
+        }
+    }
+    CHECK(p.stagesDone == 4);
+    CHECK(panel.headline().startsWith(QString::fromUtf8("Готово за")));
+    CHECK(panel.headline().contains(QString::fromUtf8("без стадии «Улучшение»")));
+    const QStringList rows = panel.stageLines();
+    REQUIRE(rows.size() == 4);
+    CHECK(rows[0].startsWith(QString::fromUtf8("Апскейл ×2 · готово запасным способом")));
+    CHECK(rows[1] == QString::fromUtf8("Улучшение · пропущена · —"));
+    CHECK(rows[2].startsWith(QString::fromUtf8("Генерация кадров ×2 · готово")));
+    CHECK(panel.note().contains(QString::fromUtf8("Стадия «Улучшение» пропущена: на этом компьютере она не запускается (nvngx_dlssnr.dll not found)")));
+    CHECK(panel.note().contains(QString::fromUtf8("подробности в подсказке строки и в логе")));  // not the card: rife's has no line, the button is not always there
+    CHECK(panel.note().contains(QString::fromUtf8("Стадия «Апскейл ×2» сделана запасным способом (NIS): dlss unavailable: no nvngx_dlss.dll")));
+    CHECK(ProcessingPanel::EndSummary(p) == QString::fromUtf8("без стадии «Улучшение»"));
+}
+
+TEST_CASE("TaskQueue keeps the dashes of an option at the start of the runner's reason", "[app][tasks][regression]") {
+    // review of TASK-0071: the separator trim ate "--" of "--multiplier 3 needs ..."
+    App();
+    TaskQueue queue;
+    const int id = queue.enqueue("t", "cmd", {"/c", "echo", "[10:00:00.000]", "[warning]", "process:", "fg", "disabled", "-", "--multiplier", "3", "needs", "MFG;",
+                                              "the", "result", "is", "made", "without", "frame", "generation"},
+                                 {{"fg", "FG", 1.0, false}});
+    Pump([&] { return queue.finished(id); }, 30000);
+    REQUIRE(queue.succeeded(id));
+    const TaskQueue::Progress p = queue.progress(id);
+    REQUIRE(p.stages.size() == 1);
+    CHECK(p.stages[0].state == "disabled");
+    CHECK(p.stages[0].note == "--multiplier 3 needs MFG");
+}
+
+TEST_CASE("ProcessingPanel::EndSummary: what a run that ended ok is short of - the window keeps the page for it", "[app][tasks][regression]") {
+    // review of TASK-0071: a run whose only trouble was an upscale that fell back left the page at once, «результат готов»
+    TaskQueue::Progress p;
+    TaskQueue::StageStatus up;
+    up.name = "upscale";
+    up.title = QString::fromUtf8("Апскейл ×2");
+    up.state = "done";
+    p.stages.push_back(up);
+    CHECK(ProcessingPanel::EndSummary(p).isEmpty());
+    p.stages[0].fellBack = true;
+    CHECK(ProcessingPanel::EndSummary(p) == QString::fromUtf8("стадия «Апскейл ×2» — запасным способом"));
+    TaskQueue::StageStatus nr;
+    nr.name = "nr";
+    nr.title = QString::fromUtf8("Улучшение");
+    nr.state = "disabled";
+    p.stages.push_back(nr);
+    CHECK(ProcessingPanel::EndSummary(p) == QString::fromUtf8("без стадии «Улучшение»"));
+    p.stages[1].state = "failed";
+    CHECK(ProcessingPanel::EndSummary(p) == QString::fromUtf8("без стадии «Улучшение»"));
+}
+
+TEST_CASE("TaskQueue: a skipped NR whose earlier color_nr stays in the result is not shown done - the window keeps the page", "[app][tasks][regression]") {
+    // review of TASK-0071: "process: nr could not run - ...; the earlier color_nr is used" matched nothing, the row read «готово»; then the
+    // page's note said NR was made by NIS
+    App();
+    TaskQueue queue;
+    ProcessingPanel panel(queue);
+    const int id = queue.enqueue("t", "cmd",
+                                 {"/c", "echo", "nr:", "3/3", "frames", "&", "echo", "[10:00:00.000]", "[warning]", "process:", "nr", "could", "not", "run", "-", "no",
+                                  "feature;", "the", "earlier", "color_nr", "is", "used", "&", "echo", "encode:", "3/3", "frames"},
+                                 {{"nr", QString::fromUtf8("Улучшение"), 1.0, false}, {"encode", QString::fromUtf8("Кодирование"), 1.0, false}});
+    panel.watch(id, "a → b");
+    Pump([&] { return queue.finished(id); }, 30000);
+    REQUIRE(queue.succeeded(id));
+    const TaskQueue::Progress p = queue.progress(id);
+    REQUIRE(p.stages.size() == 2);
+    CHECK(p.stages[0].fellBack);
+    CHECK(p.stages[0].state == "done");
+    CHECK(p.stages[0].note == "no feature");
+    CHECK(ProcessingPanel::EndSummary(p) == QString::fromUtf8("стадия «Улучшение» — запасным способом"));
+    CHECK(panel.note().contains(QString::fromUtf8("Стадия «Улучшение» на этом компьютере не запустилась (no feature) — в результате её прежний проход.")));
+    CHECK_FALSE(panel.note().contains("NIS"));
+}
+
+TEST_CASE("TaskQueue: the kept NR's line ends the stage - a failure after it is not put on NR", "[app][tasks][regression]") {
+    // review of TASK-0071: a kept NR prints no done line - it stayed «running», and the encode's failure before its first progress line
+    // made it «ошибка»
+    App();
+    TaskQueue queue;
+    const int id = queue.enqueue("t", "cmd",
+                                 {"/c", "echo", "nr:", "3/3", "frames", "&", "echo", "[10:00:00.000]", "[warning]", "process:", "nr", "could", "not", "run", "-", "no",
+                                  "feature;", "the", "earlier", "color_nr", "is", "used", "&", "echo", "[10:00:00.100]", "[error]", "encoder", "failed", "&", "exit", "1"},
+                                 {{"nr", QString::fromUtf8("Улучшение"), 1.0, false}, {"encode", QString::fromUtf8("Кодирование"), 1.0, false}});
+    Pump([&] { return queue.finished(id); }, 30000);
+    REQUIRE(queue.finished(id));
+    CHECK_FALSE(queue.succeeded(id));
+    const TaskQueue::Progress p = queue.progress(id);
+    REQUIRE(p.stages.size() == 2);
+    CHECK(p.stages[0].state == "done");
+    CHECK(p.stages[0].fellBack);
+    CHECK(p.stages[1].state != "done");
+}
+
+TEST_CASE("TaskQueue reads the CLI's UTF-8 across reads: an em dash split between two of them stays whole", "[app][tasks][regression]") {
+    // TASK-0071: each read was decoded on its own - a character cut by the pipe became three replacement characters
+    App();
+    TaskQueue queue;
+    const QString script = R"($o=[Console]::OpenStandardOutput(); $e=[Text.Encoding]::UTF8;
+$a=$e.GetBytes("nr: 3/3 frames`n[10:00:00.000] [warning] process: nr disabled "); $o.Write($a,0,$a.Length); $o.Write([byte[]](0xE2),0,1); $o.Flush();
+Start-Sleep -Milliseconds 600;
+$b=[byte[]](0x80,0x94)+$e.GetBytes(" no DLL; the result is made without Neural Rendering`n"); $o.Write($b,0,$b.Length); $o.Flush())";
+    const int id = queue.enqueue("t", "powershell", {"-NoProfile", "-NonInteractive", "-Command", script}, {{"nr", "Улучшение", 1.0, false}});
+    Pump([&] { return queue.finished(id); }, 30000);
+    REQUIRE(queue.succeeded(id));
+    const TaskQueue::Progress p = queue.progress(id);
+    REQUIRE(p.stages.size() == 1);
+    CHECK(p.stages[0].state == "disabled");
+    CHECK(p.stages[0].note == "no DLL");
+}
+
+TEST_CASE("TaskQueue runs dlssvid process with NR, FG and DLSS on the software adapter: NR and FG skipped, the upscale fell back, the task succeeded", "[app][tasks][process][regression]") {
+    // TASK-0071: the runner's own lines, end to end (the em dash of "disabled — " included)
+    App();
+    const auto d = Dir("process_unavailable");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    const auto out = d / "out.mkv";
+    TaskQueue queue;
+    QStringList output;
+    QObject::connect(&queue, &TaskQueue::taskOutput, [&](int, const QString& line) { output << line; });
+    const std::vector<TaskQueue::StagePlan> plan{{"depth", "Глубина", 1.0, false}, {"flow", "Векторы", 1.0, false}, {"upscale", "Апскейл", 1.0, false},
+                                                  {"nr", "NR", 1.0, false},          {"fg", "FG", 1.0, false},      {"encode", "Кодирование", 1.0, false}};
+    const QStringList args{"process", "-i", QString::fromStdWString(clip.wstring()), "-o", QString::fromStdWString(out.wstring()), "--passes",
+                           QString::fromStdWString((d / "p").wstring()), "--warp", "--codec", "ffv1", "--disable-unavailable",
+                           "--param", "depth.backend=stub", "--param", "flow.backend=stub", "--param", "upscale.backend=dlss",
+                           "--param", "nr.backend=ngx", "--param", "fg.backend=dlssg"};
+    const int id = queue.enqueue("Обработка", DLSSVID_CLI_PATH, args, plan);
+    Pump([&] { return queue.finished(id); }, 120000);
+    REQUIRE(queue.finished(id));
+    INFO(output.join("\n").toStdString());
+    CHECK(queue.succeeded(id));
+    const TaskQueue::Progress p = queue.progress(id);
+    CHECK(p.missingStageTitles() == QStringList({"NR", "FG"}));
+    for (const auto& s : p.stages) {
+        INFO(s.name.toStdString() + " " + s.state.toStdString() + " " + s.note.toStdString());
+        if (s.name == "nr" || s.name == "fg") {
+            CHECK(s.state == "disabled");
+            CHECK_FALSE(s.note.isEmpty());
+            CHECK_FALSE(s.note.startsWith(s.name + ":"));  // the runner drops the stage's own prefix
+            // exactly the reason of the runner's line: its separator, its tail, the pipe's decoding (review of TASK-0071)
+            CHECK(output.join("\n").contains(QString::fromUtf8("process: %1 disabled — ").arg(s.name) + s.note + "; the result is made"));
+        }
+        if (s.name == "upscale") CHECK(s.fellBack);
+        if (s.name == "encode") CHECK(s.state == "done");
+    }
+    CHECK(DecodeAll(out).size() == 4);  // color_sr, as the GUI's run of the same project gives
+}
+
+TEST_CASE("StageAvailabilityFor: what the card says of NR and FG before the run - known without NGX, or the last check", "[app][availability]") {
+    App();
+    nlohmann::json nr = EffectiveStageParams("nr", {{"backend", "ngx"}});
+    nlohmann::json fg = EffectiveStageParams("fg", {{"backend", "dlssg"}});
+    AvailabilityFacts f;
+    f.nvidia = true;
+    f.driver = NvidiaDriverVersion{616, 92, true};
+    f.nr = NrAvailability{true, ""};
+    f.nrDll = f.nrForwarder = f.dlssgDll = true;
+    // nothing known against: the check is offered
+    StageAvailability a = StageAvailabilityFor("nr", true, nr, f, nullptr, false);
+    CHECK(a.text == QString::fromUtf8("Работа на этой видеокарте не проверена"));
+    CHECK(a.checkable);
+    CHECK(a.tone == "none");
+    // what makes the run skip the stage
+    AvailabilityFacts w = f;
+    w.software = true;
+    CHECK(StageAvailabilityFor("nr", true, nr, w, nullptr, false).text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — стадия будет пропущена"));
+    CHECK_FALSE(StageAvailabilityFor("fg", true, fg, w, nullptr, false).checkable);
+    AvailabilityFacts amd = f;
+    amd.nvidia = false;
+    CHECK(StageAvailabilityFor("fg", true, fg, amd, nullptr, false).text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX — стадия будет пропущена"));
+    AvailabilityFacts noDll = f;
+    noDll.nr = NrAvailability{false, "copy nvngx_dlssnr.dll to bin/nvidia"};
+    noDll.nrDll = false;
+    a = StageAvailabilityFor("nr", true, nr, noDll, nullptr, false);
+    CHECK(a.text == QString::fromUtf8("Нет nvngx_dlssnr.dll — стадия будет пропущена"));
+    CHECK(a.tone == "danger");
+    CHECK(a.tip == "copy nvngx_dlssnr.dll to bin/nvidia");
+    CHECK_FALSE(a.checkable);
+    noDll.nrDll = true;
+    noDll.nrForwarder = false;
+    CHECK(StageAvailabilityFor("nr", true, nr, noDll, nullptr, false).text == QString::fromUtf8("Нет переходника nvngx.dll_dlssvid.dll — стадия будет пропущена"));
+    AvailabilityFacts old = f;
+    old.driver = NvidiaDriverVersion{610, 12, true};
+    CHECK(StageAvailabilityFor("nr", true, nr, old, nullptr, false).text == QString::fromUtf8("Драйвер 610.12, нужен 616.56 или новее — стадия будет пропущена"));
+    CHECK(StageAvailabilityFor("fg", true, fg, old, nullptr, false).checkable);  // FG has no fixed minimum: NGX says
+    old.driver = NvidiaDriverVersion{};  // unreadable: the run warns and goes on
+    CHECK(StageAvailabilityFor("nr", true, nr, old, nullptr, false).checkable);
+    AvailabilityFacts noSdk = f;  // review of TASK-0071: a build without the DLSS SDK skips FG whatever the files
+    noSdk.fg = FgAvailability{false, "built without the DLSS SDK"};
+    a = StageAvailabilityFor("fg", true, fg, noSdk, nullptr, false);
+    CHECK(a.text == QString::fromUtf8("Frame Generation не собран в этой версии — стадия будет пропущена"));
+    CHECK_FALSE(a.checkable);
+    // review of TASK-0071: without the SDK the DLLs are not copied either - the build is the reason, not a missing DLL
+    noSdk.ngxBuilt = false;
+    noSdk.dlssgDll = false;
+    noSdk.nrDll = false;
+    noSdk.nr = NrAvailability{false, "built without the DLSS SDK (NGX headers)"};
+    a = StageAvailabilityFor("fg", true, fg, noSdk, nullptr, false);
+    CHECK(a.text == QString::fromUtf8("Frame Generation не собран в этой версии — стадия будет пропущена"));
+    CHECK(a.tip == "built without the DLSS SDK");
+    a = StageAvailabilityFor("nr", true, nr, noSdk, nullptr, false);
+    CHECK(a.text == QString::fromUtf8("Neural Rendering не собран в этой версии — стадия будет пропущена"));
+    CHECK(a.tip == "built without the DLSS SDK (NGX headers)");
+    CHECK_FALSE(a.checkable);
+    // a backend that is not a string is no NGX stage: no line, no throw (review of TASK-0071: the card's refresh threw)
+    CHECK_FALSE(StageNeedsNgx("nr", {{"backend", nullptr}}));
+    CHECK_FALSE(StageNeedsNgx("fg", {{"backend", 1}}));
+    CHECK(StageAvailabilityFor("nr", true, {{"backend", nullptr}}, noSdk, nullptr, false).text.isEmpty());
+    AvailabilityFacts noFg = f;
+    noFg.dlssgDll = false;
+    noFg.dlssgInstruction = "copy nvngx_dlssg.dll";
+    a = StageAvailabilityFor("fg", true, fg, noFg, nullptr, false);
+    CHECK(a.text == QString::fromUtf8("Нет nvngx_dlssg.dll — стадия будет пропущена"));
+    CHECK(a.tip == "copy nvngx_dlssg.dll");
+    // a check's answer, and one running
+    StageCheck good{true, {}, "RTX 4070 Ti SUPER · драйвер 616.92", "14:02"};
+    a = StageAvailabilityFor("nr", true, nr, f, &good, false);
+    CHECK(a.text == QString::fromUtf8("Работает на этой видеокарте · проверено 14:02"));
+    CHECK(a.tone == "ok");
+    CHECK(a.tip == good.gpu);
+    // a pass the plan reuses is in the result anyway: only a recompute would be skipped (review of TASK-0071)
+    a = StageAvailabilityFor("nr", true, nr, noDll, nullptr, false, true);
+    CHECK(a.text == QString::fromUtf8("Нет переходника nvngx.dll_dlssvid.dll — пересчитать здесь не получится"));
+    CHECK(a.tone == "warn");
+    StageCheck bad{false, "--multiplier 3 needs Multi Frame Generation (RTX 50)", {}, "14:03"};
+    a = StageAvailabilityFor("fg", true, fg, f, &bad, false);
+    CHECK(a.text == QString::fromUtf8("Проверка не прошла — стадия будет пропущена"));
+    CHECK(a.tone == "danger");
+    CHECK(a.tip == bad.hint);
+    CHECK(a.checkable);  // again, after a fix
+    a = StageAvailabilityFor("fg", true, fg, f, &bad, false, true);
+    CHECK(a.text == QString::fromUtf8("Проверка не прошла — пересчитать здесь не получится"));
+    CHECK(a.tone == "warn");
+    a = StageAvailabilityFor("nr", true, nr, f, &good, true);
+    CHECK(a.text == QString::fromUtf8("Проверка…"));
+    CHECK(a.checking);
+    // no line: the stage off, another backend, NR at intensity 0 (no model then)
+    CHECK(StageAvailabilityFor("nr", false, nr, noDll, nullptr, false).text.isEmpty());
+    CHECK(StageAvailabilityFor("nr", true, EffectiveStageParams("nr", {{"backend", "stub"}}), noDll, nullptr, false).text.isEmpty());
+    CHECK(StageAvailabilityFor("nr", true, EffectiveStageParams("nr", {{"backend", "ngx"}, {"intensity", 0.0}}), noDll, nullptr, false).text.isEmpty());
+    CHECK(StageAvailabilityFor("fg", true, EffectiveStageParams("fg", {{"backend", "blend"}}), noFg, nullptr, false).text.isEmpty());
+    CHECK(StageAvailabilityFor("upscale", true, EffectiveStageParams("upscale", {}), noFg, nullptr, false).text.isEmpty());
+}
+
+TEST_CASE("StageCard: NR and FG on the software adapter say the run will skip them; no check button then", "[app][availability]") {
+    App();
+    const auto d = Dir("availability_card");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    AppModel model(true);
+    model.openVideo(Q(WriteClip(d / "clip.mkv", spec)));
+    model.setStageEnabled("nr", true);
+    model.setStageParam("nr", "backend", "ngx");
+    model.setStageEnabled("fg", true);
+    model.setStageParam("fg", "backend", "dlssg");
+    const StageAvailability a = model.availability("nr");
+    CHECK(a.text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — стадия будет пропущена"));
+    CHECK_FALSE(a.checkable);
+    model.checkStage("nr");  // nothing to check: no process
+    CHECK_FALSE(model.checkRunning());
+    StageCard card(model, "nr");
+    card.refresh();
+    auto* label = card.findChild<QLabel*>("availability");
+    auto* button = card.findChild<QPushButton*>("checkStage");
+    REQUIRE(label);
+    REQUIRE(button);
+    CHECK(label->text() == a.text);
+    CHECK(button->isHidden());
+    model.setStageParam("nr", "backend", "stub");
+    card.refresh();
+    CHECK(label->isHidden());  // the stub runs anywhere
+    CHECK(model.availability("upscale").text.isEmpty());
+}
+
+TEST_CASE("AppModel::checkArgs: the check runs the run's NR settings without the keys the schema lacks, at the model's frame of the run", "[app][availability][regression]") {
+    // review of TASK-0071: `nr --params-file` refuses a key `process` passes over (nr.preset of an older project) - the check failed for a
+    // stage that runs; the check size was not in the answer's key
+    App();
+    const auto d = Dir("availability_args");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    AppModel model(true);
+    model.openVideo(Q(WriteClip(d / "clip.mkv", spec)));
+    model.setStageEnabled("nr", true);
+    model.setStageParams("nr", {{"backend", "ngx"}, {"preset", "natural"}, {"model_scale", 0.5}});
+    model.setStageEnabled("upscale", true);
+    model.setStageParams("upscale", {{"backend", "nis"}, {"scale", 2.0}, {"target_width", 192}});  // the target, not the scale: 192x128
+    model.setStageEnabled("fg", true);
+    model.setStageParams("fg", {{"backend", "dlssg"}, {"multiplier", 3}});
+    model.refreshPlan();
+    REQUIRE(model.outcome().width > 0);
+    const nlohmann::json params = model.checkParams("nr");
+    CHECK_FALSE(params.contains("preset"));
+    CHECK(params.value("backend", std::string()) == "ngx");
+    QStringList nr = model.checkArgs("nr", "P.json", "J.json");
+    CHECK(nr.mid(0, 4) == QStringList({"nr", "--check", "--backend", "ngx"}));
+    CHECK(nr.contains("--params-file"));
+    CHECK(nr[nr.indexOf("--params-file") + 1] == "P.json");
+    CHECK(nr[nr.indexOf("--json") + 1] == "J.json");
+    REQUIRE(nr.contains("--check-size"));
+    CHECK(model.outcome().width == 192);  // the frame UpscaleStage makes (review of TASK-0071: source x scale was 96)
+    const auto [w, h] = NrWorkSize(192, 128, 0.5);
+    REQUIRE(w != 192);
+    CHECK(nr[nr.indexOf("--check-size") + 1] == QString("%1x%2").arg(w).arg(h));
+    CHECK(nr.contains("--warp"));  // the adapter the GUI runs on
+    const QStringList fg = model.checkArgs("fg", "P.json", "J.json");
+    CHECK(fg[fg.indexOf("--multiplier") + 1] == "3");
+    CHECK_FALSE(fg.contains("--params-file"));
+    // review of TASK-0071: a malformed value of a hand-edited project or the JSON field threw at every refresh of the card
+    model.setStageParams("fg", {{"backend", "dlssg"}, {"multiplier", "three"}});
+    const QStringList fg2 = model.checkArgs("fg", "P.json", "J.json");
+    CHECK(fg2[fg2.indexOf("--multiplier") + 1] == "2");
+    model.setStageParams("nr", {{"backend", "ngx"}, {"model_scale", "half"}});
+    QStringList nr2;
+    CHECK_NOTHROW(nr2 = model.checkArgs("nr", "P.json", "J.json"));
+    if (model.outcome().width) {  // the model's frame: scale 1
+        REQUIRE(nr2.contains("--check-size"));
+        CHECK(nr2[nr2.indexOf("--check-size") + 1] == QString("%1x%2").arg(model.outcome().width).arg(model.outcome().height));
+    }
+    CHECK_NOTHROW(model.availability("nr"));
+    model.setStageParams("nr", {{"backend", nullptr}});
+    CHECK(model.availability("nr").text.isEmpty());
+}
+
+TEST_CASE("AppModel::checkStage runs nr --check with the project's settings and says what it found", "[app][availability][gpu]") {
+    // TASK-0071: one feature on the GPU, as `dlssvid nr --check` - the default check, not a stress probe
+    App();
+    if (FindNrDll().empty()) SKIP("no nvngx_dlssnr.dll here");
+    const auto d = Dir("availability_check");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    AppModel model(false);
+    model.openVideo(Q(WriteClip(d / "clip.mkv", spec)));
+    model.setStageEnabled("upscale", true);
+    model.setStageParam("upscale", "scale", 2.0);
+    model.setStageEnabled("nr", true);
+    model.setStageParam("nr", "backend", "ngx");
+    model.refreshPlan();  // the outcome: NR's frame for --check-size
+    const StageAvailability before = model.availability("nr");
+    if (!before.checkable) SKIP("NR cannot run here: " + before.text.toStdString());
+    // «Проверить» waits for the GPU's work: off while a task or a preview runs (only the button keeps a check from starting then) and
+    // while a check runs (review of TASK-0071)
+    StageCard card(model, "nr");
+    bool gpuBusy = false;
+    card.setBusyCheck([&] { return gpuBusy; });
+    card.refresh();
+    auto* checkButton = card.findChild<QPushButton*>("checkStage");
+    REQUIRE(checkButton);
+    CHECK(checkButton->isEnabled());
+    gpuBusy = true;
+    card.refreshBusy();
+    CHECK_FALSE(checkButton->isEnabled());
+    gpuBusy = false;
+    card.refreshBusy();
+    CHECK(checkButton->isEnabled());
+    QSignalSpy changed(&model, &AppModel::availabilityChanged);
+    model.checkStage("nr");
+    REQUIRE(model.checkRunning());
+    CHECK(model.availability("nr").text == QString::fromUtf8("Проверка…"));
+    CHECK_FALSE(checkButton->isEnabled());
+    model.checkStage("fg");  // one at a time
+    Pump([&] { return !model.checkRunning(); }, 120000);
+    REQUIRE_FALSE(model.checkRunning());
+    CHECK(changed.count() >= 2);
+    const StageAvailability after = model.availability("nr");
+    INFO(after.text.toStdString() + " | " + after.tip.toStdString());
+    CHECK((after.tone == "ok" || after.tone == "danger"));  // what this GPU and DLL give; a patched DLL on RTX 20/30/40, or none
+    CHECK(after.text != before.text);
+    // the CLI's own answer to the same command: the card says what it says (review of TASK-0071: a wrong command passed as «danger»)
+    const auto params = d / "params.json";
+    std::ofstream(params, std::ios::binary) << model.checkParams("nr").dump(2);
+    const auto json = d / "check.json";
+    std::vector<std::string> cmd{DLSSVID_CLI_PATH};
+    for (const QString& a : model.checkArgs("nr", Q(params), Q(json))) cmd.push_back(a.toStdString());
+    std::string out;
+    Subprocess::Run(cmd, &out);
+    REQUIRE(std::filesystem::exists(json));  // a completed check writes its report
+    const nlohmann::json report = nlohmann::json::parse(std::ifstream(json));
+    CHECK((after.tone == "ok") == report.value("ok", false));
+    // another frame for NR (the upscale's scale): the answer was of the old size
+    const std::string answered = model.availability("nr").text.toStdString();
+    model.setStageParam("upscale", "scale", 3.0);
+    model.refreshPlan();
+    CHECK(model.availability("nr").text == before.text);
+    model.setStageParam("upscale", "scale", 2.0);
+    model.refreshPlan();
+    CHECK(model.availability("nr").text.toStdString() == answered);  // the same again: the answer stands
+    // another setting: the answer was of the old ones
+    model.setStageParam("nr", "passes", 2);
+    CHECK(model.availability("nr").text == before.text);
+    // a CLI that does not start ends the check as failed - not «Проверка…» for good (review of TASK-0071)
+    model.setCheckProgramForTests(Q(d / "no_such_dlssvid.exe"));
+    model.checkStage("nr");
+    Pump([&] { return !model.checkRunning(); }, 30000);
+    REQUIRE_FALSE(model.checkRunning());
+    const StageAvailability broken = model.availability("nr");
+    CHECK(broken.text == QString::fromUtf8("Проверка не прошла — стадия будет пропущена"));
+    CHECK(broken.tip.contains(QString::fromUtf8("dlssvid не запускается")));
+    model.setCheckProgramForTests({});
+    // a task queued on the GPU stops a running check: nothing is stored of it
+    model.setStageParam("nr", "passes", 3);
+    TaskQueue queue;
+    ProjectTasks tasks(model, queue);
+    model.checkStage("nr");
+    REQUIRE(model.checkRunning());
+    QPointer<QProcess> killed;
+    for (QProcess* p : model.findChildren<QProcess*>())
+        if (p->state() != QProcess::NotRunning && p->arguments().contains("--check")) killed = p;
+    REQUIRE(killed);
+    bool ended = false;
+    QProcess::ExitStatus endedAs = QProcess::NormalExit;
+    QObject::connect(killed, &QProcess::finished, [&](int, QProcess::ExitStatus s) {
+        ended = true;
+        endedAs = s;
+    });
+    const int task = queue.enqueue("t", "cmd", {"/c", "exit", "0"});
+    CHECK_FALSE(model.checkRunning());
+    Pump([&] { return queue.finished(task) && ended; }, 30000);
+    CHECK(endedAs == QProcess::CrashExit);  // killed: the feature is off the GPU before the task (review of TASK-0071)
+    QCoreApplication::processEvents();
+    CHECK(model.availability("nr").text == before.text);  // its end came and stored nothing
+    // a preview started on the GPU stops it too (ProjectTasks: previewStarted; review of TASK-0071 - only the task's half was tested)
+    model.setStageParam("nr", "passes", 4);  // other settings: nothing stored for them
+    model.checkStage("nr");
+    REQUIRE(model.checkRunning());
+    QPointer<QProcess> killedByPreview;
+    for (QProcess* p : model.findChildren<QProcess*>())
+        if (p->state() != QProcess::NotRunning && p->arguments().contains("--check")) killedByPreview = p;
+    REQUIRE(killedByPreview);
+    bool previewEnded = false;
+    QProcess::ExitStatus previewEndedAs = QProcess::NormalExit;
+    QObject::connect(killedByPreview, &QProcess::finished, [&](int, QProcess::ExitStatus s) {
+        previewEnded = true;
+        previewEndedAs = s;
+    });
+    QSignalSpy previews(&queue, &TaskQueue::previewStarted);
+    const int preview = queue.enqueue("p", "cmd", {"/c", "exit", "0"}, {}, TaskQueue::Lane::Preview);
+    Pump([&] { return previews.count() > 0; }, 30000);
+    REQUIRE(previews.count() > 0);
+    CHECK_FALSE(model.checkRunning());
+    Pump([&] { return queue.finished(preview) && previewEnded; }, 30000);
+    CHECK(previewEndedAs == QProcess::CrashExit);
+    QCoreApplication::processEvents();
+    CHECK(model.availability("nr").text == QString::fromUtf8("Работа на этой видеокарте не проверена"));
+}
+
 // Audit play-fg-rate (TASK-0038): playback is paced by a clock at the exact rational rate. Before, a QTimer of
 // floor(1000 / fps) ms advanced a frame per tick: 48 fps played at 50 Hz, 24 fps at 24.39 Hz.
 TEST_CASE("PlaybackClock paces frames at the exact rational rate: 48 fps is 48 Hz, not 50; 24 fps steps 1/24 s (regression: timer interval truncated to whole ms)",
@@ -2605,7 +3095,6 @@ TEST_CASE("AppModel: the card of the scene list, its chips and the lines of the 
 
     REQUIRE(model.saveProject());
     QStringList args = model.processArgs();
-    args << "--warp";
     std::vector<std::string> cmd{DLSSVID_CLI_PATH};
     for (const QString& a : args) cmd.push_back(a.toStdString());
     std::string out;
@@ -2721,7 +3210,6 @@ TEST_CASE("AppModel: the same list names the stages made with another one; the l
     auto run = [&] {
         REQUIRE(model.saveProject());
         QStringList args = model.processArgs();
-        args << "--warp";
         std::vector<std::string> cmd{DLSSVID_CLI_PATH};
         for (const QString& a : args) cmd.push_back(a.toStdString());
         std::string out;
@@ -5284,6 +5772,215 @@ TEST_CASE("NR preview: computing the stages before NR runs process --stages with
     CHECK_FALSE(model.upstreamArgs({"depth"}).contains("--force"));
 }
 
+TEST_CASE("AppModel::availability: a stage whose pass the plan reuses says only that a recompute would be skipped here", "[app][availability][regression]") {
+    // review of TASK-0071: the card said «будет пропущена» while the reused color_nr went into the result
+    App();
+    PreviewProject m("availability_reused");
+    AppModel& model = *m.model;
+    model.setStageParam("nr", "backend", "ngx");  // the WARP model: NR cannot run here
+    model.refreshPlan();
+    std::string want;
+    for (const auto& d : model.plan().stages)
+        if (d.name == "nr") want = d.fingerprint;
+    REQUIRE(!want.empty());
+    CHECK(model.availability("nr").text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — стадия будет пропущена"));
+    Manifest man = Manifest::Load(m.root() / "color_nr");  // the stub's pass, stamped as the ngx run would
+    man.fingerprint = want;
+    man.Save(m.root() / "color_nr");
+    model.refreshPlan();
+    std::string action;
+    for (const auto& d : model.plan().stages)
+        if (d.name == "nr") action = d.action;
+    REQUIRE(action == "reuse");
+    const StageAvailability a = model.availability("nr");
+    CHECK(a.text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — пересчитать здесь не получится"));
+    CHECK(a.tone == "warn");
+}
+
+TEST_CASE("AppModel::availability: FG's reused pass is not promised when NR, planned to run, will be skipped - FG is decided again", "[app][availability][regression]") {
+    // review of TASK-0071: the run moves the skipped NR's color_nr aside, FG's input changes and it runs (or is skipped) - the card said
+    // «пересчитать здесь не получится» as if its color_fg went into the result
+    App();
+    PreviewProject m("availability_fg_after_nr");
+    AppModel& model = *m.model;
+    model.setStageEnabled("fg", true);
+    model.setStageParam("fg", "backend", "blend");
+    std::string out;  // color_fg made by blend
+    REQUIRE(model.saveProject());
+    QStringList args = model.processArgs();
+    std::vector<std::string> cmd{DLSSVID_CLI_PATH};
+    for (const QString& s : args) cmd.push_back(s.toStdString());
+    REQUIRE(Subprocess::Run(cmd, &out) == 0);
+    model.setStageParam("nr", "backend", "ngx");
+    model.setStageParam("fg", "backend", "dlssg");
+    model.refreshPlan();
+    auto fingerprintOf = [&](const char* stage) {
+        for (const auto& d : model.plan().stages)
+            if (d.name == stage) return d.fingerprint;
+        return std::string();
+    };
+    // the passes on disk stamped as the ngx / dlssg runs would (the same DLLs, the WARP adapter: neither can run here)
+    for (const auto& [stage, pass] : {std::pair<const char*, const char*>{"nr", "color_nr"}, {"fg", "color_fg"}}) {
+        Manifest man = Manifest::Load(m.root() / pass);
+        man.fingerprint = fingerprintOf(stage);
+        man.Save(m.root() / pass);
+        model.refreshPlan();
+    }
+    auto actionOf = [&](const char* stage) {
+        for (const auto& d : model.plan().stages)
+            if (d.name == stage) return d.action;
+        return std::string();
+    };
+    REQUIRE(actionOf("nr") == "reuse");
+    REQUIRE(actionOf("fg") == "reuse");
+    CHECK(model.availability("fg").tone == "warn");  // reused: in the result anyway
+    model.setForce("nr", true);  // NR planned to run - and skipped on WARP
+    model.refreshPlan();
+    REQUIRE(actionOf("nr") == "run");
+    REQUIRE(actionOf("fg") == "reuse");  // the plan takes NR's planned color_nr
+    const StageAvailability a = model.availability("fg");
+    CHECK(a.text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — стадия будет пропущена"));
+    CHECK(a.tone == "danger");
+}
+
+TEST_CASE("AppModel::availability: FG planned on NR's pass, NR to be skipped - the run reuses FG's pass made from color_sr, the card says so", "[app][availability][regression]") {
+    // review of TASK-0071: the card took FG's action from the plan with NR's planned color_nr - «будет пропущена»; the run moves the skipped
+    // NR's color_nr aside, decides FG on color_sr and reuses its color_fg
+    App();
+    PreviewProject m("availability_fg_reused_after_nr");
+    AppModel& model = *m.model;
+    std::filesystem::remove_all(m.root() / "color_nr");  // NR never ran here
+    model.setStageEnabled("nr", false);
+    model.setStageEnabled("fg", true);
+    model.setStageParam("fg", "backend", "blend");
+    auto run = [&] {
+        REQUIRE(model.saveProject());
+        std::vector<std::string> cmd{DLSSVID_CLI_PATH};
+        for (const QString& s : model.processArgs()) cmd.push_back(s.toStdString());
+        std::string out;
+        REQUIRE(Subprocess::Run(cmd, &out) == 0);
+        return out;
+    };
+    run();  // color_fg made by blend from color_sr
+    REQUIRE_FALSE(std::filesystem::exists(m.root() / "color_nr"));
+    auto decision = [&](const char* stage) {
+        for (const auto& d : model.plan().stages)
+            if (d.name == stage) return d;
+        return StageDecision{};
+    };
+    model.setStageParam("fg", "backend", "dlssg");
+    model.refreshPlan();
+    Manifest man = Manifest::Load(m.root() / "color_fg");  // stamped as the dlssg run on color_sr would (WARP: it cannot run here)
+    man.fingerprint = decision("fg").fingerprint;
+    man.Save(m.root() / "color_fg");
+    model.refreshPlan();
+    REQUIRE(decision("fg").action == "reuse");
+    model.setStageEnabled("nr", true);
+    model.setStageParam("nr", "backend", "ngx");  // planned to run - and skipped on WARP
+    model.refreshPlan();
+    REQUIRE(decision("nr").action == "run");
+    REQUIRE(decision("fg").action == "run");  // on NR's planned color_nr
+    REQUIRE(model.availability("nr").tone == "danger");
+    const StageAvailability a = model.availability("fg");
+    CHECK(a.text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — пересчитать здесь не получится"));
+    CHECK(a.tone == "warn");
+    // the scene list analysed again: FG's pass waits for it in the run's plan - reused if the list comes out the same, not «пропущена»
+    model.setForce("scenes", true);
+    model.refreshPlan();
+    REQUIRE(decision("nr").action == "run");
+    REQUIRE_FALSE(decision("nr").pending);  // no pass to reuse: it runs - and is skipped
+    CHECK(model.availability("fg").tone == "warn");
+    model.setForce("scenes", false);
+    model.refreshPlan();
+    // the run agrees: NR skipped, FG's pass reused
+    const std::string out = run();
+    INFO(out);
+    CHECK(out.find("process: nr disabled") != std::string::npos);
+    CHECK(QString::fromStdString(out).contains(QRegularExpression(R"(process: fg \S+ .*is complete, reused)")));
+}
+
+TEST_CASE("AppModel::availability: an NR pass pending on the scene list is not said skipped - the run may reuse it", "[app][availability][regression]") {
+    // review of TASK-0071: a pending decision (action "run", reused if the list comes out as its pass was made with) was taken for a
+    // recompute: the card said the stage would be skipped while the run reuses its color_nr when no cut is found
+    App();
+    PreviewProject m("availability_pending_nr");
+    AppModel& model = *m.model;
+    model.setStageParam("nr", "backend", "ngx");
+    model.refreshPlan();
+    auto decision = [&](const char* stage) {
+        for (const auto& d : model.plan().stages)
+            if (d.name == stage) return d;
+        return StageDecision{};
+    };
+    Manifest man = Manifest::Load(m.root() / "color_nr");  // stamped as the ngx run would (WARP: it cannot run here)
+    man.fingerprint = decision("nr").fingerprint;
+    man.Save(m.root() / "color_nr");
+    model.refreshPlan();
+    REQUIRE(decision("nr").action == "reuse");
+    model.setForce("scenes", true);  // analysed again: NR's pass is reused if the same list comes out
+    model.refreshPlan();
+    std::string plan;
+    for (const auto& d : model.plan().stages) plan += d.name + ":" + d.action + (d.pending ? "(pending " + d.pendingRule + ")" : "") + " " + d.kind + " " + d.detail + "; ";
+    INFO(plan + model.planError().toStdString());
+    REQUIRE(decision("scenes").action == "run");
+    REQUIRE(decision("nr").action == "run");
+    REQUIRE(decision("nr").pending);
+    const StageAvailability a = model.availability("nr");
+    CHECK(a.text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — пересчитать здесь не получится"));
+    CHECK(a.tone == "warn");
+}
+
+TEST_CASE("NR preview: the stages before NR whose upscale fell back from DLSS to NIS say so", "[app][preview][gpu][regression]") {
+    // review of TASK-0071: the same `process --disable-unavailable`, its fallback only in the log
+    App();
+    PreviewProject m("preview_upstream_fallback");
+    AppModel& model = *m.model;
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.setStageParams("upscale", {{"backend", "dlss"}, {"scale", 1.5}});  // WARP: DLSS cannot run, NIS does
+    model.refreshPlan();
+    QObject::connect(&queue, &TaskQueue::taskFinished, [&](int taskId, bool ok) { runner.handleTaskFinished(taskId, ok); });
+    QSignalSpy messages(&model, &AppModel::message);
+    std::vector<std::pair<QString, QString>> statuses;  // every line the bar showed, with its tone
+    QObject::connect(&runner, &PreviewRunner::changed, [&] { statuses.emplace_back(runner.statusText(), runner.statusRole()); });
+    // the tone too, not only the words: each line that says the fallback is a warning (review of TASK-0071)
+    auto saidInWarnTone = [&] {
+        int said = 0;
+        for (const auto& [text, role] : statuses)
+            if (text.contains(QString::fromUtf8("запасным способом (NIS)"))) {
+                ++said;
+                INFO(text.toStdString());
+                CHECK(role == "warn");
+            }
+        return said;
+    };
+    const int id = runner.prepareInputs();
+    REQUIRE(id > 0);
+    Pump([&] { return queue.finished(id); }, 120000);
+    REQUIRE(queue.succeeded(id));
+    bool said = false;
+    for (const auto& args : messages)  // «стадия «Апскейл ×2» сделана»: the title is masculine (review of TASK-0071)
+        said = said || args.at(0).toString().contains(QRegularExpression(QString::fromUtf8("Этапы до улучшения: стадия «[^»]+» сделана запасным способом \\(NIS\\)")));
+    CHECK(said);
+    CHECK(runner.statusText().contains(QString::fromUtf8("запасным способом (NIS)")));
+    Pump([&] { return !runner.running(); }, 60000);
+    CHECK(std::any_of(statuses.begin(), statuses.end(), [](const auto& s) {  // the line the preview starts with
+        return s.first.contains(QString::fromUtf8("запасным способом (NIS)")) && s.first.contains(QString::fromUtf8("считаю превью кадра")) &&
+               !s.first.contains(QString::fromUtf8("осталось"));
+    }));
+    CHECK(saidInWarnTone() > 0);
+    // again: the stages before NR reused - their pass made so, said again - and the frame's preview from the cache, shown in that tone
+    statuses.clear();
+    const int again = runner.prepareInputs();
+    REQUIRE(again > 0);
+    Pump([&] { return queue.finished(again); }, 120000);
+    REQUIRE(queue.succeeded(again));
+    Pump([&] { return !runner.running(); }, 60000);
+    CHECK(runner.statusText().contains(QString::fromUtf8("запасным способом (NIS)")));
+    CHECK(runner.statusRole() == "warn");
+    CHECK(saidInWarnTone() > 0);
+}
+
 TEST_CASE("NR preview: clearing lets the viewport go first; GC keeps the shown entry", "[app][preview][gpu]") {
     App();
     PreviewProject m("preview_gc");
@@ -5490,7 +6187,7 @@ TEST_CASE("AppModel: a project in a Cyrillic folder opens, shows the video, save
     TaskQueue queue;  // as «Обработать» runs it: QProcess, the arguments as UTF-16
     QString output;
     QObject::connect(&queue, &TaskQueue::taskOutput, [&](int, const QString& line) { output += line + "\n"; });
-    const int id = queue.enqueue("process", DLSSVID_CLI_PATH, model.processArgs() << "--warp");
+    const int id = queue.enqueue("process", DLSSVID_CLI_PATH, model.processArgs());
     Pump([&] { return queue.finished(id); }, 120000);
     INFO(output.toStdString());
     REQUIRE(queue.succeeded(id));

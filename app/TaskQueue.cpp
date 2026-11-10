@@ -31,12 +31,22 @@ void Recount(TaskQueue::Progress& p, bool finishedOk) {
     p.stagesDone = 0;
     double running = 0.0;
     for (const auto& s : p.stages) {
-        if (s.state == "reused" || s.state == "done") ++p.stagesDone;
+        if (s.state == "reused" || s.state == "done" || s.state == "disabled") ++p.stagesDone;  // a skipped stage is over
         else if (s.state == "running") running += s.percent / 100.0;
     }
     if (finishedOk) p.fraction = 1.0;
     else if (p.stagesTotal > 0) p.fraction = (p.stagesDone + running) / p.stagesTotal;
     else p.fraction = p.total > 0 ? static_cast<double>(p.done) / p.total : 0.0;
+}
+
+// What the runner says after a stage's verb: "— <why>; the result is ..." -> <why>.
+QString RunnerNote(const QString& rest) {
+    static const QRegularExpression lead(R"(^\s*[:\-\x{2014}]?\s*)");  // one separator: "--multiplier 3 ..." keeps its dashes
+    QString r = rest;
+    r.remove(lead);
+    if (const qsizetype at = r.indexOf(QLatin1String("; the result")); at >= 0) r.truncate(at);
+    if (const qsizetype at = r.indexOf(QLatin1String("; the earlier")); at >= 0) r.truncate(at);  // "; the earlier color_nr is used": the page says it
+    return r.trimmed();
 }
 
 // The time left: what the running stage still needs (-1: unknown) plus the estimates of the queued stages.
@@ -57,6 +67,20 @@ QStringList TaskQueue::Progress::failedStageTitles() const {
     QStringList out;
     for (const auto& s : stages)
         if (s.state == "failed") out << s.title;
+    return out;
+}
+
+QStringList TaskQueue::Progress::fellBackStageTitles() const {
+    QStringList out;
+    for (const auto& s : stages)
+        if (s.fellBack) out << s.title;
+    return out;
+}
+
+QStringList TaskQueue::Progress::missingStageTitles() const {
+    QStringList out;
+    for (const auto& s : stages)
+        if (s.state == "failed" || s.state == "disabled") out << s.title;
     return out;
 }
 
@@ -279,6 +303,7 @@ void TaskQueue::startNext() {
     connect(process_.get(), qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, &TaskQueue::onFinished);
     connect(process_.get(), &QProcess::errorOccurred, this, &TaskQueue::onError, Qt::QueuedConnection);
     buffer_.clear();
+    decoder_.resetState();
     t.timer.start();
     Log()->info("task {}: {} {}", t.id, t.program.toStdString(), t.args.join(' ').toStdString());
     const Task started = t;  // the signals' slots may queue a task: `t` is not used after them
@@ -290,7 +315,7 @@ void TaskQueue::startNext() {
 
 void TaskQueue::onOutput() {
     if (!process_ || current_ < 0) return;
-    buffer_ += QString::fromUtf8(process_->readAll());
+    buffer_ += decoder_.decode(process_->readAll());
     // progress lines look like "\rdepth: 12/90 frames" (process) or "\r12/90 frames" (a single stage); the runner
     // also tells when a stage is done or reused
     static const QRegularExpression progressRe(R"((?:([A-Za-z_]+): )?(\d+)/(\d+) frames)");
@@ -301,7 +326,13 @@ void TaskQueue::onOutput() {
     static const QRegularExpression reusedRe(R"(process: ([A-Za-z_]+) \S+ .*(is complete, reused|restored from the history))");
     // a stage that failed while the run went on (fg in its own process, audit fg-2); "process: stage 'fg' failed" - the
     // whole run failing - does not match
-    static const QRegularExpression failedRe(R"((?:^|\] )process: (depth|flow|upscale|nr|fg) failed\b)");
+    static const QRegularExpression failedRe(R"((?:^|\] )process: (depth|flow|upscale|nr|fg) failed\b(.*)$)");
+    // TASK-0071: a stage the run went on without, skipped as unavailable, and a stage made with another backend than asked for; the runner
+    // prints these after the stage's progress lines
+    static const QRegularExpression disabledRe(R"((?:^|\] )process: (depth|flow|upscale|nr|fg) disabled\b(.*)$)");
+    static const QRegularExpression fellBackRe(R"((?:^|\] )process: (upscale) fell back to [a-z]+\b(.*)$)");
+    // a skipped NR whose earlier color_nr could not be moved aside: the result has that pass, not this run's (review of TASK-0071)
+    static const QRegularExpression keptRe(R"((?:^|\] )process: (nr) could not run\b(.*)$)");
     static const QRegularExpression newline("[\r\n]");
     QStringList lines = buffer_.split(newline, Qt::SkipEmptyParts);
     if (!buffer_.endsWith('\n') && !buffer_.endsWith('\r') && !lines.isEmpty()) buffer_ = lines.takeLast();
@@ -311,7 +342,22 @@ void TaskQueue::onOutput() {
         // dlssvid logs the error it ends on as its last line; an error of a child it went on after (the fg process) is followed by more
         if (!line.trimmed().isEmpty()) t.reportedError = line.contains(QLatin1String("] [error] "));
         if (const auto f = failedRe.match(line); f.hasMatch()) {  // first: a progress update may be glued to this line
-            stageFailed(t, f.captured(1));
+            stageFailed(t, f.captured(1), RunnerNote(f.captured(2)));
+            emitOutput(tasks_[static_cast<size_t>(current_)], line);
+            continue;
+        }
+        if (const auto f = disabledRe.match(line); f.hasMatch()) {
+            stageDisabled(t, f.captured(1), RunnerNote(f.captured(2)));
+            emitOutput(tasks_[static_cast<size_t>(current_)], line);
+            continue;
+        }
+        if (const auto f = fellBackRe.match(line); f.hasMatch()) {
+            stageFellBack(t, f.captured(1), RunnerNote(f.captured(2)));
+            emitOutput(tasks_[static_cast<size_t>(current_)], line);
+            continue;
+        }
+        if (const auto f = keptRe.match(line); f.hasMatch()) {
+            stageFellBack(t, f.captured(1), RunnerNote(f.captured(2)));
             emitOutput(tasks_[static_cast<size_t>(current_)], line);
             continue;
         }
@@ -409,7 +455,35 @@ void TaskQueue::stageReused(Task& t, const QString& stage) {
     publish(t);
 }
 
-void TaskQueue::stageFailed(Task& t, const QString& stage) {
+void TaskQueue::stageFailed(Task& t, const QString& stage, const QString& note) { endStage(t, stage, "failed", note); }
+
+void TaskQueue::stageDisabled(Task& t, const QString& stage, const QString& note) { endStage(t, stage, "disabled", note); }
+
+void TaskQueue::stageFellBack(Task& t, const QString& stage, const QString& note) {
+    Progress& p = t.progress;
+    if (!FindStage(p, stage)) {
+        StageStatus st;
+        st.name = stage;
+        st.title = stage;
+        st.state = "done";  // the line comes when the stage has ended
+        p.stages.push_back(st);
+    }
+    StageStatus* s = FindStage(p, stage);
+    s->fellBack = true;
+    s->note = note;
+    // the stage has ended: a kept NR prints no done line - left running, a cancel or a failure after it was put on it (review of TASK-0071);
+    // the upscale's done line follows with its time
+    if (s->state == "running") {
+        s->state = "done";
+        s->percent = 100;
+        s->seconds = static_cast<double>(t.timer.elapsed() - t.stageStartMs) / 1000.0;
+    }
+    if (t.stage == stage) t.stage.clear();
+    Recount(p, false);
+    publish(t);
+}
+
+void TaskQueue::endStage(Task& t, const QString& stage, const QString& state, const QString& note) {
     Progress& p = t.progress;
     if (!FindStage(p, stage)) {
         StageStatus st;
@@ -419,7 +493,8 @@ void TaskQueue::stageFailed(Task& t, const QString& stage) {
     }
     StageStatus* s = FindStage(p, stage);
     if (s->state == "running") s->seconds = static_cast<double>(t.timer.elapsed() - t.stageStartMs) / 1000.0;
-    s->state = "failed";
+    s->state = state;
+    s->note = note;
     if (t.stage == stage) t.stage.clear();
     p.elapsed = static_cast<double>(t.timer.elapsed()) / 1000.0;
     p.eta = TimeLeft(p, -1.0);

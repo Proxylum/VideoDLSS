@@ -1085,10 +1085,56 @@ TEST_CASE("RunProcess: --frames, passthrough, an unavailable nr stage and a run 
         CHECK(Report(r, "fg").status == "ran");
         CHECK(r.finalPass == dir / "passes" / "color_fg");
         CHECK(r.framesOut == FgFrameCount(6, 3));
+        // TASK-0071: said in the report's warnings (the GUI reads the runner's line), not only in the stage's own log
+        CHECK(std::any_of(r.warnings.begin(), r.warnings.end(), [](const std::string& w) {
+            return w.rfind("nr disabled: ", 0) == 0 && w.rfind("nr disabled: nr:", 0) != 0 && w.find("without Neural Rendering") != std::string::npos;
+        }));
         o.disableUnavailable = false;
         o.output = dir / "nongx_fail.mkv";
         o.passesRoot = dir / "passes_fail";
         CHECK_THROWS_WITH(RunProcess(o), Catch::Matchers::ContainsSubstring("stage 'nr' failed"));
+    }
+    SECTION("fg dlssg and upscale dlss on WARP: fg skipped, the upscale fell back to nis - both in the warnings") {
+        // TASK-0071: the run went on without them and the GUI said «готово»
+        o.output = dir / "nodlssg.mkv";
+        o.passesRoot = dir / "passes_dlssg";
+        ApplyParamSpec(o.stages, "fg.backend=dlssg");
+        ApplyParamSpec(o.stages, "upscale.backend=dlss");
+        o.disableUnavailable = true;
+        const ProcessResult r = RunProcess(o);
+        CHECK(Report(r, "fg").status == "disabled");
+        CHECK(Report(r, "upscale").status == "ran");
+        CHECK(Report(r, "upscale").details.value("fallback", false));
+        CHECK_FALSE(Report(r, "upscale").details.value("fallback_reason", std::string()).empty());
+        auto has = [&](const char* start, const char* also) {
+            return std::any_of(r.warnings.begin(), r.warnings.end(),
+                               [&](const std::string& w) { return w.rfind(start, 0) == 0 && w.find(also) != std::string::npos; });
+        };
+        CHECK(has("fg disabled: ", "without frame generation"));
+        CHECK(has("upscale: dlss ", "nis used instead"));
+        CHECK(r.finalPass == dir / "passes_dlssg" / "color_nr");
+        // the NIS color_sr carries the fingerprint of the dlss settings: a later run reuses it - and says so (review of TASK-0071)
+        o.output = dir / "nodlssg_again.mkv";
+        const ProcessResult again = RunProcess(o);
+        CHECK(Report(again, "upscale").status == "reused");
+        CHECK(Report(again, "upscale").details.value("fallback", false));
+        auto hasAgain = [&](const char* also) {
+            return std::any_of(again.warnings.begin(), again.warnings.end(),
+                               [&](const std::string& w) { return w.rfind("upscale: dlss ", 0) == 0 && w.find(also) != std::string::npos; });
+        };
+        CHECK(hasAgain("the color_sr reused was made so"));
+        // the same pass adopted without a fingerprint (as a standalone `dlssvid upscale` leaves it) while nis is asked now: what was asked,
+        // no fallback to say (review of TASK-0071: every run said «запасным способом»)
+        Manifest sr = Manifest::Load(o.passesRoot / "color_sr");
+        sr.fingerprint.clear();
+        sr.tool = nlohmann::json::object();
+        sr.Save(o.passesRoot / "color_sr");
+        ApplyParamSpec(o.stages, "upscale.backend=nis");
+        o.output = dir / "nodlssg_nis.mkv";
+        const ProcessResult nis = RunProcess(o);
+        REQUIRE(Report(nis, "upscale").status == "reused");  // adopted
+        CHECK_FALSE(Report(nis, "upscale").details.value("fallback", false));
+        CHECK_FALSE(std::any_of(nis.warnings.begin(), nis.warnings.end(), [](const std::string& w) { return w.find("nis used instead") != std::string::npos; }));
     }
     SECTION("no colour stage: the source is encoded unchanged") {
         o.output = dir / "guides_only.mkv";
@@ -1210,6 +1256,216 @@ TEST_CASE("RunProcess: fg disabled over a color_fg kept in place encodes color_n
     CHECK(std::filesystem::exists(o.passesRoot / "color_fg" / Manifest::kFileName));  // left alone
     CHECK(r.finalPass == o.passesRoot / "color_nr");  // before: the 9-frame color_fg of another backend was encoded
     CHECK(r.framesOut == 5);
+}
+
+TEST_CASE("RunProcess: nr disabled over a color_nr kept in place takes it out of the result, as said; it comes back from the history", "[integration][process][nr][regression]") {
+    // review of TASK-0071: the run said «the result is made without Neural Rendering» and encoded the color_nr a forced run left in place
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("nr_disabled_in_place");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "r1.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    for (auto& st : o.stages) st.enabled = st.name != "fg";
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);  // color_nr by the stub
+    ApplyParamSpec(o.stages, "nr.backend=ngx");  // unavailable on WARP
+    o.disableUnavailable = true;
+    // the stub's pass stamped with the fingerprint the ngx run needs: under --force it stays in place (retire only on another fingerprint)
+    const std::string want = [&] {
+        for (const auto& st : PlanProcess(o).stages)
+            if (st.name == "nr") return st.fingerprint;
+        return std::string();
+    }();
+    REQUIRE(!want.empty());
+    Manifest m = Manifest::Load(o.passesRoot / "color_nr");
+    m.fingerprint = want;
+    m.Save(o.passesRoot / "color_nr");
+    o.forceStages = {"nr"};
+    o.output = dir / "r2.mkv";
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "disabled");
+    CHECK(r.finalPass == o.passesRoot / "color_sr");  // before: the color_nr kept in place
+    CHECK_FALSE(std::filesystem::exists(o.passesRoot / "color_nr"));
+    CHECK(std::any_of(r.warnings.begin(), r.warnings.end(), [](const std::string& w) { return w.find("without Neural Rendering") != std::string::npos; }));
+    bool inHistory = false;
+    for (const auto& v : ListPassVersions(o.passesRoot, "color_nr")) inHistory = inHistory || (!v.current && v.fingerprint == want);
+    CHECK(inHistory);
+}
+
+TEST_CASE("PlanProcess with planSkipped: the stages below a skipped NR are decided as the run decides them", "[integration][process][nr][regression]") {
+    // review of TASK-0071: the GUI's card of FG after an NR that cannot run here - the plan with NR's color_nr gave FG's action of another run
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("plan_skipped_nr");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "r1.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    for (auto& st : o.stages) st.enabled = st.name != "nr";
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);  // color_fg from color_sr
+    for (auto& st : o.stages) st.enabled = true;
+    ApplyParamSpec(o.stages, "nr.backend=ngx");  // unavailable on WARP
+    auto actionOf = [](const ProcessPlan& plan, const char* stage) {
+        for (const auto& d : plan.stages)
+            if (d.name == stage) return d.action;
+        return std::string();
+    };
+    const ProcessPlan withNr = PlanProcess(o);
+    REQUIRE(actionOf(withNr, "nr") == "run");
+    CHECK(actionOf(withNr, "fg") == "run");  // on NR's planned color_nr
+    ProcessOptions skipped = o;
+    skipped.planSkipped = {"nr"};
+    const ProcessPlan plan = PlanProcess(skipped);
+    CHECK(actionOf(plan, "nr") == "run");
+    CHECK(actionOf(plan, "fg") == "reuse");
+    CHECK(plan.finalPass == "color_fg");
+    o.disableUnavailable = true;
+    o.output = dir / "r2.mkv";
+    const ProcessResult r = RunProcess(o);  // the run does as the plan said
+    CHECK(Report(r, "nr").status == "disabled");
+    CHECK(Report(r, "fg").status == "reused");
+}
+
+TEST_CASE("PlanProcess with planSkipped: a skipped NR's pass planned with the scene list is no input of FG either", "[integration][process][nr][regression]") {
+    // review of TASK-0071: NR forced while the list is analysed again - its provisional color_nr stayed, FG was decided pending on it (the
+    // card: «пересчитать здесь не получится»); the run moves the skipped NR's color_nr aside and FG runs on color_sr
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("plan_skipped_provisional");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "r1.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    for (auto& st : o.stages) st.enabled = true;
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);  // color_fg from color_nr
+    ApplyParamSpec(o.stages, "nr.backend=ngx");  // unavailable on WARP
+    auto decisionOf = [](const ProcessPlan& plan, const char* stage) {
+        for (const auto& d : plan.stages)
+            if (d.name == stage) return d;
+        throw std::runtime_error(std::string("no decision for ") + stage);
+    };
+    // the passes stamped as the ngx run would: both reused
+    for (const auto& [stage, pass] : {std::pair<const char*, const char*>{"nr", "color_nr"}, {"fg", "color_fg"}}) {
+        Manifest m = Manifest::Load(o.passesRoot / pass);
+        m.fingerprint = decisionOf(PlanProcess(o), stage).fingerprint;
+        m.Save(o.passesRoot / pass);
+    }
+    REQUIRE(decisionOf(PlanProcess(o), "nr").action == "reuse");
+    REQUIRE(decisionOf(PlanProcess(o), "fg").action == "reuse");
+    o.forceStages = {"nr", "scenes"};
+    ProcessOptions skipped = o;
+    skipped.planSkipped = {"nr"};
+    const ProcessPlan plan = PlanProcess(skipped);
+    REQUIRE_FALSE(decisionOf(plan, "scenes").sceneCuts.known);
+    CHECK(decisionOf(plan, "fg").action == "run");
+    CHECK_FALSE(decisionOf(plan, "fg").pending);  // not reused on a color_nr the run moves aside
+    o.disableUnavailable = true;
+    o.output = dir / "r2.mkv";
+    const ProcessResult r = RunProcess(o);  // the run does as the plan said
+    CHECK(Report(r, "nr").status == "disabled");
+    CHECK(Report(r, "fg").status == "ran");
+}
+
+TEST_CASE("PlanProcess with planSkipped: a skipped NR's stale pass is discarded - FG made from it is not restored", "[integration][process][nr][regression]") {
+    // review of TASK-0071: the run discards a stale color_nr before NR is skipped, and FG's color_fg made from it reruns ("built on a
+    // discarded pass"); the plan with NR skipped only dropped color_nr and restored an older color_fg made from color_sr
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("plan_skipped_stale");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "r1.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    ApplyParamSpec(o.stages, "nr.intensity=0.5");
+    for (auto& st : o.stages) st.enabled = st.name != "nr";
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);  // color_fg from color_sr
+    for (auto& st : o.stages) st.enabled = true;
+    RunProcess(o);  // color_fg from color_nr; the one from color_sr goes to the history
+    const auto nrDir = o.passesRoot / "color_nr";
+    Manifest m = Manifest::Load(nrDir);  // as the builds before PR-7 stamped it: wrong under its own fingerprint (stale)
+    m.stageParams.erase("model_intensity");
+    m.tool["app"] = std::string(kPassToolVersion);
+    m.fingerprint = "sha256:" + std::string(64, '0');
+    m.Save(nrDir);
+    ApplyParamSpec(o.stages, "nr.backend=ngx");  // unavailable on WARP
+    auto decisionOf = [](const ProcessPlan& plan, const char* stage) {
+        for (const auto& d : plan.stages)
+            if (d.name == stage) return d;
+        throw std::runtime_error(std::string("no decision for ") + stage);
+    };
+    ProcessOptions skipped = o;
+    skipped.planSkipped = {"nr"};
+    const ProcessPlan plan = PlanProcess(skipped);
+    REQUIRE(decisionOf(plan, "nr").stale);
+    CHECK(decisionOf(plan, "fg").action == "run");  // not «restore»
+    o.disableUnavailable = true;
+    o.output = dir / "r2.mkv";
+    const ProcessResult r = RunProcess(o);  // the run does as the plan said
+    CHECK(Report(r, "nr").status == "disabled");
+    CHECK(Report(r, "fg").status == "ran");
+    CHECK_THAT(Report(r, "fg").reason, Catch::Matchers::ContainsSubstring("discarded"));
+}
+
+TEST_CASE("RunProcess: nr disabled over an unfinished color_nr removes it - nothing could restore it", "[integration][process][nr][regression]") {
+    // review of TASK-0071: an unfinished pass moved to the history is never restored (RestorableVersion takes complete ones)
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("nr_disabled_unfinished");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "r1.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    for (auto& st : o.stages) st.enabled = st.name != "fg";
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);
+    // as a killed run leaves it: no fingerprint, the last frame missing
+    Manifest m = Manifest::Load(o.passesRoot / "color_nr");
+    m.fingerprint.clear();
+    m.Save(o.passesRoot / "color_nr");
+    std::vector<std::filesystem::path> frames;
+    for (const auto& e : std::filesystem::directory_iterator(o.passesRoot / "color_nr"))
+        if (e.path().filename() != Manifest::kFileName) frames.push_back(e.path());
+    REQUIRE(!frames.empty());
+    std::sort(frames.begin(), frames.end());
+    std::filesystem::remove(frames.back());
+    ApplyParamSpec(o.stages, "nr.backend=ngx");  // unavailable on WARP
+    o.disableUnavailable = true;
+    o.output = dir / "r2.mkv";
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "disabled");
+    CHECK(r.finalPass == o.passesRoot / "color_sr");
+    CHECK_FALSE(std::filesystem::exists(o.passesRoot / "color_nr"));
+    for (const auto& v : ListPassVersions(o.passesRoot, "color_nr")) CHECK(v.current);  // none in the history
 }
 
 TEST_CASE("RunProcess: fg disabled over an older color_fg encodes color_nr, not the stale pass", "[integration][process][fg]") {

@@ -189,11 +189,12 @@ void ProcessingPanel::render() {
     const bool cancelled = done && tasks_.cancelled(taskId_);
     const double elapsed = done ? p.elapsed : (known ? tasks_.elapsed(taskId_) : 0.0);
     const QStringList failedStages = ok ? p.failedStageTitles() : QStringList{};  // the run finished without them (audit fg-2)
+    const QStringList missingStages = ok ? p.missingStageTitles() : QStringList{};  // ... or skipped them as unavailable (TASK-0071)
 
     QString head;
     if (!known) head = tr("Обработка");
     else if (!done) head = tr("Обработка · Прошло %1 · Осталось %2").arg(FormatClock(elapsed), p.eta >= 0.0 ? tr("≈ %1").arg(FormatClock(p.eta)) : tr("оцениваем…"));
-    else if (ok && !failedStages.isEmpty()) head = tr("Готово за %1 · без стадии «%2»").arg(FormatClock(elapsed), failedStages.join(tr("», «")));
+    else if (ok && !missingStages.isEmpty()) head = tr("Готово за %1 · без стадии «%2»").arg(FormatClock(elapsed), missingStages.join(tr("», «")));
     else if (ok) head = tr("Готово за %1").arg(FormatClock(elapsed));
     else if (cancelled) head = tr("Отменено через %1 · готовые стадии сохранены").arg(FormatClock(elapsed));
     else head = tr("Ошибка через %1 · подробности в логе").arg(FormatClock(elapsed));
@@ -216,8 +217,13 @@ void ProcessingPanel::render() {
             state = tr("переиспользуется");
             time = "—";
         } else if (s.state == "done") {
-            state = tr("готово");
+            state = s.fellBack ? tr("готово запасным способом") : tr("готово");  // TASK-0071: upscale fell back to NIS
             time = FormatClock(s.seconds);
+            if (s.fellBack) tone = "warn";
+        } else if (s.state == "disabled") {  // TASK-0071: skipped as unavailable, the run went on without it
+            state = tr("пропущена");
+            time = "—";
+            tone = "warn";
         } else if (s.state == "running") {
             state = tr("%1 %").arg(s.percent);
             time = FormatClock(s.seconds);
@@ -239,6 +245,7 @@ void ProcessingPanel::render() {
         }
         r.state->setText(state);
         SetRole(r.state, tone);
+        r.state->setToolTip(s.note);  // what the runner said: why it failed, was skipped or fell back
         r.time->setText(time);
     }
 
@@ -249,12 +256,38 @@ void ProcessingPanel::render() {
     back_->setVisible(done && !ok);
     if (!known) note_->setText(QString());
     else if (!done) note_->setText(tr("Отмена сохранит уже готовые стадии — в следующий раз они переиспользуются. Свёрнутое окно сообщит о завершении уведомлением."));
-    else if (ok && !failedStages.isEmpty())
-        note_->setText(tr("Стадия «%1» завершилась сбоем — результат закодирован без неё, готовые стадии сохранены. Подробности в логе.")
-                           .arg(failedStages.join(tr("», «"))));
-    else if (ok) note_->setText(tr("Вьюпорт показывает «До | После»: исходник слева, результат справа."));
+    else if (ok) note_->setText(doneNote(p, failedStages));
     else if (cancelled) note_->setText(tr("Готовые стадии остались на диске: следующая обработка продолжит с прерванной."));
     else note_->setText(tr("Что случилось — в логе ниже; готовые стадии сохранены."));
+}
+
+QString ProcessingPanel::doneNote(const TaskQueue::Progress& p, const QStringList& failedStages) const {
+    QStringList lines;
+    if (!failedStages.isEmpty())
+        lines << tr("Стадия «%1» завершилась сбоем — результат закодирован без неё, готовые стадии сохранены. Подробности в логе.")
+                     .arg(failedStages.join(tr("», «")));
+    // TASK-0071: a stage the runner skipped as unavailable, one made with another backend - the result is not what the cards promised
+    for (const auto& s : p.stages) {
+        if (s.state == "disabled")
+            lines << tr("Стадия «%1» пропущена: на этом компьютере она не запускается (%2). Результат сделан без неё — подробности в "
+                        "подсказке строки и в логе.")
+                         .arg(s.title, s.note.isEmpty() ? tr("причина в логе") : s.note);
+        else if (s.fellBack && s.name == "upscale")
+            lines << tr("Стадия «%1» сделана запасным способом (NIS): %2.").arg(s.title, s.note.isEmpty() ? tr("причина в логе") : s.note);
+        else if (s.fellBack)  // a skipped NR whose earlier color_nr could not be moved aside (review of TASK-0071: it read «(NIS)»)
+            lines << tr("Стадия «%1» на этом компьютере не запустилась (%2) — в результате её прежний проход.")
+                         .arg(s.title, s.note.isEmpty() ? tr("причина в логе") : s.note);
+    }
+    if (lines.isEmpty()) return tr("Вьюпорт показывает «До | После»: исходник слева, результат справа.");
+    return lines.join("\n");
+}
+
+QString ProcessingPanel::note() const { return note_->text(); }
+
+QString ProcessingPanel::EndSummary(const TaskQueue::Progress& p) {
+    if (const QStringList missing = p.missingStageTitles(); !missing.isEmpty()) return tr("без стадии «%1»").arg(missing.join(tr("», «")));
+    if (const QStringList fellBack = p.fellBackStageTitles(); !fellBack.isEmpty()) return tr("стадия «%1» — запасным способом").arg(fellBack.join(tr("», «")));
+    return {};
 }
 
 QStringList ProcessingPanel::stageLines() const {

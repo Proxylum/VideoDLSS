@@ -1,8 +1,13 @@
 #include "AppModel.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QRegularExpression>
 #include <QSettings>
 #include <algorithm>
 #include <cmath>
@@ -20,6 +25,7 @@
 #include "stages/PresetLibrary.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "stages/nr/INrBackend.h"
+#include "stages/nr/NrStage.h"
 #include "stages/upscale/IUpscaler.h"
 #include "util/Log.h"
 #include "viewport/ViewportProxy.h"
@@ -52,6 +58,10 @@ AppModel::AppModel(bool warp, QObject* parent) : QObject(parent) {
 }
 
 AppModel::~AppModel() {
+    if (QProcess* p = checkProcess_) {  // its end handled while the connections stand: the check's folder goes
+        cancelCheck();
+        p->waitForFinished(3000);
+    }
     maskPool_.waitForDone();  // an import in flight finishes (or leaves .import/ to the next one); its queued end is dropped with us
     cancelProxies();
     store_->SetOnCurrentLoaded({});  // loaders may still finish a frame while the store shuts down
@@ -221,6 +231,7 @@ void AppModel::adoptProject(Project next) {
     dropNrPreview();
     force_.clear();   // the «пересчитать» marks and the run time are the open project's (as in closeProject)
     lastRun_ = 0.0;
+    cancelCheck();  // TASK-0071: its result is of the settings of the project before
     releasedFile_.clear();  // a run encoding the result of the project before: this project's videos are shown, the next encode line decides
     project_ = std::move(next);
 }
@@ -892,6 +903,7 @@ void AppModel::refreshPlan() {
     planTimer_.stop();
     plan_ = ProcessPlan{};
     planNoForce_.reset();
+    planNrSkipped_.reset();
     outcome_ = RunOutcome{};
     sourceInfo_ = SourceInfo{};
     planError_.clear();
@@ -922,6 +934,18 @@ void AppModel::refreshPlan() {
                 planNoForce_ = PlanProcess(planOptions(false));
                 break;
             }
+        // TASK-0071: an NR planned to run that cannot run here is skipped and its color_nr moved aside - the run decides FG again on what is
+        // left, either way: a planned run may become a reuse, a reuse a run. Planned whatever the card says now: a check may say it later
+        bool nrRuns = false, fgOn = false;
+        for (const auto& d : plan_.stages) {
+            if (d.name == "nr" && d.action == "run" && !d.pending) nrRuns = true;  // a pending NR's card is not «будет пропущена»
+            if (d.name == "fg") fgOn = true;
+        }
+        if (nrRuns && fgOn) {
+            ProcessOptions skipped = o;
+            skipped.planSkipped = {"nr"};
+            planNrSkipped_ = PlanProcess(skipped);
+        }
         outcome_ = EstimateRun(plan_, o.stages, sourceInfo_);
         // the result's layout: the encoder card's choice against the codec and the source (an impossible pair is a plan error)
         const OutputFormat of = ResolveOutputFormat(project_.codec, project_.outputFormat, sourceInfo_.decoded);
@@ -1031,6 +1055,7 @@ QStringList AppModel::processArgs() const {
         for (const auto& s : force_) list += (list.isEmpty() ? "" : ",") + QString::fromStdString(s);
         args << "--force" << list;
     }
+    if (device_->IsWarp()) args << "--warp";  // the adapter the GUI runs on, as upstreamArgs: the cards' availability is of it (TASK-0071)
     return args;
 }
 
@@ -1359,6 +1384,7 @@ bool AppModel::closeProject() {
     lastRun_ = 0.0;
     resultAudio_ = false;
     releasedFile_.clear();
+    cancelCheck();
     cancelProxies();
     store_->SetSources({});
     if (!controlMaskBusy_) controlMask_ = {};
@@ -1883,6 +1909,196 @@ void AppModel::addRecent(const QString& path) {
 void AppModel::clearRecents() {
     QSettings().remove("recent/files");
     emit recentsChanged();
+}
+
+// ---- TASK-0071: can NR / FG run here ----
+
+namespace {
+const StageEntry* FindEntry(const Project& p, const std::string& name) {
+    for (const auto& s : p.stages)
+        if (s.name == name) return &s;
+    return nullptr;
+}
+}  // namespace
+
+AvailabilityFacts AppModel::availabilityFacts() const {
+    AvailabilityFacts f;
+    f.software = device_->IsWarp();
+    f.nvidia = device_->IsNvidia();
+#if defined(DLSSVID_WITH_DLSS)
+    f.ngxBuilt = true;
+#else
+    f.ngxBuilt = false;
+#endif
+    f.driver = NvidiaDriverFromUmd(device_->UmdDriverVersion());
+    f.nr = NrAvailable("ngx");
+    f.nrDll = !FindNrDll().empty();
+    f.nrForwarder = !FindNrForwarder().empty();
+    f.dlssgDll = !FindDlssgDll().empty();
+    f.fg = FgAvailable("dlssg");
+    f.dlssgInstruction = DlssgDllInstruction();
+    return f;
+}
+
+QString AppModel::nrCheckSize() const {
+    // the model's frame of the run: NR works on the upscaled frame. Unknown before the plan: the CLI's default
+    const StageEntry* e = FindEntry(project_, "nr");
+    if (!e || outcome_.width == 0 || outcome_.height == 0) return {};
+    const nlohmann::json p = EffectiveStageParams("nr", e->params);
+    // a malformed value is the plan's error, not a throw at every refresh of the card (review of TASK-0071)
+    const double modelScale = p.contains("model_scale") && p["model_scale"].is_number() ? p["model_scale"].get<double>() : 1.0;
+    const auto [w, h] = NrWorkSize(outcome_.width, outcome_.height, modelScale);
+    return QString("%1x%2").arg(w).arg(h);
+}
+
+QStringList AppModel::checkArgs(const std::string& stage, const QString& paramsFile, const QString& jsonFile) const {
+    const StageEntry* e = FindEntry(project_, stage);
+    const nlohmann::json p = EffectiveStageParams(stage, e ? e->params : nlohmann::json::object());
+    QStringList args;
+    if (stage == "nr") {
+        args = {"nr", "--check", "--backend", "ngx", "--params-file", paramsFile, "--json", jsonFile};
+        if (const QString size = nrCheckSize(); !size.isEmpty()) args << "--check-size" << size;
+    } else {
+        const int multiplier = p.contains("multiplier") && p["multiplier"].is_number() ? p["multiplier"].get<int>() : 2;
+        args = {"fg", "--check", "--backend", "dlssg", "--multiplier", QString::number(multiplier), "--json", jsonFile};
+    }
+    if (device_->IsWarp()) args << "--warp";
+    return args;
+}
+
+nlohmann::json AppModel::checkParams(const std::string& stage) const {
+    // the run's settings without the keys the schema lacks: `process` passes them over (a project of an older build keeps nr.preset),
+    // `nr --params-file` refuses them
+    const StageEntry* e = FindEntry(project_, stage);
+    nlohmann::json p = EffectiveStageParams(stage, e ? e->params : nlohmann::json::object());
+    if (const StageSchema* schema = FindStageSchema(stage); schema && p.is_object())
+        for (auto it = p.begin(); it != p.end();) it = schema->Find(it.key()) ? std::next(it) : p.erase(it);
+    return p;
+}
+
+std::string AppModel::checkKey(const std::string& stage) const {
+    const StageEntry* e = FindEntry(project_, stage);
+    const nlohmann::json p = EffectiveStageParams(stage, e ? e->params : nlohmann::json::object());
+    const std::filesystem::path dll = stage == "nr" ? FindNrDll() : FindDlssgDll();
+    std::error_code ec;
+    const auto size = dll.empty() ? 0 : std::filesystem::file_size(dll, ec);
+    const auto time = dll.empty() ? std::filesystem::file_time_type{} : std::filesystem::last_write_time(dll, ec);
+    // the result says nothing of other settings, another DLL (a patched one) or another driver
+    const std::u8string u = dll.u8string();
+    return p.dump() + "|" + std::string(u.begin(), u.end()) + "|" + std::to_string(size) + "|" + std::to_string(time.time_since_epoch().count()) + "|" +
+           NvidiaDriverFromUmd(device_->UmdDriverVersion()).ToString() + "|" + (stage == "nr" ? nrCheckSize().toStdString() : std::string());
+}
+
+StageAvailability AppModel::availability(const std::string& stage) const {
+    if (!hasProject()) return {};
+    const StageEntry* e = FindEntry(project_, stage);
+    if (!e) return {};
+    const nlohmann::json p = EffectiveStageParams(stage, e->params);
+    if (!e->enabled || !StageNeedsNgx(stage, p)) return {};
+    const auto it = checks_.find(stage);
+    const StageCheck* check = it != checks_.end() && it->second.key == checkKey(stage) ? &it->second.check : nullptr;
+    // a pass the plan reuses or restores goes into the result whatever this computer can do: only a recompute would be skipped. A pending
+    // one (reused if the scene list comes out as its pass was made with) too: the run decides again after the analysis (review of TASK-0071)
+    bool reused = false;
+    for (const auto& d : plan_.stages)
+        if (d.name == stage) reused = d.action != "run" || d.pending;
+    // fg's decision takes NR's planned color_nr: an NR planned to run that will be skipped has its color_nr moved aside, and the run decides
+    // fg again on what is left - the plan with NR skipped says what it will do (review of TASK-0071: either way, a run or a reuse)
+    if (stage == "fg" && planNrSkipped_ && availability("nr").tone == "danger")
+        for (const auto& d : planNrSkipped_->stages)
+            if (d.name == "fg") reused = d.action != "run" || d.pending;
+    return StageAvailabilityFor(stage, e->enabled, p, availabilityFacts(), check, checkProcess_ && checkingStage_ == stage, reused);
+}
+
+void AppModel::checkStage(const std::string& stage) {
+    if (checkProcess_ || !hasProject()) return;
+    const StageAvailability a = availability(stage);
+    if (!a.checkable) return;
+    // a folder of its own: a cancelled check that ends late removes only its files
+    const QString dir = QDir(QDir::tempPath()).filePath(QString("dlssvid-check-%1-%2").arg(QCoreApplication::applicationPid()).arg(++checkSerial_));
+    QDir().mkpath(dir);
+    const QString json = QDir(dir).filePath(QString::fromStdString(stage) + ".json");
+    const QString params = QDir(dir).filePath(QString::fromStdString(stage) + "-params.json");
+    if (stage == "nr") {
+        QFile f(params);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            emit message(tr("Проверка не запустилась: нельзя записать %1").arg(params));
+            QDir(dir).removeRecursively();
+            return;
+        }
+        f.write(QByteArray::fromStdString(checkParams(stage).dump(2)));
+        f.close();
+    }
+    const QStringList args = checkArgs(stage, params, json);
+    checkingStage_ = stage;
+    const std::string key = checkKey(stage);
+    checkProcess_ = new QProcess(this);
+    checkProcess_->setProcessChannelMode(QProcess::MergedChannels);
+    QProcess* proc = checkProcess_;
+    QTimer::singleShot(120000, proc, [proc] {  // NGX that does not answer: the check ends as failed
+        if (proc->state() != QProcess::NotRunning) proc->kill();
+    });
+    // a CLI that does not start gives no finished: the check ends here (not «Проверка…» for good)
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, stage, key, dir](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart) return;
+        proc->deleteLater();
+        QDir(dir).removeRecursively();
+        if (checkProcess_ != proc) return;
+        checkProcess_ = nullptr;
+        checkingStage_.clear();
+        StageCheck c;
+        c.when = QTime::currentTime().toString("HH:mm");
+        c.hint = tr("dlssvid не запускается: %1").arg(proc->errorString());
+        checks_[stage] = CheckRecord{key, c};
+        emit message(tr("Проверка «%1» не прошла: %2").arg(stageTitle(stage), c.hint));
+        emit availabilityChanged();
+    });
+    connect(proc, &QProcess::finished, this, [this, proc, stage, key, json, dir](int code, QProcess::ExitStatus status) {
+        const QString out = QString::fromUtf8(proc->readAll());
+        proc->deleteLater();
+        const QByteArray report = [&] {
+            QFile f(json);
+            return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+        }();
+        QDir(dir).removeRecursively();  // the settings file and the report
+        if (checkProcess_ != proc) return;  // cancelled: another project
+        checkProcess_ = nullptr;
+        checkingStage_.clear();
+        StageCheck c;
+        c.when = QTime::currentTime().toString("HH:mm");
+        const QJsonObject j = QJsonDocument::fromJson(report).object();
+        if (!j.isEmpty()) {
+            c.ok = j.value("ok").toBool() && status == QProcess::NormalExit && code == 0;
+            c.hint = j.value("hint").toString();
+            if (c.hint.isEmpty()) c.hint = j.value("error").toString();
+            QStringList gpu;
+            if (const QString g = j.value("gpu").toString(); !g.isEmpty()) gpu << g;
+            if (const QString d = j.value("driver").toString(); !d.isEmpty()) gpu << tr("драйвер %1").arg(d);
+            c.gpu = gpu.join(" · ");
+        } else {  // no report: the CLI failed before it (a device, bad settings) or was ended
+            const QStringList lines = out.split(QRegularExpression("[\r\n]+"), Qt::SkipEmptyParts);
+            c.hint = status != QProcess::NormalExit ? tr("проверка не ответила или прервалась") : lines.isEmpty() ? tr("нет ответа CLI") : lines.last().trimmed();
+        }
+        if (c.ok) c.hint.clear();
+        checks_[stage] = CheckRecord{key, c};
+        Log()->info("check {}: {} {}", stage, c.ok ? "ok" : "failed", c.hint.toStdString());
+        const QString title = stageTitle(stage);
+        emit message(c.ok ? tr("Проверка «%1»: работает на этой видеокарте").arg(title) : tr("Проверка «%1» не прошла: %2").arg(title, c.hint));
+        emit availabilityChanged();
+    });
+    const QString program = checkProgram_.isEmpty() ? cliPath() : checkProgram_;
+    Log()->info("check {}: {} {}", stage, program.toStdString(), args.join(' ').toStdString());
+    proc->start(program, args);
+    emit availabilityChanged();
+}
+
+void AppModel::cancelCheck() {
+    if (!checkProcess_) return;
+    QProcess* p = checkProcess_;
+    checkProcess_ = nullptr;
+    checkingStage_.clear();
+    p->kill();  // its finished slot sees another process (or none) and returns; deleteLater there
+    emit availabilityChanged();
 }
 
 QString AppModel::readiness() const {

@@ -130,6 +130,58 @@ TEST_CASE("EstimateRun combines the plan, the stages and the source", "[unit][es
     CHECK(o.stages.back().frames == 240);
 }
 
+TEST_CASE("EstimateRun sizes the result as the upscale stage does: the 4K cap, a target, no scaling", "[unit][estimates][regression]") {
+    // TASK-0071 (D3a): source x scale only - 1080p x3 was shown 5760x3240 (disk x2.25 too high), and NR's check ran at that frame
+    CHECK(UpscaleOutputFor(1920, 1080, {{"scale", 3.0}}).width == 3840);
+    CHECK(UpscaleOutputFor(1920, 1080, {{"scale", 3.0}}).height == 2160);
+    CHECK(UpscaleOutputFor(1920, 1080, {{"scale", 3.0}}).capped);
+    CHECK(UpscaleOutputFor(1920, 1080, {{"scale", 2.0}, {"artifact_reduction_only", true}}).width == 1920);
+    const UpscaleTarget t = UpscaleOutputFor(1920, 1080, {{"scale", 2.0}, {"target_width", 2560}});
+    CHECK(t.width == 2560);
+    CHECK(t.height == 1440);
+    ProcessPlan plan;
+    plan.passesRoot = "Z:/nowhere";
+    StageDecision d;
+    d.name = "upscale";
+    d.action = "run";
+    d.params = EffectiveStageParams("upscale", {{"scale", 3.0}});
+    plan.stages.push_back(d);
+    std::vector<ProcessStage> stages = DefaultProcessStages();
+    for (auto& s : stages) {
+        s.enabled = s.name == "upscale";
+        if (s.name == "upscale") s.params["scale"] = 3.0;
+    }
+    SourceInfo src;
+    src.width = 1920;
+    src.height = 1080;
+    src.fps = 24.0;
+    src.frames = 10;
+    const RunOutcome o = EstimateRun(plan, stages, src);
+    CHECK(o.width == 3840);
+    CHECK(o.height == 2160);
+    CHECK(o.newBytes == 3840ull * 2160 * 8 * 10);  // RGBA16F color_sr at the frame made
+    // a target of another aspect: the pass is the frame made, not the source times the width's scale
+    stages = DefaultProcessStages();
+    for (auto& s : stages) {
+        s.enabled = s.name == "upscale";
+        if (s.name == "upscale") s.params = {{"target_width", 1920}, {"target_height", 1080}};
+    }
+    plan.stages[0].params = EffectiveStageParams("upscale", {{"target_width", 1920}, {"target_height", 1080}});
+    src.width = 1440;
+    const UpscaleTarget made = UpscaleOutputFor(1440, 1080, plan.stages[0].params);
+    const RunOutcome o2 = EstimateRun(plan, stages, src);
+    CHECK(o2.width == made.width);
+    CHECK(o2.height == made.height);
+    CHECK(o2.newBytes == static_cast<uint64_t>(made.width) * made.height * 8 * 10);
+    // a size not known yet (review of TASK-0071: ResolveUpscaleTarget threw "empty input" - the whole plan failed)
+    SourceInfo unknown = src;
+    unknown.width = unknown.height = 0;
+    RunOutcome o3;
+    REQUIRE_NOTHROW(o3 = EstimateRun(plan, stages, unknown));
+    CHECK(o3.width == 0);
+    CHECK(o3.height == 0);
+}
+
 // D8 (TASK-0049): a standalone `dlssvid nr` (the GUI's «Запустить отдельно») recorded its 16 ms GPU time as ms_per_frame and
 // `process` adopted the pass with it - the NR ETA came out ~25x short; passes and model_scale did not move the estimate at all.
 TEST_CASE("NR estimate follows passes and model scale; a GPU-only ms/frame is not wall time", "[unit][estimates][regression]") {

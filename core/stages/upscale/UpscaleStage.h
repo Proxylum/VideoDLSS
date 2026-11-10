@@ -71,6 +71,7 @@ public:
         uint32_t inputWidth = 0, inputHeight = 0, outputWidth = 0, outputHeight = 0;
         std::string backend;  // backend actually used
         bool fellBack = false;
+        std::string fallbackReason;  // why the backend asked for did not run (TASK-0071: process says it)
         int jitterPhases = 0;
         bool depthUsed = false, mvUsed = false;
         int64_t sceneCutCount = 0;       // cuts of the list met in the run (PR-13)

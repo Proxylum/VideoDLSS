@@ -410,6 +410,15 @@ parameters return. `process --plan` shows the decisions first; `passes list|use|
 (`docs/architecture.md`, «Отпечатки и версии пассов»). Frame Generation runs in a process of its own (a child
 `dlssvid fg`): if DLSS-G or the driver crashes there, `--disable-unavailable` (which the GUI always passes) marks the
 stage `failed`, encodes the result from `color_nr` and prints a `warning:` line; without the flag the run fails.
+With the flag, NR or FG that cannot run here (no DLL, a driver older than 616.56 for NR, no NVIDIA GPU, NGX refused the
+feature) is skipped: the report has a `warning: nr disabled: …` / `fg disabled: …` line and the log
+`process: nr disabled — …`; the GUI shows such a stage as «пропущена» with its reason and the run as
+«Готово за … · без стадии «…»». If an earlier `color_nr` left in place cannot be moved aside (a file is busy), the result
+is made with it: the log says `process: nr could not run — …; the earlier color_nr is used`, and the GUI shows the row
+as «готово запасным способом». An upscale that fell back from DLSS to NIS (with or without the flag, unless
+`upscale.no_fallback`) says `upscale: dlss … nis used instead`; the GUI shows its row as «готово запасным способом».
+Before the run, the NR (ngx) and FG (dlssg) cards say whether the stage can run here and offer «Проверить»
+(`dlssvid nr|fg --check` with the project's settings).
 
 The result is written next to its place as `<name>.dlssvid-part<ext>` and replaces the previous result in one rename,
 only when it is complete and reads back as what was encoded (the frame size, the frame count in MP4 and MOV, the audio):

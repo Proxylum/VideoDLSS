@@ -23,6 +23,7 @@
 #include "pipeline/Estimates.h"
 #include "pipeline/NrPreview.h"
 #include "stages/StagePreset.h"
+#include "StageAvailability.h"
 #include "viewport/FrameStore.h"
 #include "viewport/PipelinePreset.h"
 #include "viewport/Project.h"
@@ -111,6 +112,19 @@ public:
     StageEntry* stageEntry(const std::string& stage);
     bool forced(const std::string& stage) const { return force_.count(stage) > 0; }
     QStringList processArgs() const;  // dlssvid process --project <file> --disable-unavailable [--force a,b]
+    // TASK-0071: whether NR / FG can run here - the line of their card. «Проверить» runs `dlssvid nr|fg --check` with the project's
+    // settings in a process of its own (one feature on the GPU, a couple of seconds); its result stands while the settings and the DLL
+    // stay the same. availabilityChanged when a check starts or ends.
+    StageAvailability availability(const std::string& stage) const;
+    void checkStage(const std::string& stage);
+    bool checkRunning() const { return checkProcess_ != nullptr; }
+    // A running check is stopped (nothing stored) when a task or a preview starts on the GPU (ProjectTasks), and with the project.
+    void cancelCheck();
+    void setCheckProgramForTests(const QString& program) { checkProgram_ = program; }  // empty: cliPath()
+    // what checkStage runs (tests): `nr --check --params-file <paramsFile> --json <jsonFile> [--check-size WxH]` or `fg --check ...`;
+    // checkParams - what goes into the settings file: the stage's effective settings without the keys the schema lacks
+    QStringList checkArgs(const std::string& stage, const QString& paramsFile, const QString& jsonFile) const;
+    nlohmann::json checkParams(const std::string& stage) const;
     QString stageTitle(const std::string& stage) const;  // «Апскейл ×2», «Генерация кадров ×3», «Кодирование»
 
     // ---- start screen, recents, unsaved changes (stage 9, MR E) ----
@@ -324,6 +338,7 @@ signals:
     void controlMaskFinished(bool ok, bool changed, const QString& message);
     void nrPreviewChanged();       // shown, cleared or its «before» side changed (PR-10): the chips, the labels, the viewport
     void passesContextChanged();   // another project or passes root: a preview in flight is cancelled
+    void availabilityChanged();    // a check started or ended (TASK-0071)
 
 private:
     // the project's and the NR preview shown; dropped: without mask_control and its versions
@@ -356,6 +371,7 @@ private:
     bool dirty_ = false;
     ProcessPlan plan_;
     std::optional<ProcessPlan> planNoForce_;  // PR-10: when a stage above NR is marked «пересчитать»
+    std::optional<ProcessPlan> planNrSkipped_;  // TASK-0071: NR planned to run and FG on - the run's plan if NR is skipped (FG's card)
     std::optional<NrPreviewShown> nrPreview_;
     uint64_t generation_ = 0;
     RunOutcome outcome_;
@@ -375,6 +391,19 @@ private:
     std::vector<double> scrubMs_;
     ControlMaskState controlMask_;
     bool controlMaskBusy_ = false;
+    // TASK-0071: the checks of NR / FG: per stage the last one, with what it depends on; the one running
+    struct CheckRecord {
+        std::string key;
+        StageCheck check;
+    };
+    std::map<std::string, CheckRecord> checks_;
+    QProcess* checkProcess_ = nullptr;
+    std::string checkingStage_;
+    std::string checkKey(const std::string& stage) const;  // the stage's effective settings, the DLL file, the driver, NR's frame size
+    QString nrCheckSize() const;                           // "WxH" of NR's model frame in the run, empty before the plan
+    int checkSerial_ = 0;
+    AvailabilityFacts availabilityFacts() const;
+    QString checkProgram_;
     std::filesystem::path releasedFile_;  // releaseResult: its videos are no sources until restoreResult
     bool isReleased(const std::filesystem::path& video) const;
     QThreadPool maskPool_;  // one thread: the control mask's import (decoding and a PNG16 write take seconds on 4K)

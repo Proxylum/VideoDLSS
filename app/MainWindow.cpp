@@ -478,19 +478,19 @@ void MainWindow::onTaskFinished(int taskId, bool ok) {
     processTaskId_ = -1;
     const QString video = finished.video;  // another project may be open by now
     const QString took = FormatClock(tasks_->progress(taskId).elapsed);
-    const QStringList failedStages = ok ? tasks_->progress(taskId).failedStageTitles() : QStringList{};
-    if (ok && !failedStages.isEmpty()) {
-        // a stage failed and the result was encoded without it (fg in its own process, audit fg-2): the processing page
-        // stays and says so, «Показать результат» leads on - to the project open now, so only if it is the run's own
+    // the stages the result is made without: failed (fg in its own process, audit fg-2) or skipped as unavailable (TASK-0071)
+    // what the result is short of: a stage failed or skipped as unavailable, one made by a fallback (TASK-0071)
+    const QString shortOf = ok ? ProcessingPanel::EndSummary(tasks_->progress(taskId)) : QString();
+    if (ok && !shortOf.isEmpty()) {
+        // the processing page stays and says so, «Показать результат» leads on - to the project open now, so only if it is the run's own
         if (!finished.ownProject) {
             processingActive_ = false;
             updatePage();
         }
-        const QString stages = failedStages.join(tr("», «"));
-        statusBar()->showMessage(finished.ownProject ? tr("Обработка завершена за %1 без стадии «%2» — подробности на странице обработки").arg(took, stages)
-                                                     : tr("Обработка %1 завершена за %2 без стадии «%3»").arg(video, took, stages),
+        statusBar()->showMessage(finished.ownProject ? tr("Обработка завершена за %1, %2 — подробности на странице обработки").arg(took, shortOf)
+                                                     : tr("Обработка %1 завершена за %2, %3").arg(video, took, shortOf),
                                  15000);
-        if (inBackground()) notify(tr("Обработка завершена с ошибкой стадии"), tr("%1 — результат без стадии «%2»").arg(video, failedStages.join(tr("», «"))));
+        if (inBackground()) notify(tr("Обработка завершена"), tr("%1 — результат готов, %2").arg(video, shortOf));
     } else if (ok) {
         processingActive_ = false;
         updatePage();

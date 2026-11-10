@@ -99,6 +99,7 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         if (!avail.available) {
             if (!options_.allowFallback || backend == "nis") Throw("upscale: " + avail.reason);
             Log()->warn("upscale: backend '{}' unavailable — {}. Falling back to nis.", backend, avail.reason);
+            stats_.fallbackReason = backend + " unavailable: " + avail.reason;
             backend = "nis";
             stats_.fellBack = true;
         }
@@ -109,6 +110,7 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         } catch (const std::exception& e) {
             if (!options_.allowFallback || backend == "nis") throw;
             Log()->warn("upscale: backend '{}' failed to initialise ({}). Falling back to nis.", backend, e.what());
+            stats_.fallbackReason = backend + " failed to initialise: " + e.what();
             backend = "nis";
             cfg.backend = backend;
             upscaler_ = CreateUpscaler(backend);
@@ -153,6 +155,7 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["input"] = {w, h};
         m.stageParams["scale"] = t.scale;
         m.stageParams["fallback"] = stats_.fellBack;
+        if (stats_.fellBack) m.stageParams["fallback_reason"] = stats_.fallbackReason;  // a later run that reuses the pass says it (TASK-0071)
         m.stageParams["jitter_phases"] = stats_.jitterPhases;
         writer_ = std::make_unique<PassWriter>(OutDir(), m);
     }

@@ -420,7 +420,8 @@ void PreviewRunner::onProgress(int id) {
         const int percent = p.total > 0 ? static_cast<int>(p.done * 100 / p.total) : 0;
         setStatus(Tr("Превью отрезка %1–%2 · %3 % · осталось %4").arg(job_->first).arg(job_->first + job_->frames - 1).arg(percent).arg(remain));
     } else if (p.done == 0) {
-        if (!upstreamNote_.isEmpty()) setStatus(Tr("%1 — считаю превью кадра %2 · осталось %3").arg(upstreamNote_).arg(job_->first).arg(remain), "ok");
+        if (!upstreamNote_.isEmpty())
+            setStatus(Tr("%1 — считаю превью кадра %2 · осталось %3").arg(upstreamNote_).arg(job_->first).arg(remain), upstreamWarn_ ? "warn" : "ok");
         else setStatus(Tr("Превью кадра %1 · запуск модели · осталось %2").arg(job_->first).arg(remain));
     } else {
         setStatus(Tr("Превью кадра %1 · %2 · осталось %3").arg(job_->first).arg(jobRequest_.kind == Kind::Frame ? Tr("без истории") : Tr("с историей"), remain));
@@ -445,6 +446,7 @@ void PreviewRunner::onFinished(int id, bool ok) {
     const double seconds = jobClock_.isValid() ? static_cast<double>(jobClock_.elapsed()) / 1000.0 : 0.0;
     jobSuperseded_ = false;
     upstreamNote_.clear();  // said while the run started; its end says what it gave
+    upstreamWarn_ = false;
     job_.reset();
     taskId_ = -1;
     watchdog_.stop();
@@ -582,11 +584,13 @@ void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, b
     text += NrPreviewDroppedText(job.gate.dropped);
     const QString tip = entry.cacheable ? QString() : uncachedTip_;
     if (!entry.cacheable && model_.engineerMode()) text += Tr(" · ") + tip;  // the engineer mode says it in the line (design §5)
+    const bool warn = cached && upstreamWarn_ && !upstreamNote_.isEmpty();
     if (cached && !upstreamNote_.isEmpty()) text = upstreamNote_ + Tr(" — ") + text;  // the stages done, the preview from the cache
     upstreamNote_.clear();
+    upstreamWarn_ = false;
     shownStatus_ = text;
     shownTip_ = tip;
-    setStatus(text, "ok", tip);
+    setStatus(text, warn ? "warn" : "ok", tip);
     updateUsage();
 }
 
@@ -733,9 +737,20 @@ void PreviewRunner::upstreamFinished(int id, bool ok) {
     const Request next = afterUpstream_.value_or(lastFrameKind_);
     afterUpstream_.reset();
     upstreamNote_ = Tr("Этапы до улучшения посчитаны за %1").arg(FormatDuration(took));  // onProgress / show say it while it starts
+    upstreamWarn_ = false;
+    // TASK-0071: the same `process --disable-unavailable` - an upscale that fell back from DLSS to NIS is said here too, not only in the log
+    for (const auto& s : tasks_.progress(id).stages)
+        if (s.fellBack) {
+            upstreamNote_ += Tr(" · «%1» запасным способом (NIS)").arg(s.title);
+            upstreamWarn_ = true;
+            emit model_.message(Tr("Этапы до улучшения: стадия «%1» сделана запасным способом (NIS) — %2").arg(s.title, s.note.isEmpty() ? Tr("причина в логе") : s.note));
+        }
     const int64_t frame = model_.store().FrameAt("source", model_.time());
-    setStatus(Tr("%1 — считаю превью кадра %2").arg(upstreamNote_).arg(frame), "ok");
-    if (!start(next)) upstreamNote_.clear();  // the status says why
+    setStatus(Tr("%1 — считаю превью кадра %2").arg(upstreamNote_).arg(frame), upstreamWarn_ ? "warn" : "ok");
+    if (!start(next)) {  // the status says why
+        upstreamNote_.clear();
+        upstreamWarn_ = false;
+    }
 }
 
 void PreviewRunner::hide() {

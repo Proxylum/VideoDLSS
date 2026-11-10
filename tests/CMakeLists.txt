@@ -126,6 +126,10 @@ if(DLSSVID_BUILD_APP)
   target_include_directories(dlssvid_app_tests PRIVATE ${CMAKE_SOURCE_DIR}/tests/integration)
   target_link_libraries(dlssvid_app_tests PRIVATE dlssvid_app Catch2::Catch2WithMain Qt6::Test)
   dlssvid_utf8_code_page(dlssvid_app_tests)
+  if(MSVC)
+    # one translation unit with every GUI case: past 2^16 COMDAT sections (Catch2's per-case registration, Qt's templates) - C1128
+    target_compile_options(dlssvid_app_tests PRIVATE /bigobj)
+  endif()
   target_compile_definitions(dlssvid_app_tests PRIVATE
     DLSSVID_TEST_TMP="${CMAKE_BINARY_DIR}/test-tmp"
     DLSSVID_QT_PLUGINS="${DLSSVID_QT_BIN}/../plugins"

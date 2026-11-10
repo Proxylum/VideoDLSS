@@ -308,6 +308,20 @@ StageCard::StageCard(AppModel& model, const std::string& stage, QWidget* parent)
     warning_->setWordWrap(true);
     SetRole(warning_, "warn");
     side->addWidget(warning_);
+    if (stage == "nr" || stage == "fg") {  // TASK-0071: the run skips the stage when it cannot run here - said before it
+        availability_ = new QLabel(this);
+        availability_->setWordWrap(true);
+        availability_->setObjectName("availability");
+        availability_->setMinimumWidth(120);
+        side->addWidget(availability_);
+        check_ = new QPushButton(tr("Проверить"), this);
+        check_->setObjectName("checkStage");
+        SetRole(check_, "small");
+        check_->setToolTip(tr("Создать модель на видеокарте с настройками проекта (dlssvid %1 --check) — пара секунд").arg(QString::fromStdString(stage)));
+        side->addWidget(check_, 0, Qt::AlignLeft);
+        connect(check_, &QPushButton::clicked, this, [this] { model_.checkStage(stage_); });
+        connect(&model_, &AppModel::availabilityChanged, this, &StageCard::refresh);
+    }
     force_ = new QCheckBox(tr("пересчитать"), this);
     force_->setToolTip(tr("Посчитать заново, даже если пасс совпадает по отпечатку"));
     side->addWidget(force_);
@@ -656,6 +670,7 @@ void StageCard::setExtra(QWidget* extra) {
 }
 
 void StageCard::refreshBusy() {
+    if (check_) check_->setEnabled(model_.availability(stage_).checkable && !model_.checkRunning() && !(busy_ && busy_()));  // TASK-0071
     if (!controlRow_) return;
     const StageEntry* e = model_.stageEntry(stage_);
     const nlohmann::json effective = EffectiveStageParams(stage_, e ? e->params : nlohmann::json::object());
@@ -743,6 +758,16 @@ void StageCard::refresh() {
     warning_->setVisible(!st.warning.isEmpty());
     scenes_->setText(st.scenes);
     scenes_->setVisible(!st.scenes.isEmpty());
+    if (availability_) {
+        const StageAvailability a = model_.availability(stage_);
+        availability_->setText(a.text);
+        availability_->setToolTip(a.tip);
+        availability_->setVisible(!a.text.isEmpty());
+        SetRole(availability_, a.tone == "ok" ? "ok" : a.tone == "danger" ? "danger" : a.tone == "warn" ? "warn" : "hint");
+        check_->setVisible(a.checkable);
+        // one check at a time; not while a task runs on the GPU
+        check_->setEnabled(a.checkable && !a.checking && !model_.checkRunning() && !(busy_ && busy_()));
+    }
     force_->setChecked(model_.forced(stage_));
     force_->setVisible(e && e->enabled);
     engineer_->setVisible(model_.engineerMode());

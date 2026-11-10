@@ -54,6 +54,9 @@ struct ProcessOptions {
     bool encode = true;                // false (process --no-encode, PR-10: the stages before NR for the preview): the passes only, the
                                        // result is neither written nor created; -o then only locates the passes
     std::set<std::string> forceStages;  // recompute these stages even when their pass matches (a per-stage --no-skip-existing)
+    // PlanProcess only (TASK-0071): these stages, where the plan runs them, are taken as skipped by --disable-unavailable - as the run does,
+    // their pass on disk is moved aside and the stages below are decided without it (the GUI's card of FG after an NR that cannot run here)
+    std::set<std::string> planSkipped;
     std::string sourceHash;             // "sha256:<hex>" of the input when the caller knows it (Project::SourceHash); empty = hash the file
     uint64_t vramBytes = 0;             // GPU memory for the VRAM advice of the plan (TASK-0039); 0: RunProcess takes the device's, a
                                         // plan without it has no VRAM error (WARP, unknown)
