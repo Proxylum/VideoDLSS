@@ -1039,6 +1039,7 @@ QStringList AppModel::processArgs() const {
         for (const auto& s : force_) list += (list.isEmpty() ? "" : ",") + QString::fromStdString(s);
         args << "--force" << list;
     }
+    if (device_->IsWarp()) args << "--warp";  // the adapter the GUI runs on, as upstreamArgs: the cards' availability is of it (TASK-0071)
     return args;
 }
 
@@ -1917,6 +1918,39 @@ AvailabilityFacts AppModel::availabilityFacts() const {
     return f;
 }
 
+QString AppModel::nrCheckSize() const {
+    // the model's frame of the run: NR works on the upscaled frame. Unknown before the plan: the CLI's default
+    const StageEntry* e = FindEntry(project_, "nr");
+    if (!e || outcome_.width == 0 || outcome_.height == 0) return {};
+    const nlohmann::json p = EffectiveStageParams("nr", e->params);
+    const auto [w, h] = NrWorkSize(outcome_.width, outcome_.height, p.value("model_scale", 1.0));
+    return QString("%1x%2").arg(w).arg(h);
+}
+
+QStringList AppModel::checkArgs(const std::string& stage, const QString& paramsFile, const QString& jsonFile) const {
+    const StageEntry* e = FindEntry(project_, stage);
+    const nlohmann::json p = EffectiveStageParams(stage, e ? e->params : nlohmann::json::object());
+    QStringList args;
+    if (stage == "nr") {
+        args = {"nr", "--check", "--backend", "ngx", "--params-file", paramsFile, "--json", jsonFile};
+        if (const QString size = nrCheckSize(); !size.isEmpty()) args << "--check-size" << size;
+    } else {
+        args = {"fg", "--check", "--backend", "dlssg", "--multiplier", QString::number(p.value("multiplier", 2)), "--json", jsonFile};
+    }
+    if (device_->IsWarp()) args << "--warp";
+    return args;
+}
+
+nlohmann::json AppModel::checkParams(const std::string& stage) const {
+    // the run's settings without the keys the schema lacks: `process` passes them over (a project of an older build keeps nr.preset),
+    // `nr --params-file` refuses them
+    const StageEntry* e = FindEntry(project_, stage);
+    nlohmann::json p = EffectiveStageParams(stage, e ? e->params : nlohmann::json::object());
+    if (const StageSchema* schema = FindStageSchema(stage); schema && p.is_object())
+        for (auto it = p.begin(); it != p.end();) it = schema->Find(it.key()) ? std::next(it) : p.erase(it);
+    return p;
+}
+
 std::string AppModel::checkKey(const std::string& stage) const {
     const StageEntry* e = FindEntry(project_, stage);
     const nlohmann::json p = EffectiveStageParams(stage, e ? e->params : nlohmann::json::object());
@@ -1927,7 +1961,7 @@ std::string AppModel::checkKey(const std::string& stage) const {
     // the result says nothing of other settings, another DLL (a patched one) or another driver
     const std::u8string u = dll.u8string();
     return p.dump() + "|" + std::string(u.begin(), u.end()) + "|" + std::to_string(size) + "|" + std::to_string(time.time_since_epoch().count()) + "|" +
-           NvidiaDriverFromUmd(device_->UmdDriverVersion()).ToString();
+           NvidiaDriverFromUmd(device_->UmdDriverVersion()).ToString() + "|" + (stage == "nr" ? nrCheckSize().toStdString() : std::string());
 }
 
 StageAvailability AppModel::availability(const std::string& stage) const {
@@ -1938,37 +1972,33 @@ StageAvailability AppModel::availability(const std::string& stage) const {
     if (!e->enabled || !StageNeedsNgx(stage, p)) return {};
     const auto it = checks_.find(stage);
     const StageCheck* check = it != checks_.end() && it->second.key == checkKey(stage) ? &it->second.check : nullptr;
-    return StageAvailabilityFor(stage, e->enabled, p, availabilityFacts(), check, checkProcess_ && checkingStage_ == stage);
+    // a pass the plan reuses or restores goes into the result whatever this computer can do: only a recompute would be skipped
+    bool reused = false;
+    for (const auto& d : plan_.stages)
+        if (d.name == stage) reused = d.action != "run";
+    return StageAvailabilityFor(stage, e->enabled, p, availabilityFacts(), check, checkProcess_ && checkingStage_ == stage, reused);
 }
 
 void AppModel::checkStage(const std::string& stage) {
     if (checkProcess_ || !hasProject()) return;
     const StageAvailability a = availability(stage);
     if (!a.checkable) return;
-    const StageEntry* e = FindEntry(project_, stage);
-    const nlohmann::json p = EffectiveStageParams(stage, e->params);
-    const QString dir = QDir(QDir::tempPath()).filePath(QString("dlssvid-check-%1").arg(QCoreApplication::applicationPid()));
+    // a folder of its own: a cancelled check that ends late removes only its files
+    const QString dir = QDir(QDir::tempPath()).filePath(QString("dlssvid-check-%1-%2").arg(QCoreApplication::applicationPid()).arg(++checkSerial_));
     QDir().mkpath(dir);
     const QString json = QDir(dir).filePath(QString::fromStdString(stage) + ".json");
-    QFile::remove(json);
-    QStringList args;
+    const QString params = QDir(dir).filePath(QString::fromStdString(stage) + "-params.json");
     if (stage == "nr") {
-        const QString params = QDir(dir).filePath("nr-params.json");
         QFile f(params);
         if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             emit message(tr("Проверка не запустилась: нельзя записать %1").arg(params));
+            QDir(dir).removeRecursively();
             return;
         }
-        f.write(QByteArray::fromStdString(p.dump(2)));
+        f.write(QByteArray::fromStdString(checkParams(stage).dump(2)));
         f.close();
-        args = {"nr", "--check", "--backend", "ngx", "--params-file", params, "--json", json};
-        if (outcome_.width > 0 && outcome_.height > 0) {  // the model's frame of the run: NR works on the upscaled frame
-            const auto [w, h] = NrWorkSize(outcome_.width, outcome_.height, p.value("model_scale", 1.0));
-            args << "--check-size" << QString("%1x%2").arg(w).arg(h);
-        }
-    } else {
-        args = {"fg", "--check", "--backend", "dlssg", "--multiplier", QString::number(p.value("multiplier", 2)), "--json", json};
     }
+    const QStringList args = checkArgs(stage, params, json);
     checkingStage_ = stage;
     const std::string key = checkKey(stage);
     checkProcess_ = new QProcess(this);
@@ -1976,6 +2006,21 @@ void AppModel::checkStage(const std::string& stage) {
     QProcess* proc = checkProcess_;
     QTimer::singleShot(120000, proc, [proc] {  // NGX that does not answer: the check ends as failed
         if (proc->state() != QProcess::NotRunning) proc->kill();
+    });
+    // a CLI that does not start gives no finished: the check ends here (not «Проверка…» for good)
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, stage, key, dir](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart) return;
+        proc->deleteLater();
+        QDir(dir).removeRecursively();
+        if (checkProcess_ != proc) return;
+        checkProcess_ = nullptr;
+        checkingStage_.clear();
+        StageCheck c;
+        c.when = QTime::currentTime().toString("HH:mm");
+        c.hint = tr("dlssvid не запускается: %1").arg(proc->errorString());
+        checks_[stage] = CheckRecord{key, c};
+        emit message(tr("Проверка «%1» не прошла: %2").arg(stageTitle(stage), c.hint));
+        emit availabilityChanged();
     });
     connect(proc, &QProcess::finished, this, [this, proc, stage, key, json, dir](int code, QProcess::ExitStatus status) {
         const QString out = QString::fromUtf8(proc->readAll());

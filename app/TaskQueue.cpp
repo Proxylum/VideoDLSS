@@ -69,6 +69,13 @@ QStringList TaskQueue::Progress::failedStageTitles() const {
     return out;
 }
 
+QStringList TaskQueue::Progress::fellBackStageTitles() const {
+    QStringList out;
+    for (const auto& s : stages)
+        if (s.fellBack) out << s.title;
+    return out;
+}
+
 QStringList TaskQueue::Progress::missingStageTitles() const {
     QStringList out;
     for (const auto& s : stages)

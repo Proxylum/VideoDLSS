@@ -31,6 +31,9 @@ public:
     QStringList stageLines() const;
     QString logTail() const { return tail_->toPlainText(); }
     QString note() const;  // the line under the stages (TASK-0071: what the result is made without, and why)
+    // What a run that ended ok is short of: «без стадии «Улучшение»», «стадия «Апскейл ×2» — запасным способом»; empty when nothing. The
+    // window keeps the page for such a run and says it (MainWindow::onTaskFinished).
+    static QString EndSummary(const TaskQueue::Progress& p);
 
 signals:
     void showResultRequested();  // «Показать результат»

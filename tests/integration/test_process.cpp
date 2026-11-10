@@ -1113,6 +1113,16 @@ TEST_CASE("RunProcess: --frames, passthrough, an unavailable nr stage and a run 
         CHECK(has("fg disabled: ", "without frame generation"));
         CHECK(has("upscale: dlss ", "nis used instead"));
         CHECK(r.finalPass == dir / "passes_dlssg" / "color_nr");
+        // the NIS color_sr carries the fingerprint of the dlss settings: a later run reuses it - and says so (review of TASK-0071)
+        o.output = dir / "nodlssg_again.mkv";
+        const ProcessResult again = RunProcess(o);
+        CHECK(Report(again, "upscale").status == "reused");
+        CHECK(Report(again, "upscale").details.value("fallback", false));
+        auto hasAgain = [&](const char* also) {
+            return std::any_of(again.warnings.begin(), again.warnings.end(),
+                               [&](const std::string& w) { return w.rfind("upscale: dlss ", 0) == 0 && w.find(also) != std::string::npos; });
+        };
+        CHECK(hasAgain("the color_sr reused was made so"));
     }
     SECTION("no colour stage: the source is encoded unchanged") {
         o.output = dir / "guides_only.mkv";
@@ -1234,6 +1244,47 @@ TEST_CASE("RunProcess: fg disabled over a color_fg kept in place encodes color_n
     CHECK(std::filesystem::exists(o.passesRoot / "color_fg" / Manifest::kFileName));  // left alone
     CHECK(r.finalPass == o.passesRoot / "color_nr");  // before: the 9-frame color_fg of another backend was encoded
     CHECK(r.framesOut == 5);
+}
+
+TEST_CASE("RunProcess: nr disabled over a color_nr kept in place takes it out of the result, as said; it comes back from the history", "[integration][process][nr][regression]") {
+    // review of TASK-0071: the run said «the result is made without Neural Rendering» and encoded the color_nr a forced run left in place
+    ClipSpec spec;
+    spec.frames = 5;
+    spec.width = 48;
+    spec.height = 32;
+    const auto dir = Dir("nr_disabled_in_place");
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    ProcessOptions o;
+    o.input = clip;
+    o.output = dir / "r1.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    for (auto& st : o.stages) st.enabled = st.name != "fg";
+    o.codec = "ffv1";
+    o.warp = true;
+    RunProcess(o);  // color_nr by the stub
+    ApplyParamSpec(o.stages, "nr.backend=ngx");  // unavailable on WARP
+    o.disableUnavailable = true;
+    // the stub's pass stamped with the fingerprint the ngx run needs: under --force it stays in place (retire only on another fingerprint)
+    const std::string want = [&] {
+        for (const auto& st : PlanProcess(o).stages)
+            if (st.name == "nr") return st.fingerprint;
+        return std::string();
+    }();
+    REQUIRE(!want.empty());
+    Manifest m = Manifest::Load(o.passesRoot / "color_nr");
+    m.fingerprint = want;
+    m.Save(o.passesRoot / "color_nr");
+    o.forceStages = {"nr"};
+    o.output = dir / "r2.mkv";
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "nr").status == "disabled");
+    CHECK(r.finalPass == o.passesRoot / "color_sr");  // before: the color_nr kept in place
+    CHECK_FALSE(std::filesystem::exists(o.passesRoot / "color_nr"));
+    CHECK(std::any_of(r.warnings.begin(), r.warnings.end(), [](const std::string& w) { return w.find("without Neural Rendering") != std::string::npos; }));
+    bool inHistory = false;
+    for (const auto& v : ListPassVersions(o.passesRoot, "color_nr")) inHistory = inHistory || (!v.current && v.fingerprint == want);
+    CHECK(inHistory);
 }
 
 TEST_CASE("RunProcess: fg disabled over an older color_fg encodes color_nr, not the stale pass", "[integration][process][fg]") {

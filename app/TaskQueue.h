@@ -61,6 +61,8 @@ public:
         QStringList failedStageTitles() const;
         // the stages the result is made without: failed, or skipped as unavailable (`process: nr disabled - ...`, TASK-0071)
         QStringList missingStageTitles() const;
+        // the stages made with another backend than asked for (`process: upscale fell back to nis - ...`)
+        QStringList fellBackStageTitles() const;
     };
 
     enum class Lane { Main, Preview };

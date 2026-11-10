@@ -42,8 +42,9 @@ struct StageAvailability {
 };
 
 // `params`: the stage's effective parameters. `check`: the last check of these settings and files, or null.
+// `reused`: the plan reuses or restores the stage's pass - it goes into the result anyway, only a recompute would be skipped.
 StageAvailability StageAvailabilityFor(const std::string& stage, bool enabled, const nlohmann::json& params, const AvailabilityFacts& facts, const StageCheck* check,
-                                       bool checking);
+                                       bool checking, bool reused = false);
 
 // The stages that have the line: nr with the ngx backend (not at intensity 0: no model then), fg with dlssg.
 bool StageNeedsNgx(const std::string& stage, const nlohmann::json& params);

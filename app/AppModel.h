@@ -118,6 +118,10 @@ public:
     StageAvailability availability(const std::string& stage) const;
     void checkStage(const std::string& stage);
     bool checkRunning() const { return checkProcess_ != nullptr; }
+    // what checkStage runs (tests): `nr --check --params-file <paramsFile> --json <jsonFile> [--check-size WxH]` or `fg --check ...`;
+    // checkParams - what goes into the settings file: the stage's effective settings without the keys the schema lacks
+    QStringList checkArgs(const std::string& stage, const QString& paramsFile, const QString& jsonFile) const;
+    nlohmann::json checkParams(const std::string& stage) const;
     QString stageTitle(const std::string& stage) const;  // «Апскейл ×2», «Генерация кадров ×3», «Кодирование»
 
     // ---- start screen, recents, unsaved changes (stage 9, MR E) ----
@@ -391,7 +395,9 @@ private:
     std::map<std::string, CheckRecord> checks_;
     QProcess* checkProcess_ = nullptr;
     std::string checkingStage_;
-    std::string checkKey(const std::string& stage) const;  // the stage's effective settings, the DLL file, the driver
+    std::string checkKey(const std::string& stage) const;  // the stage's effective settings, the DLL file, the driver, NR's frame size
+    QString nrCheckSize() const;                           // "WxH" of NR's model frame in the run, empty before the plan
+    int checkSerial_ = 0;
     AvailabilityFacts availabilityFacts() const;
     void cancelCheck();
     std::filesystem::path releasedFile_;  // releaseResult: its videos are no sources until restoreResult

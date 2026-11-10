@@ -155,6 +155,7 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["input"] = {w, h};
         m.stageParams["scale"] = t.scale;
         m.stageParams["fallback"] = stats_.fellBack;
+        if (stats_.fellBack) m.stageParams["fallback_reason"] = stats_.fallbackReason;  // a later run that reuses the pass says it (TASK-0071)
         m.stageParams["jitter_phases"] = stats_.jitterPhases;
         writer_ = std::make_unique<PassWriter>(OutDir(), m);
     }

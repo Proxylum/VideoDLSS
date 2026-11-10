@@ -1278,6 +1278,21 @@ ProcessResult RunProcess(const ProcessOptions& options) {
 
     PlanState state;
     bool retiredAny = false;
+    // TASK-0071: a color_sr made by NIS because DLSS could not run is stamped with the fingerprint of the settings asked for - a later
+    // run that reuses it says so too, not only the run that fell back
+    auto sayReusedFallback = [&](const std::string& name, ProcessStageReport& rep) {
+        if (name != "upscale" || rep.outDir.empty()) return;
+        try {
+            const Manifest m = Manifest::Load(rep.outDir);
+            if (!m.stageParams.is_object() || !m.stageParams.value("fallback", false)) return;
+            const std::string why = m.stageParams.value("fallback_reason", std::string("the backend asked for could not run"));
+            rep.details["fallback"] = true;
+            rep.details["fallback_reason"] = why;
+            result.warnings.push_back("upscale: " + why + "; nis used instead (the color_sr reused was made so)");
+            Log()->warn("process: upscale fell back to nis — the color_sr reused was made so: {}", why);  // TaskQueue parses this line
+        } catch (const std::exception&) {
+        }
+    };
     bool fgSkipped = false;           // fg was wanted but failed or is disabled: the result comes from its input, not color_fg
     std::filesystem::path fgColorDir;  // that input (color_nr / color_sr; empty: the source)
     for (const std::string& name : ProcessStageOrder()) {
@@ -1310,6 +1325,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                     if (Manifest::Exists(root / pass)) StampPass(root / pass, d, FileTimeIso8601(root / pass / Manifest::kFileName), 0.0, true);
             }
             Log()->info("process: {} — {} is complete, reused{}", name, d.outDir.string(), d.kind == "legacy" ? " (adopted)" : "");
+            sayReusedFallback(name, rep);
             result.stages.push_back(rep);
             continue;
         }
@@ -1326,6 +1342,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             rep.frames = framesOf();
             state.ran.insert(d.outputs.begin(), d.outputs.end());
             Log()->info("process: {} — version {} restored from the history", name, d.version);
+            sayReusedFallback(name, rep);
             result.stages.push_back(rep);
             continue;
         }
@@ -1621,8 +1638,26 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             std::string why = rep.reason;
             if (why.rfind(name + ": ", 0) == 0) why.erase(0, name.size() + 2);
             const std::string without = name == "nr" ? "without Neural Rendering" : name == "fg" ? "without frame generation" : "without " + name;
-            result.warnings.push_back(name + " disabled: " + why + "; the result is made " + without);
-            Log()->warn("process: {} disabled — {}; the result is made {}", name, why, without);  // TaskQueue parses this line
+            bool kept = false;
+            if (name == "nr") {
+                // a color_nr left in place - a forced run with the same fingerprint, an incomplete one - is not this run's: fg and the encode
+                // would read it (fg's skipped pass is left out by fgSkipped). To the history, restored when NR runs with these settings again
+                const std::filesystem::path cur = root / "color_nr";
+                std::error_code ec;
+                if (std::filesystem::exists(cur, ec)) {
+                    if (Manifest::Exists(cur) && RetirePassVersion(root, "color_nr", ec)) retiredAny = true;
+                    else if (!ec) std::filesystem::remove_all(cur, ec);
+                    kept = std::filesystem::exists(cur);
+                    if (kept) Log()->warn("process: cannot move the earlier color_nr aside ({}): it is used", ec.message());
+                }
+            }
+            if (kept) {  // NR's earlier output is in the result after all: not «without» it
+                result.warnings.push_back("nr disabled: " + why + "; the earlier color_nr is used");
+                Log()->warn("process: nr could not run — {}; the earlier color_nr is used", why);
+            } else {
+                result.warnings.push_back(name + " disabled: " + why + "; the result is made " + without);
+                Log()->warn("process: {} disabled — {}; the result is made {}", name, why, without);  // TaskQueue parses this line
+            }
         }
         if (rep.status == "ran")
             Log()->info("process: {} done — {} frames in {:.1f} s ({:.1f} ms/frame), {} ({})", name, rep.frames, rep.seconds, rep.msPerFrame, ShortFingerprint(d.fingerprint),

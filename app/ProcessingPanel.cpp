@@ -269,17 +269,23 @@ QString ProcessingPanel::doneNote(const TaskQueue::Progress& p, const QStringLis
     // TASK-0071: a stage the runner skipped as unavailable, one made with another backend - the result is not what the cards promised
     for (const auto& s : p.stages) {
         if (s.state == "disabled")
-            lines << tr("Стадия «%1» пропущена: на этом компьютере она не запускается (%2). Результат сделан без неё — проверить стадию можно "
-                        "кнопкой «Проверить» в её карточке.")
+            lines << tr("Стадия «%1» пропущена: на этом компьютере она не запускается (%2). Результат сделан без неё — в карточке стадии "
+                        "сказано, чего не хватает, или есть «Проверить».")
                          .arg(s.title, s.note.isEmpty() ? tr("причина в логе") : s.note);
         else if (s.fellBack)
-            lines << tr("«%1» сделана запасным способом (NIS): %2.").arg(s.title, s.note.isEmpty() ? tr("причина в логе") : s.note);
+            lines << tr("Стадия «%1» сделана запасным способом (NIS): %2.").arg(s.title, s.note.isEmpty() ? tr("причина в логе") : s.note);
     }
     if (lines.isEmpty()) return tr("Вьюпорт показывает «До | После»: исходник слева, результат справа.");
     return lines.join("\n");
 }
 
 QString ProcessingPanel::note() const { return note_->text(); }
+
+QString ProcessingPanel::EndSummary(const TaskQueue::Progress& p) {
+    if (const QStringList missing = p.missingStageTitles(); !missing.isEmpty()) return tr("без стадии «%1»").arg(missing.join(tr("», «")));
+    if (const QStringList fellBack = p.fellBackStageTitles(); !fellBack.isEmpty()) return tr("стадия «%1» — запасным способом").arg(fellBack.join(tr("», «")));
+    return {};
+}
 
 QStringList ProcessingPanel::stageLines() const {
     QStringList out;
