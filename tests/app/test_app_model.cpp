@@ -2328,10 +2328,26 @@ TEST_CASE("AppModel::checkStage runs nr --check with the project's settings and 
     model.refreshPlan();  // the outcome: NR's frame for --check-size
     const StageAvailability before = model.availability("nr");
     if (!before.checkable) SKIP("NR cannot run here: " + before.text.toStdString());
+    // «Проверить» waits for the GPU's work: off while a task or a preview runs (only the button keeps a check from starting then) and
+    // while a check runs (review of TASK-0071)
+    StageCard card(model, "nr");
+    bool gpuBusy = false;
+    card.setBusyCheck([&] { return gpuBusy; });
+    card.refresh();
+    auto* checkButton = card.findChild<QPushButton*>("checkStage");
+    REQUIRE(checkButton);
+    CHECK(checkButton->isEnabled());
+    gpuBusy = true;
+    card.refreshBusy();
+    CHECK_FALSE(checkButton->isEnabled());
+    gpuBusy = false;
+    card.refreshBusy();
+    CHECK(checkButton->isEnabled());
     QSignalSpy changed(&model, &AppModel::availabilityChanged);
     model.checkStage("nr");
     REQUIRE(model.checkRunning());
     CHECK(model.availability("nr").text == QString::fromUtf8("Проверка…"));
+    CHECK_FALSE(checkButton->isEnabled());
     model.checkStage("fg");  // one at a time
     Pump([&] { return !model.checkRunning(); }, 120000);
     REQUIRE_FALSE(model.checkRunning());
@@ -5925,6 +5941,19 @@ TEST_CASE("NR preview: the stages before NR whose upscale fell back from DLSS to
     model.refreshPlan();
     QObject::connect(&queue, &TaskQueue::taskFinished, [&](int taskId, bool ok) { runner.handleTaskFinished(taskId, ok); });
     QSignalSpy messages(&model, &AppModel::message);
+    std::vector<std::pair<QString, QString>> statuses;  // every line the bar showed, with its tone
+    QObject::connect(&runner, &PreviewRunner::changed, [&] { statuses.emplace_back(runner.statusText(), runner.statusRole()); });
+    // the tone too, not only the words: each line that says the fallback is a warning (review of TASK-0071)
+    auto saidInWarnTone = [&] {
+        int said = 0;
+        for (const auto& [text, role] : statuses)
+            if (text.contains(QString::fromUtf8("запасным способом (NIS)"))) {
+                ++said;
+                INFO(text.toStdString());
+                CHECK(role == "warn");
+            }
+        return said;
+    };
     const int id = runner.prepareInputs();
     REQUIRE(id > 0);
     Pump([&] { return queue.finished(id); }, 120000);
@@ -5935,6 +5964,21 @@ TEST_CASE("NR preview: the stages before NR whose upscale fell back from DLSS to
     CHECK(said);
     CHECK(runner.statusText().contains(QString::fromUtf8("запасным способом (NIS)")));
     Pump([&] { return !runner.running(); }, 60000);
+    CHECK(std::any_of(statuses.begin(), statuses.end(), [](const auto& s) {  // the line the preview starts with
+        return s.first.contains(QString::fromUtf8("запасным способом (NIS)")) && s.first.contains(QString::fromUtf8("считаю превью кадра")) &&
+               !s.first.contains(QString::fromUtf8("осталось"));
+    }));
+    CHECK(saidInWarnTone() > 0);
+    // again: the stages before NR reused - their pass made so, said again - and the frame's preview from the cache, shown in that tone
+    statuses.clear();
+    const int again = runner.prepareInputs();
+    REQUIRE(again > 0);
+    Pump([&] { return queue.finished(again); }, 120000);
+    REQUIRE(queue.succeeded(again));
+    Pump([&] { return !runner.running(); }, 60000);
+    CHECK(runner.statusText().contains(QString::fromUtf8("запасным способом (NIS)")));
+    CHECK(runner.statusRole() == "warn");
+    CHECK(saidInWarnTone() > 0);
 }
 
 TEST_CASE("NR preview: clearing lets the viewport go first; GC keeps the shown entry", "[app][preview][gpu]") {
