@@ -146,6 +146,7 @@ private:
     QString uncachedTip_;  // why the preview shown is not in the cache (another DLL, a folder that could not be renamed)
     QString shownStatus_, shownTip_;  // show()'s status: back when the preview is current again
     QString upstreamNote_;  // «Этапы до улучшения посчитаны за …»: said until the preview after them shows
+    bool upstreamWarn_ = false;  // ... with a stage made by a fallback (TASK-0071)
     // the stages before NR
     int upstreamTaskId_ = -1;
     std::optional<Request> afterUpstream_;

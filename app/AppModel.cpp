@@ -58,7 +58,10 @@ AppModel::AppModel(bool warp, QObject* parent) : QObject(parent) {
 }
 
 AppModel::~AppModel() {
-    cancelCheck();
+    if (QProcess* p = checkProcess_) {  // its end handled while the connections stand: the check's folder goes
+        cancelCheck();
+        p->waitForFinished(3000);
+    }
     maskPool_.waitForDone();  // an import in flight finishes (or leaves .import/ to the next one); its queued end is dropped with us
     cancelProxies();
     store_->SetOnCurrentLoaded({});  // loaders may still finish a frame while the store shuts down
@@ -2055,8 +2058,9 @@ void AppModel::checkStage(const std::string& stage) {
         emit message(c.ok ? tr("Проверка «%1»: работает на этой видеокарте").arg(title) : tr("Проверка «%1» не прошла: %2").arg(title, c.hint));
         emit availabilityChanged();
     });
-    Log()->info("check {}: {} {}", stage, cliPath().toStdString(), args.join(' ').toStdString());
-    proc->start(cliPath(), args);
+    const QString program = checkProgram_.isEmpty() ? cliPath() : checkProgram_;
+    Log()->info("check {}: {} {}", stage, program.toStdString(), args.join(' ').toStdString());
+    proc->start(program, args);
     emit availabilityChanged();
 }
 

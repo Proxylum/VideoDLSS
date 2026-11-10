@@ -269,8 +269,8 @@ QString ProcessingPanel::doneNote(const TaskQueue::Progress& p, const QStringLis
     // TASK-0071: a stage the runner skipped as unavailable, one made with another backend - the result is not what the cards promised
     for (const auto& s : p.stages) {
         if (s.state == "disabled")
-            lines << tr("Стадия «%1» пропущена: на этом компьютере она не запускается (%2). Результат сделан без неё — в карточке стадии "
-                        "сказано, чего не хватает, или есть «Проверить».")
+            lines << tr("Стадия «%1» пропущена: на этом компьютере она не запускается (%2). Результат сделан без неё — подробности в "
+                        "подсказке строки и в логе.")
                          .arg(s.title, s.note.isEmpty() ? tr("причина в логе") : s.note);
         else if (s.fellBack)
             lines << tr("Стадия «%1» сделана запасным способом (NIS): %2.").arg(s.title, s.note.isEmpty() ? tr("причина в логе") : s.note);

@@ -414,8 +414,8 @@ With the flag, NR or FG that cannot run here (no DLL, a driver older than 616.56
 feature) is skipped: the report has a `warning: nr disabled: …` / `fg disabled: …` line and the log
 `process: nr disabled — …`; an upscale that fell back from DLSS to NIS says `upscale: dlss … nis used instead`. The GUI
 shows such a stage as «пропущена» with its reason and the run as «Готово за … · без стадии «…»»; before the run, the NR
-and FG cards say whether the stage can run here and offer «Проверить» (`dlssvid nr|fg --check` with the project's
-settings).
+(ngx) and FG (dlssg) cards say whether the stage can run here and offer «Проверить» (`dlssvid nr|fg --check` with the
+project's settings).
 
 The result is written next to its place as `<name>.dlssvid-part<ext>` and replaces the previous result in one rename,
 only when it is complete and reads back as what was encoded (the frame size, the frame count in MP4 and MOV, the audio):

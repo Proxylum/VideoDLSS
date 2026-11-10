@@ -118,6 +118,9 @@ public:
     StageAvailability availability(const std::string& stage) const;
     void checkStage(const std::string& stage);
     bool checkRunning() const { return checkProcess_ != nullptr; }
+    // A running check is stopped (nothing stored) when a task or a preview starts on the GPU (ProjectTasks), and with the project.
+    void cancelCheck();
+    void setCheckProgramForTests(const QString& program) { checkProgram_ = program; }  // empty: cliPath()
     // what checkStage runs (tests): `nr --check --params-file <paramsFile> --json <jsonFile> [--check-size WxH]` or `fg --check ...`;
     // checkParams - what goes into the settings file: the stage's effective settings without the keys the schema lacks
     QStringList checkArgs(const std::string& stage, const QString& paramsFile, const QString& jsonFile) const;
@@ -399,7 +402,7 @@ private:
     QString nrCheckSize() const;                           // "WxH" of NR's model frame in the run, empty before the plan
     int checkSerial_ = 0;
     AvailabilityFacts availabilityFacts() const;
-    void cancelCheck();
+    QString checkProgram_;
     std::filesystem::path releasedFile_;  // releaseResult: its videos are no sources until restoreResult
     bool isReleased(const std::filesystem::path& video) const;
     QThreadPool maskPool_;  // one thread: the control mask's import (decoding and a PNG16 write take seconds on 4K)

@@ -8,6 +8,7 @@
 #include "stages/ParamSchema.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "stages/nr/NrStage.h"
+#include "stages/upscale/IUpscaler.h"
 
 namespace dlssvid {
 
@@ -149,6 +150,11 @@ uint64_t BytesPerFrame(const std::string& stage, uint32_t sourceW, uint32_t sour
     return 0;
 }
 
+UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& p) {
+    if (p.value("artifact_reduction_only", false)) return UpscaleTarget{sourceW, sourceH, 1.0, false};
+    return ResolveUpscaleTarget(sourceW, sourceH, Scale(p), p.value("target_width", 0u), p.value("target_height", 0u));
+}
+
 RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>& stages, const SourceInfo& source) {
     RunOutcome o;
     o.width = source.width;
@@ -169,8 +175,12 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
         if (s.name == "fg") multiplier = std::clamp(p.value("multiplier", 2), 1, 4);
     }
     if (!params[2].is_null()) {
-        o.width = static_cast<uint32_t>(std::llround(source.width * scale));
-        o.height = static_cast<uint32_t>(std::llround(source.height * scale));
+        // the frame UpscaleStage::Setup makes: «только подавление артефактов» keeps the source's, else the scale or the target, even, capped
+        // at 3840x2160 (TASK-0071: 1080p x3 was shown 5760x3240 and NR's check ran at a frame the run never makes)
+        const UpscaleTarget t = UpscaleOutputFor(source.width, source.height, params[2]);
+        o.width = t.width;
+        o.height = t.height;
+        scale = t.scale;
     }
     if (!params[4].is_null()) o.fps = source.fps * multiplier;
     const int64_t frames = std::max<int64_t>(0, source.frames);

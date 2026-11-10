@@ -18,9 +18,11 @@ bool SamePath(const std::filesystem::path& a, const std::filesystem::path& b) {
 ProjectTasks::ProjectTasks(AppModel& model, TaskQueue& tasks, QObject* parent) : QObject(parent), model_(model), tasks_(tasks) {
     // at the queueing, not at the start: a task waits in the queue while another project is opened
     connect(&tasks_, &TaskQueue::taskQueued, this, [this](int id) {
+        model_.cancelCheck();  // TASK-0071: a check's NGX feature does not share the GPU with a run (nothing is stored of it)
         const Project& p = model_.project();
         origins_[id] = {model_.generation(), p.passesRoot, QString::fromStdWString(p.sourceVideo.filename().wstring()), p.resultVideo};
     });
+    connect(&tasks_, &TaskQueue::previewStarted, this, [this](int) { model_.cancelCheck(); });  // the NR preview, as a task
     // TASK-0070: the run encodes the new result next to the old one, to be renamed over it: the viewer lets the old file go. By the file,
     // not the project: a project opened again since, or another one with the same result file, shows that file too.
     connect(&tasks_, &TaskQueue::taskProgress, this, [this](int id, const TaskQueue::Progress& progress) {
