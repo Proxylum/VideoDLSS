@@ -1123,6 +1123,18 @@ TEST_CASE("RunProcess: --frames, passthrough, an unavailable nr stage and a run 
                                [&](const std::string& w) { return w.rfind("upscale: dlss ", 0) == 0 && w.find(also) != std::string::npos; });
         };
         CHECK(hasAgain("the color_sr reused was made so"));
+        // the same pass adopted without a fingerprint (as a standalone `dlssvid upscale` leaves it) while nis is asked now: what was asked,
+        // no fallback to say (review of TASK-0071: every run said «запасным способом»)
+        Manifest sr = Manifest::Load(o.passesRoot / "color_sr");
+        sr.fingerprint.clear();
+        sr.tool = nlohmann::json::object();
+        sr.Save(o.passesRoot / "color_sr");
+        ApplyParamSpec(o.stages, "upscale.backend=nis");
+        o.output = dir / "nodlssg_nis.mkv";
+        const ProcessResult nis = RunProcess(o);
+        REQUIRE(Report(nis, "upscale").status == "reused");  // adopted
+        CHECK_FALSE(Report(nis, "upscale").details.value("fallback", false));
+        CHECK_FALSE(std::any_of(nis.warnings.begin(), nis.warnings.end(), [](const std::string& w) { return w.find("nis used instead") != std::string::npos; }));
     }
     SECTION("no colour stage: the source is encoded unchanged") {
         o.output = dir / "guides_only.mkv";

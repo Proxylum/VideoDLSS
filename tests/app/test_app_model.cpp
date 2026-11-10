@@ -2393,6 +2393,29 @@ TEST_CASE("AppModel::checkStage runs nr --check with the project's settings and 
     CHECK(endedAs == QProcess::CrashExit);  // killed: the feature is off the GPU before the task (review of TASK-0071)
     QCoreApplication::processEvents();
     CHECK(model.availability("nr").text == before.text);  // its end came and stored nothing
+    // a preview started on the GPU stops it too (ProjectTasks: previewStarted; review of TASK-0071 - only the task's half was tested)
+    model.setStageParam("nr", "passes", 4);  // other settings: nothing stored for them
+    model.checkStage("nr");
+    REQUIRE(model.checkRunning());
+    QPointer<QProcess> killedByPreview;
+    for (QProcess* p : model.findChildren<QProcess*>())
+        if (p->state() != QProcess::NotRunning && p->arguments().contains("--check")) killedByPreview = p;
+    REQUIRE(killedByPreview);
+    bool previewEnded = false;
+    QProcess::ExitStatus previewEndedAs = QProcess::NormalExit;
+    QObject::connect(killedByPreview, &QProcess::finished, [&](int, QProcess::ExitStatus s) {
+        previewEnded = true;
+        previewEndedAs = s;
+    });
+    QSignalSpy previews(&queue, &TaskQueue::previewStarted);
+    const int preview = queue.enqueue("p", "cmd", {"/c", "exit", "0"}, {}, TaskQueue::Lane::Preview);
+    Pump([&] { return previews.count() > 0; }, 30000);
+    REQUIRE(previews.count() > 0);
+    CHECK_FALSE(model.checkRunning());
+    Pump([&] { return queue.finished(preview) && previewEnded; }, 30000);
+    CHECK(previewEndedAs == QProcess::CrashExit);
+    QCoreApplication::processEvents();
+    CHECK(model.availability("nr").text == QString::fromUtf8("Работа на этой видеокарте не проверена"));
 }
 
 // Audit play-fg-rate (TASK-0038): playback is paced by a clock at the exact rational rate. Before, a QTimer of

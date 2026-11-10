@@ -1290,8 +1290,11 @@ ProcessResult RunProcess(const ProcessOptions& options) {
     bool retiredAny = false;
     // TASK-0071: a color_sr made by NIS because DLSS could not run is stamped with the fingerprint of the settings asked for - a later
     // run that reuses it says so too, not only the run that fell back
-    auto sayReusedFallback = [&](const std::string& name, ProcessStageReport& rep) {
+    auto sayReusedFallback = [&](const std::string& name, const nlohmann::json& p, ProcessStageReport& rep) {
         if (name != "upscale" || rep.outDir.empty()) return;
+        // nis asked now: the pass is what was asked (a pass without a fingerprint is adopted whatever it was made for - a standalone
+        // `dlssvid upscale` that fell back; review of TASK-0071)
+        if (Get<std::string>(p, "backend", "dlss") == "nis") return;
         try {
             const Manifest m = Manifest::Load(rep.outDir);
             if (!m.stageParams.is_object() || !m.stageParams.value("fallback", false)) return;
@@ -1335,7 +1338,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                     if (Manifest::Exists(root / pass)) StampPass(root / pass, d, FileTimeIso8601(root / pass / Manifest::kFileName), 0.0, true);
             }
             Log()->info("process: {} — {} is complete, reused{}", name, d.outDir.string(), d.kind == "legacy" ? " (adopted)" : "");
-            sayReusedFallback(name, rep);
+            sayReusedFallback(name, p, rep);
             result.stages.push_back(rep);
             continue;
         }
@@ -1352,7 +1355,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             rep.frames = framesOf();
             state.ran.insert(d.outputs.begin(), d.outputs.end());
             Log()->info("process: {} — version {} restored from the history", name, d.version);
-            sayReusedFallback(name, rep);
+            sayReusedFallback(name, p, rep);
             result.stages.push_back(rep);
             continue;
         }
