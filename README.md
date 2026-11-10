@@ -342,7 +342,7 @@ dlssvid process -i input.mp4 -o out.mp4 --param scenes.threshold=0.3 --plan   ::
 dlssvid flow    -i input.mp4 -o passes --no-scenes               :: without the list (default: <-o>\scenes when present; --scenes-dir <folder>)
 ```
 
-Upscale (stage 5): `color_sr` at x1.5 / x2 / x3 (output capped at 3840x2160), depth/MV guides from pass folders or
+Upscale (stage 5): `color_sr` at x1.5 / x2 / x3 (output capped at 3840x2160 by the long side: 2160x3840 for a portrait frame), depth/MV guides from pass folders or
 from the same pipeline, jitter emulation for DLSS.
 
 ```bat

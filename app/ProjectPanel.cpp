@@ -373,10 +373,14 @@ void ProjectPanel::refresh() {
                                             : tr(" · отражён");
         sourceFrame_->setText(frame);
         QString tip = src.codec.empty() ? QString() : tr("Поток: %1 бит %2; декодируется как %3").arg(src.bitDepth).arg(QString::fromStdString(src.chroma)).arg(QString::fromStdString(src.decoded.Name()));
-        if (!src.orientation.Identity())
-            tip += tr("\nХранится %1×%2, показывается повёрнутым по матрице дисплея, как в плеере; обработка и результат — в этом виде")
+        if (!src.orientation.Identity()) {
+            const QString how = src.orientation.rotate ? (src.orientation.hflip ? tr("повёрнутым и отражённым") : tr("повёрнутым")) : tr("отражённым");
+            const QString by = src.orientationFrom == "rotate tag" ? tr("по тегу rotate") : tr("по матрице дисплея");
+            tip += tr("\nХранится %1×%2, показывается %3 %4, как в плеере; обработка и результат — в этом виде")
                        .arg(src.codedWidth)
-                       .arg(src.codedHeight);
+                       .arg(src.codedHeight)
+                       .arg(how, by);
+        }
         sourceFrame_->setToolTip(tip);
     } else {
         sourceFrame_->setText("—");

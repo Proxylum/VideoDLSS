@@ -1405,7 +1405,27 @@ TEST_CASE("AppModel opens a turned clip as shown: the viewport, the source info,
     REQUIRE(label);
     CHECK(label->text().startsWith(QString::fromUtf8("32×48")));
     CHECK(label->text().contains(QString::fromUtf8(" · повёрнут на 90°")));
-    CHECK(label->toolTip().contains(QString::fromUtf8("Хранится 48×32")));
+    CHECK(label->toolTip().contains(QString::fromUtf8("Хранится 48×32, показывается повёрнутым по матрице дисплея")));
+    // a zoomed view saved over the stored frame: its centre back on the shown one (review of TASK-0072)
+    model.state().view = ViewTransform{2.f, 46.f, 30.f};
+    model.reloadSources();
+    CHECK(model.state().view.centerX == 32.f);
+    CHECK(model.state().view.centerY == 30.f);
+    // the old rotate tag, a mirror: the tooltip says where the turn comes from and what it is (review of TASK-0072)
+    spec.orientation = {};
+    spec.rotateTag = "90";
+    model.openVideo(Q(WriteClip(d / "tagged.mkv", spec)));
+    model.refreshPlan();
+    panel.refresh();
+    CHECK(label->toolTip().contains(QString::fromUtf8("показывается повёрнутым по тегу rotate")));
+    spec.rotateTag.clear();
+    spec.orientation = {0, true};
+    model.openVideo(Q(WriteClip(d / "mirrored.mkv", spec)));
+    model.refreshPlan();
+    panel.refresh();
+    CHECK(label->text().contains(QString::fromUtf8(" · отражён")));
+    CHECK(label->toolTip().contains(QString::fromUtf8("показывается отражённым по матрице дисплея")));
+    spec.orientation = {};
     // an unturned clip: no word of a turn
     spec.orientation = {};
     model.openVideo(Q(WriteClip(d / "plain.mkv", spec)));

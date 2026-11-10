@@ -414,6 +414,11 @@ void AppModel::reloadSources() {
     timelineFps_ = Rational{0, 1};
     state().ResolveLegacyFrame(store_->FpsOf(baseSource()));  // projects before stage 9: frame -> time at the base rate
     state().time = std::clamp(state().time, 0.0, lastTime());
+    // a zoomed view saved over another frame (TASK-0072: the stored frame of a source shown turned now): its centre back on the image
+    if (ViewTransform& v = state().view; !v.IsFit() && store_->ImageWidth() && store_->ImageHeight()) {
+        v.centerX = std::clamp(v.centerX, 0.f, static_cast<float>(store_->ImageWidth()));
+        v.centerY = std::clamp(v.centerY, 0.f, static_cast<float>(store_->ImageHeight()));
+    }
     emit sourcesChanged();
     requestFrames();
     emit stateChanged();
@@ -926,6 +931,7 @@ void AppModel::refreshPlan() {
         sourceInfo_.decoded = probe.Info().decoded;
         sourceInfo_.layout = SourceLayout(probe.Info());
         sourceInfo_.orientation = probe.Info().orientation;
+        sourceInfo_.orientationFrom = probe.Info().orientationFrom;
         sourceInfo_.codedWidth = probe.Info().codedWidth;
         sourceInfo_.codedHeight = probe.Info().codedHeight;
         sourceInfo_.bitDepth = probe.Info().bitDepth;

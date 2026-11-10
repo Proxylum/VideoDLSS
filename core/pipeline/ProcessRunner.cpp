@@ -141,6 +141,22 @@ std::filesystem::path ExistingPass(const std::filesystem::path& root, std::initi
 
 // ---- planning (stage 9, MR A) ----------------------------------------------------------------------------------
 
+// TASK-0072: whether a pass on disk was made from the stored frame of a source shown turned `o` - its label names another
+// orientation; one without a label (a standalone command) by its proportions: those of the stored frame, not the shown one (90 / 270)
+bool MadeFromStoredFrame(const Manifest& m, DisplayOrientation o, uint32_t shownW, uint32_t shownH, uint32_t codedW, uint32_t codedH) {
+    if (o.Identity()) return false;
+    if (!m.sourceFormat.empty()) return OrientationOfSourceFormat(m.sourceFormat) != o;
+    if (!o.SwapsAxes() || !m.width || !m.height || !shownW || !shownH || !codedW || !codedH) return false;
+    const double aspect = static_cast<double>(m.width) / m.height;
+    return std::fabs(aspect / (static_cast<double>(codedW) / codedH) - 1.0) <= 0.01 && std::fabs(aspect / (static_cast<double>(shownW) / shownH) - 1.0) > 0.01;
+}
+
+// "повёрнут на 90°", "отражён", "повёрнут на 180° и отражён": a turn in the Russian texts of the cards
+std::string TurnRu(DisplayOrientation o) {
+    if (!o.rotate) return o.hflip ? "отражён" : "";
+    return "повёрнут на " + std::to_string(o.rotate) + "°" + (o.hflip ? " и отражён" : "");
+}
+
 struct RunContext {
     std::filesystem::path root;
     std::string sourceHash;
@@ -458,6 +474,20 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             break;
         }
     if (!state.scenesNote.empty() && StageReadsSceneCuts(name, p)) d.warnings.push_back(name + ": " + state.scenesNote);
+    // TASK-0072: an input this plan does not remake (its stage off; a pass of the build before or of a standalone command) made from the
+    // stored frame of a source shown turned: the stage would read the sideways picture and its own pass carry the turn's label - refused
+    if (!ctx.orientation.Identity())
+        for (const auto& [input, id] : d.inputs) {
+            if (state.ran.count(input) || input == kScenesPass || input.rfind("mask_", 0) == 0) continue;  // the masks: the user's (advised)
+            try {
+                if (MadeFromStoredFrame(Manifest::Load(ctx.root / input), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
+                    d.error = input + " сделан по боковому кадру, а источник показывается " + TurnRu(ctx.orientation) +
+                              ": включите стадию, которая его делает, или пересчитайте её";
+                    break;
+                }
+            } catch (const std::exception&) {
+            }
+        }
     std::vector<std::string> inputsStale;  // inputs rerun in this plan because they were stale (PlanState::staleRan)
     for (const auto& [input, inputFp] : d.inputs)
         if (state.staleRan.count(input)) inputsStale.push_back(input);
@@ -470,9 +500,13 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     if (name == "nr" && NrMaskSizesDiffer(ctx.root, d.inputs)) stageTool.app += "+nr.msize";
     // TASK-0072: the 4K cap of a portrait output is by its long side now - an upscale pass whose size that changes is another pass
     // (1080x1920 x2: 2160x3840, was 1216x2160); every other one keeps its fingerprint
+    bool srCap = false;
+    UpscaleTarget capBefore;
     if (name == "upscale" && ctx.sourceWidth && ctx.sourceHeight) {
-        const UpscaleTarget now = UpscaleOutputFor(ctx.sourceWidth, ctx.sourceHeight, p), before = UpscaleOutputFor(ctx.sourceWidth, ctx.sourceHeight, p, false);
-        if (now.width != before.width || now.height != before.height) stageTool.app += "+sr.cap";
+        const UpscaleTarget now = UpscaleOutputFor(ctx.sourceWidth, ctx.sourceHeight, p);
+        capBefore = UpscaleOutputFor(ctx.sourceWidth, ctx.sourceHeight, p, false);
+        srCap = now.width != capBefore.width || now.height != capBefore.height;
+        if (srCap) stageTool.app += "+sr.cap";
     }
     const PassFingerprint fp = ComputeFingerprint(name, ctx.sourceHash, p, d.inputs, stageTool, ctx.sourceFormat);
     d.fingerprint = fp.value;
@@ -636,6 +670,11 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             // under the masks' fingerprint. Masks of different sizes are judged above
             d.diff["inputs"] = masks;
             run("input_changed", NrMasksRead(m).empty() ? "made without the masks NR reads now" : "made with other masks", true);
+        } else if (srCap && m.width == capBefore.width && m.height == capBefore.height) {
+            // TASK-0072: a standalone upscale pass made under the 4K cap by the axes (a portrait frame 2160 high) - adopted it would carry
+            // the +sr.cap fingerprint of the long-side size
+            d.diff["tool"]["app"] = nlohmann::json::array({kPassToolVersion, fp.tool.app});
+            run("tool_changed", "upscale made under the 4K cap by the axes, before TASK-0072", true);
         } else if (!complete) {
             run("incomplete", incomplete, false);
         } else {
@@ -897,12 +936,13 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
             d.warnings.push_back("маска управления не читается (" + why + ") и не применяется");
         return;
     }
-    // the frame NR runs at: color_sr of the clip (the upscale's --target included), else the source
+    // the frame NR runs at: color_sr of the clip (the upscale's --target included), else the source; a color_sr of the stored frame of a
+    // turned source is no input of NR (DecideStage refuses it)
     uint32_t fw = ctx.sourceWidth, fh = ctx.sourceHeight;
     try {
         if (Manifest::Exists(ctx.root / "color_sr"))
             if (const Manifest sr = Manifest::Load(ctx.root / "color_sr");
-                PassOfClip(sr) && OrientationOfSourceFormat(sr.sourceFormat) == ctx.orientation) {  // made from the stored frame: recomputed
+                PassOfClip(sr) && OrientationOfSourceFormat(sr.sourceFormat) == ctx.orientation) {
                 fw = sr.width;
                 fh = sr.height;
             }
@@ -949,8 +989,10 @@ void AdviseTurnedMasks(const RunContext& ctx, StageDecision& d) {
         if (std::fabs(aspect / stored - 1.0) <= 0.01 && std::fabs(aspect / shown - 1.0) > 0.01) sideways.push_back(pass);
     }
     if (!sideways.empty()) {
-        d.warnings.push_back("Маски " + Join(sideways) + " сделаны по боковому кадру: источник показывается повёрнутым (" + ctx.orientation.Describe() +
-                             "), маска ляжет неправильно — сделайте её заново по повёрнутому кадру");
+        std::vector<std::string> names;  // as the GUI names them: «маска управления», «маска ui»
+        for (const std::string& pass : sideways) names.push_back(pass == kControlMaskPass ? "маска управления" : "маска " + pass.substr(5));
+        d.warnings.push_back("Сделаны по боковому кадру: " + Join(names) + ". Источник " + TurnRu(ctx.orientation) +
+                             " — маска ляжет неправильно, сделайте её заново по повёрнутому кадру");
         return;
     }
     if (!any) return;
@@ -958,7 +1000,7 @@ void AdviseTurnedMasks(const RunContext& ctx, StageDecision& d) {
     for (const char* pass : {"color_sr", "color_nr"})
         try {
             if (Manifest::Exists(ctx.root / pass) && OrientationOfSourceFormat(Manifest::Load(ctx.root / pass).sourceFormat) != ctx.orientation) {
-                d.warnings.push_back("Проект обработан до учёта поворота источника (" + ctx.orientation.Describe() +
+                d.warnings.push_back("Проект обработан до учёта поворота источника (источник " + TurnRu(ctx.orientation) +
                                      "): маски, сделанные по прежнему кадру, лягут неправильно — проверьте их по повёрнутому кадру");
                 return;
             }
@@ -1170,17 +1212,9 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     if (sourceFps.num > 0 && fps.num > 0) mult = std::max(1, static_cast<int>(std::lround(fps.ToDouble() / sourceFps.ToDouble())));
     // TASK-0072: a source shown turned - a colour pass made from its stored (sideways) frame would give a sideways result: refused (the
     // stages that would remake it are off, or a standalone command made it)
-    if (!info.orientation.Identity()) {
-        bool sideways = !m.sourceFormat.empty() && OrientationOfSourceFormat(m.sourceFormat) != info.orientation;
-        if (m.sourceFormat.empty() && info.orientation.SwapsAxes() && m.width && m.height && info.codedWidth && info.codedHeight) {
-            const double aspect = static_cast<double>(m.width) / m.height;
-            sideways = std::fabs(aspect / (static_cast<double>(info.codedWidth) / info.codedHeight) - 1.0) <= 0.01 &&
-                       std::fabs(aspect / (static_cast<double>(info.width) / info.height) - 1.0) > 0.01;
-        }
-        if (sideways)
-            Throw("process: " + passDir.string() + " was made from the stored frame of a source shown " + info.orientation.Describe() +
-                  ": the result would be sideways - recompute the stages (--force)");
-    }
+    if (MadeFromStoredFrame(m, info.orientation, info.width, info.height, info.codedWidth, info.codedHeight))
+        Throw("process: " + passDir.string() + " was made from the stored frame of a source shown " + info.orientation.Describe() +
+              ": the result would be sideways - recompute the stages (--force)");
     const OutputFormat of = ResolveOutputFormat(encode.codec, encode.format, SourceLayout(info));  // the stream's chroma, not a turn's 4:4:4
     FrameDesc target = of.desc;
     target.width = m.width;

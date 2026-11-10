@@ -51,6 +51,7 @@ struct SourceInfo {
     FrameDesc decoded;        // the layout the source decodes into (TASK-0034)
     FrameDesc layout;         // the stream's own layout as shown (SourceLayout): what the encoder's «auto» follows
     DisplayOrientation orientation;  // TASK-0072: how the source is shown (a phone video turned); width / height are as shown
+    std::string orientationFrom;     // "display matrix" | "rotate tag" | ""
     uint32_t codedWidth = 0, codedHeight = 0;  // as stored
     int bitDepth = 8;         // of the source's own pixel format
     std::string chroma = "420";

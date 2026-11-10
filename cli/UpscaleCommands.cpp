@@ -347,7 +347,7 @@ void UpscaleCommands::Register(CLI::App& app) {
     upscale_->add_option("--models-dir,--models_dir", ua_.modelsDir, "folder with registry.json (default: auto)");
     upscale_->add_option("--window", ua_.window, "worker: frames per pass of the video model (0 = registry default)")->default_val(0);
     upscale_->add_option("--overlap", ua_.overlap, "worker: frames the next window re-estimates and blends (0 = registry default)")->default_val(0);
-    upscale_->add_option("--scale", ua_.scale, "scale factor: 1.5 | 2 | 3 (output capped at 3840x2160)")->default_val(2.0);
+    upscale_->add_option("--scale", ua_.scale, "scale factor: 1.5 | 2 | 3 (output capped at 3840x2160 by the long side)")->default_val(2.0);
     upscale_->add_option("--target", ua_.target, "explicit output size WxH (instead of --scale)");
     upscale_->add_option("--depth-dir", ua_.depthDir, "depth_dlss pass folder (dlss)");
     upscale_->add_option("--mv-dir", ua_.mvDir, "mv_dlss pass folder (dlss)");

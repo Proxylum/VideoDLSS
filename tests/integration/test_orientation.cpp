@@ -23,6 +23,7 @@
 #include "pipeline/ControlMask.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/ProcessRunner.h"
+#include "util/Sha256.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "stages/nr/INrBackend.h"
 #include "stages/upscale/IUpscaler.h"
@@ -412,7 +413,7 @@ TEST_CASE("The plan warns of masks drawn over a turned source's stored frame and
         return all;
     };
     WritePass(d / "passes" / "mask_ui", PassKind::Mask, 64, 36, 3, FileFormat::Png);  // drawn over the stored frame
-    CHECK_THAT(nrWarnings(), ContainsSubstring("mask_ui сделаны по боковому кадру"));
+    CHECK_THAT(nrWarnings(), ContainsSubstring("Сделаны по боковому кадру: маска ui. Источник повёрнут на 90°"));
     std::filesystem::remove_all(d / "passes" / "mask_ui");
     WritePass(d / "passes" / "mask_ui", PassKind::Mask, 36, 64, 3, FileFormat::Png);  // over the shown one
     CHECK_THAT(nrWarnings(), !ContainsSubstring("по боковому кадру"));
@@ -436,7 +437,7 @@ TEST_CASE("The plan warns of masks drawn over a turned source's stored frame and
     Manifest nr = Manifest::Load(d180 / "passes" / "color_nr");
     nr.sourceFormat = "yuv420p";
     nr.Save(d180 / "passes" / "color_nr");
-    CHECK_THAT(warnings180(), ContainsSubstring("Проект обработан до учёта поворота"));
+    CHECK_THAT(warnings180(), ContainsSubstring("Проект обработан до учёта поворота источника (источник повёрнут на 180°)"));
     // an explicit target of the stored frame's proportions
     ApplyParamSpec(o.stages, "upscale.target_width=128");
     ApplyParamSpec(o.stages, "upscale.target_height=72");
@@ -494,7 +495,83 @@ TEST_CASE("The control mask advice measures a turned source's shown frame, not a
     std::string all;
     const StageDecision nr = Decision(PlanProcess(o), "nr");
     for (const auto& w : nr.warnings) all += w + "\n";
-    CHECK_THAT(all, ContainsSubstring("64×36 растянется на кадр 36×64"));  // the frame NR will get: the shown one
+    CHECK_THAT(all, ContainsSubstring("64×36 растянется на кадр 36×64"));  // the frame NR is to work at: the shown one
+    CHECK_THAT(nr.error, ContainsSubstring("color_sr сделан по боковому кадру"));  // and the sideways color_sr is no input of it (review of TASK-0072)
+}
+
+TEST_CASE("A stage refuses an input made from a turned source's stored frame that the run does not remake", "[integration][orientation][process][regression]") {
+    // review of TASK-0072: NR alone over the color_sr of the build before read the sideways picture, its color_nr got the turn's label and the
+    // encode took it - a sideways result
+    const auto d = Dir("stored_input");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 64;
+    spec.height = 36;
+    spec.orientation = {90, false};
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    ProcessOptions o = Options(clip, d);
+    auto pass = [&](const char* name, PassKind kind, uint32_t w, uint32_t h, const std::string& label) {
+        std::filesystem::remove_all(o.passesRoot / name);
+        Manifest m = Manifest::ForPass(kind, w, h, FileFormat::Exr);
+        m.sourceFormat = label;
+        PassWriter wr(o.passesRoot / name, m);
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(kind, w, h));
+        wr.Finish();
+    };
+    for (auto& s : o.stages) s.enabled = s.name == "nr";  // upscale off: color_sr is read from the disk
+    pass("color_sr", PassKind::ColorSr, 128, 72, "yuv420p");  // the build before: the stored frame x2
+    CHECK_THAT(Decision(PlanProcess(o), "nr").error, ContainsSubstring("color_sr сделан по боковому кадру, а источник показывается повёрнут на 90°"));
+    o.output = d / "r_labelled.mkv";
+    CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("color_sr сделан по боковому кадру"));
+    CHECK_FALSE(std::filesystem::exists(o.output));
+    CHECK_FALSE(std::filesystem::exists(o.passesRoot / "color_nr"));  // refused before anything ran
+    pass("color_sr", PassKind::ColorSr, 128, 72, "");  // a standalone command's: the stored frame's proportions
+    CHECK_FALSE(Decision(PlanProcess(o), "nr").error.empty());
+    pass("color_sr", PassKind::ColorSr, 72, 128, "");  // ... the shown frame's: taken
+    CHECK(Decision(PlanProcess(o), "nr").error.empty());
+    pass("color_sr", PassKind::ColorSr, 72, 128, "yuv420p+r90");
+    CHECK(Decision(PlanProcess(o), "nr").error.empty());
+    o.output = d / "r_upright.mkv";
+    CHECK_NOTHROW(RunProcess(o));
+    // the upscale on: it remakes color_sr in this run, the old one is no matter
+    pass("color_sr", PassKind::ColorSr, 128, 72, "yuv420p");
+    for (auto& s : o.stages) s.enabled = s.name == "nr" || s.name == "upscale";
+    CHECK(Decision(PlanProcess(o), "nr").error.empty());
+    // fg alone over the color_nr of the build before
+    for (auto& s : o.stages) s.enabled = s.name == "fg";
+    pass("color_nr", PassKind::ColorNr, 128, 72, "yuv420p");
+    CHECK_THAT(Decision(PlanProcess(o), "fg").error, ContainsSubstring("color_nr сделан по боковому кадру"));
+}
+
+TEST_CASE("A standalone upscale pass made under the 4K cap by the axes is not adopted under the long-side cap", "[integration][orientation][upscale][regression]") {
+    // review of TASK-0072: a portrait clip's pass of 2160 high (a standalone dlssvid upscale of the build before) was adopted and stamped
+    // with the +sr.cap fingerprint of the 2400-high frame: the plan said 1350x2400, the result was 1216x2160 for good
+    const auto d = Dir("legacy_cap");
+    ClipSpec spec;
+    spec.frames = 1;
+    spec.width = 720;
+    spec.height = 1280;
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    ProcessOptions o = Options(clip, d);
+    for (auto& s : o.stages) s.enabled = s.name == "upscale";
+    ApplyParamSpec(o.stages, "upscale.target_height=2400");
+    auto legacy = [&](uint32_t w, uint32_t h) {
+        std::filesystem::remove_all(o.passesRoot / "color_sr");
+        Manifest m = Manifest::ForPass(PassKind::ColorSr, w, h, FileFormat::Exr);
+        m.sourceHash = "sha256:" + Sha256FileCached(clip);  // made from this clip, without a fingerprint
+        PassWriter wr(o.passesRoot / "color_sr", m);
+        wr.WriteFrame(0, MakePassImage(PassKind::ColorSr, w, h));
+        wr.Finish();
+    };
+    legacy(1216, 2160);
+    const StageDecision old = Decision(PlanProcess(o), "upscale");
+    CHECK(old.action == "run");
+    CHECK(old.kind == "tool_changed");
+    CHECK_THAT(old.detail, ContainsSubstring("4K cap by the axes"));
+    legacy(1350, 2400);  // the size of the long-side cap: adopted
+    const StageDecision now = Decision(PlanProcess(o), "upscale");
+    CHECK(now.action == "reuse");
+    CHECK(now.kind == "legacy");
 }
 
 TEST_CASE("dlssvid scenes labels a turned clip's list as process does: the plan reuses it", "[integration][orientation][cli][scenes]") {
