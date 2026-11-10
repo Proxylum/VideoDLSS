@@ -5845,11 +5845,50 @@ TEST_CASE("AppModel::availability: FG planned on NR's pass, NR to be skipped - t
     const StageAvailability a = model.availability("fg");
     CHECK(a.text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — пересчитать здесь не получится"));
     CHECK(a.tone == "warn");
+    // the scene list analysed again: FG's pass waits for it in the run's plan - reused if the list comes out the same, not «пропущена»
+    model.setForce("scenes", true);
+    model.refreshPlan();
+    REQUIRE(decision("nr").action == "run");
+    REQUIRE_FALSE(decision("nr").pending);  // no pass to reuse: it runs - and is skipped
+    CHECK(model.availability("fg").tone == "warn");
+    model.setForce("scenes", false);
+    model.refreshPlan();
     // the run agrees: NR skipped, FG's pass reused
     const std::string out = run();
     INFO(out);
     CHECK(out.find("process: nr disabled") != std::string::npos);
     CHECK(QString::fromStdString(out).contains(QRegularExpression(R"(process: fg \S+ .*is complete, reused)")));
+}
+
+TEST_CASE("AppModel::availability: an NR pass pending on the scene list is not said skipped - the run may reuse it", "[app][availability][regression]") {
+    // review of TASK-0071: a pending decision (action "run", reused if the list comes out as its pass was made with) was taken for a
+    // recompute: the card said the stage would be skipped while the run reuses its color_nr when no cut is found
+    App();
+    PreviewProject m("availability_pending_nr");
+    AppModel& model = *m.model;
+    model.setStageParam("nr", "backend", "ngx");
+    model.refreshPlan();
+    auto decision = [&](const char* stage) {
+        for (const auto& d : model.plan().stages)
+            if (d.name == stage) return d;
+        return StageDecision{};
+    };
+    Manifest man = Manifest::Load(m.root() / "color_nr");  // stamped as the ngx run would (WARP: it cannot run here)
+    man.fingerprint = decision("nr").fingerprint;
+    man.Save(m.root() / "color_nr");
+    model.refreshPlan();
+    REQUIRE(decision("nr").action == "reuse");
+    model.setForce("scenes", true);  // analysed again: NR's pass is reused if the same list comes out
+    model.refreshPlan();
+    std::string plan;
+    for (const auto& d : model.plan().stages) plan += d.name + ":" + d.action + (d.pending ? "(pending " + d.pendingRule + ")" : "") + " " + d.kind + " " + d.detail + "; ";
+    INFO(plan + model.planError().toStdString());
+    REQUIRE(decision("scenes").action == "run");
+    REQUIRE(decision("nr").action == "run");
+    REQUIRE(decision("nr").pending);
+    const StageAvailability a = model.availability("nr");
+    CHECK(a.text == QString::fromUtf8("Нужна видеокарта NVIDIA RTX, сейчас программный адаптер — пересчитать здесь не получится"));
+    CHECK(a.tone == "warn");
 }
 
 TEST_CASE("NR preview: the stages before NR whose upscale fell back from DLSS to NIS say so", "[app][preview][gpu][regression]") {

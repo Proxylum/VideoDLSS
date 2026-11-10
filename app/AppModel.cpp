@@ -938,7 +938,7 @@ void AppModel::refreshPlan() {
         // left, either way: a planned run may become a reuse, a reuse a run. Planned whatever the card says now: a check may say it later
         bool nrRuns = false, fgOn = false;
         for (const auto& d : plan_.stages) {
-            if (d.name == "nr" && d.action == "run") nrRuns = true;
+            if (d.name == "nr" && d.action == "run" && !d.pending) nrRuns = true;  // a pending NR's card is not «будет пропущена»
             if (d.name == "fg") fgOn = true;
         }
         if (nrRuns && fgOn) {
@@ -1997,15 +1997,16 @@ StageAvailability AppModel::availability(const std::string& stage) const {
     if (!e->enabled || !StageNeedsNgx(stage, p)) return {};
     const auto it = checks_.find(stage);
     const StageCheck* check = it != checks_.end() && it->second.key == checkKey(stage) ? &it->second.check : nullptr;
-    // a pass the plan reuses or restores goes into the result whatever this computer can do: only a recompute would be skipped
+    // a pass the plan reuses or restores goes into the result whatever this computer can do: only a recompute would be skipped. A pending
+    // one (reused if the scene list comes out as its pass was made with) too: the run decides again after the analysis (review of TASK-0071)
     bool reused = false;
     for (const auto& d : plan_.stages)
-        if (d.name == stage) reused = d.action != "run";
+        if (d.name == stage) reused = d.action != "run" || d.pending;
     // fg's decision takes NR's planned color_nr: an NR planned to run that will be skipped has its color_nr moved aside, and the run decides
     // fg again on what is left - the plan with NR skipped says what it will do (review of TASK-0071: either way, a run or a reuse)
     if (stage == "fg" && planNrSkipped_ && availability("nr").tone == "danger")
         for (const auto& d : planNrSkipped_->stages)
-            if (d.name == "fg") reused = d.action != "run";
+            if (d.name == "fg") reused = d.action != "run" || d.pending;
     return StageAvailabilityFor(stage, e->enabled, p, availabilityFacts(), check, checkProcess_ && checkingStage_ == stage, reused);
 }
 
