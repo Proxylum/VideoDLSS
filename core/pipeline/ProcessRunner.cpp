@@ -496,6 +496,8 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
     if (!ctx.orientation.Identity())
         for (const auto& [input, id] : d.inputs) {
             if (state.ran.count(input) || input == kScenesPass || input.rfind("mask_", 0) == 0) continue;  // the masks: the user's (advised)
+            // fg lists the guides whatever its backend (its fingerprints keep them); only DLSS-G reads them (UsesGuides)
+            if (name == "fg" && Get<std::string>(p, "backend", "dlssg") != "dlssg" && (input == "depth_dlss" || input == "mv_dlss")) continue;
             try {
                 if (MadeFromStoredFrame(Manifest::Load(ctx.root / input), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
                     d.error = "Пасс " + input + StageRu(input) + " " + MadeFromStoredRu(ctx.orientation) + ": включите эту стадию или удалите пасс";

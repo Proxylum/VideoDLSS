@@ -349,6 +349,10 @@ TEST_CASE("A colour pass of a turned source's stored frame is not encoded: the r
     o.output = d / "r_shown.mkv";
     CHECK_NOTHROW(RunProcess(o));
     CHECK_NOTHROW(EncodePassToVideo(sr, clip, d / "direct_shown.mkv", es));
+    // the result's settings note says the source's turn although the unlabelled pass does not (review of TASK-0072)
+    const auto tags = ReadContainerTags(o.output);
+    REQUIRE(tags.count("comment"));
+    CHECK(tags.at("comment").find("| source: rotate=90 |") != std::string::npos);
 }
 
 TEST_CASE("A proxy of a turned clip holds its frames as shown; one made before the turn was applied is not used", "[integration][orientation][viewport][proxy]") {
@@ -644,6 +648,30 @@ TEST_CASE("The result is not taken from a pass of a stage that is off made from 
         wr.Finish();
     }
     CHECK(PlanProcess(o).error.empty());
+}
+
+TEST_CASE("Frame generation without DLSS-G is not refused over stored-frame guide passes it does not read", "[integration][orientation][process][regression]") {
+    // review of TASK-0072: fg lists depth_dlss / mv_dlss whatever its backend; blend and RIFE never read them
+    const auto d = Dir("fg_guides");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 64;
+    spec.height = 36;
+    spec.orientation = {90, false};
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    ProcessOptions o = Options(clip, d);
+    for (auto& s : o.stages) s.enabled = s.name == "fg";
+    for (const auto& [pass, kind] : {std::pair<const char*, PassKind>{"depth_dlss", PassKind::DepthDlss}, {"mv_dlss", PassKind::MvDlss}}) {
+        Manifest m = Manifest::ForPass(kind, 64, 36, FileFormat::Exr);  // the build before: the stored frame
+        m.sourceFormat = "yuv420p";
+        PassWriter wr(o.passesRoot / pass, m);
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(kind, 64, 36));
+        wr.Finish();
+    }
+    ApplyParamSpec(o.stages, "fg.backend=blend");
+    CHECK(Decision(PlanProcess(o), "fg").error.empty());
+    ApplyParamSpec(o.stages, "fg.backend=dlssg");  // DLSS-G reads the guides: refused
+    CHECK_THAT(Decision(PlanProcess(o), "fg").error, ContainsSubstring("сделан по боковому кадру"));
 }
 
 TEST_CASE("A standalone upscale pass made under the 4K cap by the axes is not adopted under the long-side cap", "[integration][orientation][upscale][regression]") {

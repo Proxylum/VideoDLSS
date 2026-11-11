@@ -124,7 +124,11 @@ DisplayOrientation OrientationFromDisplayMatrix(const int32_t m[9], std::string*
 DisplayOrientation OrientationFromRotateTag(std::string_view tag, std::string* why) {
     long long deg = 0;
     const auto [end, ec] = std::from_chars(tag.data(), tag.data() + tag.size(), deg);
-    if (ec != std::errc() || end != tag.data() + tag.size() || deg % 90 != 0) {
+    if (ec != std::errc() || end != tag.data() + tag.size()) {
+        if (why) *why = "the rotate tag '" + std::string(tag) + "' is not a whole number of degrees: not applied";
+        return {};
+    }
+    if (deg % 90 != 0) {
         if (why) *why = "the rotate tag '" + std::string(tag) + "' is not a multiple of 90 deg: not applied";
         return {};
     }
@@ -323,7 +327,8 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
         info_.orientation = OrientationFromRotateTag(tag->value, &orientationWhy);
         if (!info_.orientation.Identity()) info_.orientationFrom = "rotate tag";
     }
-    if (!orientationWhy.empty()) Log()->warn("{}: {}", url, orientationWhy);
+    if (!orientationWhy.empty())  // once per real open: a probe (the plan, the viewport, the result check) says it at debug level
+        Log()->log(options.probe ? spdlog::level::debug : spdlog::level::warn, "{}: {}", url, orientationWhy);
     info_.width = info_.orientation.SwapsAxes() ? info_.codedHeight : info_.codedWidth;
     info_.height = info_.orientation.SwapsAxes() ? info_.codedWidth : info_.codedHeight;
     const AVRational fr = av_guess_frame_rate(fmt_, vs, nullptr);

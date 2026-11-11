@@ -158,12 +158,15 @@ TEST_CASE("OrientationFromRotateTag reads the old rotate tag: degrees clockwise"
     std::string why;
     CHECK(OrientationFromRotateTag("0", &why).Identity());
     CHECK(why.empty());
-    for (const char* bad : {"45", "x", "", "90deg"}) {
+    for (const char* bad : {"x", "", "90deg", "+90"}) {  // not a number: said so (review of TASK-0072)
         INFO(bad);
         why.clear();
         CHECK(OrientationFromRotateTag(bad, &why).Identity());
-        CHECK_FALSE(why.empty());
+        CHECK(why.find("not a whole number of degrees") != std::string::npos);
     }
+    why.clear();
+    CHECK(OrientationFromRotateTag("45", &why).Identity());
+    CHECK(why.find("not a multiple of 90") != std::string::npos);
 }
 
 TEST_CASE("OrientFrame turns a 4x2 frame as players show it, by hand", "[orientation][frame]") {
