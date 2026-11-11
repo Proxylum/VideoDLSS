@@ -713,6 +713,15 @@ TEST_CASE("The plan's advice on an anamorphic source: masks of the shown frame f
         wr.Finish();
     }
     CHECK_THAT(Warnings(Decision(PlanProcess(tm), "nr")), ContainsSubstring("Сделана по боковому кадру: маска ui"));
+    // ... and a colour pass of it with no label (a standalone command before TASK-0072, target 128x72): refused, not written sideways
+    {
+        Manifest sideways = Manifest::ForPass(PassKind::ColorSr, 128, 72, FileFormat::Exr);
+        sideways.sourceHash = "sha256:" + Sha256FileCached(turned);
+        PassWriter wr(tm.passesRoot / "color_sr", sideways);
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 128, 72));
+        wr.Finish();
+    }
+    CHECK_THAT(Decision(PlanProcess(tm), "nr").error, ContainsSubstring("сделан по боковому кадру"));
 }
 
 TEST_CASE("The viewport shows an anamorphic clip stretched: the reference image is the frame as shown", "[integration][aspect][viewport]") {

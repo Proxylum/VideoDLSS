@@ -307,6 +307,19 @@ TEST_CASE("ResolveUpscaleTarget of an anamorphic input: the scale, the target an
     CHECK(ch.width == 3240);
     CHECK(ch.height == 2160);
     CHECK(ch.displayWidth == 3840);
+    // a source already past the cap as shown: the grid stays the input's (no upscaler goes down), shown fit into the cap (review)
+    const UpscaleTarget past = ResolveUpscaleTarget(3840, 2160, 2.0, 0, 0, 3840, 2160, true, PixelAspect{4, 3});
+    CHECK(past.capped);
+    CHECK(past.width == 3840);
+    CHECK(past.height == 2160);
+    CHECK(past.displayWidth == 3840);
+    CHECK(past.displayHeight == 1620);
+    CHECK(ResolveUpscaleTarget(3840, 2160, 2.0).width == 3840);  // the square rule: the same grid - no +sr.sar
+    const UpscaleTarget past2 = ResolveUpscaleTarget(2880, 2160, 2.0, 0, 0, 3840, 2160, true, PixelAspect{2, 1});
+    CHECK(past2.width == 2880);
+    CHECK(past2.height == 2160);
+    CHECK(past2.displayWidth == 3840);
+    CHECK(past2.displayHeight == 1440);
     const UpscaleTarget cw = ResolveUpscaleTarget(720, 480, 0.0, 4000, 0, 3840, 2160, true, PixelAspect{8, 9});
     CHECK(cw.capped);
     CHECK(cw.width == 2880);
@@ -408,6 +421,35 @@ TEST_CASE("EstimateRun of an anamorphic source: the stages make the grid, the re
     CHECK(kept.gridWidth == 108);
     left.finalPass.clear();
     CHECK(EstimateRun(left, stages, src).width == 54);  // passed through
+    // an upscale pass reused (of the build before: no shown_size record) - the result is its grid stretched, as the encode writes it,
+    // not the target as shown (review of TASK-0073: 702x480 at 32:27 x1.5 - 1250 written, 1248 said)
+    const auto reusedRoot = std::filesystem::path(DLSSVID_TEST_TMP) / "aspect_reused_pass";
+    std::filesystem::remove_all(reusedRoot);
+    std::filesystem::create_directories(reusedRoot / "color_sr");
+    Manifest old = Manifest::ForPass(PassKind::ColorSr, 1054, 720, FileFormat::Exr);
+    old.Save(reusedRoot / "color_sr");
+    SourceInfo dvd = src;
+    dvd.width = 702;
+    dvd.height = 480;
+    dvd.sar = PixelAspect{32, 27};
+    ProcessPlan reused;
+    reused.passesRoot = reusedRoot;
+    StageDecision up;
+    up.name = "upscale";
+    up.action = "reuse";
+    up.params = EffectiveStageParams("upscale", {{"scale", 1.5}});
+    reused.stages.push_back(up);
+    for (auto& s : stages) {
+        s.enabled = s.name == "upscale";
+        if (s.name == "upscale") s.params["scale"] = 1.5;
+    }
+    CHECK(EstimateRun(reused, stages, dvd).width == 1250);
+    reused.stages[0].action = "run";  // made now: it records the target as shown
+    CHECK(EstimateRun(reused, stages, dvd).width == 1248);
+    reused.stages[0].action = "reuse";
+    old.stageParams = {{"pixel_aspect", "32:27"}, {"shown_size", {1248, 720}}};  // a pass of this build
+    old.Save(reusedRoot / "color_sr");
+    CHECK(EstimateRun(reused, stages, dvd).width == 1248);
 }
 
 TEST_CASE("DLSS-G's camera takes the frame as shown: the grid of 32:27 pixels is 16:9", "[unit][aspect][fg]") {

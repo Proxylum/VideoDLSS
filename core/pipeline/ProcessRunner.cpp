@@ -144,12 +144,17 @@ std::filesystem::path ExistingPass(const std::filesystem::path& root, std::initi
 
 // TASK-0072: whether a pass on disk was made from the stored frame of a source shown turned `o` - its label names another
 // orientation; one without a label (a standalone command) by its proportions: those of the stored frame, not the shown one (90 / 270)
-bool MadeFromStoredFrame(const Manifest& m, DisplayOrientation o, uint32_t shownW, uint32_t shownH, uint32_t codedW, uint32_t codedH) {
+bool MadeFromStoredFrame(const Manifest& m, DisplayOrientation o, uint32_t shownW, uint32_t shownH, uint32_t codedW, uint32_t codedH,
+                         PixelAspect codedSar = {}) {
     if (o.Identity()) return false;
     if (!m.sourceFormat.empty()) return OrientationOfSourceFormat(m.sourceFormat) != o;
     if (!o.SwapsAxes() || !m.width || !m.height || !shownW || !shownH || !codedW || !codedH) return false;
     const double aspect = static_cast<double>(m.width) / m.height;
-    return std::fabs(aspect / (static_cast<double>(codedW) / codedH) - 1.0) <= 0.01 && std::fabs(aspect / (static_cast<double>(shownW) / shownH) - 1.0) > 0.01;
+    // the stored frame: its grid, or as players show it unturned - an anamorphic one stretched (720x480 at 32:27 - 854x480, review of
+    // TASK-0073)
+    const auto [cw, ch] = codedSar.DisplaySize(codedW, codedH);
+    const bool stored = std::fabs(aspect / (static_cast<double>(codedW) / codedH) - 1.0) <= 0.01 || std::fabs(aspect / (static_cast<double>(cw) / ch) - 1.0) <= 0.01;
+    return stored && std::fabs(aspect / (static_cast<double>(shownW) / shownH) - 1.0) > 0.01;
 }
 
 // "повёрнут на 90°", "отражён", "повёрнут на 180° и отражён": a turn in the Russian texts of the cards
@@ -502,7 +507,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             // fg lists the guides whatever its backend (its fingerprints keep them); only DLSS-G reads them (UsesGuides)
             if (name == "fg" && Get<std::string>(p, "backend", "dlssg") != "dlssg" && (input == "depth_dlss" || input == "mv_dlss")) continue;
             try {
-                if (MadeFromStoredFrame(Manifest::Load(ctx.root / input), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
+                if (MadeFromStoredFrame(Manifest::Load(ctx.root / input), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight, ctx.codedSar)) {
                     d.error = "Пасс " + input + StageRu(input) + " " + MadeFromStoredRu(ctx.orientation) + ": включите эту стадию или удалите пасс";
                     break;
                 }
@@ -988,7 +993,7 @@ std::string StoredFrameResult(const RunContext& ctx, const std::function<bool(co
         if (runs(stage)) return {};  // its pass, or a later one, is the result
         if (!Manifest::Exists(ctx.root / pass) || !PassOfClip(ctx.root / pass)) continue;
         try {
-            if (MadeFromStoredFrame(Manifest::Load(ctx.root / pass), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight))
+            if (MadeFromStoredFrame(Manifest::Load(ctx.root / pass), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight, ctx.codedSar))
                 return "Результат взялся бы из пасса " + std::string(pass) + StageRu(pass) + ": он " + MadeFromStoredRu(ctx.orientation) +
                        ". Включите эту стадию или удалите пасс";
         } catch (const std::exception&) {
@@ -1018,7 +1023,7 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
     try {
         if (Manifest::Exists(ctx.root / "color_sr"))
             if (const Manifest sr = Manifest::Load(ctx.root / "color_sr");
-                PassOfClip(sr) && !MadeFromStoredFrame(sr, ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
+                PassOfClip(sr) && !MadeFromStoredFrame(sr, ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight, ctx.codedSar)) {
                 fw = sr.width;
                 fh = sr.height;
                 colourSar = PassPixelAspect(sr, ctx.sar, ctx.sourceWidth, ctx.sourceHeight);
@@ -1098,7 +1103,7 @@ void AdviseTurnedMasks(const RunContext& ctx, StageDecision& d) {
         try {
             // judged as the plan judges an input: the label, or (no label) the stored frame's proportions (review of TASK-0072)
             if (Manifest::Exists(ctx.root / pass) &&
-                MadeFromStoredFrame(Manifest::Load(ctx.root / pass), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
+                MadeFromStoredFrame(Manifest::Load(ctx.root / pass), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight, ctx.codedSar)) {
                 const char* shown = ctx.orientation.rotate ? (ctx.orientation.hflip ? "повёрнутому и отражённому" : "повёрнутому") : "отражённому";
                 d.warnings.push_back("Проект обработан до учёта поворота источника (источник " + TurnRu(ctx.orientation) +
                                      "): маски, сделанные по прежнему кадру, лягут неправильно — проверьте их по " + shown + " кадру");
@@ -1329,7 +1334,7 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     if (sourceFps.num > 0 && fps.num > 0) mult = std::max(1, static_cast<int>(std::lround(fps.ToDouble() / sourceFps.ToDouble())));
     // TASK-0072: a source shown turned - a colour pass made from its stored (sideways) frame would give a sideways result: refused (the
     // stages that would remake it are off, or a standalone command made it)
-    if (MadeFromStoredFrame(m, info.orientation, info.width, info.height, info.codedWidth, info.codedHeight))
+    if (MadeFromStoredFrame(m, info.orientation, info.width, info.height, info.codedWidth, info.codedHeight, info.codedSar))
         Throw("process: " + passDir.string() + " was made from the stored frame of a source shown " + info.orientation.Describe() +
               ": the result would not be shown so - enable the stage that makes it or remove the pass");
     const OutputFormat of = ResolveOutputFormat(encode.codec, encode.format, SourceLayout(info));  // the stream's chroma, not a turn's 4:4:4

@@ -234,6 +234,23 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
         } catch (const std::exception&) {
         }
     }
+    // an anamorphic source's upscale pass the run does not remake (reused: of the build before, no shown_size record) - the run writes
+    // what that pass gives, NR and FG over it pass its record on or have none (review of TASK-0073)
+    if (!params[2].is_null() && !source.sar.Square())
+        for (const StageDecision& d : plan.stages)
+            if (d.name == "upscale" && d.action == "reuse") {
+                try {
+                    const Manifest m = Manifest::Load(plan.passesRoot / "color_sr");
+                    if (m.width && m.height) {
+                        o.gridWidth = m.width;
+                        o.gridHeight = m.height;
+                        const auto [dw, dh] = PassResultSize(m, source.sar, source.width, source.height);
+                        o.width = dw;
+                        o.height = dh;
+                    }
+                } catch (const std::exception&) {
+                }
+            }
     if (!params[4].is_null()) o.fps = source.fps * multiplier;
     const int64_t frames = std::max<int64_t>(0, source.frames);
     for (const StageDecision& d : plan.stages) {

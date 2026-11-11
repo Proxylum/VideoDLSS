@@ -121,6 +121,13 @@ UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uin
         const bool byHeight = targetH && !targetW && !t.capped, byWidth = targetW && !targetH && !t.capped;
         t.width = s > 1.0 ? (scaled ? even(inW * scale) : byHeight ? even(static_cast<double>(targetH) * inW / inH) : grid(w / s)) : even(w);
         t.height = s < 1.0 ? (scaled ? even(inH * scale) : byWidth ? even(static_cast<double>(targetW) * inH / inW) : grid(h * s)) : even(h);
+        // a source already past the cap as shown (3840x2160 at 4:3 is 5120x2160): the cap would take the grid under the input - no
+        // upscaler goes down. The input's own grid then (x1, as for square pixels), the frame as shown fit into the cap when written
+        // (review of TASK-0073)
+        if (t.capped && (t.width < inW || t.height < inH)) {
+            t.width = inW;
+            t.height = inH;
+        }
     }
     t.scale = static_cast<double>(t.width) / inW;
     // the frame as shown: the target asked for (capped: within the cap), not the grid stretched back - two roundings could miss it by 2
