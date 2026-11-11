@@ -81,6 +81,7 @@
 #include "TaskQueue.h"
 #include "TestClips.h"
 #include "io/ResultFile.h"
+#include "io/VideoDecoder.h"
 #include "util/Sha256.h"
 #include "util/Subprocess.h"
 #include "pipeline/PassVersions.h"
@@ -1451,8 +1452,9 @@ TEST_CASE("AppModel opens a turned clip as shown: the viewport, the source info,
     CHECK(label->text().contains(QString::fromUtf8("4:2:2")));
 }
 
-TEST_CASE("The plan blocks the run when the result would come from a turned source's stored-frame pass of a stage that is off", "[app][orientation][regression]") {
-    // review of TASK-0072: a plan-level refusal (no stage's) - the GUI blocks the run and says why
+TEST_CASE("A turned source's stored-frame pass of a stage that is off neither blocks the run nor is its result", "[app][orientation][regression]") {
+    // review of TASK-0072: the plan refused it and the GUI blocked the run. TASK-0074: a colour pass of a stage off is not the result at all -
+    // the source passes through upright, nothing to block
     App();
     const auto d = Dir("turned_blocker");
     ClipSpec spec;
@@ -1470,11 +1472,14 @@ TEST_CASE("The plan blocks the run when the result would come from a turned sour
     for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 96, 64));
     wr.Finish();
     model.refreshPlan();
-    CHECK(model.planBlocker().startsWith(QString::fromUtf8("Результат взялся бы из пасса color_sr (стадия «Апскейл»)")));
-    model.setStageEnabled("upscale", true);  // it remakes its pass
+    CHECK(model.planBlocker().isEmpty());
+    CHECK(model.plan().finalPass.empty());  // the source, not the sideways color_sr
+    model.setStageEnabled("upscale", true);  // it remakes its pass: that is the result
     model.setStageParam("upscale", "backend", "nis");
     model.refreshPlan();
     CHECK(model.planBlocker().isEmpty());
+    CHECK(model.plan().finalPass == "color_sr");
+    CHECK(model.cardState("upscale").runs);
 }
 
 TEST_CASE("RecentPreviews: a turned clip's thumbnail and line as shown; one the build before cached is not reused", "[app][orientation][previews][regression]") {
@@ -6900,4 +6905,112 @@ TEST_CASE("AppModel: a file that cannot be read is no change of project - the ge
     rig.wait(rig.processId);
     CHECK(rig.ended[rig.processId].ownProject);
     CHECK_FALSE(rig.model.forced("depth"));
+}
+
+// TASK-0074 (found in the review of TASK-0071): an unticked «Улучшение» or «Генерация кадров» stayed in the result - the run took any colour
+// pass under the root while «Что получится» counted the stages on. The plan the cards show, «Что получится», the run and its settings note
+// agree now: the stage off is out, its pass stays on disk and counts again when the card is ticked.
+TEST_CASE("AppModel: an unticked colour stage is out of the plan's result and of the run's; its pass stays and counts when ticked again", "[app][model][regression]") {
+    App();
+    const auto d = Dir("switch_off_result");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    Project p = Project::Create(clip, d / "passes");
+    for (auto& st : p.stages) {
+        if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+        if (st.name == "upscale") st.params["backend"] = "nis";
+        if (st.name == "fg") st.params["backend"] = "blend";
+    }
+    p.resultVideo = d / "result.mkv";
+    p.codec = "ffv1";
+    p.Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    auto run = [&] {
+        REQUIRE(model.saveProject());
+        std::vector<std::string> cmd{DLSSVID_CLI_PATH};
+        for (const QString& a : model.processArgs()) cmd.push_back(a.toStdString());
+        std::string out;
+        model.releaseResult(model.project().resultVideo);  // as the GUI does at the encode step (TASK-0070)
+        REQUIRE(Subprocess::Run(cmd, &out) == 0);
+        model.restoreResult();
+        model.reloadSources();
+        model.refreshPlan();
+    };
+    auto note = [&] {
+        const auto tags = ReadContainerTags(d / "result.mkv");
+        return tags.count("comment") ? tags.at("comment") : std::string();
+    };
+    auto decision = [&](const std::string& name) {
+        for (const auto& s : model.plan().stages)
+            if (s.name == name) return s;
+        FAIL("no decision for " << name);
+        return StageDecision{};
+    };
+    run();
+    REQUIRE(model.plan().finalPass == "color_fg");
+    REQUIRE(note().find("| nr: stub") != std::string::npos);
+    const double fps = model.outcome().fps;  // FG x2
+
+    // «Улучшение» unticked: FG reads color_sr - its card says it runs again, and the result has no NR
+    model.setStageEnabled("nr", false);
+    model.refreshPlan();
+    CHECK(model.cardState("fg").runs);  // before: «переиспользуется» over the color_nr of the stage off
+    CHECK(decision("fg").inputs.count("color_sr"));
+    CHECK_FALSE(decision("fg").inputs.count("color_nr"));
+    run();
+    CHECK(note().find("| fg: blend x2") != std::string::npos);
+    CHECK(note().find("nr:") == std::string::npos);  // before: «| nr: stub …»
+    CHECK(std::filesystem::exists(d / "passes" / "color_nr" / Manifest::kFileName));
+
+    // «Генерация кадров» unticked too: «Что получится» and the run agree on the source's rate and color_sr
+    model.setStageEnabled("fg", false);
+    model.refreshPlan();
+    CHECK(model.plan().finalPass == "color_sr");  // before: color_fg
+    CHECK(model.outcome().fps == Approx(fps / 2));
+    run();
+    CHECK(DecodeAll(d / "result.mkv").size() == 4);  // before: 7 frames of the color_fg left on disk
+    CHECK(note().find("| upscale: nis x2") != std::string::npos);
+    CHECK(note().find("fg:") == std::string::npos);
+    CHECK(std::filesystem::exists(d / "passes" / "color_fg" / Manifest::kFileName));
+
+    // ticked again: NR's pass is reused, FG's made from it comes back from the history
+    model.setStageEnabled("nr", true);
+    model.setStageEnabled("fg", true);
+    model.refreshPlan();
+    CHECK(decision("nr").action == "reuse");
+    CHECK(decision("fg").action == "restore");
+    CHECK(model.plan().finalPass == "color_fg");
+    CHECK(model.outcome().fps == Approx(fps));
+}
+
+// TASK-0074: «До» of the NR preview set to the upscale is NR's input - the source when the upscale is switched off, not the color_sr left on
+// disk (NR reads the source then, and so does the preview: its job takes NR's inputs from the plan)
+TEST_CASE("AppModel: the NR preview's before side set to the upscale is the source with the upscale switched off", "[app][preview][regression]") {
+    App();
+    PreviewProject m("preview_before_upscale_off");
+    AppModel& model = *m.model;
+    QSettings().remove("card/nr/previewBefore");
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    NrPreviewBar bar(model, runner);
+    QComboBox* before = nullptr;  // «До:» - the combo holding the «sr» choice
+    for (QComboBox* c : bar.findChildren<QComboBox*>())
+        if (c->findData("sr") >= 0) before = c;
+    REQUIRE(before);
+    model.setNrPreviewBefore("sr");
+    model.showNrPreview(m.Shown(m.FakeEntry("abcdef012345", 4, 4), 4, 4), false);
+    REQUIRE(model.state().CompareSide(true)->source == kNrPreviewSource);
+    CHECK(model.state().CompareSide(false)->source == "color_sr");
+    CHECK(before->itemText(before->findData("sr")) == QString::fromUtf8("Апскейл"));
+    model.setStageEnabled("upscale", false);
+    model.refreshPlan();
+    model.showNrPreview(m.Shown(m.FakeEntry("abcdef012346", 4, 4), 4, 4), false);
+    REQUIRE(model.state().CompareSide(true)->source == kNrPreviewSource);
+    CHECK(model.state().CompareSide(false)->source == "source");  // before: the color_sr of the upscale switched off
+    CHECK(before->itemText(before->findData("sr")) == QString::fromUtf8("Исходник"));  // what that side shows now
+    QSettings().remove("card/nr/previewBefore");
 }
