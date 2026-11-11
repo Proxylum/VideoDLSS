@@ -545,6 +545,10 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         for (const char* colour : {"color_nr", "color_sr"})
             if (d.inputs.count(colour)) {
                 if (!state.ran.count(colour)) fgAspect = ColourPixelAspect(ctx.root / colour, ctx.sar, ctx.sourceWidth, ctx.sourceHeight);
+                // color_nr remade in this run takes NR's own colour: a color_sr on disk this run keeps (one of the build before may be
+                // square already), else the grid (review of TASK-0073)
+                else if (std::string(colour) == "color_nr" && state.fp.count("color_sr") && !state.ran.count("color_sr"))
+                    fgAspect = ColourPixelAspect(ctx.root / "color_sr", ctx.sar, ctx.sourceWidth, ctx.sourceHeight);
                 break;
             }
     const bool fgSar = name == "fg" && !fgAspect.Square() && Get<std::string>(p, "backend", "dlssg") == "dlssg";

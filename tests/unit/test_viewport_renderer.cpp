@@ -380,6 +380,22 @@ TEST_CASE("ViewportRenderer arrows of an anamorphic source: motion in the vector
     };
     CHECK(yellow(10));  // the first arrow from x 8 ...
     CHECK(yellow(20));  // ... to x 24
+    // the other axis: pixels 1:2 (the image twice the vectors' height), +4 px down is 8 of the image - one arrow from y 16 to 24, none past
+    // it (review of TASK-0073)
+    Tex down = MakeMv(dev, 32, 16, [](uint32_t, uint32_t) { return std::array<float, 2>{0.f, 4.f}; }, 4.f);
+    FrameTextures tall{{"mv_raw", down.desc}};
+    ViewportState vt = OneToOne(32, 32);
+    vt.SetSingleSource("mv_raw");
+    vt.layers[0].display = DisplayMode::MvArrows;
+    vt.layers[0].arrowStep = 32;
+    const PassImage vimg = r.RenderToImage(vt, tall, 32, 32, 32, 32);
+    auto yellowAt = [&](uint32_t y) {
+        for (uint32_t x = 15; x <= 16; ++x)
+            if (const Px p = At(vimg, x, y); p.r > 200 && p.g > 180 && p.b < 100) return true;
+        return false;
+    };
+    CHECK(yellowAt(22));
+    CHECK(!yellowAt(28));
 }
 
 TEST_CASE("ViewportRenderer mask fill and contour", "[viewport][renderer][gpu]") {

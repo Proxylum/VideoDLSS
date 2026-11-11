@@ -36,8 +36,8 @@ struct ViewportSource {
     int64_t lastFrame = -1;       // inclusive; video: frameCount - 1 (or -1 when unknown)
     uint32_t width = 0, height = 0;
     Rational fps{0, 1};
-    // TASK-0073: the pixels' proportions of a video (an anamorphic source - the reference image is it as shown, every layer is stretched
-    // onto it); pass folders are square
+    // TASK-0073: the pixels' proportions (an anamorphic source - the reference image is it as shown, every layer is stretched onto it): a
+    // video's; a pass folder's are set by SetSources - its record, else by its proportions against the source video's (PassPixelAspect)
     PixelAspect sar;
     // Pass folders: the folder name, as in PassVersions.h (the current version and its previous versions share it). The
     // manifest's `pass` is the kind and may differ: mask_ui, mask_ignore, mask_face and mask_skin are all "mask".

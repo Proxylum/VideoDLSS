@@ -387,7 +387,7 @@ void ProjectPanel::refresh() {
         }
         if (!src.sar.Square()) {
             // without a colour stage the source passes through: its grid and pixels (review of TASK-0073)
-            const bool passthrough = out.gridWidth && out.gridWidth == out.width && out.gridHeight == out.height;
+            const bool passthrough = out.gridWidth && model_.planError().isEmpty() && model_.plan().finalPass.empty();  // no colour pass to encode
             tip += tr("\nПиксели не квадратные (%1, %2): кадр %3×%4 показывается %5×%6, как в плеере. Стадии работают в пикселях источника; %7")
                        .arg(QString::fromStdString(src.sar.Token()))
                        .arg(src.sarFrom == "container" ? tr("по контейнеру") : tr("по потоку"))

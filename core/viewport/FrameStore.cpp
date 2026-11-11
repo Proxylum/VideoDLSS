@@ -263,6 +263,16 @@ void FrameStore::SetSources(std::vector<ViewportSource> sources) {
     imageW_ = imageH_ = 0;
     fps_ = Rational{0, 1};
     duration_ = 0.0;
+    // TASK-0073 (review): the pixels of each pass folder - the grid of an anamorphic source (depth, vectors, colour passes), square ones
+    // (masks drawn over the frame as shown, a pass an explicit target of the build before stretched): its record, else its proportions
+    // against the source video's; no source video - its record
+    const ViewportSource* video = nullptr;
+    for (const auto& s : sources_)
+        if (s.name == "source" && s.isVideo) video = &s;
+    for (auto& s : sources_)
+        if (!s.isVideo && s.manifest)
+            s.sar = video ? PassPixelAspect(*s.manifest, video->sar, video->width, video->height)
+                          : PixelAspectFromStamp(StageParamText(*s.manifest, "pixel_aspect")).value_or(PixelAspect{});
     bool fromSource = false;
     for (const auto& s : sources_) {
         if (s.name == "source" || imageW_ == 0) {

@@ -207,6 +207,20 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
         const auto [dw, dh] = StretchedResultSize(source.sar, o.width, o.height);
         o.width = dw;
         o.height = dh;
+    } else if (!plan.finalPass.empty()) {
+        // no colour stage, yet a colour pass of a stage that is off is on disk: the encode takes it (RunProcess) - its frame, stretched
+        // by its pixels (review of TASK-0073)
+        try {
+            const Manifest m = Manifest::Load(plan.passesRoot / plan.finalPass);
+            if (m.width && m.height) {
+                o.gridWidth = m.width;
+                o.gridHeight = m.height;
+                const auto [dw, dh] = StretchedResultSize(PassPixelAspect(m, source.sar, source.width, source.height), m.width, m.height);
+                o.width = dw;
+                o.height = dh;
+            }
+        } catch (const std::exception&) {
+        }
     }
     if (!params[4].is_null()) o.fps = source.fps * multiplier;
     const int64_t frames = std::max<int64_t>(0, source.frames);

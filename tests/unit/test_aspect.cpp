@@ -105,6 +105,7 @@ TEST_CASE("StretchedResultSize: the result of an anamorphic pass in square pixel
     CHECK(StretchedResultSize(PixelAspect{4, 3}, 2880, 2160) == Size{3840, 2160});  // at the cap: as is
     CHECK(StretchedResultSize(PixelAspect{4, 3}, 3840, 2160) == Size{3840, 1620});  // 5120x2160 fit
     CHECK(StretchedResultSize(PixelAspect{4, 1}, 1000, 540) == Size{3840, 518});
+    CHECK(StretchedResultSize(PixelAspect{4, 1}, 1000, 552) == Size{3840, 530});  // the free side 529.92 rounds to even (not down to 528)
     CHECK(StretchedResultSize(PixelAspect{27, 32}, 2160, 3240) == Size{2160, 3840});  // portrait at its cap
     CHECK(StretchedResultSize(PixelAspect{1, 2}, 2160, 3840) == Size{1080, 3840});   // portrait 2160x7680 fit
     CHECK(StretchedResultSize(PixelAspect{32, 27}, 0, 0) == Size{0, 0});
@@ -253,6 +254,24 @@ TEST_CASE("EstimateRun of an anamorphic source: the stages make the grid, the re
     CHECK(fit.width == 3840);
     CHECK(fit.height == 518);
     CHECK(fit.gridWidth == 1000);
+    // no colour stage, yet a colour pass of a stage that is off on disk: the encode takes it - its frame, stretched (review of TASK-0073)
+    const auto root = std::filesystem::path(DLSSVID_TEST_TMP) / "aspect_final_pass";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "color_sr");
+    src.sar = PixelAspect{32, 27};
+    Manifest sr = Manifest::ForPass(PassKind::ColorSr, 108, 72, FileFormat::Exr);
+    sr.stageParams = {{"pixel_aspect", "32:27"}};
+    sr.Save(root / "color_sr");
+    ProcessPlan left;
+    left.passesRoot = root;
+    left.finalPass = "color_sr";
+    for (auto& s : stages) s.enabled = false;
+    const RunOutcome kept = EstimateRun(left, stages, src);
+    CHECK(kept.width == 128);
+    CHECK(kept.height == 72);
+    CHECK(kept.gridWidth == 108);
+    left.finalPass.clear();
+    CHECK(EstimateRun(left, stages, src).width == 54);  // passed through
 }
 
 TEST_CASE("DLSS-G's camera takes the frame as shown: the grid of 32:27 pixels is 16:9", "[unit][aspect][fg]") {

@@ -1643,6 +1643,20 @@ TEST_CASE("AppModel opens an anamorphic clip as shown: the viewport, the source 
     CHECK(label->toolTip().contains(QString::fromUtf8("без цветовых стадий результат пишется как есть — в этой сетке, с теми же пропорциями пикселя")));
     CHECK(!label->toolTip().contains(QString::fromUtf8("в квадратных пикселях")));
     CHECK(out->text().startsWith(QString::fromUtf8("54×36")));
+    // ... unless a colour pass of a stage that is off is on disk: the encode takes it, stretched (review of TASK-0073)
+    {
+        Manifest m = Manifest::ForPass(PassKind::ColorSr, 108, 72, FileFormat::Exr);
+        m.sourceHash = model.plan().sourceHash;
+        m.stageParams = {{"pixel_aspect", "32:27"}};
+        PassWriter wr(model.project().passesRoot / "color_sr", m);
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 108, 72));
+        wr.Finish();
+    }
+    model.refreshPlan();
+    panel.refresh();
+    CHECK(label->toolTip().contains(QString::fromUtf8("результат пишется в квадратных пикселях")));
+    CHECK(out->text().startsWith(QString::fromUtf8("128×72")));
+    std::filesystem::remove_all(model.project().passesRoot / "color_sr");
     model.setStageEnabled("upscale", true);
     model.refreshPlan();
     panel.refresh();

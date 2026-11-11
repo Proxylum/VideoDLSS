@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <chrono>
 #include <system_error>
 #include <thread>
@@ -61,8 +62,11 @@ std::string CheckEncodedResult(const fs::path& file, const ResultExpectation& ex
         // the frames are written upright (TASK-0072): a display matrix on the result would turn them again in a player
         if (!info.orientation.Identity())
             return "it carries a display orientation (" + info.orientation.Token() + "): the frames were written upright, a player would turn them again";
-        // TASK-0073: the pixels as written - square for a result stretched to them, the source's SAR in passthrough
-        if (!(info.codedSar == expect.sar)) {
+        // TASK-0073: the pixels as written - square for a result stretched to them, the source's SAR in passthrough. A muxer that keeps
+        // the frame as shown in whole pixels (WebM's DisplayWidth: 32:27 of 720 comes back 853:720) wrote the same picture
+        const bool sameShown = !expect.sar.Square() && !info.codedSar.Square() &&
+                               std::fabs(info.codedSar.Value() - expect.sar.Value()) * static_cast<double>(info.width) <= 1.0;
+        if (!(info.codedSar == expect.sar) && !sameShown) {
             if (expect.sar.Square())
                 return "it carries a pixel aspect of " + info.codedSar.Token() + " (square pixels were written): players would stretch it";
             return "its pixels are " + (info.codedSar.Square() ? std::string("square") : info.codedSar.Token()) + ", " + expect.sar.Token() +

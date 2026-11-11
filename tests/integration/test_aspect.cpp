@@ -330,6 +330,11 @@ TEST_CASE("NR and FG of an anamorphic source take the pixels of the colour they 
     CHECK(recorded("color_fg") == "1:1");
     CHECK(Summarize(d / "result.mkv").width == 128);
     CHECK(App(Decision(PlanProcess(g), "fg")).find("fg.sar") == std::string::npos);  // DLSS-G on square pixels: its camera as before
+    // ... with color_nr remade in the same run from that square color_sr: square too, not the grid (review of TASK-0073)
+    ProcessOptions remade = o;
+    ApplyParamSpec(remade.stages, "fg.backend=dlssg");
+    remade.forceStages = {"nr"};
+    CHECK(App(Decision(PlanProcess(remade), "fg")).find("fg.sar") == std::string::npos);
     colourPass(108, 72, {{"backend", "nis"}, {"pixel_aspect", "32:27"}});  // the grid of this build
     // planned with NR remade: FG's colour is the pass this run makes (the grid), not the square color_nr still on disk
     ProcessOptions both = o;
@@ -392,6 +397,11 @@ TEST_CASE("Passthrough keeps an anamorphic clip's grid bit for bit and writes it
     }
     // no colour pass at all (every colour stage off): the source passes through, its proportions with it
     const auto e = Dir("passthrough_fallback");
+    {
+        ProcessOptions none = Options(clip, e);
+        Only(none, {"depth"});
+        CHECK(PlanProcess(none).finalPass.empty());
+    }
     ProcessOptions f = Options(clip, e);
     Only(f, {"depth"});
     RunProcess(f);
@@ -409,6 +419,16 @@ TEST_CASE("The result check compares the pixels' proportions written with those 
     CHECK_THAT(CheckEncodedResult(square, ResultExpectation{54, 36, 3, false, kDvdWide}), ContainsSubstring("its pixels are square, 32:27 was written"));
     CHECK(CheckEncodedResult(wide, ResultExpectation{54, 36, 3, false, kDvdWide}).empty());
     CHECK(CheckEncodedResult(square, ResultExpectation{54, 36, 3, false}).empty());
+    // a muxer that keeps the frame as shown in whole pixels: WebM's DisplayWidth 853 of 720 at 32:27 reads back 853:720 - the same picture;
+    // 856:720 is 3 pixels off (review of TASK-0073: the passthrough of a .webm failed at the end)
+    ClipSpec rounded = Anamorphic(720, 48, PixelAspect{853, 720});
+    rounded.sarIn = "container";
+    const auto webmLike = WriteClip(d / "rounded.mkv", rounded);
+    REQUIRE(Summarize(webmLike).sar == PixelAspect{853, 720});
+    CHECK(CheckEncodedResult(webmLike, ResultExpectation{720, 48, 3, false, kDvdWide}).empty());
+    rounded.sar = PixelAspect{856, 720};
+    CHECK_THAT(CheckEncodedResult(WriteClip(d / "off.mkv", rounded), ResultExpectation{720, 48, 3, false, kDvdWide}),
+               ContainsSubstring("its pixels are 107:90, 32:27 was written"));
 }
 
 TEST_CASE("A turned anamorphic clip: the proportions turn with the frame; passthrough and process as shown", "[integration][aspect][orientation]") {
@@ -575,6 +595,30 @@ TEST_CASE("The viewport shows an anamorphic clip stretched: the reference image 
     store.SetSources({*src});
     CHECK(store.ImageWidth() == 64);  // before TASK-0073: 54
     CHECK(store.ImageHeight() == 36);
+    // the pass folders carry the pixels of their grid: a colour pass by its record, depth by its proportions, a mask drawn over the frame
+    // as shown square (review of TASK-0073: their labels named the grid next to the source as shown)
+    auto pass = [&](const char* name, PassKind kind, uint32_t w, uint32_t h, const nlohmann::json& stageParams) {
+        Manifest m = Manifest::ForPass(kind, w, h, kind == PassKind::Mask ? FileFormat::Png : FileFormat::Exr);
+        m.stageParams = stageParams;
+        PassWriter wr(d / "passes" / name, m);
+        wr.WriteFrame(0, MakePassImage(kind, w, h, kind == PassKind::Mask ? std::optional<PixelType>(PixelType::U8) : std::nullopt));
+        wr.Finish();
+        const auto s = FrameStore::PassFolderSource(d / "passes" / name, name, name);
+        REQUIRE(s);
+        return *s;
+    };
+    const ViewportSource sr = pass("color_sr", PassKind::ColorSr, 108, 72, {{"pixel_aspect", "32:27"}});
+    const ViewportSource depth = pass("depth_raw", PassKind::DepthRaw, 54, 36, nlohmann::json::object());
+    const ViewportSource mask = pass("mask_ui", PassKind::Mask, 64, 36, nlohmann::json::object());
+    store.SetSources({*src, sr, depth, mask});
+    CHECK(store.FindSource("color_sr")->sar == kDvdWide);
+    CHECK(store.FindSource("depth_raw")->sar == kDvdWide);
+    CHECK(store.FindSource("mask_ui")->sar.num == 1);  // square, known
+    CHECK(store.FindSource("mask_ui")->sar.Square());
+    // no source video: the first pass as shown by its record
+    store.SetSources({sr, depth});
+    CHECK(store.ImageWidth() == 128);
+    CHECK(store.ImageHeight() == 72);
 }
 
 TEST_CASE("dlssvid info names an anamorphic clip's pixels; a square clip's info is as before", "[integration][aspect][cli]") {
@@ -589,6 +633,9 @@ TEST_CASE("dlssvid info names an anamorphic clip's pixels; a square clip's info 
         return s.str();
     };
     CHECK_THAT(info(WriteClip(d / "wide.mkv", Anamorphic())), ContainsSubstring("pixels:      32:27 (container), shown 64x36"));
+    ClipSpec turned = Anamorphic();
+    turned.orientation = {90, false};
+    CHECK_THAT(info(WriteClip(d / "turned.mkv", turned)), ContainsSubstring("pixels:      32:27 (container), shown 36x64"));  // stored axes, as ffprobe
     ClipSpec plain = Anamorphic();
     plain.sar = {};
     CHECK(info(WriteClip(d / "plain.mkv", plain)).find("pixels:") == std::string::npos);
