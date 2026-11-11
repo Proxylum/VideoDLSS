@@ -1281,8 +1281,9 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     Rational fps = m.fps.num > 0 ? m.fps : sourceFps;
     int mult = 1;
     if (sourceFps.num > 0 && fps.num > 0) mult = std::max(1, static_cast<int>(std::lround(fps.ToDouble() / sourceFps.ToDouble())));
-    // TASK-0072: a source shown turned - a colour pass made from its stored (sideways) frame would give a sideways result: refused (the
-    // stages that would remake it are off, or a standalone command made it)
+    // TASK-0072: a source shown turned - a colour pass made from its stored (sideways) frame would give a sideways result: refused. RunProcess
+    // does not hand one over (a colour pass of a stage off is not the result, TASK-0074; the stages on remake theirs) - the last line for a
+    // color_nr an NR skipped at run time could not move aside (TASK-0071) and for direct callers
     if (MadeFromStoredFrame(m, info.orientation, info.width, info.height, info.codedWidth, info.codedHeight))
         Throw("process: " + passDir.string() + " was made from the stored frame of a source shown " + info.orientation.Describe() +
               ": the result would not be shown so - enable the stage that makes it or remove the pass");

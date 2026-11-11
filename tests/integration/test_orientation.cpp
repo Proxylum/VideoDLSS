@@ -522,11 +522,20 @@ TEST_CASE("The control mask advice measures a turned source's shown frame, not a
         for (uint32_t x = 0; x < 64; ++x) mask.Set(x, y, 0, 30000.f);
     WritePng(d / "mask.png", mask);
     ImportControlMask(d / "mask.png", o.passesRoot);
-    std::string all;
+    auto advice = [](const StageDecision& d) {
+        std::string all;
+        for (const auto& w : d.warnings) all += w + "\n";
+        return all;
+    };
+    // the upscale on: it remakes its pass from the shown frame - the sideways color_sr on disk is not the frame to measure
+    for (auto& s : o.stages) s.enabled = s.name == "upscale" || s.name == "nr";
+    const StageDecision on = Decision(PlanProcess(o), "nr");
+    CHECK_THAT(advice(on), ContainsSubstring("64×36 растянется на кадр 36×64"));  // the shown frame
+    CHECK(advice(on).find("128×72") == std::string::npos);                          // not the sideways pass
+    // the upscale off: the sideways color_sr is no input of NR (TASK-0074) - it reads the source, nothing to refuse
+    for (auto& s : o.stages) s.enabled = s.name == "nr";
     const StageDecision nr = Decision(PlanProcess(o), "nr");
-    for (const auto& w : nr.warnings) all += w + "\n";
-    CHECK_THAT(all, ContainsSubstring("64×36 растянется на кадр 36×64"));  // the frame NR is to work at: the shown one
-    // the sideways color_sr is no input of it: the upscale is off (TASK-0074) - NR reads the source, nothing to refuse
+    CHECK_THAT(advice(nr), ContainsSubstring("64×36 растянется на кадр 36×64"));  // the frame NR is to work at: the shown one
     CHECK_FALSE(nr.inputs.count("color_sr"));
     CHECK(nr.error.empty());
     // an unlabelled color_sr of another frame (a standalone upscale with a 3:4 target) is not NR's frame either with the upscale off: a mask
@@ -541,9 +550,7 @@ TEST_CASE("The control mask advice measures a turned source's shown frame, not a
     ImportControlMask(d / "fits.png", o.passesRoot);
     const StageDecision taken = Decision(PlanProcess(o), "nr");
     CHECK(taken.error.empty());
-    std::string advice;
-    for (const auto& w : taken.warnings) advice += w + "\n";
-    CHECK(advice.find("растянется") == std::string::npos);  // measured on the source's 36x64, not on color_sr 48x64
+    CHECK(advice(taken).find("растянется") == std::string::npos);  // measured on the source's 36x64, not on color_sr 48x64
 }
 
 TEST_CASE("A stage refuses an input made from a turned source's stored frame that the run does not remake", "[integration][orientation][process][regression]") {
