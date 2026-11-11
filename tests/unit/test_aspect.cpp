@@ -241,6 +241,10 @@ TEST_CASE("ResolveUpscaleTarget of an anamorphic input: the scale, the target an
     const UpscaleTarget x1 = UpscaleOutputFor(720, 480, {{"scale", 2.0}, {"artifact_reduction_only", true}}, true, dvd);
     CHECK(x1.width == 720);
     CHECK(x1.displayWidth == 854);
+    // x1 of an anamorphic 4K: as `process` writes it - fit into 3840x2160 (5120x2160 stretched)
+    const UpscaleTarget x1k = UpscaleOutputFor(3840, 2160, {{"scale", 2.0}, {"artifact_reduction_only", true}}, true, PixelAspect{4, 3});
+    CHECK(x1k.displayWidth == 3840);
+    CHECK(x1k.displayHeight == 1620);
 }
 
 TEST_CASE("EstimateRun of an anamorphic source: the stages make the grid, the result is it stretched", "[unit][aspect][estimates]") {
