@@ -176,6 +176,18 @@ TEST_CASE("VideoDecoder reads the pixels' proportions: the container's, else the
         VideoDecoder dec(file, VideoDecoder::Probe());
         CHECK(dec.Info().sar == kDvdWide);
         CHECK(dec.Info().sarFrom == "bitstream");
+        // the container over the bitstream: an MKV DisplayWidth of 16:9 over a stream that says 8:9 (review of TASK-0073)
+        ClipSpec both = Anamorphic(64, 48, PixelAspect{8, 9});
+        both.codec = "mpeg4";
+        both.containerSar = kDvdWide;
+        const auto corrected = WriteClip(d / "corrected.mkv", both);
+        const StreamSummary s = Summarize(corrected);
+        REQUIRE(s.streamSar == kDvdWide);
+        REQUIRE(s.codecSar == PixelAspect{8, 9});
+        VideoDecoder over(corrected, VideoDecoder::Probe());
+        CHECK(over.Info().sar == kDvdWide);
+        CHECK(over.Info().codedSar == kDvdWide);
+        CHECK(over.Info().sarFrom == "container");
     }
     // MOV's pasp
     if (VideoEncoder::EncoderAvailable("prores_ks")) {

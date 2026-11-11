@@ -135,6 +135,10 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     vs->avg_frame_rate = vctx->framerate;
     CheckAv(avcodec_parameters_from_context(vs->codecpar, vctx), "video params");
     if (spec.sarIn != "codec") vs->sample_aspect_ratio = sar;
+    if (!spec.containerSar.Square()) {
+        vs->codecpar->sample_aspect_ratio = AVRational{0, 1};
+        vs->sample_aspect_ratio = AVRational{static_cast<int>(spec.containerSar.num), static_cast<int>(spec.containerSar.den)};
+    }
     if (!spec.orientation.Identity()) {  // TASK-0072: a phone video's display matrix
         AVPacketSideData* sd = av_packet_side_data_new(&vs->codecpar->coded_side_data, &vs->codecpar->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX,
                                                        9 * sizeof(int32_t), 0);

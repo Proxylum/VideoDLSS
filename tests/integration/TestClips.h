@@ -45,6 +45,9 @@ struct ClipSpec {
     std::string sarIn = "all";
     // The muxer by name (empty: by the file's extension - FFmpeg takes its MP4 'ipod' muxer for .m4v, not the raw one)
     std::string format;
+    // Non-square: the container says these pixels while the codec keeps `sar` (an MKV DisplayWidth correcting a stream's VUI) - the
+    // codec parameters' SAR is cleared before the header (the muxer refuses two non-zero ones that differ)
+    PixelAspect containerSar;
 };
 // The CpuFrame layout `WriteClip` feeds the encoder for a ClipSpec::pixFmt.
 FrameDesc FrameDescFor(const ClipSpec& spec);
