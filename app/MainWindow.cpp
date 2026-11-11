@@ -395,7 +395,7 @@ void MainWindow::updateCellLabels() {
 QString MainWindow::cellLabel(const QString& title, const std::string& source, bool withTime) {
     const double t = model_.time();
     QString s = title;
-    if (const ViewportSource* src = model_.store().FindSource(source); src && src->width > 0) s += QString(" · %1×%2").arg(src->width).arg(src->height);
+    if (const ViewportSource* src = model_.store().FindSource(source); src && src->width > 0) s += " · " + SourceSizeText(*src);  // as shown
     const ViewportSource* shown = model_.store().FindSource(source);
     s += shown && shown->isStatic ? tr("  статичная") : QString("  #%1").arg(model_.store().FrameAt(source, t));  // PR-8: one frame at every time
     if (withTime) s += QString(" · %1").arg(QString::fromStdString(FormatTimecode(t)));

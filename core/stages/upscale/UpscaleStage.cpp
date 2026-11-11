@@ -58,10 +58,17 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         t.height = h;
         t.scale = 1.0;
     } else {
-        t = ResolveUpscaleTarget(w, h, options_.scale, options_.targetWidth, options_.targetHeight, options_.maxWidth, options_.maxHeight);
+        t = ResolveUpscaleTarget(w, h, options_.scale, options_.targetWidth, options_.targetHeight, options_.maxWidth, options_.maxHeight, true, options_.sar);
         if (t.capped)
-            Log()->warn("upscale: target capped to {}x{} (v1 limit {}x{} by the long side, ТЗ §3)", t.width, t.height, std::max(options_.maxWidth, options_.maxHeight),
-                        std::min(options_.maxWidth, options_.maxHeight));
+            Log()->warn("upscale: target capped to {}x{} (v1 limit {}x{} by the long side, ТЗ §3)", t.displayWidth, t.displayHeight,
+                        std::max(options_.maxWidth, options_.maxHeight), std::min(options_.maxWidth, options_.maxHeight));
+        if (!options_.sar.Square()) {
+            const auto [gw, gh] = options_.sar.DisplaySize(t.width, t.height);  // the grid as shown, before any fit into the cap
+            Log()->info("upscale: pixels {} - {}x{} of the source's pixels, {}x{} as shown{}", options_.sar.Token(), t.width, t.height, gw, gh,
+                        gw > t.displayWidth || gh > t.displayHeight
+                            ? fmt::format(", fit into {}x{} when process writes it", t.displayWidth, t.displayHeight)
+                            : std::string());
+        }
     }
     inW_ = w;
     inH_ = h;
@@ -159,12 +166,17 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["fallback"] = stats_.fellBack;
         if (stats_.fellBack) m.stageParams["fallback_reason"] = stats_.fallbackReason;  // a later run that reuses the pass says it (TASK-0071)
         m.stageParams["jitter_phases"] = stats_.jitterPhases;
+        // TASK-0073: the target taken in the pixels of the frame as shown - a standalone pass without it predates that (DecideStage)
+        if (const std::string px = options_.sar.Stamp(); !px.empty()) m.stageParams["pixel_aspect"] = px;
+        // ... and the frame as shown the run stretches it to: the target itself (review of TASK-0073)
+        if (!options_.sar.Square() && !options_.artifactReductionOnly) m.stageParams["shown_size"] = {t.displayWidth, t.displayHeight};
         writer_ = std::make_unique<PassWriter>(OutDir(), m);
     }
     if (!options_.videoOut.empty()) {
         VideoEncoder::Options eo;
         eo.codec = options_.videoCodec;
         eo.frameRate = options_.fps.num > 0 ? options_.fps : Rational{30, 1};
+        eo.sar = options_.sar;  // the grid, shown in its proportions (TASK-0073)
         encoder_ = std::make_unique<VideoEncoder>(options_.videoOut, FrameDesc{t.width, t.height, PixelFormat::Yuv420p}, eo);
         encoder_->Open();
     }
@@ -379,6 +391,7 @@ UpscaleRunResult RunUpscale(VideoDecoder& decoder, D3D12Device& device, UpscaleS
     const auto& info = decoder.Info();
     options.color = ColorInfoFromStream(info);
     options.fps = info.frameRate;
+    options.sar = info.sar;  // TASK-0073: process and the standalone command alike
     options.uploadToGpu = false;  // single-stage run: nothing reads the slot
     Pipeline pipeline(device, 4);
     auto stage = std::make_unique<UpscaleStage>(options);

@@ -941,6 +941,9 @@ void AppModel::refreshPlan() {
         sourceInfo_.orientationFrom = probe.Info().orientationFrom;
         sourceInfo_.codedWidth = probe.Info().codedWidth;
         sourceInfo_.codedHeight = probe.Info().codedHeight;
+        sourceInfo_.sar = probe.Info().sar;
+        sourceInfo_.codedSar = probe.Info().codedSar;
+        sourceInfo_.sarFrom = probe.Info().sarFrom;
         sourceInfo_.bitDepth = probe.Info().bitDepth;
         sourceInfo_.chroma = probe.Info().chroma;
         const ProcessOptions o = planOptions(true);
@@ -1235,6 +1238,8 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
                 else if (has("nr.msize")) st.state = tr("пересчёт: защита интерфейса при масках разного размера");
                 else if (has("nr.gain")) st.state = tr("пересчёт: сила правки теперь после модели");
                 else if (has("nr.ev")) st.state = tr("пересчёт: экспозиция в ступенях EV");
+                else if (has("sr.sar")) st.state = tr("пересчёт: цель и предел 4K — в пикселях показа (у источника неквадратные пиксели)");
+                else if (has("fg.sar")) st.state = tr("пересчёт: камера DLSS-G — в пропорциях показа (у источника неквадратные пиксели)");
                 else if (has("sr.cap")) st.state = tr("пересчёт: предел 4K для вертикального кадра — по длинной стороне");
             }
         } else {
@@ -1969,14 +1974,20 @@ AvailabilityFacts AppModel::availabilityFacts() const {
     return f;
 }
 
+std::pair<uint32_t, uint32_t> AppModel::nrColorSize() const {
+    if (outcome_.gridWidth > 0 && outcome_.gridHeight > 0) return {outcome_.gridWidth, outcome_.gridHeight};
+    return {sourceInfo_.width, sourceInfo_.height};
+}
+
 QString AppModel::nrCheckSize() const {
-    // the model's frame of the run: NR works on the upscaled frame. Unknown before the plan: the CLI's default
+    // the model's frame of the run: NR works on the upscaled frame (the grid: an anamorphic source's result is stretched after it, TASK-0073).
+    // Unknown before the plan: the CLI's default
     const StageEntry* e = FindEntry(project_, "nr");
-    if (!e || outcome_.width == 0 || outcome_.height == 0) return {};
+    if (!e || outcome_.gridWidth == 0 || outcome_.gridHeight == 0) return {};
     const nlohmann::json p = EffectiveStageParams("nr", e->params);
     // a malformed value is the plan's error, not a throw at every refresh of the card (review of TASK-0071)
     const double modelScale = p.contains("model_scale") && p["model_scale"].is_number() ? p["model_scale"].get<double>() : 1.0;
-    const auto [w, h] = NrWorkSize(outcome_.width, outcome_.height, modelScale);
+    const auto [w, h] = NrWorkSize(outcome_.gridWidth, outcome_.gridHeight, modelScale);
     return QString("%1x%2").arg(w).arg(h);
 }
 

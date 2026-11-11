@@ -489,7 +489,12 @@ viewport see them upright (a depth or vectors pass of a stage that is off, made 
 standalone command, is not used: the plan refuses until that stage is switched on or the pass is deleted; a colour pass of a
 stage that is off is never read anyway), and the result
 is written upright without a matrix (`dlssvid info` prints an `orientation:` line for such a file). The 4K cap of the
-upscale is by the long side: a portrait output goes up to 2160x3840. HDR (PQ / HLG) stays out of scope: such sources are treated as SDR. The NVIDIA
+upscale is by the long side: a portrait output goes up to 2160x3840. A source of non-square pixels (DVD 720x480 at 32:27,
+PAL 64:45, HDV 1440x1080 at 4:3) is processed on its stored samples and shown stretched as in a player: the scale, the
+target and the 4K cap are of the frame as shown (`--target 1920x1080` gives 1920x1080 as shown), the result of `process` is
+stretched to square pixels when it is encoded (DVD x2: 1706x960; fit into 3840x2160 when the stretch would go beyond),
+passthrough (and a `process` run with upscale, NR and frame generation all off) keeps the stored grid (not resampled) and
+writes its pixel aspect; a pixel aspect that moves no pixel of the frame (14400:14399 of 1694x720) is taken as square; `dlssvid info` prints a `pixels:` line. HDR (PQ / HLG) stays out of scope: such sources are treated as SDR. The NVIDIA
 passes keep the 10-bit gradations too: a shallow 10-bit ramp comes out of DLSS SR, NR and Frame Generation with one-code
 steps, no 8-bit staircase (measured, `docs/benchmarks.md`; the `[precision]` tests watch it).
 

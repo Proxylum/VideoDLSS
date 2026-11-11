@@ -104,6 +104,9 @@ public:
     const ProcessPlan& plan() const { return plan_; }        // PlanProcess over the project (empty without a source)
     const RunOutcome& outcome() const { return outcome_; }  // what the run gives: size, rate, time, disk
     const SourceInfo& sourceInfo() const { return sourceInfo_; }
+    // The colour NR reads in the run: the frame the stages make (the upscale's; an anamorphic source's grid, not the result stretched after
+    // it - TASK-0073), else the source's; {0, 0} unknown. The preview's estimate and calibration key
+    std::pair<uint32_t, uint32_t> nrColorSize() const;
     QString planError() const { return planError_; }         // why there is no plan (bad parameters, no video)
     // a stage the run would refuse although the plan exists (depth does not fit the GPU, TASK-0039): «Обработать» waits
     QString planBlocker() const;

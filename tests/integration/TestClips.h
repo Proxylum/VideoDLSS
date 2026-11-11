@@ -38,6 +38,16 @@ struct ClipSpec {
     // av_display_matrix_flip left-right: FFmpeg's command line applies exactly this orientation), the frames written as they are (stored)
     DisplayOrientation orientation;
     std::string rotateTag;  // non-empty: the stream's old 'rotate' tag (degrees clockwise), written as well as any matrix
+    // TASK-0073: the pixels' proportions, where they are said: "all" - the codec (FFV1 then at level 3: its slices carry it), the stream
+    // (MKV DisplayWidth, MP4 / MOV pasp, AVI vprp) and the frames; "container" - the stream only; "codec" - the codec and the frames only
+    // (with a container without the field - `format` "m4v", a raw MPEG-4 stream - the bitstream alone says it)
+    PixelAspect sar;
+    std::string sarIn = "all";
+    // The muxer by name (empty: by the file's extension - FFmpeg takes its MP4 'ipod' muxer for .m4v, not the raw one)
+    std::string format;
+    // Non-square: the container says these pixels while the codec keeps `sar` (an MKV DisplayWidth correcting a stream's VUI) - the
+    // codec parameters' SAR is cleared before the header (the muxer refuses two non-zero ones that differ)
+    PixelAspect containerSar;
 };
 // The CpuFrame layout `WriteClip` feeds the encoder for a ClipSpec::pixFmt.
 FrameDesc FrameDescFor(const ClipSpec& spec);
@@ -60,6 +70,11 @@ struct StreamSummary {
     std::string pixelFormat;  // the video stream's pixel format name
     int profile = -1;         // the video stream's profile (codec-specific; HEVC: 1 Main, 2 Main 10, 4 Rext)
     int colorRange = 0, colorSpace = 2, colorPrimaries = 2, colorTrc = 2;  // AVCOL_* tags of the video stream
+    // TASK-0073: the video stream's size and pixels' proportions - the container's (stream), the codec parameters', and the one players take
+    // (av_guess_sample_aspect_ratio: the container's, else the codec's)
+    uint32_t width = 0, height = 0;
+    PixelAspect streamSar, codecSar, sar;
+    std::string comment;  // the container's `comment` tag (the settings note, PR-11)
 };
 StreamSummary Summarize(const std::filesystem::path& path);
 

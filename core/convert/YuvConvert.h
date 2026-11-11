@@ -22,4 +22,19 @@ private:
     SwsContext* sws_ = nullptr;
 };
 
+// The same layout at another size (TASK-0073: a pass of an anamorphic source stretched to square pixels when `process` encodes it):
+// Lanczos, the same on every CPU (SWS_BITEXACT); at the same size the samples come out as they are.
+class YuvResizer {
+public:
+    YuvResizer() = default;
+    ~YuvResizer();
+    YuvResizer(const YuvResizer&) = delete;
+    YuvResizer& operator=(const YuvResizer&) = delete;
+
+    void Resize(const CpuFrame& in, uint32_t width, uint32_t height, CpuFrame& out);
+
+private:
+    SwsContext* sws_ = nullptr;
+};
+
 }  // namespace dlssvid

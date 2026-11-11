@@ -321,6 +321,8 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         m.sourceHash = options_.sourceHash;
         m.stageParams = bypass_ ? nlohmann::json{{"backend", options_.backend}, {"bypass", true}} : backends_[0]->Describe();
         m.stageParams["passes"] = stats_.passes;          // model passes: 0 in the bypass (the estimates read it)
+        if (const std::string px = options_.sar.Stamp(); !px.empty()) m.stageParams["pixel_aspect"] = px;  // TASK-0073: what `process` encodes by
+        if (const auto shown = ColourShownSize(options_.colorDir, w, h)) m.stageParams["shown_size"] = {shown->first, shown->second};  // passed on
         if (!stats_.vramMibPerPass.empty()) m.stageParams["vram_mib_per_pass"] = stats_.vramMibPerPass;  // PR-5: each pass's feature
         m.stageParams["intensity"] = options_.intensity;  // our edit strength after the model, not the model's (PR-7)
         if (!bypass_) m.stageParams["model_intensity"] = kNrModelIntensity;  // what the model got: also the mark of a PR-7 pass
@@ -376,6 +378,7 @@ void NrStage::OpenOutputs() {
         VideoEncoder::Options eo;
         eo.codec = options_.videoCodec;
         eo.frameRate = options_.fps.num > 0 ? options_.fps : Rational{30, 1};
+        eo.sar = options_.sar;  // shown in its proportions (TASK-0073)
         encoder_ = std::make_unique<VideoEncoder>(options_.videoOut, FrameDesc{inW_, inH_, PixelFormat::Yuv420p}, eo);
         encoder_->Open();
     }
@@ -639,6 +642,7 @@ NrRunResult RunNrFrames(const VideoStreamInfo& info, D3D12Device& device, NrStag
                         int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params) {
     options.color = ColorInfoFromStream(info);
     options.fps = info.frameRate;
+    options.sar = ColourPixelAspect(options.colorDir, info.sar, info.width, info.height);  // TASK-0073: of the colour NR reads
     options.uploadToGpu = false;  // single-stage run: nothing reads the slot
     Pipeline pipeline(device, 4);
     auto stage = std::make_unique<NrStage>(options);

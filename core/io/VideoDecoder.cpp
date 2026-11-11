@@ -4,6 +4,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/display.h>
+#include <libavutil/rational.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_cuda.h>
 #include <libavutil/imgutils.h>
@@ -331,6 +332,25 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
         Log()->log(options.probe ? spdlog::level::debug : spdlog::level::warn, "{}: {}", url, orientationWhy);
     info_.width = info_.orientation.SwapsAxes() ? info_.codedHeight : info_.codedWidth;
     info_.height = info_.orientation.SwapsAxes() ? info_.codedWidth : info_.codedHeight;
+    // TASK-0073: the pixels' proportions - the container's (MP4 pasp, MKV DisplayWidth, AVI vprp, DV), else the bitstream's (VUI, the
+    // sequence header); in the stored grid's axes, inverted for the turned frame by 90 / 270
+    {
+        AVRational guess = av_guess_sample_aspect_ratio(fmt_, vs, nullptr);
+        if (guess.num > 0 && guess.den > 0) av_reduce(&guess.num, &guess.den, guess.num, guess.den, 65535);
+        std::string sarWhy;
+        info_.codedSar = PixelAspectFrom(guess.num, guess.den, &sarWhy);
+        if (!sarWhy.empty()) Log()->log(options.probe ? spdlog::level::debug : spdlog::level::warn, "{}: {}", url, sarWhy);
+        if (!info_.codedSar.Square() && !info_.codedSar.MovesAPixel(info_.codedWidth, info_.codedHeight)) {  // the same picture as square
+            Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "{}: a pixel aspect of {} moves no pixel of {}x{}: the pixels are taken as square",
+                       url, info_.codedSar.Token(), info_.codedWidth, info_.codedHeight);
+            info_.codedSar = {};
+        }
+        // which one decided: the codec's when it says the same (a raw stream: no container field, the guess falls back to the codec
+        // parameters; MP4's pasp and the VUI agreeing), else the container's (MKV DisplayWidth over FFV1, MOV pasp over ProRes)
+        if (!info_.codedSar.Square())
+            info_.sarFrom = PixelAspectFrom(vs->codecpar->sample_aspect_ratio.num, vs->codecpar->sample_aspect_ratio.den) == info_.codedSar ? "bitstream" : "container";
+        info_.sar = info_.orientation.SwapsAxes() ? info_.codedSar.Inverse() : info_.codedSar;
+    }
     const AVRational fr = av_guess_frame_rate(fmt_, vs, nullptr);
     info_.frameRate = Rational{fr.num, fr.den};
     info_.timeBase = Rational{vs->time_base.num, vs->time_base.den};
@@ -368,6 +388,11 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     if (!info_.orientation.Identity())
         Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "open {}: stored {}x{}, shown {} ({}): the frames are turned so", url,
                    info_.codedWidth, info_.codedHeight, info_.orientation.Describe(), info_.orientationFrom);
+    if (!info_.sar.Square()) {
+        const auto [dw, dh] = info_.sar.DisplaySize(info_.width, info_.height);
+        Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "open {}: pixels {} ({}), shown {}x{}", url, info_.codedSar.Token(),
+                   info_.sarFrom, dw, dh);
+    }
 }
 
 VideoDecoder::~VideoDecoder() {

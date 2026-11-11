@@ -360,6 +360,44 @@ TEST_CASE("ViewportRenderer motion-vector displays (HSV, magnitude, arrows)", "[
     CHECK(gray > static_cast<int>(w * h / 2));
 }
 
+TEST_CASE("ViewportRenderer arrows of an anamorphic source: motion in the vectors' pixels drawn in the image's", "[viewport][renderer][gpu][aspect]") {
+    // TASK-0073: the image is the source as shown (pixels 2:1 - twice the vectors' width); +8 px of motion of the vectors' grid is 16 px of
+    // the image - before, the arrows were drawn half as long
+    D3D12Device dev({true, false});
+    ViewportRenderer r(dev);
+    const uint32_t tw = 32, th = 16, w = 64, h = 16;
+    Tex mv = MakeMv(dev, tw, th, [](uint32_t, uint32_t) { return std::array<float, 2>{8.f, 0.f}; }, 8.f);
+    FrameTextures frame{{"mv_raw", mv.desc}};
+    ViewportState st = OneToOne(w, h);
+    st.SetSingleSource("mv_raw");
+    st.layers[0].display = DisplayMode::MvArrows;
+    st.layers[0].arrowStep = 16;
+    const PassImage img = r.RenderToImage(st, frame, w, h, w, h);
+    auto yellow = [&](uint32_t x) {
+        for (uint32_t y = 7; y <= 8; ++y)  // the shaft on the row boundary: either row
+            if (const Px p = At(img, x, y); p.r > 200 && p.g > 180 && p.b < 100) return true;
+        return false;
+    };
+    CHECK(yellow(10));  // the first arrow from x 8 ...
+    CHECK(yellow(20));  // ... to x 24
+    // the other axis: pixels 1:2 (the image twice the vectors' height), +4 px down is 8 of the image - one arrow from y 16 to 24, none past
+    // it (review of TASK-0073)
+    Tex down = MakeMv(dev, 32, 16, [](uint32_t, uint32_t) { return std::array<float, 2>{0.f, 4.f}; }, 4.f);
+    FrameTextures tall{{"mv_raw", down.desc}};
+    ViewportState vt = OneToOne(32, 32);
+    vt.SetSingleSource("mv_raw");
+    vt.layers[0].display = DisplayMode::MvArrows;
+    vt.layers[0].arrowStep = 32;
+    const PassImage vimg = r.RenderToImage(vt, tall, 32, 32, 32, 32);
+    auto yellowAt = [&](uint32_t y) {
+        for (uint32_t x = 15; x <= 16; ++x)
+            if (const Px p = At(vimg, x, y); p.r > 200 && p.g > 180 && p.b < 100) return true;
+        return false;
+    };
+    CHECK(yellowAt(22));
+    CHECK(!yellowAt(28));
+}
+
 TEST_CASE("ViewportRenderer mask fill and contour", "[viewport][renderer][gpu]") {
     D3D12Device dev({true, false});
     ViewportRenderer r(dev);

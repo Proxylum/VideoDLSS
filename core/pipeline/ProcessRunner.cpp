@@ -8,6 +8,7 @@
 #include <set>
 
 #include "convert/ColorConvert.h"
+#include "convert/YuvConvert.h"
 #include "gpu/D3D12Device.h"
 #include "io/EncodeDefaults.h"
 #include "io/OutputFormat.h"
@@ -143,12 +144,17 @@ std::filesystem::path ExistingPass(const std::filesystem::path& root, std::initi
 
 // TASK-0072: whether a pass on disk was made from the stored frame of a source shown turned `o` - its label names another
 // orientation; one without a label (a standalone command) by its proportions: those of the stored frame, not the shown one (90 / 270)
-bool MadeFromStoredFrame(const Manifest& m, DisplayOrientation o, uint32_t shownW, uint32_t shownH, uint32_t codedW, uint32_t codedH) {
+bool MadeFromStoredFrame(const Manifest& m, DisplayOrientation o, uint32_t shownW, uint32_t shownH, uint32_t codedW, uint32_t codedH,
+                         PixelAspect codedSar = {}) {
     if (o.Identity()) return false;
     if (!m.sourceFormat.empty()) return OrientationOfSourceFormat(m.sourceFormat) != o;
     if (!o.SwapsAxes() || !m.width || !m.height || !shownW || !shownH || !codedW || !codedH) return false;
     const double aspect = static_cast<double>(m.width) / m.height;
-    return std::fabs(aspect / (static_cast<double>(codedW) / codedH) - 1.0) <= 0.01 && std::fabs(aspect / (static_cast<double>(shownW) / shownH) - 1.0) > 0.01;
+    // the stored frame: its grid, or as players show it unturned - an anamorphic one stretched (720x480 at 32:27 - 854x480, review of
+    // TASK-0073)
+    const auto [cw, ch] = codedSar.DisplaySize(codedW, codedH);
+    const bool stored = std::fabs(aspect / (static_cast<double>(codedW) / codedH) - 1.0) <= 0.01 || std::fabs(aspect / (static_cast<double>(cw) / ch) - 1.0) <= 0.01;
+    return stored && std::fabs(aspect / (static_cast<double>(shownW) / shownH) - 1.0) > 0.01;
 }
 
 // "повёрнут на 90°", "отражён", "повёрнут на 180° и отражён": a turn in the Russian texts of the cards
@@ -174,6 +180,7 @@ std::string MadeFromStoredRu(DisplayOrientation o) {
     return std::string(o.SwapsAxes() ? "сделан по боковому кадру" : "сделан без учёта поворота источника") + ", а источник " + TurnRu(o);
 }
 
+
 struct RunContext {
     std::filesystem::path root;
     std::string sourceHash;
@@ -182,6 +189,7 @@ struct RunContext {
     uint32_t sourceWidth = 0, sourceHeight = 0;  // as shown; the model input of depth follows from them (VRAM advice)
     uint32_t codedWidth = 0, codedHeight = 0;    // as stored (TASK-0072: a phone video kept landscape, shown turned)
     DisplayOrientation orientation;
+    PixelAspect sar, codedSar;                   // TASK-0073: the pixels as shown / as stored (an anamorphic source: the grid is stretched)
     uint64_t vramBytes = 0;                      // 0: unknown, no VRAM error
     bool skipExisting = true;
     std::set<std::string> force;  // stages recomputed on request
@@ -533,7 +541,7 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             // fg lists the guides whatever its backend (its fingerprints keep them); only DLSS-G reads them (UsesGuides)
             if (name == "fg" && Get<std::string>(p, "backend", "dlssg") != "dlssg" && (input == "depth_dlss" || input == "mv_dlss")) continue;
             try {
-                if (MadeFromStoredFrame(Manifest::Load(ctx.root / input), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
+                if (MadeFromStoredFrame(Manifest::Load(ctx.root / input), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight, ctx.codedSar)) {
                     d.error = "Пасс " + input + StageRu(input) + " " + MadeFromStoredRu(ctx.orientation) + ": включите эту стадию или удалите пасс";
                     break;
                 }
@@ -560,6 +568,30 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
         srCap = now.width != capBefore.width || now.height != capBefore.height;
         if (srCap) stageTool.app += "+sr.cap";
     }
+    // TASK-0073: an anamorphic source's target and 4K cap are of the frame as shown - an upscale pass whose grid that changes (a target,
+    // the cap) is another pass, one by the scale alone keeps its fingerprint; DLSS-G's camera takes the shown proportions - another picture
+    bool srSar = false;
+    if (name == "upscale" && ctx.sourceWidth && ctx.sourceHeight && !ctx.sar.Square()) {
+        const UpscaleTarget square = UpscaleOutputFor(ctx.sourceWidth, ctx.sourceHeight, p);
+        const UpscaleTarget shown = UpscaleOutputFor(ctx.sourceWidth, ctx.sourceHeight, p, true, ctx.sar);
+        srSar = shown.width != square.width || shown.height != square.height;
+        if (srSar) stageTool.app += "+sr.sar";
+    }
+    // FG takes the pixels of the colour it reads (review of TASK-0073): a pass this run makes is the grid, one on disk says (a pass of the
+    // build before stretched by an explicit target is square already), the source's frames are the source's
+    PixelAspect fgAspect = ctx.sar;
+    if (name == "fg" && !ctx.sar.Square())
+        for (const char* colour : {"color_nr", "color_sr"})
+            if (d.inputs.count(colour)) {
+                if (!state.ran.count(colour)) fgAspect = ColourPixelAspect(ctx.root / colour, ctx.sar, ctx.sourceWidth, ctx.sourceHeight);
+                // color_nr remade in this run takes NR's own colour: a color_sr on disk this run keeps (one of the build before may be
+                // square already), else the grid (review of TASK-0073)
+                else if (std::string(colour) == "color_nr" && state.fp.count("color_sr") && !state.ran.count("color_sr"))
+                    fgAspect = ColourPixelAspect(ctx.root / "color_sr", ctx.sar, ctx.sourceWidth, ctx.sourceHeight);
+                break;
+            }
+    const bool fgSar = name == "fg" && !fgAspect.Square() && Get<std::string>(p, "backend", "dlssg") == "dlssg";
+    if (fgSar) stageTool.app += "+fg.sar";
     const PassFingerprint fp = ComputeFingerprint(name, ctx.sourceHash, p, d.inputs, stageTool, ctx.sourceFormat);
     d.fingerprint = fp.value;
     d.sourceFormat = ctx.sourceFormat;
@@ -736,6 +768,15 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
             // the +sr.cap fingerprint of the long-side size
             d.diff["tool"]["app"] = nlohmann::json::array({kPassToolVersion, fp.tool.app});
             run("tool_changed", "upscale made under the 4K cap by the axes, before TASK-0072", true);
+        } else if ((srSar || (fgSar && StageParamText(m, "backend") == "dlssg")) &&
+                   StageParamText(m, "pixel_aspect") != (name == "fg" ? fgAspect : ctx.sar).Token()) {
+            // TASK-0073: a standalone upscale pass with its target in the source's pixels, or a DLSS-G pass with the camera of the grid's
+            // proportions - made before the pixels' proportions were applied: adopted it would carry the +sr.sar / +fg.sar fingerprint
+            d.diff["tool"]["app"] = nlohmann::json::array({kPassToolVersion, fp.tool.app});
+            run("tool_changed",
+                name == "fg" ? "dlssg made with the camera of the stored grid's proportions, before TASK-0073"
+                             : "upscale made with its target in the source's pixels, before TASK-0073",
+                true);
         } else if (!complete) {
             run("incomplete", incomplete, false);
         } else {
@@ -901,6 +942,8 @@ Prepared Prepare(const ProcessOptions& options) {
     r.ctx.codedWidth = r.info.codedWidth;
     r.ctx.codedHeight = r.info.codedHeight;
     r.ctx.orientation = r.info.orientation;
+    r.ctx.sar = r.info.sar;
+    r.ctx.codedSar = r.info.codedSar;
     r.ctx.vramBytes = options.vramBytes;
     return r;
 }
@@ -1003,17 +1046,33 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
     // the frame NR runs at: color_sr of the clip (the upscale's --target included), else the source - also with the upscale off (TASK-0074);
     // a color_sr of the stored frame of a turned source is no input of NR (DecideStage refuses it)
     uint32_t fw = ctx.sourceWidth, fh = ctx.sourceHeight;
+    PixelAspect colourSar = ctx.sar;  // the pixels of that frame: a color_sr of the build before may be square already (review of TASK-0073)
+    std::optional<std::pair<uint32_t, uint32_t>> colourShown;  // ... and as shown: the upscale's target it records
     try {
         if (!ctx.switchedOff.count("color_sr") && Manifest::Exists(ctx.root / "color_sr"))
             if (const Manifest sr = Manifest::Load(ctx.root / "color_sr");
-                PassOfClip(sr) && !MadeFromStoredFrame(sr, ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
+                PassOfClip(sr) && !MadeFromStoredFrame(sr, ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight, ctx.codedSar)) {
                 fw = sr.width;
                 fh = sr.height;
+                colourSar = PassPixelAspect(sr, ctx.sar, ctx.sourceWidth, ctx.sourceHeight);
+                colourShown = PassShownSize(sr, colourSar);
             }
     } catch (const std::exception&) {
     }
     if (fw == 0 || fh == 0 || info->width == 0 || info->height == 0) return;
-    const double off = (static_cast<double>(info->width) / info->height) / (static_cast<double>(fw) / fh) - 1.0;
+    const double mask = static_cast<double>(info->width) / info->height;
+    double off = mask / (static_cast<double>(fw) / fh) - 1.0;
+    // TASK-0073: an anamorphic source is shown (and its masks drawn) stretched - a mask of the frame as shown fits as well: NR lays it on
+    // its grid; the warning names the frame as shown
+    if (!colourSar.Square()) {
+        const auto [sw, sh] = colourShown ? *colourShown : colourSar.DisplaySize(fw, fh);
+        const double shownOff = mask / (static_cast<double>(sw) / sh) - 1.0;
+        if (std::fabs(off) > 0.01) {
+            off = shownOff;
+            fw = sw;
+            fh = sh;
+        }
+    }
     if (std::fabs(off) > 0.01)
         d.warnings.push_back("Маска управления " + std::to_string(info->width) + "×" + std::to_string(info->height) + " растянется на кадр " +
                              std::to_string(fw) + "×" + std::to_string(fh) + " без сохранения пропорций (разница " +
@@ -1050,7 +1109,11 @@ void AdviseTurnedMasks(const RunContext& ctx, StageDecision& d) {
         if (!ctx.orientation.SwapsAxes() || !mw || !mh || !ctx.codedWidth || !ctx.codedHeight) continue;
         const double aspect = static_cast<double>(mw) / mh;
         const double stored = static_cast<double>(ctx.codedWidth) / ctx.codedHeight, shown = static_cast<double>(ctx.sourceWidth) / ctx.sourceHeight;
-        if (std::fabs(aspect / stored - 1.0) <= 0.01 && std::fabs(aspect / shown - 1.0) > 0.01) sideways.push_back(pass);
+        // ... or the stored frame as players show it unturned: an anamorphic one stretched (720x480 at 32:27 - 854x480, review of TASK-0073)
+        const auto [cw, ch] = ctx.codedSar.DisplaySize(ctx.codedWidth, ctx.codedHeight);
+        const double storedShown = static_cast<double>(cw) / ch;
+        if ((std::fabs(aspect / stored - 1.0) <= 0.01 || std::fabs(aspect / storedShown - 1.0) <= 0.01) && std::fabs(aspect / shown - 1.0) > 0.01)
+            sideways.push_back(pass);
     }
     if (!sideways.empty()) {
         std::vector<std::string> names;  // as the GUI names them: «маска управления», «маска ui»
@@ -1068,7 +1131,7 @@ void AdviseTurnedMasks(const RunContext& ctx, StageDecision& d) {
         try {
             // judged as the plan judges an input: the label, or (no label) the stored frame's proportions (review of TASK-0072)
             if (Manifest::Exists(ctx.root / pass) &&
-                MadeFromStoredFrame(Manifest::Load(ctx.root / pass), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
+                MadeFromStoredFrame(Manifest::Load(ctx.root / pass), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight, ctx.codedSar)) {
                 const char* shown = ctx.orientation.rotate ? (ctx.orientation.hflip ? "повёрнутому и отражённому" : "повёрнутому") : "отражённому";
                 d.warnings.push_back("Проект обработан до учёта поворота источника (источник " + TurnRu(ctx.orientation) +
                                      "): маски, сделанные по прежнему кадру, лягут неправильно — проверьте их по " + shown + " кадру");
@@ -1078,17 +1141,32 @@ void AdviseTurnedMasks(const RunContext& ctx, StageDecision& d) {
         }
 }
 
-// TASK-0072: an explicit target of the stored frame's proportions for a source shown turned stretches the picture.
-void AdviseTurnedTarget(const RunContext& ctx, StageDecision& d) {
-    if (!ctx.orientation.SwapsAxes() || !ctx.codedWidth || !ctx.codedHeight || !ctx.sourceWidth || !ctx.sourceHeight) return;
+// TASK-0072: an explicit target of the stored frame's proportions for a source shown turned stretches the picture. TASK-0073: an anamorphic
+// source's target is of the frame as shown - one of the proportions of its grid distorts it.
+void AdviseTargetProportions(const RunContext& ctx, StageDecision& d) {
+    if (!ctx.codedWidth || !ctx.codedHeight || !ctx.sourceWidth || !ctx.sourceHeight) return;
     if (Get<bool>(d.params, "artifact_reduction_only", false)) return;  // x1: the target is not used (UpscaleStage::Setup, UpscaleOutputFor)
     const uint32_t tw = Get<uint32_t>(d.params, "target_width", 0u), th = Get<uint32_t>(d.params, "target_height", 0u);
     if (!tw || !th) return;
     const double aspect = static_cast<double>(tw) / th;
-    const double stored = static_cast<double>(ctx.codedWidth) / ctx.codedHeight, shown = static_cast<double>(ctx.sourceWidth) / ctx.sourceHeight;
-    if (std::fabs(aspect / stored - 1.0) <= 0.01 && std::fabs(aspect / shown - 1.0) > 0.01)
-        d.warnings.push_back("Целевой размер " + std::to_string(tw) + "×" + std::to_string(th) + " — пропорции бокового кадра, а источник показывается повёрнутым (" +
-                             std::to_string(ctx.sourceWidth) + "×" + std::to_string(ctx.sourceHeight) + "): картинка растянется");
+    const std::string target = "Целевой размер " + std::to_string(tw) + "×" + std::to_string(th);
+    const double grid = static_cast<double>(ctx.sourceWidth) / ctx.sourceHeight;
+    const auto [sw, sh] = ctx.sar.DisplaySize(ctx.sourceWidth, ctx.sourceHeight);  // the frame as shown (the grid when square)
+    const double shown = static_cast<double>(sw) / sh;
+    if (ctx.orientation.SwapsAxes()) {
+        // the stored frame - its grid, or as players show it unturned (an anamorphic one: 720x480 at 32:27 is 854x480, review of TASK-0073)
+        const auto [cw, ch] = ctx.codedSar.DisplaySize(ctx.codedWidth, ctx.codedHeight);
+        const double stored = static_cast<double>(ctx.codedWidth) / ctx.codedHeight, storedShown = static_cast<double>(cw) / ch;
+        if ((std::fabs(aspect / stored - 1.0) <= 0.01 || std::fabs(aspect / storedShown - 1.0) <= 0.01) && std::fabs(aspect / shown - 1.0) > 0.01) {
+            d.warnings.push_back(target + " — пропорции бокового кадра, а источник показывается повёрнутым (" + std::to_string(sw) + "×" +
+                                 std::to_string(sh) + "): картинка растянется");
+            return;
+        }
+    }
+    if (ctx.sar.Square()) return;
+    if (std::fabs(aspect / grid - 1.0) <= 0.01 && std::fabs(aspect / shown - 1.0) > 0.01)
+        d.warnings.push_back(target + " — пропорции кадра в пикселях источника, а у источника пиксели " + ctx.sar.Token() + ": он показывается " +
+                             std::to_string(sw) + "×" + std::to_string(sh) + ". Цель задаётся в пикселях показа — картинка исказится");
 }
 
 void AdviseStage(const RunContext& ctx, StageDecision& d) {
@@ -1122,7 +1200,7 @@ void AdviseStage(const RunContext& ctx, StageDecision& d) {
         if (!NrBypassParams(d.params)) AdviseTurnedMasks(ctx, d);
         return;
     }
-    if (d.name == "upscale") AdviseTurnedTarget(ctx, d);
+    if (d.name == "upscale") AdviseTargetProportions(ctx, d);
     if (d.name != "depth") return;
     const std::string backend = Get<std::string>(d.params, "backend", "da3");
     if (DepthFamilyOf(backend).empty()) return;
@@ -1284,13 +1362,22 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     // TASK-0072: a source shown turned - a colour pass made from its stored (sideways) frame would give a sideways result: refused. RunProcess
     // does not hand one over (a colour pass of a stage off is not the result, TASK-0074; the stages on remake theirs) - the last line for a
     // color_nr an NR skipped at run time could not move aside (TASK-0071) and for direct callers
-    if (MadeFromStoredFrame(m, info.orientation, info.width, info.height, info.codedWidth, info.codedHeight))
+    if (MadeFromStoredFrame(m, info.orientation, info.width, info.height, info.codedWidth, info.codedHeight, info.codedSar))
         Throw("process: " + passDir.string() + " was made from the stored frame of a source shown " + info.orientation.Describe() +
               ": the result would not be shown so - enable the stage that makes it or remove the pass");
     const OutputFormat of = ResolveOutputFormat(encode.codec, encode.format, SourceLayout(info));  // the stream's chroma, not a turn's 4:4:4
-    FrameDesc target = of.desc;
-    target.width = m.width;
-    target.height = m.height;
+    // TASK-0073: a pass of an anamorphic source is its grid - stretched to square pixels here (Lanczos: the stretched axis, both when fit
+    // into the cap), so that every player
+    // shows the result in its proportions; `grid` is the frame converted, `target` the one written
+    const PixelAspect sar = PassPixelAspect(m, info.sar, info.width, info.height);
+    const auto [rw, rh] = PassResultSize(m, info.sar, info.width, info.height);
+    FrameDesc grid = of.desc;
+    grid.width = m.width;
+    grid.height = m.height;
+    FrameDesc target = grid;
+    target.width = rw;
+    target.height = rh;
+    if (!sar.Square()) Log()->info("encode: the pass {}x{} has pixels {} - stretched to {}x{} square ones", m.width, m.height, sar.Token(), rw, rh);
     const ColorInfo ci = ColorInfoFromStream(info);
     VideoEncoder::Options eo;
     eo.codec = encode.codec;
@@ -1299,9 +1386,9 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     eo.color = ColorTagsFor(ci, info);
     eo.metadata = encode.metadata;
     // no `b` given: the bitrate for this output (NVENC's own default is far too low for 4K)
-    eo.codecOptions = EffectiveCodecOptions(encode.codec, encode.codecOptions, m.width, m.height, eo.frameRate.ToDouble());
+    eo.codecOptions = EffectiveCodecOptions(encode.codec, encode.codecOptions, rw, rh, eo.frameRate.ToDouble());
     if (!encode.codecOptions.count("b") && eo.codecOptions.count("b"))
-        Log()->info("encode: bitrate {} chosen for {}x{} at {:.3g} fps ({}); --codec-opt b=... overrides", eo.codecOptions.at("b"), m.width, m.height,
+        Log()->info("encode: bitrate {} chosen for {}x{} at {:.3g} fps ({}); --codec-opt b=... overrides", eo.codecOptions.at("b"), rw, rh,
                     eo.frameRate.ToDouble(), encode.codec);
     VideoEncoder encoder(output, target, eo);
     Log()->info("encode: {} as {} ({}) from a {} source{}", encode.codec, target.Describe(), encoder.PixelFormatName(), info.decoded.Describe(),
@@ -1310,6 +1397,7 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     r.fps = eo.frameRate;
     r.format = target;
     r.pixelFormat = encoder.PixelFormatName();
+    r.codecOptions = eo.codecOptions;
     if (decoder.HasAudio()) {
         encoder.AddAudioStreamCopy(decoder.AudioCodecParameters(), decoder.AudioTimeBase());
         decoder.SetAudioPacketSink([&encoder](AVPacket* pkt) { encoder.WriteAudioPacket(pkt); });
@@ -1322,6 +1410,7 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     if (progress) progress(0, total);
     encoder.Open();
     CpuFrame src;
+    YuvResizer stretch;
     int64_t s = 0;
     while ((maxSourceFrames < 0 || s < maxSourceFrames) && decoder.NextFrame(src)) {  // decoding the source pumps its audio packets
         for (int k = 0; k < mult; ++k) {
@@ -1329,7 +1418,12 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
             if (!pass.HasFrame(m.firstFrame + idx)) break;
             const PassImage rgb = pass.ReadFrame(m.firstFrame + idx);
             CpuFrame yuv;
-            RgbToYuv(rgb, ci, target, yuv);
+            RgbToYuv(rgb, ci, grid, yuv);
+            if (!sar.Square()) {
+                CpuFrame wide;
+                stretch.Resize(yuv, rw, rh, wide);
+                yuv = std::move(wide);
+            }
             yuv.index = idx;
             yuv.pts = idx;
             encoder.WriteFrame(yuv);
@@ -1418,13 +1512,15 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             eopt.timeBase = info.timeBase;
             eopt.codecOptions = EffectiveCodecOptions(options.codec, options.codecOptions, info.width, info.height, info.frameRate.ToDouble());
             eopt.color = ColorTagsFor(ColorInfoFromStream(info), info);
+            eopt.sar = info.sar;  // TASK-0073: the grid passes through as it is, its pixels' proportions with it (turned with the frames)
             const OutputFormat of = ResolveOutputFormat(options.codec, options.outputFormat, SourceLayout(info));  // the stream's chroma (TASK-0072)
             FrameDesc target = of.desc;
             target.width = info.width;
             target.height = info.height;
             VideoEncoder encoder(partial.Path(), target, eopt);
-            Log()->info("passthrough: {} as {} ({}) from a {} source{}{}{}", options.codec, target.Describe(), encoder.PixelFormatName(), info.decoded.Describe(),
-                        target == info.decoded ? ", bit-exact" : ", converted", info.orientation.Identity() ? "" : ", " + info.orientation.Describe(),
+            Log()->info("passthrough: {} as {} ({}) from a {} source{}{}{}{}", options.codec, target.Describe(), encoder.PixelFormatName(),
+                        info.decoded.Describe(), target == info.decoded ? ", bit-exact" : ", converted",
+                        info.orientation.Identity() ? "" : ", " + info.orientation.Describe(), info.sar.Square() ? "" : ", pixels " + info.sar.Token() + " kept",
                         of.reason.empty() ? "" : " — " + of.reason);
             result.codec = options.codec;
             result.outputFormat = target;
@@ -1461,7 +1557,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             result.framesIn = stats.framesOut;
             result.outputFps = info.frameRate;
             result.audio = encoder.AudioPacketsWritten() > 0;  // a source track without packets: MP4 and MOV leave the track out
-            expect = ResultExpectation{target.width, target.height, stats.framesOut, result.audio};
+            expect = ResultExpectation{target.width, target.height, stats.framesOut, result.audio, info.sar};
         } catch (...) {
             partial.DiscardIfWritten();  // the encoder is gone with its scope: the file is closed
             throw;
@@ -1936,7 +2032,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         es.format = options.outputFormat;
         if (options.settingsNote) {
             // PR-11 (spec §2g): what made the result, from the stages' own records - the result is not a pass, no fingerprint changes
-            const nlohmann::json settings = BuildSettingsJson(root, result.finalPass.filename().string(), ctx.orientation);
+            const nlohmann::json settings = BuildSettingsJson(root, result.finalPass.filename().string(), ctx.orientation, ctx.codedSar);
             es.metadata["comment"] = SettingsNoteText(settings);
             std::string ext = options.output.extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });

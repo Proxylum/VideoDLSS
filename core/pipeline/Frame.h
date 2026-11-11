@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <string_view>
 #include <vector>
 
@@ -70,6 +71,35 @@ struct DisplayOrientation {
 
 // The orientation a token names ("" is the identity); nullopt for anything else.
 std::optional<DisplayOrientation> OrientationFromToken(std::string_view token);
+
+// The proportions of a pixel (TASK-0073: an anamorphic source - DVD 720x480 at 32:27 is shown 16:9): width : height of one sample. 0:1
+// (and 1:1) is square. The stages work on the stored grid; `process` stretches its result to square pixels when it encodes it.
+struct PixelAspect {
+    uint32_t num = 0;
+    uint32_t den = 1;
+
+    bool Square() const { return num == 0 || num == den; }
+    double Value() const { return Square() ? 1.0 : static_cast<double>(num) / den; }
+    PixelAspect Inverse() const { return Square() ? PixelAspect{} : PixelAspect{den, num}; }
+    // "" (square) | "32:27": in logs, the settings note
+    std::string Token() const;
+    // What a colour pass of a non-square source records of its pixels (stage_params.pixel_aspect): "32:27", or "1:1" for pixels known to be
+    // square ({1, 1}: a pass of the build before that an explicit target stretched already); "" for {} - a square source records nothing
+    std::string Stamp() const;
+    // The frame a w x h grid of these pixels is shown as, in square pixels, nothing narrowed: wider than 1 - the width grows, narrower -
+    // the height grows (720x480 at 8:9 -> 720x540); even sides. The grid itself when square.
+    std::pair<uint32_t, uint32_t> DisplaySize(uint32_t w, uint32_t h) const;
+    // Whether these pixels move the frame as shown of a w x h grid by half a pixel or more - 14400:14399 of 1694x720 (ffmpeg's scale=-2:720
+    // of a 1920x816 film) moves none: such a source is square (no stretch, no recompute)
+    bool MovesAPixel(uint32_t w, uint32_t h) const;
+
+    bool operator==(const PixelAspect& o) const { return Square() ? o.Square() : num == o.num && den == o.den; }
+};
+
+// num:den reduced; 0, negative or 1:1 - square; outside 1/4 .. 4 (a broken file: 1000:1) - square, `why` says so.
+PixelAspect PixelAspectFrom(int64_t num, int64_t den, std::string* why = nullptr);
+// A Stamp() read back: "1:1" -> {1, 1}, "32:27" -> {32, 27}; anything else (empty, malformed, not plausible) -> nullopt
+std::optional<PixelAspect> PixelAspectFromStamp(std::string_view stamp);
 
 // The layout of a stored frame `desc` once shown with `o`: the sides swapped for 90 / 270. The chroma grid must map onto itself for
 // the samples to be permuted exactly; where it does not - 4:2:2 turned by 90 / 270 (4:4:0 is not a format here), or an odd side of a

@@ -1,7 +1,10 @@
 #include "pipeline/Frame.h"
 
 #include <algorithm>
+#include <charconv>
+#include <cmath>
 #include <cstring>
+#include <numeric>
 
 #include "util/Error.h"
 
@@ -103,6 +106,52 @@ std::optional<DisplayOrientation> OrientationFromToken(std::string_view token) {
         for (const bool h : {false, true})
             if (const DisplayOrientation o{static_cast<uint16_t>(r), h}; o.Token() == token) return o;
     return std::nullopt;
+}
+
+std::string PixelAspect::Token() const { return Square() ? std::string() : std::to_string(num) + ":" + std::to_string(den); }
+
+std::string PixelAspect::Stamp() const { return num == 0 ? std::string() : Square() ? std::string("1:1") : Token(); }
+
+bool PixelAspect::MovesAPixel(uint32_t w, uint32_t h) const {
+    if (Square()) return false;
+    const double v = Value();
+    return v > 1.0 ? static_cast<double>(w) * (v - 1.0) >= 0.5 : static_cast<double>(h) * (1.0 / v - 1.0) >= 0.5;
+}
+
+std::optional<PixelAspect> PixelAspectFromStamp(std::string_view stamp) {
+    const size_t colon = stamp.find(':');
+    if (colon == std::string_view::npos) return std::nullopt;
+    int64_t num = 0, den = 0;
+    const std::string_view a = stamp.substr(0, colon), b = stamp.substr(colon + 1);
+    const auto ra = std::from_chars(a.data(), a.data() + a.size(), num);
+    const auto rb = std::from_chars(b.data(), b.data() + b.size(), den);
+    if (ra.ec != std::errc() || ra.ptr != a.data() + a.size() || rb.ec != std::errc() || rb.ptr != b.data() + b.size() || num <= 0 || den <= 0)
+        return std::nullopt;
+    if (num == den) return PixelAspect{1, 1};
+    const PixelAspect p = PixelAspectFrom(num, den);
+    if (p.Square()) return std::nullopt;  // not plausible
+    return p;
+}
+
+std::pair<uint32_t, uint32_t> PixelAspect::DisplaySize(uint32_t w, uint32_t h) const {
+    if (Square() || !w || !h) return {w, h};  // square, or a size not known yet: as is
+    auto even = [](double v) { return std::max<uint32_t>(2u, static_cast<uint32_t>(std::lround(v / 2.0)) * 2u); };
+    if (num > den) return {even(static_cast<double>(w) * num / den), h};
+    return {w, even(static_cast<double>(h) * den / num)};
+}
+
+PixelAspect PixelAspectFrom(int64_t num, int64_t den, std::string* why) {
+    if (num <= 0 || den <= 0) return {};
+    const int64_t g = std::gcd(num, den);
+    num /= g;
+    den /= g;
+    if (num == den) return {};
+    const double v = static_cast<double>(num) / static_cast<double>(den);
+    if (v < 0.25 || v > 4.0 || num > 65535 || den > 65535) {
+        if (why) *why = "a pixel aspect of " + std::to_string(num) + ":" + std::to_string(den) + " is not plausible: the pixels are taken as square";
+        return {};
+    }
+    return {static_cast<uint32_t>(num), static_cast<uint32_t>(den)};
 }
 
 namespace {

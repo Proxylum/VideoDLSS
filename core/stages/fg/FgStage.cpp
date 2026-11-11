@@ -75,6 +75,7 @@ void FgStage::Setup(uint32_t w, uint32_t h) {
     cfg.fp16 = options_.fp16;
     cfg.modelsDir = options_.modelsDir;
     cfg.requireDriver = options_.requireDriver;
+    cfg.pixelAspect = options_.sar;
     if (depthReader_) {
         cfg.guideWidth = depthReader_->Man().width;
         cfg.guideHeight = depthReader_->Man().height;
@@ -119,6 +120,9 @@ void FgStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams = generator_->Describe();
         m.stageParams["multiplier"] = options_.multiplier;
         m.stageParams["source_fps"] = options_.fps.num > 0 ? options_.fps.ToDouble() : 0.0;
+        // TASK-0073: what `process` encodes by, what the camera of DLSS-G took; a standalone DLSS-G pass without it predates that (DecideStage)
+        if (const std::string px = options_.sar.Stamp(); !px.empty()) m.stageParams["pixel_aspect"] = px;
+        if (const auto shown = ColourShownSize(options_.colorDir, w, h)) m.stageParams["shown_size"] = {shown->first, shown->second};  // passed on
         writer_ = std::make_unique<PassWriter>(OutDir(), m);
     }
     if (!options_.videoOut.empty()) {
@@ -126,6 +130,7 @@ void FgStage::Setup(uint32_t w, uint32_t h) {
         eo.codec = options_.videoCodec;
         const Rational base = options_.fps.num > 0 ? options_.fps : Rational{30, 1};
         eo.frameRate = Rational{base.num * options_.multiplier, base.den};
+        eo.sar = options_.sar;  // the grid, shown in its proportions (TASK-0073)
         encoder_ = std::make_unique<VideoEncoder>(options_.videoOut, FrameDesc{w, h, PixelFormat::Yuv420p}, eo);
         encoder_->Open();
     }
@@ -292,6 +297,9 @@ FgRunResult RunFg(VideoDecoder& decoder, D3D12Device& device, FgStageOptions opt
     const auto& info = decoder.Info();
     options.color = ColorInfoFromStream(info);
     options.fps = info.frameRate;
+    // TASK-0073: the pixels of the colour FG reads (a pass of the build before may be square already) - process (its child process too) and
+    // the standalone command alike
+    options.sar = ColourPixelAspect(options.colorDir, info.sar, info.width, info.height);
     Pipeline pipeline(device, 4);
     auto stage = std::make_unique<FgStage>(options);
     FgStage* raw = stage.get();

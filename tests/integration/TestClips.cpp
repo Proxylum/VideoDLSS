@@ -108,7 +108,7 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     const std::string url = path.string();
 
     AVFormatContext* fmt = nullptr;
-    CheckAv(avformat_alloc_output_context2(&fmt, nullptr, nullptr, url.c_str()), "alloc output");
+    CheckAv(avformat_alloc_output_context2(&fmt, nullptr, spec.format.empty() ? nullptr : spec.format.c_str(), url.c_str()), "alloc output");
 
     // --- video (ffv1, lossless, unless the spec says otherwise) ---
     const AVCodec* venc = avcodec_find_encoder_by_name(spec.codec.c_str());
@@ -123,12 +123,22 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     vctx->time_base = AVRational{spec.fpsDen, spec.fpsNum};
     vctx->framerate = AVRational{spec.fpsNum, spec.fpsDen};
     if (spec.gop > 0) vctx->gop_size = spec.gop;
+    const AVRational sar = spec.sar.Square() ? AVRational{0, 1} : AVRational{static_cast<int>(spec.sar.num), static_cast<int>(spec.sar.den)};
+    if (spec.sarIn != "container") {
+        vctx->sample_aspect_ratio = sar;
+        if (!spec.sar.Square() && spec.codec == "ffv1") vctx->level = 3;  // the slices carry the frame's proportions from version 3
+    }
     if (fmt->oformat->flags & AVFMT_GLOBALHEADER) vctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     CheckAv(avcodec_open2(vctx, venc, nullptr), ("open " + spec.codec + " (" + spec.pixFmt + ")").c_str());
     AVStream* vs = avformat_new_stream(fmt, nullptr);
     vs->time_base = vctx->time_base;
     vs->avg_frame_rate = vctx->framerate;
     CheckAv(avcodec_parameters_from_context(vs->codecpar, vctx), "video params");
+    if (spec.sarIn != "codec") vs->sample_aspect_ratio = sar;
+    if (!spec.containerSar.Square()) {
+        vs->codecpar->sample_aspect_ratio = AVRational{0, 1};
+        vs->sample_aspect_ratio = AVRational{static_cast<int>(spec.containerSar.num), static_cast<int>(spec.containerSar.den)};
+    }
     if (!spec.orientation.Identity()) {  // TASK-0072: a phone video's display matrix
         AVPacketSideData* sd = av_packet_side_data_new(&vs->codecpar->coded_side_data, &vs->codecpar->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX,
                                                        9 * sizeof(int32_t), 0);
@@ -182,6 +192,7 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
         frame->format = encFmt;
         frame->width = vctx->width;
         frame->height = vctx->height;
+        frame->sample_aspect_ratio = spec.sarIn != "container" ? sar : AVRational{0, 1};
         CheckAv(av_frame_get_buffer(frame, 0), "frame buffer");
         const size_t W = spec.width, H = spec.height, cw = src.desc.PlaneWidth(1);
         auto row16 = [&](int plane, size_t r) { return reinterpret_cast<uint16_t*>(frame->data[plane] + static_cast<ptrdiff_t>(r) * frame->linesize[plane]); };
@@ -273,6 +284,12 @@ StreamSummary Summarize(const std::filesystem::path& path) {
                 s.colorSpace = static_cast<int>(p->color_space);
                 s.colorPrimaries = static_cast<int>(p->color_primaries);
                 s.colorTrc = static_cast<int>(p->color_trc);
+                s.width = static_cast<uint32_t>(p->width);
+                s.height = static_cast<uint32_t>(p->height);
+                const AVRational st = fmt->streams[i]->sample_aspect_ratio, guess = av_guess_sample_aspect_ratio(fmt, fmt->streams[i], nullptr);
+                s.streamSar = PixelAspectFrom(st.num, st.den);
+                s.codecSar = PixelAspectFrom(p->sample_aspect_ratio.num, p->sample_aspect_ratio.den);
+                s.sar = PixelAspectFrom(guess.num, guess.den);
             }
             ++s.videoStreams;
         }
@@ -283,6 +300,7 @@ StreamSummary Summarize(const std::filesystem::path& path) {
             s.audioCodec = d ? d->name : "?";
         }
     }
+    if (const AVDictionaryEntry* c = av_dict_get(fmt->metadata, "comment", nullptr, 0)) s.comment = c->value;
     AVPacket* pkt = av_packet_alloc();
     while (av_read_frame(fmt, pkt) >= 0) {
         if (pkt->stream_index == audioIndex) {

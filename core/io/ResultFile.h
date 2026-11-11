@@ -4,6 +4,8 @@
 #include <filesystem>
 #include <string>
 
+#include "pipeline/Frame.h"
+
 namespace dlssvid {
 
 // TASK-0070: the result of `process` is written next to its place and replaces the previous result in one rename, only when it is
@@ -17,6 +19,7 @@ struct ResultExpectation {
     uint32_t width = 0, height = 0;
     int64_t frames = -1;  // checked in MP4 and MOV, which count one sample per frame; < 0: not checked
     bool audio = false;   // audio packets were written (a track that got none is left out of MP4 and MOV)
+    PixelAspect sar;      // TASK-0073: the pixels' proportions written (square: none) - a muxer that lost them is caught
 };
 
 // Empty when `file` opens as a video of that size, frame count and audio; else what differs.

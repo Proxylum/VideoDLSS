@@ -27,6 +27,7 @@ struct UpscaleStageOptions {
     double scale = 2.0;                    // x1.5 / x2 / x3
     uint32_t targetWidth = 0, targetHeight = 0;  // explicit target instead of `scale`
     uint32_t maxWidth = 3840, maxHeight = 2160;  // v1 cap (ТЗ §3)
+    PixelAspect sar;                       // TASK-0073: the input's pixels (RunUpscale: the source's) - the target and the cap are of the frame as shown
     float sharpness = 0.5f;                // nis
     std::string preset = "default";        // dlss render preset hint
     bool artifactReductionOnly = false;    // no scaling (x1): dlss = DLAA, nis = NVSharpen

@@ -262,8 +262,8 @@ std::vector<StageSchema> Build() {
             Tuning(Number("jitter_sign", "Знак джиттера", ParamType::Float, 1.0, -1.0, 1.0, 2.0, ParamWidget::Spin, "", true)),
             Tuning(Flag("artifact_reduction_only", "Без масштабирования (×1)", false,
                         "DLSS — сглаживание DLAA, NIS — повышение резкости; артефакты сжатия не подавляются")),
-            Tuning(Number("target_width", "Ширина цели", ParamType::Int, 0, 0, 7680, 2, ParamWidget::Spin, "0 = по масштабу", true)),
-            Tuning(Number("target_height", "Высота цели", ParamType::Int, 0, 0, 4320, 2, ParamWidget::Spin, "0 = по масштабу", true)),
+            Tuning(Number("target_width", "Ширина цели", ParamType::Int, 0, 0, 7680, 2, ParamWidget::Spin, "0 = по масштабу; в пикселях показа", true)),
+            Tuning(Number("target_height", "Высота цели", ParamType::Int, 0, 0, 4320, 2, ParamWidget::Spin, "0 = по масштабу; в пикселях показа", true)),
             Tuning(Flag("no_fallback", "Без запасного NIS", false, "ошибка вместо перехода на NIS")),
             Tuning(Enum("format", "Формат пасса", "exr", Formats(true), ParamWidget::Select, "", true)),
         };

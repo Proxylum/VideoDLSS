@@ -41,6 +41,9 @@ public:
         // container (global) metadata, written with the header: `comment` in every container; a custom key only where the muxer keeps
         // it (Matroska tags; mp4 / mov keep the well-known keys) - PR-11, the settings note
         std::map<std::string, std::string> metadata;
+        // TASK-0073: the pixels' proportions written to the codec and the stream (MP4 / MOV pasp, MKV DisplayWidth, AVI vprp, NVENC's
+        // VUI); square: nothing written
+        PixelAspect sar;
     };
 
     VideoEncoder(const std::filesystem::path& path, const FrameDesc& frameDesc, const Options& options);

@@ -10,6 +10,7 @@
 
 #include "gpu/D3D12Device.h"
 #include "passes/PassImage.h"
+#include "pipeline/Frame.h"
 #include "stages/nr/INrBackend.h"  // NvidiaDriverVersion, GpuArchitectureFromName
 
 namespace dlssvid {
@@ -31,6 +32,7 @@ struct FgConfig {
     std::string model = "rife49";            // rife: registry id (rife49 | rife48 | rife47)
     bool fp16 = true;                        // rife
     std::string modelsDir;                   // rife: folder with registry.json (empty = default)
+    PixelAspect pixelAspect;                 // dlssg: the colour's pixels (TASK-0073) - the camera's aspect is of the frame as shown
     nlohmann::json extra = nlohmann::json::object();
 };
 
@@ -100,13 +102,15 @@ inline int64_t FgFrameCount(int64_t reals, int mult) { return reals <= 0 ? 0 : (
 
 // Synthetic camera for DLSS-G on video (HACK, docs/architecture.md): a perspective projection with the frame's aspect
 // ratio, its inverse, identity clip-to-previous-clip (the camera does not move; all motion is in the motion vectors).
+// TASK-0073: the aspect is of the frame as shown (the guide's cameraAspectRatio: view space width / height) - width x height of pixels
+// `sar` (an anamorphic source's grid: 1440x960 at 32:27 is 16:9).
 struct FgCamera {
     float viewToClip[16];  // row-major (post-multiplication), as the DLSS-FG guide expects
     float clipToView[16];
     float identity[16];
     float nearPlane = 0.1f, farPlane = 1000.f, fovRadians = 0.f, aspect = 1.f;
 };
-FgCamera BuildFgCamera(uint32_t width, uint32_t height, float fovDegrees = 60.f, float nearPlane = 0.1f, float farPlane = 1000.f);
+FgCamera BuildFgCamera(uint32_t width, uint32_t height, PixelAspect sar = {}, float fovDegrees = 60.f, float nearPlane = 0.1f, float farPlane = 1000.f);
 // 4x4 row-major multiply (tests: viewToClip * clipToView == I).
 void Mul4x4(const float* a, const float* b, float* out);
 

@@ -162,7 +162,7 @@ void DlssgFrameGenerator::Init(D3D12Device& device, const FgConfig& config) {
         im.fallbackMv = device.CreateTexture2D(gw, gh, DXGI_FORMAT_R32G32_FLOAT);
         device.UploadTexture2D(im.fallbackMv.Get(), reinterpret_cast<const uint8_t*>(mv.data()), gw * 2 * sizeof(float));
     }
-    im.camera = BuildFgCamera(config.width, config.height);
+    im.camera = BuildFgCamera(config.width, config.height, config.pixelAspect);
     diag_.ok = true;
     Log()->info("fg: dlssg {}x{} x{} ready (guides {}x{}, backbuffer {})", config.width, config.height, config.multiplier, gw, gh, diag_.backbufferFormat);
 }
@@ -271,6 +271,7 @@ void DlssgFrameGenerator::Generate(const FgInputs& in, std::vector<PassImage>& o
 nlohmann::json DlssgFrameGenerator::Describe() const {
     nlohmann::json j = {{"backend", "dlssg"}, {"feature", static_cast<int>(NVSDK_NGX_Feature_FrameGeneration)}, {"multiplier", config_.multiplier},
                         {"backbuffer_format", diag_.backbufferFormat},  {"guides", true},           {"camera", "synthetic (fov 60, static)"}};
+    if (impl_) j["camera_aspect"] = impl_->camera.aspect;  // what cameraAspectRatio was given: the frame as shown (TASK-0073)
     j["diagnostics"] = diag_.ToJson();
     return j;
 }

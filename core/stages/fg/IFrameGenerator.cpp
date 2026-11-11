@@ -66,12 +66,12 @@ void Mul4x4(const float* a, const float* b, float* out) {
     std::memcpy(out, r, sizeof(r));
 }
 
-FgCamera BuildFgCamera(uint32_t width, uint32_t height, float fovDegrees, float nearPlane, float farPlane) {
+FgCamera BuildFgCamera(uint32_t width, uint32_t height, PixelAspect sar, float fovDegrees, float nearPlane, float farPlane) {
     FgCamera c{};
     c.nearPlane = nearPlane;
     c.farPlane = farPlane;
     c.fovRadians = fovDegrees * 3.14159265358979f / 180.f;
-    c.aspect = height ? static_cast<float>(width) / static_cast<float>(height) : 1.f;
+    c.aspect = height ? static_cast<float>(width * sar.Value() / height) : 1.f;
     const float f = 1.f / std::tan(c.fovRadians * 0.5f);
     const float n = nearPlane, fa = farPlane;
     // D3D-style perspective (z in [0, 1]), row-major with post-multiplication: v' = v * M

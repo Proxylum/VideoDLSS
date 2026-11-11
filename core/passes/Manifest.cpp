@@ -1,5 +1,6 @@
 #include "passes/Manifest.h"
 
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 
@@ -211,6 +212,63 @@ std::string Manifest::FrameFileName(int64_t frame) const {
     char buf[512];
     std::snprintf(buf, sizeof(buf), filePattern.c_str(), static_cast<long long>(frame));
     return buf;
+}
+
+std::string StageParamText(const Manifest& m, const char* key) {
+    if (!m.stageParams.is_object()) return {};
+    const auto it = m.stageParams.find(key);
+    return it != m.stageParams.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+
+PixelAspect PassPixelAspect(const Manifest& m, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH) {
+    if (sourceSar.Square()) return {};
+    if (const auto stamped = PixelAspectFromStamp(StageParamText(m, "pixel_aspect"))) return *stamped;
+    if (!m.width || !m.height || !sourceW || !sourceH) return sourceSar;
+    // off the grid's proportions: square (review of TASK-0073 - not only the proportions as shown: a target 1920x1080 of an 8:9 source)
+    const bool grid = std::fabs((static_cast<double>(m.width) / m.height) / (static_cast<double>(sourceW) / sourceH) - 1.0) <= 0.01;
+    return grid ? sourceSar : PixelAspect{1, 1};
+}
+
+bool ShownSizeMatches(std::pair<uint32_t, uint32_t> recorded, std::pair<uint32_t, uint32_t> stretched) {
+    auto within = [](uint32_t a, uint32_t b) { return std::abs(static_cast<int64_t>(a) - static_cast<int64_t>(b)) <= 4 + static_cast<int64_t>(b) / 100; };
+    return within(recorded.first, stretched.first) && within(recorded.second, stretched.second);
+}
+
+std::pair<uint32_t, uint32_t> PassShownSize(const Manifest& m, PixelAspect px) {
+    const auto stretched = px.DisplaySize(m.width, m.height);
+    if (px.Square()) return stretched;
+    if (const auto shown = RecordedShownSize(m); shown && ShownSizeMatches(*shown, stretched)) return *shown;
+    return stretched;
+}
+
+std::optional<std::pair<uint32_t, uint32_t>> RecordedShownSize(const Manifest& m) {
+    if (!m.stageParams.is_object()) return std::nullopt;
+    const auto it = m.stageParams.find("shown_size");
+    if (it == m.stageParams.end() || !it->is_array() || it->size() != 2 || !(*it)[0].is_number_integer() || !(*it)[1].is_number_integer())
+        return std::nullopt;
+    const int64_t w = (*it)[0].get<int64_t>(), h = (*it)[1].get<int64_t>();
+    if (w <= 0 || h <= 0 || w > 16384 || h > 16384) return std::nullopt;
+    return std::pair<uint32_t, uint32_t>{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+}
+
+std::optional<std::pair<uint32_t, uint32_t>> ColourShownSize(const std::filesystem::path& colorDir, uint32_t w, uint32_t h) {
+    if (colorDir.empty()) return std::nullopt;
+    try {
+        const Manifest m = Manifest::Load(colorDir);
+        if (m.width != w || m.height != h) return std::nullopt;
+        return RecordedShownSize(m);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+PixelAspect ColourPixelAspect(const std::filesystem::path& colorDir, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH) {
+    if (sourceSar.Square() || colorDir.empty()) return sourceSar;
+    try {
+        return PassPixelAspect(Manifest::Load(colorDir), sourceSar, sourceW, sourceH);
+    } catch (const std::exception&) {
+        return sourceSar;  // the stage that reads it says what is wrong with it
+    }
 }
 
 }  // namespace dlssvid

@@ -74,23 +74,26 @@ std::unique_ptr<IUpscaler> CreateUpscaler(const std::string& backend) {
 }
 
 UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uint32_t targetW, uint32_t targetH, uint32_t maxW, uint32_t maxH,
-                                   bool capByLongSide) {
+                                   bool capByLongSide, PixelAspect sar) {
     if (!inW || !inH) Throw("ResolveUpscaleTarget: empty input");
     UpscaleTarget t;
+    // TASK-0073: the input as shown - nothing narrowed: wider pixels widen it, narrower ones make it higher; square: the input itself
+    const double s = sar.Value();
+    const double inDW = s > 1.0 ? inW * s : inW, inDH = s < 1.0 ? inH / s : inH;
     double w, h;
     if (targetW && targetH) {
         w = targetW;
         h = targetH;
     } else if (targetW) {
         w = targetW;
-        h = static_cast<double>(targetW) * inH / inW;
+        h = static_cast<double>(targetW) * inDH / inDW;
     } else if (targetH) {
         h = targetH;
-        w = static_cast<double>(targetH) * inW / inH;
+        w = static_cast<double>(targetH) * inDW / inDH;
     } else {
         if (scale <= 0.0) Throw("ResolveUpscaleTarget: scale must be positive");
-        w = inW * scale;
-        h = inH * scale;
+        w = inDW * scale;
+        h = inDH * scale;
     }
     if (capByLongSide && h > w && maxW > maxH) std::swap(maxW, maxH);  // a portrait output: the long side is its height
     if (maxW && w > maxW) {
@@ -104,9 +107,40 @@ UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uin
         t.capped = true;
     }
     auto even = [](double v) { return std::max(2u, static_cast<uint32_t>(std::lround(v / 2.0)) * 2u); };
-    t.width = even(w);
-    t.height = even(h);
+    if (sar.Square()) {
+        t.width = even(w);
+        t.height = even(h);
+    } else {
+        // the shown size back in the input's pixels: the stretched axis divided. Capped - rounded down, so that the frame as shown stays
+        // within the cap (an even cap: the shown side rounds to at most it)
+        auto grid = [&](double v) { return t.capped ? std::max(2u, static_cast<uint32_t>(std::floor(v / 2.0 + 1e-9)) * 2u) : even(v); };
+        // by the scale alone, not capped: the stored side times the scale, as for square pixels - divided back from the shown size it
+        // could land a hair under a .5 and round 2 lower (706 x1.5 at 32:27: 1058.9999999999998 -> 1058, not 1060; review of TASK-0073)
+        // ... and so for a target of one side on the axis the pixels do not stretch (720x576 at 64:45, height 1060: 1326, not 1324)
+        const bool scaled = !targetW && !targetH && !t.capped;
+        const bool byHeight = targetH && !targetW && !t.capped, byWidth = targetW && !targetH && !t.capped;
+        t.width = s > 1.0 ? (scaled ? even(inW * scale) : byHeight ? even(static_cast<double>(targetH) * inW / inH) : grid(w / s)) : even(w);
+        t.height = s < 1.0 ? (scaled ? even(inH * scale) : byWidth ? even(static_cast<double>(targetW) * inH / inW) : grid(h * s)) : even(h);
+        // a source already past the cap as shown (3840x2160 at 4:3 is 5120x2160): the cap would take the grid under the input - no
+        // upscaler goes down. The input's own grid then (x1, as for square pixels), the frame as shown fit into the cap when written
+        // (review of TASK-0073)
+        if (t.capped && (t.width < inW || t.height < inH)) {
+            t.width = inW;
+            t.height = inH;
+            // ... and the frame as shown is the input as shown fit into the cap by its long side - what the encode writes of that grid
+            // (StretchedResultSize), not a target of other proportions (review of TASK-0073)
+            const auto [dw, dh] = sar.DisplaySize(inW, inH);
+            const double capLong = std::max(maxW, maxH) ? std::max(maxW, maxH) : 1e9, capShort = std::min(maxW, maxH) ? std::min(maxW, maxH) : 1e9;
+            const double k = std::min({1.0, capLong / std::max(dw, dh), capShort / std::min(dw, dh)});
+            w = dw * k;
+            h = dh * k;
+        }
+    }
     t.scale = static_cast<double>(t.width) / inW;
+    // the frame as shown: the target asked for (capped: within the cap), not the grid stretched back - two roundings could miss it by 2
+    // or, near the cap, go past it (review of TASK-0073)
+    t.displayWidth = sar.Square() ? t.width : even(w);
+    t.displayHeight = sar.Square() ? t.height : even(h);
     return t;
 }
 

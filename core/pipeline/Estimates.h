@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "passes/Manifest.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/upscale/IUpscaler.h"
 
@@ -55,6 +56,9 @@ struct SourceInfo {
     uint32_t codedWidth = 0, codedHeight = 0;  // as stored
     int bitDepth = 8;         // of the source's own pixel format
     std::string chroma = "420";
+    // TASK-0073: the proportions of a pixel in the axes of width / height (VideoStreamInfo::sar; codedSar - as stored, as ffprobe says)
+    PixelAspect sar, codedSar;
+    std::string sarFrom;      // "container" | "bitstream" | ""
 };
 
 struct StageEstimate {
@@ -69,6 +73,8 @@ struct StageEstimate {
 
 struct RunOutcome {
     uint32_t width = 0, height = 0;  // result frame
+    // TASK-0073: the frame the colour stages make - the result is it stretched to square pixels for an anamorphic source (the same else)
+    uint32_t gridWidth = 0, gridHeight = 0;
     double fps = 0.0;                // result rate
     bool audio = false;
     double seconds = 0.0;            // stages that run + the encode
@@ -83,8 +89,15 @@ struct RunOutcome {
 
 // The frame the upscale stage makes of a source of that size with these (effective) parameters - as UpscaleStage::Setup: the source's with
 // artifact_reduction_only, else the scale or target_width / target_height, even, capped at 3840x2160 by the long side (TASK-0072;
-// `capByLongSide = false`: by the axes, as before).
-UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& params, bool capByLongSide = true);
+// `capByLongSide = false`: by the axes, as before); `sar` - the source's pixels (TASK-0073: the target and the cap of the frame as shown).
+UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& params, bool capByLongSide = true, PixelAspect sar = {});
+// TASK-0073: the frame `process` writes of a colour pass w x h of pixels `sar`: stretched to square pixels (PixelAspect::DisplaySize), fit
+// into 3840x2160 by the long side when the stretch takes it beyond (an anamorphic 4K grid with no upscale to cap it: NVENC's H.264 stops at
+// 4096); square pixels - w x h as is.
+std::pair<uint32_t, uint32_t> StretchedResultSize(PixelAspect sar, uint32_t w, uint32_t h);
+// The frame `process` writes of a colour pass of a source of pixels `sourceSar` (sourceW x sourceH): of its pixels (PassPixelAspect)
+// the frame as shown it records (stage_params.shown_size: the upscale's target), else the pass stretched (StretchedResultSize).
+std::pair<uint32_t, uint32_t> PassResultSize(const Manifest& m, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH);
 
 // Combines the plan, the enabled stages' parameters and the source: resolution and rate after upscale / frame
 // generation, time and disk of what runs, time of a full run.
