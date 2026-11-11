@@ -250,7 +250,8 @@ std::string AppModel::nrPreviewBefore() const {
         const ViewportSource* nr = store_->FindSource("color_nr");
         if (nr && (!nrPreview_ || (nr->firstFrame <= nrPreview_->first && nr->lastFrame >= nrPreview_->last))) return "color_nr";
     }
-    if (hasSource("color_sr")) return "color_sr";
+    // NR's input: color_sr while the upscale is on, else the source - the color_sr of an upscale switched off is not what NR reads (TASK-0074)
+    if (stageOn("upscale") && hasSource("color_sr")) return "color_sr";
     return "source";
 }
 
@@ -892,6 +893,10 @@ StageEntry* AppModel::stageEntry(const std::string& stage) {
     return nullptr;
 }
 
+bool AppModel::stageOn(const std::string& stage) const {
+    return std::any_of(project_.stages.begin(), project_.stages.end(), [&](const StageEntry& s) { return s.name == stage && s.enabled; });
+}
+
 ProcessOptions AppModel::planOptions(bool withForce) {
     ProcessOptions o;
     o.input = project_.sourceVideo;
@@ -981,7 +986,7 @@ void AppModel::schedulePlan() { planTimer_.start(); }
 QString AppModel::planBlocker() const {
     for (const auto& d : plan_.stages)
         if (!d.error.empty()) return QString::fromStdString(d.error);
-    return QString::fromStdString(plan_.error);  // TASK-0072: no stage's
+    return {};
 }
 
 void AppModel::setStageEnabled(const std::string& stage, bool on) {

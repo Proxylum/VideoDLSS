@@ -411,24 +411,7 @@ TEST_CASE("EstimateRun of an anamorphic source: the stages make the grid, the re
     CHECK(fit.width == 3840);
     CHECK(fit.height == 518);
     CHECK(fit.gridWidth == 1000);
-    // no colour stage, yet a colour pass of a stage that is off on disk: the encode takes it - its frame, stretched (review of TASK-0073)
-    const auto root = std::filesystem::path(DLSSVID_TEST_TMP) / "aspect_final_pass";
-    std::filesystem::remove_all(root);
-    std::filesystem::create_directories(root / "color_sr");
     src.sar = PixelAspect{32, 27};
-    Manifest sr = Manifest::ForPass(PassKind::ColorSr, 108, 72, FileFormat::Exr);
-    sr.stageParams = {{"pixel_aspect", "32:27"}};
-    sr.Save(root / "color_sr");
-    ProcessPlan left;
-    left.passesRoot = root;
-    left.finalPass = "color_sr";
-    for (auto& s : stages) s.enabled = false;
-    const RunOutcome kept = EstimateRun(left, stages, src);
-    CHECK(kept.width == 128);
-    CHECK(kept.height == 72);
-    CHECK(kept.gridWidth == 108);
-    left.finalPass.clear();
-    CHECK(EstimateRun(left, stages, src).width == 54);  // passed through
     // an upscale pass reused (of the build before: no shown_size record) - the result is its grid stretched, as the encode writes it,
     // not the target as shown (review of TASK-0073: 702x480 at 32:27 x1.5 - 1250 written, 1248 said)
     const auto reusedRoot = std::filesystem::path(DLSSVID_TEST_TMP) / "aspect_reused_pass";

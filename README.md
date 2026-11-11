@@ -402,7 +402,10 @@ dlssvid compare --ref full_rate.mp4 --test passes\color_fg --start 1 --step 2   
 ```
 
 The whole pipeline (stage 8): stages run one after another over the pass cache, a complete pass is reused, the last
-colour pass is encoded with the audio copied from the source. Stage parameters are the project's JSON keys. A pass is
+colour pass is encoded with the audio copied from the source. A colour stage switched off (an unticked card, a stage
+`--stages` leaves out) is out of the result: its `color_sr` / `color_nr` / `color_fg` stays on disk but is neither read by
+the stages below nor encoded, and counts again when the stage is on; depth, vectors and the scene list of a stage off are
+still read as they are (external passes). Stage parameters are the project's JSON keys. A pass is
 reused only when its fingerprint matches (stage 9: source hash, canonical parameters, the fingerprints of the passes it
 read, the tool — app version, backend, model, NVIDIA DLL hash); a changed parameter recomputes that stage and the ones
 below it, the replaced folder is kept as a version in `<pass>.v/` and comes back without recomputing when the
@@ -482,15 +485,16 @@ tagged with the matrix and range used (BT.709 / BT.601, limited / full) and the 
 MP4 / MOV gets the `hvc1` sample entry. A phone video stored landscape with a display matrix (or the old `rotate` tag) is
 processed as players show it: the decoder turns the frames (a 4:2:2 stream turned by 90 deg, or a subsampled one with an odd
 side reversed, decodes as 4:4:4 of the same bit depth; the result's «auto» chroma stays the stream's), every stage and the
-viewport see them upright (a pass of a stage that is off, made from the stored frame by an earlier build or a standalone
-command, is not used: the plan refuses until that stage is switched on or the pass is deleted), and the result
+viewport see them upright (a depth or vectors pass of a stage that is off, made from the stored frame by an earlier build or a
+standalone command, is not used: the plan refuses until that stage is switched on or the pass is deleted; a colour pass of a
+stage that is off is never read anyway), and the result
 is written upright without a matrix (`dlssvid info` prints an `orientation:` line for such a file). The 4K cap of the
 upscale is by the long side: a portrait output goes up to 2160x3840. A source of non-square pixels (DVD 720x480 at 32:27,
 PAL 64:45, HDV 1440x1080 at 4:3) is processed on its stored samples and shown stretched as in a player: the scale, the
 target and the 4K cap are of the frame as shown (`--target 1920x1080` gives 1920x1080 as shown), the result of `process` is
 stretched to square pixels when it is encoded (DVD x2: 1706x960; fit into 3840x2160 when the stretch would go beyond),
-passthrough (and a `process` run that encodes no colour pass: upscale, NR and FG off and none of their colour passes on disk -
-one left there is encoded, stretched) keeps the stored grid (not resampled) and writes its pixel aspect; a pixel aspect that moves no pixel of the frame (14400:14399 of 1694x720) is taken as square; `dlssvid info` prints a `pixels:` line. HDR (PQ / HLG) stays out of scope: such sources are treated as SDR. The NVIDIA
+passthrough (and a `process` run with upscale, NR and frame generation all off) keeps the stored grid (not resampled) and
+writes its pixel aspect; a pixel aspect that moves no pixel of the frame (14400:14399 of 1694x720) is taken as square; `dlssvid info` prints a `pixels:` line. HDR (PQ / HLG) stays out of scope: such sources are treated as SDR. The NVIDIA
 passes keep the 10-bit gradations too: a shallow 10-bit ramp comes out of DLSS SR, NR and Frame Generation with one-code
 steps, no 8-bit staircase (measured, `docs/benchmarks.md`; the `[precision]` tests watch it).
 
@@ -581,7 +585,8 @@ keys `1`…`9` follow the chips of the compare bar. The passes folder can be cha
 The NR preview (PR-10, the card «Улучшение», `P`): «Превью кадра» computes the frame under the cursor with the card's settings
 (without the model's history, or «Кадр с историей» after 6 frames of it), «Превью отрезка ▾» 1, 3, 5 or 10 s from the cursor; it
 runs `dlssvid nr` in its own process into `<passes>/.preview/nr/<key>` (no pass, no version: the plan and the versions do not
-change) and shows it as «Улучшение · превью» on the «after» side, the current «Улучшение» (or «Апскейл») on the «before» side.
+change) and shows it as «Улучшение · превью» on the «after» side, the current «Улучшение» (or «Апскейл»; with the upscale off
+«Исходник», what NR reads then) on the «before» side.
 A preview computed before shows at once; «обновлять при изменении» recomputes the last frame preview 0.6 s after a change (a
 slider: after it is released); «Обработать» cancels a running preview. The inputs are the passes on disk only: when a stage
 before NR would have to run, «Посчитать этапы до улучшения» runs `dlssvid process --stages … --no-encode` (the result is not

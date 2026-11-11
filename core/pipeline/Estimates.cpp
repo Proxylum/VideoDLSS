@@ -220,20 +220,6 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
         const auto [dw, dh] = shownW && shownH ? std::pair<uint32_t, uint32_t>{shownW, shownH} : StretchedResultSize(source.sar, o.width, o.height);
         o.width = dw;
         o.height = dh;
-    } else if (!plan.finalPass.empty()) {
-        // no colour stage, yet a colour pass of a stage that is off is on disk: the encode takes it (RunProcess) - its frame, stretched
-        // by its pixels (review of TASK-0073)
-        try {
-            const Manifest m = Manifest::Load(plan.passesRoot / plan.finalPass);
-            if (m.width && m.height) {
-                o.gridWidth = m.width;
-                o.gridHeight = m.height;
-                const auto [dw, dh] = PassResultSize(m, source.sar, source.width, source.height);
-                o.width = dw;
-                o.height = dh;
-            }
-        } catch (const std::exception&) {
-        }
     }
     // an anamorphic source's upscale pass the run does not remake (reused: of the build before, no shown_size record) - the run writes
     // what that pass gives, NR and FG over it pass its record on or have none (review of TASK-0073)

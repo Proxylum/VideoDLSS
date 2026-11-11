@@ -19,7 +19,9 @@ struct ColorInfo;
 
 // The whole pipeline as one command (stage 8, ТЗ §4 / §7 / §9): the stages run one after another over the disk
 // cache of passes under `passesRoot` (depth -> flow -> upscale -> nr -> fg; each reads what the previous ones wrote),
-// then the last colour pass (color_fg > color_nr > color_sr) is encoded into `output` with the source's audio copied.
+// then the last colour pass (color_fg > color_nr > color_sr) is encoded into `output` with the source's audio copied. A colour stage
+// switched off (enabled false) is out of the result: its pass is neither an input of the stages below nor encoded, and stays on disk
+// (TASK-0074); depth, flow and the scene list of a stage off are read as they are.
 // Stage parameters are the JSON the project file and the GUI hold. Frame Generation runs in its own process
 // (`dlssvid fg --as-stage`, FgProcess.h) when `fgExecutable` is set: a crash of DLSS-G ends only that process, and with
 // `disableUnavailable` the stage is reported `failed` and the result is encoded from color_nr / color_sr (audit fg-2).
@@ -169,9 +171,6 @@ struct ProcessPlan {
     std::string finalPass;              // colour pass the encode step would use ("" -> the source is passed through)
     int runCount = 0, reuseCount = 0;   // reuseCount includes restores
     std::optional<SceneListOnDisk> scenesOnDisk;  // a readable list of this source under the root (PR-13)
-    // what the run would refuse that no stage owns (TASK-0072: the result would come from a pass of a stage that is off, made from the
-    // stored frame of a source shown turned); RunProcess throws it before any stage runs
-    std::string error;
     nlohmann::json ToJson() const;
 };
 

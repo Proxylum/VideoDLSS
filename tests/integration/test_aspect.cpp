@@ -275,9 +275,10 @@ TEST_CASE("A colour pass already of the shown proportions is not stretched again
     const auto d = Dir("shown_pass");
     const auto clip = WriteClip(d / "clip.mkv", Anamorphic());
     ProcessOptions o = Options(clip, d);
-    Only(o, {"depth"});  // the colour stages off: the result is taken from the pass on disk
+    Only(o, {"upscale"});  // its pass of the build before (no fingerprint) is adopted and encoded
     Manifest m = Manifest::ForPass(PassKind::ColorSr, 128, 72, FileFormat::Exr);
     m.sourceHash = "sha256:" + Sha256FileCached(clip);
+    m.stageParams = {{"backend", "nis"}};
     PassWriter wr(o.passesRoot / "color_sr", m);
     for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 128, 72));
     wr.Finish();
@@ -290,6 +291,7 @@ TEST_CASE("A colour pass already of the shown proportions is not stretched again
     std::filesystem::remove_all(o.passesRoot / "color_sr");
     Manifest g = Manifest::ForPass(PassKind::ColorSr, 108, 72, FileFormat::Exr);
     g.sourceHash = m.sourceHash;
+    g.stageParams = m.stageParams;
     PassWriter gw(o.passesRoot / "color_sr", g);
     for (int64_t f = 0; f < 3; ++f) gw.WriteFrame(f, MakePassImage(PassKind::ColorSr, 108, 72));
     gw.Finish();
@@ -354,7 +356,7 @@ TEST_CASE("NR and FG of an anamorphic source take the pixels of the colour they 
     const auto d = Dir("colour_pixels");
     const auto clip = WriteClip(d / "clip.mkv", Anamorphic());
     ProcessOptions o = Options(clip, d);
-    Only(o, {"nr", "fg"});  // fg: blend
+    Only(o, {"upscale", "nr", "fg"});  // fg: blend; the upscale's pass of the build before (no fingerprint) adopted
     auto colourPass = [&](uint32_t w, uint32_t h, const nlohmann::json& stageParams) {
         std::filesystem::remove_all(o.passesRoot / "color_sr");
         Manifest m = Manifest::ForPass(PassKind::ColorSr, w, h, FileFormat::Exr);
@@ -365,8 +367,7 @@ TEST_CASE("NR and FG of an anamorphic source take the pixels of the colour they 
         wr.Finish();
     };
     auto recorded = [&](const char* pass) { return Manifest::Load(o.passesRoot / pass).stageParams.value("pixel_aspect", std::string()); };
-    ProcessOptions g = Options(clip, d);
-    Only(g, {"fg"});
+    ProcessOptions g = o;
     ApplyParamSpec(g.stages, "fg.backend=dlssg");
     colourPass(128, 72, {{"backend", "nis"}});  // an explicit target of the build before: square pixels, no record
     RunProcess(o);
@@ -379,13 +380,12 @@ TEST_CASE("NR and FG of an anamorphic source take the pixels of the colour they 
     ApplyParamSpec(remade.stages, "fg.backend=dlssg");
     remade.forceStages = {"nr"};
     CHECK(App(Decision(PlanProcess(remade), "fg")).find("fg.sar") == std::string::npos);
-    // ... but with color_sr remade too (upscale on): the grid
+    // ... but with color_sr remade too: the grid
     ProcessOptions all = remade;
-    for (auto& s : all.stages) s.enabled = s.enabled || s.name == "upscale";
     all.forceStages = {"upscale", "nr"};
     CHECK_THAT(App(Decision(PlanProcess(all), "fg")), ContainsSubstring("+fg.sar"));
     colourPass(108, 72, {{"backend", "nis"}, {"pixel_aspect", "32:27"}});  // the grid of this build
-    // planned with NR remade: FG's colour is the pass this run makes (the grid), not the square color_nr still on disk
+    // planned with NR remade: FG's colour is the pass this run makes over the color_sr kept (the grid), not the square color_nr on disk
     ProcessOptions both = o;
     ApplyParamSpec(both.stages, "fg.backend=dlssg");
     both.forceStages = {"nr"};
@@ -663,6 +663,7 @@ TEST_CASE("The plan's advice on an anamorphic source: masks of the shown frame f
     CHECK(mask(64, 36).find("растянется") == std::string::npos);  // the frame as shown: before TASK-0073 a warning
     CHECK(mask(54, 36).find("растянется") == std::string::npos);  // the grid
     CHECK_THAT(mask(100, 36), ContainsSubstring("100×36 растянется на кадр 64×36"));
+    Only(o, {"upscale", "nr"});  // NR reads color_sr only with the upscale on (TASK-0074)
     {  // NR on a color_sr of the build before already in square pixels (128x72, no record): measured on it as it is, not stretched again
         Manifest m = Manifest::ForPass(PassKind::ColorSr, 128, 72, FileFormat::Exr);
         m.sourceHash = "sha256:" + Sha256FileCached(clip);
@@ -683,6 +684,7 @@ TEST_CASE("The plan's advice on an anamorphic source: masks of the shown frame f
     }
     CHECK_THAT(mask(100, 36), ContainsSubstring("100×36 растянется на кадр 96×54"));
     std::filesystem::remove_all(o.passesRoot / "color_sr");
+    Only(o, {"nr"});
     ProcessOptions u = Options(clip, d);
     Only(u, {"upscale"});
     ApplyParamSpec(u.stages, "upscale.target_width=108");
@@ -713,7 +715,14 @@ TEST_CASE("The plan's advice on an anamorphic source: masks of the shown frame f
         wr.Finish();
     }
     CHECK_THAT(Warnings(Decision(PlanProcess(tm), "nr")), ContainsSubstring("Сделана по боковому кадру: маска ui"));
-    // ... and a colour pass of it with no label (a standalone command before TASK-0072, target 128x72): refused, not written sideways
+    // ... and a depth pass of it with no label (a standalone command before TASK-0072): NR's input refused (review of TASK-0073)
+    {
+        PassWriter wr(tm.passesRoot / "depth_dlss", Manifest::ForPass(PassKind::DepthDlss, 64, 36, FileFormat::Exr));
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::DepthDlss, 64, 36));
+        wr.Finish();
+    }
+    CHECK_THAT(Decision(PlanProcess(tm), "nr").error, ContainsSubstring("Пасс depth_dlss (стадия «Глубина») сделан по боковому кадру"));
+    // a colour pass of it given to the encode directly: refused, not written sideways
     {
         Manifest sideways = Manifest::ForPass(PassKind::ColorSr, 128, 72, FileFormat::Exr);
         sideways.sourceHash = "sha256:" + Sha256FileCached(turned);
@@ -721,11 +730,6 @@ TEST_CASE("The plan's advice on an anamorphic source: masks of the shown frame f
         for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 128, 72));
         wr.Finish();
     }
-    CHECK_THAT(Decision(PlanProcess(tm), "nr").error, ContainsSubstring("сделан по боковому кадру"));
-    // with every colour stage off the result would be taken from it: refused before any stage, and by the encode itself (review)
-    Only(tm, {});
-    CHECK_THROWS_WITH(RunProcess(tm), ContainsSubstring("Результат взялся бы из пасса color_sr"));
-    CHECK_FALSE(std::filesystem::exists(tm.output));
     EncodeSettings es;
     es.codec = "ffv1";
     CHECK_THROWS_WITH(EncodePassToVideo(tm.passesRoot / "color_sr", turned, d / "tm" / "direct.mkv", es), ContainsSubstring("made from the stored frame"));
