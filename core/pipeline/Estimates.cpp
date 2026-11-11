@@ -150,9 +150,15 @@ uint64_t BytesPerFrame(const std::string& stage, uint32_t sourceW, uint32_t sour
     return 0;
 }
 
-UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& p, bool capByLongSide) {
-    if (p.value("artifact_reduction_only", false)) return UpscaleTarget{sourceW, sourceH, 1.0, false};
-    return ResolveUpscaleTarget(sourceW, sourceH, Scale(p), p.value("target_width", 0u), p.value("target_height", 0u), 3840, 2160, capByLongSide);
+UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& p, bool capByLongSide, PixelAspect sar) {
+    if (p.value("artifact_reduction_only", false)) {
+        UpscaleTarget t{sourceW, sourceH, 1.0, false};
+        const auto [dw, dh] = sar.DisplaySize(sourceW, sourceH);
+        t.displayWidth = dw;
+        t.displayHeight = dh;
+        return t;
+    }
+    return ResolveUpscaleTarget(sourceW, sourceH, Scale(p), p.value("target_width", 0u), p.value("target_height", 0u), 3840, 2160, capByLongSide, sar);
 }
 
 RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>& stages, const SourceInfo& source) {
@@ -177,10 +183,19 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
     if (!params[2].is_null() && source.width && source.height) {  // a size not known yet (the store's entry missing): 0x0, no throw
         // the frame UpscaleStage::Setup makes: «только подавление артефактов» keeps the source's, else the scale or the target, even, capped
         // at 3840x2160 (TASK-0071: 1080p x3 was shown 5760x3240 and NR's check ran at a frame the run never makes)
-        const UpscaleTarget t = UpscaleOutputFor(source.width, source.height, params[2]);
+        const UpscaleTarget t = UpscaleOutputFor(source.width, source.height, params[2], true, source.sar);
         o.width = t.width;
         o.height = t.height;
         scale = t.scale;
+    }
+    // TASK-0073: the colour stages work on the grid; the result is it stretched to square pixels - unless no colour stage runs (the source
+    // passed through keeps its grid and its pixels' proportions)
+    o.gridWidth = o.width;
+    o.gridHeight = o.height;
+    if (!params[2].is_null() || !params[3].is_null() || !params[4].is_null()) {
+        const auto [dw, dh] = source.sar.DisplaySize(o.width, o.height);
+        o.width = dw;
+        o.height = dh;
     }
     if (!params[4].is_null()) o.fps = source.fps * multiplier;
     const int64_t frames = std::max<int64_t>(0, source.frames);
@@ -195,11 +210,11 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
             e.recorded = true;
         } else {
             e.msPerFrame = BaselineMsPerFrame(d.name, backend, megapixels, d.tool.is_object() ? d.tool.value("model", std::string()) : std::string());
-            if (d.name == "nr" && o.width && o.height) {
+            if (d.name == "nr" && o.gridWidth && o.gridHeight) {
                 // the baseline is one model pass at the colour's resolution (docs/benchmarks.md): the run's passes and model_scale
                 // move it (D8)
-                const auto [ww, wh] = NrWorkSize(o.width, o.height, p.value("model_scale", 1.0));
-                e.msPerFrame = NrMovedMsPerFrame(e.msPerFrame, 1, static_cast<double>(o.width) * o.height, NrBypassParams(p) ? 0 : p.value("passes", 1),
+                const auto [ww, wh] = NrWorkSize(o.gridWidth, o.gridHeight, p.value("model_scale", 1.0));
+                e.msPerFrame = NrMovedMsPerFrame(e.msPerFrame, 1, static_cast<double>(o.gridWidth) * o.gridHeight, NrBypassParams(p) ? 0 : p.value("passes", 1),
                                                  static_cast<double>(ww) * wh, frames, backend);
             }
         }
@@ -212,7 +227,7 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
             e.seconds = seconds;
             // depth / flow at the source's size, the colour passes at the frame the upscale makes (a target of another aspect too)
             e.bytes = (d.name == "depth" || d.name == "flow" ? BytesPerFrame(d.name, source.width, source.height, 1.0, multiplier)
-                                                             : BytesPerFrame(d.name, o.width, o.height, 1.0, multiplier)) *
+                                                             : BytesPerFrame(d.name, o.gridWidth, o.gridHeight, 1.0, multiplier)) *
                       static_cast<uint64_t>(frames);
             o.seconds += seconds;
             o.newBytes += e.bytes;

@@ -75,6 +75,7 @@ void FgStage::Setup(uint32_t w, uint32_t h) {
     cfg.fp16 = options_.fp16;
     cfg.modelsDir = options_.modelsDir;
     cfg.requireDriver = options_.requireDriver;
+    cfg.pixelAspect = options_.sar;
     if (depthReader_) {
         cfg.guideWidth = depthReader_->Man().width;
         cfg.guideHeight = depthReader_->Man().height;
@@ -126,6 +127,7 @@ void FgStage::Setup(uint32_t w, uint32_t h) {
         eo.codec = options_.videoCodec;
         const Rational base = options_.fps.num > 0 ? options_.fps : Rational{30, 1};
         eo.frameRate = Rational{base.num * options_.multiplier, base.den};
+        eo.sar = options_.sar;  // the grid, shown in its proportions (TASK-0073)
         encoder_ = std::make_unique<VideoEncoder>(options_.videoOut, FrameDesc{w, h, PixelFormat::Yuv420p}, eo);
         encoder_->Open();
     }
@@ -292,6 +294,7 @@ FgRunResult RunFg(VideoDecoder& decoder, D3D12Device& device, FgStageOptions opt
     const auto& info = decoder.Info();
     options.color = ColorInfoFromStream(info);
     options.fps = info.frameRate;
+    options.sar = info.sar;  // TASK-0073: process (its child process too) and the standalone command alike
     Pipeline pipeline(device, 4);
     auto stage = std::make_unique<FgStage>(options);
     FgStage* raw = stage.get();

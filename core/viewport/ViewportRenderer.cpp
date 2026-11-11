@@ -401,6 +401,10 @@ void ViewportRenderer::RenderInto(ID3D12Resource* target, D3D12_CPU_DESCRIPTOR_H
                 a.target[3] = static_cast<float>(rows);
                 a.texSize[0] = static_cast<float>(tex->width);
                 a.texSize[1] = static_cast<float>(tex->height);
+                // TASK-0073: motion in the texture's pixels -> the image's, per axis (an anamorphic source: the image is the grid as shown,
+                // wider than the vectors' grid); 1 when the texture is the image's size
+                a.texSize[2] = tex->width ? static_cast<float>(imageWidth) / static_cast<float>(tex->width) : 1.f;
+                a.texSize[3] = tex->height ? static_cast<float>(imageHeight) / static_cast<float>(tex->height) : 1.f;
                 a.color[0] = 1.f;
                 a.color[1] = 0.95f;
                 a.color[2] = 0.2f;

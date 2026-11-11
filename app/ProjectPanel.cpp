@@ -149,6 +149,7 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     og->setVerticalSpacing(3);
     og->addWidget(Title(tr("Что получится"), outCard), 0, 0, 1, 2);
     outVideo_ = Value(outCard);
+    outVideo_->setObjectName("outVideo");
     outTime_ = Value(outCard);
     outReused_ = Value(outCard);
     outDisk_ = Value(outCard);
@@ -371,6 +372,9 @@ void ProjectPanel::refresh() {
         if (!src.orientation.Identity())
             frame += src.orientation.rotate ? tr(" · повёрнут на %1°").arg(src.orientation.rotate) + (src.orientation.hflip ? tr(" и отражён") : QString())
                                             : tr(" · отражён");
+        // TASK-0073: non-square pixels (DVD, HDV) - the frame is shown stretched, as in a player
+        const auto [shownW, shownH] = src.sar.DisplaySize(src.width, src.height);
+        if (!src.sar.Square()) frame += tr(" · пиксель %1, показ %2×%3").arg(QString::fromStdString(src.codedSar.Token())).arg(shownW).arg(shownH);
         sourceFrame_->setText(frame);
         QString tip = src.codec.empty() ? QString() : tr("Поток: %1 бит %2; декодируется как %3").arg(src.bitDepth).arg(QString::fromStdString(src.chroma)).arg(QString::fromStdString(src.decoded.Name()));
         if (!src.orientation.Identity()) {
@@ -381,6 +385,15 @@ void ProjectPanel::refresh() {
                        .arg(src.codedHeight)
                        .arg(how, by);
         }
+        if (!src.sar.Square())
+            tip += tr("\nПиксели не квадратные (%1, %2): кадр %3×%4 показывается %5×%6, как в плеере. Стадии работают в пикселях источника, "
+                      "результат пишется в квадратных пикселях — в пропорциях показа")
+                       .arg(QString::fromStdString(src.codedSar.Token()))
+                       .arg(src.sarFrom == "container" ? tr("по контейнеру") : tr("по потоку"))
+                       .arg(src.width)
+                       .arg(src.height)
+                       .arg(shownW)
+                       .arg(shownH);
         sourceFrame_->setToolTip(tip);
     } else {
         sourceFrame_->setText("—");
@@ -400,6 +413,15 @@ void ProjectPanel::refresh() {
                                .arg(QString::number(out.fps, 'g', 5))
                                .arg(AppModel::formatLabel(out.codec, out.format))
                                .arg(out.audio ? tr("со звуком") : tr("без звука")));
+        // TASK-0073: an anamorphic source - the stages make its grid, the result is it stretched to square pixels
+        outVideo_->setToolTip(out.gridWidth && (out.gridWidth != out.width || out.gridHeight != out.height)
+                                  ? tr("Стадии работают в кадре %1×%2 (пиксели источника %3); при записи он растягивается до %4×%5 с квадратными пикселями")
+                                        .arg(out.gridWidth)
+                                        .arg(out.gridHeight)
+                                        .arg(QString::fromStdString(src.codedSar.Token()))
+                                        .arg(out.width)
+                                        .arg(out.height)
+                                  : QString());
         outTime_->setText(tr("%1 · к запуску %2 из %3 (полный прогон — %4)")
                               .arg(FormatDuration(out.seconds))
                               .arg(out.stagesToRun)
@@ -413,6 +435,7 @@ void ProjectPanel::refresh() {
         outDisk_->setText(disk);
     } else {
         for (QLabel* l : {outVideo_, outTime_, outReused_, outDisk_}) l->setText("—");
+        outVideo_->setToolTip(QString());
     }
     outError_->setText(model_.planError());
     outError_->setVisible(!model_.planError().isEmpty() && hasSource);

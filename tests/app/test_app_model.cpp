@@ -1580,6 +1580,185 @@ TEST_CASE("Stage cards name the recompute of a source now shown turned and of th
     CHECK(model.cardState("upscale").state == QString::fromUtf8("пересчёт: предел 4K для вертикального кадра — по длинной стороне"));
 }
 
+// ---- TASK-0073: a source of non-square pixels (DVD 720x480 at 32:27 is shown 16:9) -----------------------------------------------------
+
+namespace {
+
+// A dark frame with a bright w x h box of stored samples in the middle
+CpuFrame BoxFrame(int64_t index, uint32_t W, uint32_t H, uint32_t w, uint32_t h) {
+    CpuFrame f;
+    f.Allocate(FrameDesc{W, H, PixelFormat::Yuv420p});
+    f.index = index;
+    f.pts = index;
+    for (uint32_t y = 0; y < H; ++y)
+        for (uint32_t x = 0; x < W; ++x)
+            f.Plane(0)[y * W + x] = x >= (W - w) / 2 && x < (W - w) / 2 + w && y >= (H - h) / 2 && y < (H - h) / 2 + h ? 235 : 16;
+    std::fill(f.Plane(1), f.Plane(1) + f.desc.PlaneSize(1), static_cast<uint8_t>(128));
+    std::fill(f.Plane(2), f.Plane(2) + f.desc.PlaneSize(2), static_cast<uint8_t>(128));
+    return f;
+}
+
+}  // namespace
+
+TEST_CASE("AppModel opens an anamorphic clip as shown: the viewport, the source line, what comes out", "[app][aspect]") {
+    App();
+    const auto d = Dir("aspect_open");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 54;
+    spec.height = 36;
+    spec.sar = PixelAspect{32, 27};
+    AppModel model(true);
+    model.openVideo(Q(WriteClip(d / "clip.mkv", spec)));
+    for (const char* s : {"depth", "flow", "nr", "fg"}) model.setStageEnabled(s, false);
+    model.setStageEnabled("upscale", true);
+    model.setStageParams("upscale", {{"backend", "nis"}, {"scale", 2.0}});
+    model.refreshPlan();
+    CHECK(model.store().ImageWidth() == 64);  // the viewport's frame: as shown (before TASK-0073: 54)
+    CHECK(model.store().ImageHeight() == 36);
+    const SourceInfo& src = model.sourceInfo();
+    CHECK(src.width == 54);
+    CHECK(src.sar == PixelAspect{32, 27});
+    CHECK(src.codedSar == PixelAspect{32, 27});
+    CHECK(src.sarFrom == "container");
+    CHECK(model.outcome().width == 128);  // the result: the grid 108x72 stretched to square pixels
+    CHECK(model.outcome().gridWidth == 108);
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    auto* label = panel.findChild<QLabel*>("sourceFrame");
+    REQUIRE(label);
+    CHECK(label->text().startsWith(QString::fromUtf8("54×36")));
+    CHECK(label->text().contains(QString::fromUtf8(" · пиксель 32:27, показ 64×36")));
+    CHECK(label->toolTip().contains(QString::fromUtf8("Пиксели не квадратные (32:27, по контейнеру): кадр 54×36 показывается 64×36")));
+    auto* out = panel.findChild<QLabel*>("outVideo");
+    REQUIRE(out);
+    CHECK(out->text().startsWith(QString::fromUtf8("128×72")));
+    CHECK(out->toolTip() == QString::fromUtf8("Стадии работают в кадре 108×72 (пиксели источника 32:27); при записи он растягивается до 128×72 с квадратными пикселями"));
+    // the viewport's labels: the size as shown, the technical tooltip both
+    const ViewportSource* vs = model.store().FindSource("source");
+    REQUIRE(vs);
+    CHECK(SourceSizeText(*vs) == QString::fromUtf8("64×36"));
+    CHECK(SourceTooltip(*vs).contains(QString::fromUtf8("54x36 (пиксель 32:27, показ 64x36)")));
+    // NR's check and preview run at the grid it works on
+    CHECK(model.nrColorSize() == std::pair<uint32_t, uint32_t>{108, 72});
+    model.setStageEnabled("nr", true);
+    model.setStageParams("nr", {{"backend", "ngx"}, {"model_scale", 1.0}});
+    model.refreshPlan();
+    const QStringList nr = model.checkArgs("nr", "P.json", "J.json");
+    REQUIRE(nr.contains("--check-size"));
+    const auto [w, h] = NrWorkSize(108, 72, 1.0);
+    CHECK(nr[nr.indexOf("--check-size") + 1] == QString("%1x%2").arg(w).arg(h));
+    // a square clip: no word of pixels, no tooltip on the result
+    spec.sar = {};
+    AppModel square(true);
+    square.openVideo(Q(WriteClip(d / "square.mkv", spec)));
+    square.refreshPlan();
+    ProjectPanel plain(square, queue);
+    plain.refresh();
+    CHECK(!plain.findChild<QLabel*>("sourceFrame")->text().contains(QString::fromUtf8("пиксель")));
+    CHECK(SourceSizeText(*square.store().FindSource("source")) == QString::fromUtf8("54×36"));
+    CHECK(!SourceTooltip(*square.store().FindSource("source")).contains(QString::fromUtf8("пиксель")));
+    CHECK(!plain.findChild<QLabel*>("sourceFrame")->toolTip().contains(QString::fromUtf8("Пиксели")));
+    CHECK(plain.findChild<QLabel*>("outVideo")->toolTip().isEmpty());
+}
+
+TEST_CASE("RecentPreviews: an anamorphic clip's thumbnail and line as shown; one the build before cached is not reused", "[app][aspect][previews][regression]") {
+    App();
+    const auto d = Dir("previews_aspect");
+    RecentPreviews::SetCacheDir(Q(d / "cache"));
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 108;
+    spec.height = 72;
+    spec.sar = PixelAspect{32, 27};
+    // a box 18 x 24 of stored samples: 21.3 x 24 as shown - 0.89 wide per high, 0.75 if the frame were not stretched
+    const QString clip = Q(WriteClipWith(d / "clip.mkv", spec, [](int64_t i) { return BoxFrame(i, 108, 72, 18, 24); }));
+    const QFileInfo fi(clip);
+    const QString stamp = clip + "|" + QString::number(fi.size()) + "|" + QString::number(fi.lastModified().toMSecsSinceEpoch());
+    const QString v2 = Q(d / "cache") + "/" + QString::fromLatin1(QCryptographicHash::hash(("v2\n" + stamp + "\n").toUtf8(), QCryptographicHash::Sha1).toHex()) + ".png";
+    CHECK(RecentPreviews::CacheFile(clip, {}) != v2);  // the build before cached the stored grid under "v2"
+    const RecentPreviews::Preview p = RecentPreviews::Make(clip);
+    CHECK(p.meta == QString::fromUtf8("128×72 24 fps"));
+    const QImage img = p.image.convertToFormat(QImage::Format_RGB32);
+    REQUIRE(!img.isNull());
+    int bw = 0, bh = 0;
+    for (int x = 0; x < img.width(); ++x) bw += qGray(img.pixel(x, img.height() / 2)) > 128 ? 1 : 0;
+    for (int y = 0; y < img.height(); ++y) bh += qGray(img.pixel(img.width() / 2, y)) > 128 ? 1 : 0;
+    REQUIRE(bh > 0);
+    const double ratio = static_cast<double>(bw) / bh;
+    CHECK(ratio > 0.83);
+    CHECK(ratio < 0.95);
+}
+
+TEST_CASE("Stage cards name the recompute of an anamorphic source's target in the pixels as shown", "[app][aspect][regression]") {
+    App();
+    const auto d = Dir("aspect_cards");
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 54;
+    spec.height = 36;
+    spec.sar = PixelAspect{32, 27};
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    Project p = Project::Create(clip, d / "passes");
+    for (auto& st : p.stages) {
+        st.enabled = st.name == "upscale";
+        if (st.name == "upscale") {
+            st.params["backend"] = "nis";
+            st.params["target_width"] = 128;
+            st.params["target_height"] = 72;
+        }
+    }
+    p.resultVideo = d / "result.mkv";
+    p.codec = "ffv1";
+    p.Save(d / "proj.dlssvid.json");
+    std::string out;
+    REQUIRE(Subprocess::Run({DLSSVID_CLI_PATH, "process", "--project", (d / "proj.dlssvid.json").string(), "--warp"}, &out) == 0);
+    Manifest sr = Manifest::Load(d / "passes" / "color_sr");
+    REQUIRE(sr.width == 108);
+    std::string app = sr.tool.value("app", std::string());
+    REQUIRE(app.find("+sr.sar") != std::string::npos);
+    app.erase(app.find("+sr.sar"), 7);  // as the build before stamped it
+    sr.tool["app"] = app;
+    sr.fingerprint = ComputeFingerprint("upscale", sr.sourceHash, sr.paramsCanonical, sr.inputs, ToolInfo::FromJson(sr.tool), sr.sourceFormat).value;
+    sr.Save(d / "passes" / "color_sr");
+    {
+        AppModel model(true);
+        model.openProject(Q(d / "proj.dlssvid.json"));
+        model.refreshPlan();
+        CHECK(model.cardState("upscale").state == QString::fromUtf8("пересчёт: цель и предел 4K — в пикселях показа (у источника неквадратные пиксели)"));
+    }
+    // DLSS-G's camera: a color_fg stamped without +fg.sar by the build before
+    {
+        AppModel model(true);
+        model.openProject(Q(d / "proj.dlssvid.json"));
+        model.setStageEnabled("upscale", false);
+        model.setStageEnabled("fg", true);
+        model.setStageParams("fg", {{"backend", "dlssg"}, {"multiplier", 2}});
+        model.refreshPlan();
+        const StageDecision* fg = nullptr;
+        for (const auto& s : model.plan().stages)
+            if (s.name == "fg") fg = &s;
+        REQUIRE(fg);
+        std::string fgApp = fg->tool.value("app", std::string());
+        REQUIRE(fgApp.find("+fg.sar") != std::string::npos);
+        fgApp.erase(fgApp.find("+fg.sar"), 7);
+        Manifest m = Manifest::ForPass(PassKind::ColorFg, 54, 36, FileFormat::Exr);
+        m.sourceHash = model.plan().sourceHash;
+        m.sourceFormat = fg->sourceFormat;
+        m.paramsCanonical = fg->params;
+        for (const auto& [k, v] : fg->inputs) m.inputs[k] = v;
+        m.tool = fg->tool;
+        m.tool["app"] = fgApp;
+        m.fingerprint = ComputeFingerprint("fg", m.sourceHash, m.paramsCanonical, m.inputs, ToolInfo::FromJson(m.tool), m.sourceFormat).value;
+        PassWriter wr(d / "passes" / "color_fg", m);
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorFg, 54, 36));
+        wr.Finish();
+        model.refreshPlan();
+        CHECK(model.cardState("fg").state == QString::fromUtf8("пересчёт: камера DLSS-G — в пропорциях показа (у источника неквадратные пиксели)"));
+    }
+}
+
 TEST_CASE("RecentPreviews makes a 96x40 frame and the size line of a clip and caches them", "[app][previews]") {
     App();
     const auto d = Dir("previews");

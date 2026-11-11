@@ -217,6 +217,7 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.width = info.width;
         s.height = info.height;
         s.fps = info.frameRate;
+        s.sar = info.sar;
         s.color = ColorInfoFromStream(info);
         s.hasColor = true;
         return s;
@@ -265,8 +266,9 @@ void FrameStore::SetSources(std::vector<ViewportSource> sources) {
     bool fromSource = false;
     for (const auto& s : sources_) {
         if (s.name == "source" || imageW_ == 0) {
-            imageW_ = s.width;
-            imageH_ = s.height;
+            const auto [w, h] = s.sar.DisplaySize(s.width, s.height);  // TASK-0073: as shown
+            imageW_ = w;
+            imageH_ = h;
         }
         if (s.fps.num <= 0 || s.fps.den <= 0) continue;
         // base rate: the source video's; without it the slowest source (the source is the slowest, FG doubles it)

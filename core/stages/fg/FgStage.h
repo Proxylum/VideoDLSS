@@ -42,6 +42,7 @@ struct FgStageOptions {
     int64_t crashAfter = -1;             // development: terminate the process after N real frames (isolation test)
     ColorInfo color;
     Rational fps;
+    PixelAspect sar;                     // TASK-0073: the colour's pixels (RunFg: the source's) - DLSS-G's camera, the preview video
     std::string sourceFile, sourceHash;
     std::function<void(int64_t frame, double ms)> onFrame;
     // PR-13: the clip's cuts (stage scenes); empty: no reset but the first frame. Between the last frame of a shot and the cut frame

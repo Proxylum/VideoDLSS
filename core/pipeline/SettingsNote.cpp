@@ -130,7 +130,7 @@ nlohmann::json Fg(const Manifest& m) {
 
 }  // namespace
 
-nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::string& finalPass, DisplayOrientation sourceOrientation) {
+nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::string& finalPass, DisplayOrientation sourceOrientation, PixelAspect sourceSar) {
     nlohmann::json out = {{"app", std::string("VideoDLSS ") + DLSSVID_VERSION}, {"stages", nlohmann::json::object()}};
     nlohmann::json& stages = out["stages"];
     auto mark = [](nlohmann::json s, const Manifest& m) {
@@ -154,6 +154,10 @@ nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::s
             if (o.rotate) out["source"]["rotate"] = o.rotate;
             if (o.hflip) out["source"]["hflip"] = true;
         }
+    if (m && !sourceSar.Square()) {  // TASK-0073: an anamorphic source - the result is its grid stretched to square pixels
+        if (!out.contains("source")) out["source"] = nlohmann::json::object();
+        out["source"]["sar"] = sourceSar.Token();
+    }
     while (m) {
         const std::string name = stage(pass);
         stages[name] = mark(name == "fg" ? Fg(*m) : name == "nr" ? Nr(*m) : Upscale(*m), *m);
@@ -181,11 +185,12 @@ nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::s
 
 std::string SettingsNoteText(const nlohmann::json& settings) {
     std::string note = settings.value("app", std::string("VideoDLSS"));
-    if (settings.contains("source") && settings["source"].is_object()) {  // TASK-0072: "source: rotate=90 hflip"
+    if (settings.contains("source") && settings["source"].is_object()) {  // TASK-0072: "source: rotate=90 hflip"; TASK-0073: "sar=32:27"
         const nlohmann::json& src = settings["source"];
         std::string seg = "source:";
         if (src.contains("rotate")) seg += " rotate=" + Num(src["rotate"]);
         if (src.value("hflip", false)) seg += " hflip";
+        if (src.contains("sar") && src["sar"].is_string()) seg += " sar=" + src["sar"].get<std::string>();  // TASK-0073
         note += " | " + seg;
     }
     const nlohmann::json& stages = settings.contains("stages") ? settings["stages"] : nlohmann::json::object();

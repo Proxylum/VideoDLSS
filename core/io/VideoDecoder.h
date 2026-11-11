@@ -36,6 +36,12 @@ struct VideoStreamInfo {
     uint32_t codedHeight = 0;
     DisplayOrientation orientation;  // how players show the stream: its display matrix, else the 'rotate' tag
     std::string orientationFrom;     // "display matrix" | "rotate tag"; "" when not turned
+    // TASK-0073: the proportions of a pixel - the container's, else the bitstream's (av_guess_sample_aspect_ratio); `codedSar` in the
+    // stored grid's axes (as ffprobe prints it), `sar` in the axes of the turned frame NextFrame yields (the inverse for 90 / 270). The
+    // frames keep the grid: `process` stretches its result to square pixels, passthrough writes the SAR.
+    PixelAspect codedSar;
+    PixelAspect sar;
+    std::string sarFrom;  // "bitstream" (the codec says it; the container agreeing or silent) | "container"; "" when square
     Rational frameRate;    // av_guess_frame_rate
     Rational timeBase;     // stream time base (pts units)
     int64_t frameCount = 0;  // from container; 0 if unknown

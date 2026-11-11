@@ -15,14 +15,17 @@ namespace dlssvid {
 // `finalPass`: the pass the result is encoded from ("color_fg" | "color_nr" | "color_sr"); another name gives no stages.
 //   {"app": "VideoDLSS 0.4.0", "stages": {"upscale": {...}, "nr": {...}, "fg": {...}}}
 // `sourceOrientation`: how the source is shown (TASK-0072) - said for an encoded pass without a source format label (a standalone command's).
-nlohmann::json BuildSettingsJson(const std::filesystem::path& passesRoot, const std::string& finalPass, DisplayOrientation sourceOrientation = {});
+// `sourceSar`: the source's pixels as stored (TASK-0073: "source": {"sar": "32:27"} - the result is stretched to square ones).
+nlohmann::json BuildSettingsJson(const std::filesystem::path& passesRoot, const std::string& finalPass, DisplayOrientation sourceOrientation = {},
+                                 PixelAspect sourceSar = {});
 
 // One ASCII line of at most kSettingsNoteMax bytes (the container's `comment`):
 //   VideoDLSS 0.4.0 | upscale: dlss x2 | nr: ngx style=natural intensity=1.2 passes=1 ... | fg: dlssg x2
 // A pass process adopted (it predates fingerprints) is marked «(adopted)».
 std::string SettingsNoteText(const nlohmann::json& settings);
-inline std::string BuildSettingsNote(const std::filesystem::path& passesRoot, const std::string& finalPass, DisplayOrientation sourceOrientation = {}) {
-    return SettingsNoteText(BuildSettingsJson(passesRoot, finalPass, sourceOrientation));
+inline std::string BuildSettingsNote(const std::filesystem::path& passesRoot, const std::string& finalPass, DisplayOrientation sourceOrientation = {},
+                                     PixelAspect sourceSar = {}) {
+    return SettingsNoteText(BuildSettingsJson(passesRoot, finalPass, sourceOrientation, sourceSar));
 }
 inline constexpr size_t kSettingsNoteMax = 1024;
 

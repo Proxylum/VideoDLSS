@@ -6,7 +6,7 @@ cbuffer ArrowConstants : register(b0) {
     float4 gView;    // offsetX, offsetY, zoom, 0
     float4 gImage;   // image w, h, arrow step (px), vector scale (screen px per image px of motion)
     float4 gTarget;  // render-target w, h, grid columns, grid rows
-    float4 gTexSize; // mv texture w, h, 0, 0
+    float4 gTexSize; // mv texture w, h; image px per texture px along x, y (TASK-0073: an anamorphic source is shown stretched)
     float4 gColor;
 };
 
@@ -30,7 +30,7 @@ VSOut VSMain(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     float2 uv = center / gImage.xy;
     int2 tp = int2(uv * gTexSize.xy);
     float2 v = gMv.Load(int3(tp, 0)).rg;
-    float2 tip = center + v * gImage.w;
+    float2 tip = center + v * gTexSize.zw * gImage.w;
     float len = length(tip - center);
     float2 dir = len > 1e-3 ? (tip - center) / len : float2(1, 0);
     float2 nrm = float2(-dir.y, dir.x);

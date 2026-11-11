@@ -36,6 +36,9 @@ struct ViewportSource {
     int64_t lastFrame = -1;       // inclusive; video: frameCount - 1 (or -1 when unknown)
     uint32_t width = 0, height = 0;
     Rational fps{0, 1};
+    // TASK-0073: the pixels' proportions of a video (an anamorphic source - the reference image is it as shown, every layer is stretched
+    // onto it); pass folders are square
+    PixelAspect sar;
     // Pass folders: the folder name, as in PassVersions.h (the current version and its previous versions share it). The
     // manifest's `pass` is the kind and may differ: mask_ui, mask_ignore, mask_face and mask_skin are all "mask".
     std::string pass;
@@ -93,7 +96,8 @@ public:
                                                           const std::string& version = {});
     static std::optional<ViewportSource> VideoSource(const std::string& name, const std::filesystem::path& file);
 
-    // Reference image size (the "source" video or the first source).
+    // Reference image size (the "source" video or the first source), as shown: an anamorphic source stretched to square pixels (TASK-0073:
+    // DVD 720x480 at 32:27 is 854x480) - the pan, the zoom, the probe and `dlssvid render` work in these pixels.
     uint32_t ImageWidth() const { return imageW_; }
     uint32_t ImageHeight() const { return imageH_; }
 

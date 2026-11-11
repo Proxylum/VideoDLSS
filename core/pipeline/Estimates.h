@@ -55,6 +55,9 @@ struct SourceInfo {
     uint32_t codedWidth = 0, codedHeight = 0;  // as stored
     int bitDepth = 8;         // of the source's own pixel format
     std::string chroma = "420";
+    // TASK-0073: the proportions of a pixel in the axes of width / height (VideoStreamInfo::sar; codedSar - as stored, as ffprobe says)
+    PixelAspect sar, codedSar;
+    std::string sarFrom;      // "container" | "bitstream" | ""
 };
 
 struct StageEstimate {
@@ -69,6 +72,8 @@ struct StageEstimate {
 
 struct RunOutcome {
     uint32_t width = 0, height = 0;  // result frame
+    // TASK-0073: the frame the colour stages make - the result is it stretched to square pixels for an anamorphic source (the same else)
+    uint32_t gridWidth = 0, gridHeight = 0;
     double fps = 0.0;                // result rate
     bool audio = false;
     double seconds = 0.0;            // stages that run + the encode
@@ -83,8 +88,8 @@ struct RunOutcome {
 
 // The frame the upscale stage makes of a source of that size with these (effective) parameters - as UpscaleStage::Setup: the source's with
 // artifact_reduction_only, else the scale or target_width / target_height, even, capped at 3840x2160 by the long side (TASK-0072;
-// `capByLongSide = false`: by the axes, as before).
-UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& params, bool capByLongSide = true);
+// `capByLongSide = false`: by the axes, as before); `sar` - the source's pixels (TASK-0073: the target and the cap of the frame as shown).
+UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& params, bool capByLongSide = true, PixelAspect sar = {});
 
 // Combines the plan, the enabled stages' parameters and the source: resolution and rate after upscale / frame
 // generation, time and disk of what runs, time of a full run.

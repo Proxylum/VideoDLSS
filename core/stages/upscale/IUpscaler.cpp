@@ -74,23 +74,26 @@ std::unique_ptr<IUpscaler> CreateUpscaler(const std::string& backend) {
 }
 
 UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uint32_t targetW, uint32_t targetH, uint32_t maxW, uint32_t maxH,
-                                   bool capByLongSide) {
+                                   bool capByLongSide, PixelAspect sar) {
     if (!inW || !inH) Throw("ResolveUpscaleTarget: empty input");
     UpscaleTarget t;
+    // TASK-0073: the input as shown - nothing narrowed: wider pixels widen it, narrower ones make it higher; square: the input itself
+    const double s = sar.Value();
+    const double inDW = s > 1.0 ? inW * s : inW, inDH = s < 1.0 ? inH / s : inH;
     double w, h;
     if (targetW && targetH) {
         w = targetW;
         h = targetH;
     } else if (targetW) {
         w = targetW;
-        h = static_cast<double>(targetW) * inH / inW;
+        h = static_cast<double>(targetW) * inDH / inDW;
     } else if (targetH) {
         h = targetH;
-        w = static_cast<double>(targetH) * inW / inH;
+        w = static_cast<double>(targetH) * inDW / inDH;
     } else {
         if (scale <= 0.0) Throw("ResolveUpscaleTarget: scale must be positive");
-        w = inW * scale;
-        h = inH * scale;
+        w = inDW * scale;
+        h = inDH * scale;
     }
     if (capByLongSide && h > w && maxW > maxH) std::swap(maxW, maxH);  // a portrait output: the long side is its height
     if (maxW && w > maxW) {
@@ -104,9 +107,20 @@ UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uin
         t.capped = true;
     }
     auto even = [](double v) { return std::max(2u, static_cast<uint32_t>(std::lround(v / 2.0)) * 2u); };
-    t.width = even(w);
-    t.height = even(h);
+    if (sar.Square()) {
+        t.width = even(w);
+        t.height = even(h);
+    } else {
+        // the shown size back in the input's pixels: the stretched axis divided. Capped - rounded down, so that the frame as shown stays
+        // within the cap (an even cap: the shown side rounds to at most it)
+        auto grid = [&](double v) { return t.capped ? std::max(2u, static_cast<uint32_t>(std::floor(v / 2.0 + 1e-9)) * 2u) : even(v); };
+        t.width = s > 1.0 ? grid(w / s) : even(w);
+        t.height = s < 1.0 ? grid(h * s) : even(h);
+    }
     t.scale = static_cast<double>(t.width) / inW;
+    const auto [dw, dh] = sar.DisplaySize(t.width, t.height);
+    t.displayWidth = dw;
+    t.displayHeight = dh;
     return t;
 }
 

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <fstream>
 #include <memory>
+#include <tuple>
 
 #include "ControlMaskText.h"
 #include "SourceNames.h"
@@ -174,9 +175,8 @@ NrPreviewEnv PreviewRunner::env() const {
     e.freeBytes = freeBytes();
     e.clipFrames = model_.sourceInfo().frames > 0 ? model_.sourceInfo().frames : -1;
     e.fps = model_.sourceInfo().fps > 0 ? model_.sourceInfo().fps : 24.0;
-    // the colour NR reads: the result frame's size (the upscale's, else the source's), as the plan's estimate and the calibration key
-    e.colorW = model_.outcome().width > 0 ? model_.outcome().width : model_.sourceInfo().width;
-    e.colorH = model_.outcome().height > 0 ? model_.outcome().height : model_.sourceInfo().height;
+    // the colour NR reads, as the plan's estimate and the calibration key
+    std::tie(e.colorW, e.colorH) = model_.nrColorSize();
     for (const auto& s : model_.outcome().stages)
         if (s.stage == "nr") e.msPerFrame = s.msPerFrame;
     // the start: the process, the device, NGX and the feature (E8 ≈ 1.6-2 s), the stub's or the bypass's much less; then what the

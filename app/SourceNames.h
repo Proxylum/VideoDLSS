@@ -13,6 +13,7 @@ struct ViewportSource;
 QString HumanSourceName(const std::string& source);  // "color_nr@20260922-140200_3f2a9c1d" -> «Улучшение · 22.09 14:02 · 3f2a9c1d»
 QString VersionLabel(const std::string& versionId);  // "20260922-140200_3f2a9c1d" -> «22.09 14:02 · 3f2a9c1d»; "preview" -> «превью»
 QString SourceTooltip(const ViewportSource& s);      // the technical side: name, size, frames, rate, version parameters
+QString SourceSizeText(const ViewportSource& s);     // «64×36»: as shown (TASK-0073: an anamorphic video stretched); "" when unknown
 // Pipeline order for chips and lists: source, depth, vectors, upscale, nr, fg, result, then the rest by name.
 int SourceRank(const std::string& source);
 // «≈ 2 мин», «≈ 45 с», «≈ 1 ч 10 мин»; and «сегодня 14:02» / «вчера 14:02» / «22.09 14:02» from an ISO-8601 UTC time.

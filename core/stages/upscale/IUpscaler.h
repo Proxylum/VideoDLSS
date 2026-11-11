@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "gpu/D3D12Device.h"
+#include "pipeline/Frame.h"
 
 namespace dlssvid {
 
@@ -81,14 +82,19 @@ std::vector<std::string> UpscalerBackends();
 
 // Output resolution: `scale` (x1.5 / x2 / x3) or an explicit target; even dimensions, aspect ratio kept,
 // capped at maxW x maxH (4K in v1, ТЗ §3) - by the long side (TASK-0072): a portrait output is capped at maxH x maxW (2160x3840), not
-// at 2160 high; `capByLongSide = false` caps by the axes as before (the planner compares the two).
+// at 2160 high; `capByLongSide = false` caps by the axes as before (the planner compares the two). A target of both sides is taken as is:
+// its proportions may differ from the input's.
+// TASK-0073: `sar` - the input's pixels are not square (DVD 720x480 at 32:27 is shown 854x480): the scale, the target and the cap are of
+// the frame as shown (PixelAspect::DisplaySize), and width x height is that frame in the input's pixels - the grid the stages make, scaled
+// uniformly when the target keeps the shown proportions (720x480 32:27 x2: 1440x960, shown 1706x960; --target 1920x1080: 1620x1080).
 struct UpscaleTarget {
     uint32_t width = 0, height = 0;
     double scale = 1.0;  // effective width scale
     bool capped = false;
+    uint32_t displayWidth = 0, displayHeight = 0;  // the frame as shown: width x height stretched to square pixels (the same when square)
 };
 UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uint32_t targetW = 0, uint32_t targetH = 0, uint32_t maxW = 3840,
-                                   uint32_t maxH = 2160, bool capByLongSide = true);
+                                   uint32_t maxH = 2160, bool capByLongSide = true, PixelAspect sar = {});
 
 // Folder searched for NVIDIA DLLs: DLSSVID_NVIDIA_DLL_DIR, then <exe dir>/nvidia, then <exe dir> (docs/dll-setup.md).
 std::vector<std::filesystem::path> NvidiaDllSearchPaths(const std::filesystem::path& override = {});

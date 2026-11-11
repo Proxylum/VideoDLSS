@@ -61,6 +61,13 @@ std::string CheckEncodedResult(const fs::path& file, const ResultExpectation& ex
         // the frames are written upright (TASK-0072): a display matrix on the result would turn them again in a player
         if (!info.orientation.Identity())
             return "it carries a display orientation (" + info.orientation.Token() + "): the frames were written upright, a player would turn them again";
+        // TASK-0073: the pixels as written - square for a result stretched to them, the source's SAR in passthrough
+        if (!(info.codedSar == expect.sar)) {
+            if (expect.sar.Square())
+                return "it carries a pixel aspect of " + info.codedSar.Token() + " (square pixels were written): players would stretch it";
+            return "its pixels are " + (info.codedSar.Square() ? std::string("square") : info.codedSar.Token()) + ", " + expect.sar.Token() +
+                   " was written: players would show it in other proportions";
+        }
         if (info.width != expect.width || info.height != expect.height)
             return "the video is " + std::to_string(info.width) + "x" + std::to_string(info.height) + ", " + std::to_string(expect.width) + "x" +
                    std::to_string(expect.height) + " was encoded";

@@ -29,7 +29,11 @@ QString FpsText(const Rational& r) {
     return QString::number(v, 'f', 2);
 }
 
-QString SizeLine(const VideoStreamInfo& i) { return QString("%1×%2 %3 fps").arg(i.width).arg(i.height).arg(FpsText(i.frameRate)); }
+// as shown: an anamorphic video stretched to square pixels (TASK-0073)
+QString SizeLine(const VideoStreamInfo& i) {
+    const auto [w, h] = i.sar.DisplaySize(i.width, i.height);
+    return QString("%1×%2 %3 fps").arg(w).arg(h).arg(FpsText(i.frameRate));
+}
 
 bool Probe(const QString& file, VideoStreamInfo& out) {
     if (file.isEmpty()) return false;
@@ -43,11 +47,14 @@ bool Probe(const QString& file, VideoStreamInfo& out) {
     }
 }
 
-// The first frame that is not a black lead-in (at most a dozen decoded), as an 8-bit RGB QImage.
+// The first frame that is not a black lead-in (at most a dozen decoded), as an 8-bit RGB QImage - as shown (an anamorphic video stretched
+// to square pixels, TASK-0073).
 QImage FirstFrame(const QString& file) {
     QImage last;
+    PixelAspect sar;
     try {
         VideoDecoder dec(FsPath(file));  // CPU decode: one frame, any GPU stays free for the pipeline
+        sar = dec.Info().sar;
         const ColorInfo color = ColorInfoFromStream(dec.Info());
         CpuFrame f;
         for (int i = 0; i < 12 && dec.NextFrame(f); ++i) {
@@ -68,6 +75,10 @@ QImage FirstFrame(const QString& file) {
         }
     } catch (const std::exception& e) {
         Log()->debug("recent preview: cannot decode '{}': {}", file.toStdString(), e.what());
+    }
+    if (!last.isNull() && !sar.Square()) {
+        const auto [w, h] = sar.DisplaySize(static_cast<uint32_t>(last.width()), static_cast<uint32_t>(last.height()));
+        last = last.scaled(static_cast<int>(w), static_cast<int>(h), Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
     }
     return last;
 }
@@ -98,9 +109,10 @@ QString RecentPreviews::CacheDir() {
 void RecentPreviews::SetCacheDir(const QString& dir) { g_cacheDir = dir; }
 
 QString RecentPreviews::CacheFile(const QString& video, const QString& result) {
-    // "v2": the frames as shown (TASK-0072) - a thumbnail made of a turned source's stored frame, and its «1920×1080», are not reused
+    // "v2": the frames as shown (TASK-0072) - a thumbnail made of a turned source's stored frame, and its «1920×1080», are not reused;
+    // "v3": an anamorphic video as shown too (TASK-0073)
     const QByteArray key =
-        QCryptographicHash::hash(("v2\n" + Stamp(video) + "\n" + (result.isEmpty() ? QString() : Stamp(result))).toUtf8(), QCryptographicHash::Sha1);
+        QCryptographicHash::hash(("v3\n" + Stamp(video) + "\n" + (result.isEmpty() ? QString() : Stamp(result))).toUtf8(), QCryptographicHash::Sha1);
     return CacheDir() + "/" + QString::fromLatin1(key.toHex()) + ".png";
 }
 

@@ -211,7 +211,7 @@ struct EncodeReport {
     Rational fps{0, 1};
     double seconds = 0.0;
     bool audio = false;
-    FrameDesc format;         // the result's layout (width / height of the pass)
+    FrameDesc format;         // the result's layout: width / height of the pass, stretched to square pixels for an anamorphic source (TASK-0073)
     std::string pixelFormat;  // the encoder's input format
 };
 EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::filesystem::path& source, const std::filesystem::path& output,

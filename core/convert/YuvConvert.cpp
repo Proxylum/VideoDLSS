@@ -48,4 +48,33 @@ void YuvConverter::Convert(const CpuFrame& in, FrameDesc target, CpuFrame& out) 
     sws_scale(sws_, src, srcPitch, 0, h, dst, dstPitch);
 }
 
+YuvResizer::~YuvResizer() {
+    if (sws_) sws_freeContext(sws_);
+}
+
+void YuvResizer::Resize(const CpuFrame& in, uint32_t width, uint32_t height, CpuFrame& out) {
+    if (in.data.size() < in.desc.ByteSize()) Throw("YuvResizer: frame has no data");
+    if (!width || !height) Throw("YuvResizer: empty target size");
+    if (width == in.desc.width && height == in.desc.height) {
+        out = in;
+        return;
+    }
+    FrameDesc target = in.desc;
+    target.width = width;
+    target.height = height;
+    const AVPixelFormat f = AvFormatFor(in.desc);
+    const int w = static_cast<int>(in.desc.width), h = static_cast<int>(in.desc.height);
+    sws_ = sws_getCachedContext(sws_, w, h, f, static_cast<int>(width), static_cast<int>(height), f, SWS_LANCZOS | SWS_ACCURATE_RND | SWS_BITEXACT, nullptr,
+                                nullptr, nullptr);
+    if (!sws_) Throw("YuvResizer: sws_getCachedContext failed for " + in.desc.Name() + " -> " + target.Name());
+    out.Allocate(target);
+    out.index = in.index;
+    out.pts = in.pts;
+    const uint8_t* src[3] = {in.Plane(0), in.Plane(1), in.Plane(2)};
+    const int srcPitch[3] = {static_cast<int>(in.desc.PlaneWidth(0)), static_cast<int>(in.desc.PlaneWidth(1)), static_cast<int>(in.desc.PlaneWidth(2))};
+    uint8_t* dst[3] = {out.Plane(0), out.Plane(1), out.Plane(2)};
+    const int dstPitch[3] = {static_cast<int>(out.desc.PlaneWidth(0)), static_cast<int>(out.desc.PlaneWidth(1)), static_cast<int>(out.desc.PlaneWidth(2))};
+    sws_scale(sws_, src, srcPitch, 0, h, dst, dstPitch);
+}
+
 }  // namespace dlssvid

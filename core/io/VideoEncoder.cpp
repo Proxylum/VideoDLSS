@@ -128,11 +128,14 @@ VideoEncoder::VideoEncoder(const std::filesystem::path& path, const FrameDesc& f
     codec_->color_primaries = static_cast<AVColorPrimaries>(options_.color.primaries);
     codec_->color_trc = static_cast<AVColorTransferCharacteristic>(options_.color.transfer);
     if (fmt_->oformat->flags & AVFMT_GLOBALHEADER) codec_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    if (!options_.sar.Square())
+        codec_->sample_aspect_ratio = AVRational{static_cast<int>(options_.sar.num), static_cast<int>(options_.sar.den)};
 
     videoStream_ = avformat_new_stream(fmt_, nullptr);
     if (!videoStream_) Throw("avformat_new_stream(video) failed");
     videoStream_->time_base = codec_->time_base;
     videoStream_->avg_frame_rate = codec_->framerate;
+    videoStream_->sample_aspect_ratio = codec_->sample_aspect_ratio;  // the muxers read the stream's (MKV, AVI), MP4's pasp the codec's
 
     frame_ = av_frame_alloc();
     packet_ = av_packet_alloc();
@@ -193,8 +196,9 @@ void VideoEncoder::Open() {
     CheckAv(avformat_write_header(fmt_, nullptr), "avformat_write_header");
     opened_ = true;
     const std::string tags = TagsText(options_.color);
-    Log()->info("encode {}: {} {}x{} {} ({}) {}/{} fps{}{}", url, codecName_, frameDesc_.width, frameDesc_.height, pixelFormatName_, frameDesc_.Describe(),
-                options_.frameRate.num, options_.frameRate.den, tags.empty() ? "" : ", " + tags, audioStream_ ? ", audio copy" : "");
+    Log()->info("encode {}: {} {}x{} {} ({}) {}/{} fps{}{}{}", url, codecName_, frameDesc_.width, frameDesc_.height, pixelFormatName_, frameDesc_.Describe(),
+                options_.frameRate.num, options_.frameRate.den, tags.empty() ? "" : ", " + tags, audioStream_ ? ", audio copy" : "",
+                options_.sar.Square() ? "" : ", pixels " + options_.sar.Token());
 }
 
 void VideoEncoder::WriteFrame(const CpuFrame& in) {
@@ -210,6 +214,7 @@ void VideoEncoder::WriteFrame(const CpuFrame& in) {
     frame_->colorspace = codec_->colorspace;
     frame_->color_primaries = codec_->color_primaries;
     frame_->color_trc = codec_->color_trc;
+    frame_->sample_aspect_ratio = codec_->sample_aspect_ratio;  // FFV1 writes the frame's
     CheckAv(av_frame_get_buffer(frame_, 0), "av_frame_get_buffer");
     CheckAv(av_frame_make_writable(frame_), "av_frame_make_writable");
     const bool wide = in.desc.HighBitDepth();
