@@ -374,7 +374,7 @@ void ProjectPanel::refresh() {
                                             : tr(" · отражён");
         // TASK-0073: non-square pixels (DVD, HDV) - the frame is shown stretched, as in a player
         const auto [shownW, shownH] = src.sar.DisplaySize(src.width, src.height);
-        if (!src.sar.Square()) frame += tr(" · пиксель %1, показ %2×%3").arg(QString::fromStdString(src.codedSar.Token())).arg(shownW).arg(shownH);
+        if (!src.sar.Square()) frame += tr(" · пиксель %1, показ %2×%3").arg(QString::fromStdString(src.sar.Token())).arg(shownW).arg(shownH);
         sourceFrame_->setText(frame);
         QString tip = src.codec.empty() ? QString() : tr("Поток: %1 бит %2; декодируется как %3").arg(src.bitDepth).arg(QString::fromStdString(src.chroma)).arg(QString::fromStdString(src.decoded.Name()));
         if (!src.orientation.Identity()) {
@@ -385,15 +385,19 @@ void ProjectPanel::refresh() {
                        .arg(src.codedHeight)
                        .arg(how, by);
         }
-        if (!src.sar.Square())
-            tip += tr("\nПиксели не квадратные (%1, %2): кадр %3×%4 показывается %5×%6, как в плеере. Стадии работают в пикселях источника, "
-                      "результат пишется в квадратных пикселях — в пропорциях показа")
-                       .arg(QString::fromStdString(src.codedSar.Token()))
+        if (!src.sar.Square()) {
+            // without a colour stage the source passes through: its grid and pixels (review of TASK-0073)
+            const bool passthrough = out.gridWidth && out.gridWidth == out.width && out.gridHeight == out.height;
+            tip += tr("\nПиксели не квадратные (%1, %2): кадр %3×%4 показывается %5×%6, как в плеере. Стадии работают в пикселях источника; %7")
+                       .arg(QString::fromStdString(src.sar.Token()))
                        .arg(src.sarFrom == "container" ? tr("по контейнеру") : tr("по потоку"))
                        .arg(src.width)
                        .arg(src.height)
                        .arg(shownW)
-                       .arg(shownH);
+                       .arg(shownH)
+                       .arg(passthrough ? tr("без цветовых стадий результат пишется как есть — в этой сетке, с теми же пропорциями пикселя")
+                                        : tr("результат пишется в квадратных пикселях — в пропорциях показа"));
+        }
         sourceFrame_->setToolTip(tip);
     } else {
         sourceFrame_->setText("—");
@@ -418,7 +422,7 @@ void ProjectPanel::refresh() {
                                   ? tr("Стадии работают в кадре %1×%2 (пиксели источника %3); при записи он растягивается до %4×%5 с квадратными пикселями")
                                         .arg(out.gridWidth)
                                         .arg(out.gridHeight)
-                                        .arg(QString::fromStdString(src.codedSar.Token()))
+                                        .arg(QString::fromStdString(src.sar.Token()))
                                         .arg(out.width)
                                         .arg(out.height)
                                   : QString());

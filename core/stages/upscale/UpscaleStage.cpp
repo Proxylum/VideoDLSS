@@ -163,7 +163,7 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         if (stats_.fellBack) m.stageParams["fallback_reason"] = stats_.fallbackReason;  // a later run that reuses the pass says it (TASK-0071)
         m.stageParams["jitter_phases"] = stats_.jitterPhases;
         // TASK-0073: the target taken in the pixels of the frame as shown - a standalone pass without it predates that (DecideStage)
-        if (!options_.sar.Square()) m.stageParams["pixel_aspect"] = options_.sar.Token();
+        if (const std::string px = options_.sar.Stamp(); !px.empty()) m.stageParams["pixel_aspect"] = px;
         writer_ = std::make_unique<PassWriter>(OutDir(), m);
     }
     if (!options_.videoOut.empty()) {

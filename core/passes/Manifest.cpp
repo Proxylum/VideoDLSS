@@ -1,5 +1,6 @@
 #include "passes/Manifest.h"
 
+#include <cmath>
 #include <cstdio>
 #include <fstream>
 
@@ -211,6 +212,32 @@ std::string Manifest::FrameFileName(int64_t frame) const {
     char buf[512];
     std::snprintf(buf, sizeof(buf), filePattern.c_str(), static_cast<long long>(frame));
     return buf;
+}
+
+std::string StageParamText(const Manifest& m, const char* key) {
+    if (!m.stageParams.is_object()) return {};
+    const auto it = m.stageParams.find(key);
+    return it != m.stageParams.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+
+PixelAspect PassPixelAspect(const Manifest& m, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH) {
+    if (sourceSar.Square()) return {};
+    if (const auto stamped = PixelAspectFromStamp(StageParamText(m, "pixel_aspect"))) return *stamped;
+    if (!m.width || !m.height || !sourceW || !sourceH) return sourceSar;
+    const auto [dw, dh] = sourceSar.DisplaySize(sourceW, sourceH);
+    const double aspect = static_cast<double>(m.width) / m.height;
+    const bool shown = std::fabs(aspect / (static_cast<double>(dw) / dh) - 1.0) <= 0.01;
+    const bool grid = std::fabs(aspect / (static_cast<double>(sourceW) / sourceH) - 1.0) <= 0.01;
+    return shown && !grid ? PixelAspect{1, 1} : sourceSar;
+}
+
+PixelAspect ColourPixelAspect(const std::filesystem::path& colorDir, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH) {
+    if (sourceSar.Square() || colorDir.empty()) return sourceSar;
+    try {
+        return PassPixelAspect(Manifest::Load(colorDir), sourceSar, sourceW, sourceH);
+    } catch (const std::exception&) {
+        return sourceSar;  // the stage that reads it says what is wrong with it
+    }
 }
 
 }  // namespace dlssvid

@@ -60,6 +60,56 @@ TEST_CASE("PixelAspect: reduced, plausible or square; the frame as shown is neve
     CHECK(PixelAspect{32, 27}.DisplaySize(0, 0) == std::pair<uint32_t, uint32_t>{0, 0});  // a size not known yet
 }
 
+TEST_CASE("PixelAspect stamps of colour passes and the pixels of a pass read back", "[unit][aspect]") {
+    CHECK(PixelAspect{}.Stamp().empty());
+    CHECK(PixelAspect{1, 1}.Stamp() == "1:1");
+    CHECK(PixelAspect{32, 27}.Stamp() == "32:27");
+    CHECK(PixelAspectFromStamp("32:27") == PixelAspect{32, 27});
+    CHECK(PixelAspectFromStamp("64:54") == PixelAspect{32, 27});
+    REQUIRE(PixelAspectFromStamp("1:1"));
+    CHECK(PixelAspectFromStamp("1:1")->num == 1);  // known square, not unknown
+    for (const char* bad : {"", "32", "32:", ":27", "a:b", "32:27x", "-4:3", "0:1", "1000:1", " 32:27"}) {
+        INFO(bad);
+        CHECK(!PixelAspectFromStamp(bad));
+    }
+    const PixelAspect dvd{32, 27};
+    Manifest m = Manifest::ForPass(PassKind::ColorSr, 108, 72, FileFormat::Exr);
+    CHECK(PassPixelAspect(m, {}, 54, 36).num == 0);   // a square source: nothing
+    CHECK(PassPixelAspect(m, dvd, 54, 36) == dvd);    // the grid
+    m.width = 128;                                     // the frame as shown, no record: an explicit target of the build before
+    CHECK(PassPixelAspect(m, dvd, 54, 36).num == 1);
+    CHECK(PassPixelAspect(m, dvd, 54, 36).Square());
+    m.stageParams["pixel_aspect"] = "32:27";          // the record wins over the guess
+    CHECK(PassPixelAspect(m, dvd, 54, 36) == dvd);
+    m.width = 108;
+    m.stageParams["pixel_aspect"] = "1:1";
+    CHECK(PassPixelAspect(m, dvd, 54, 36).num == 1);
+    m.stageParams["pixel_aspect"] = 5;                // not a text: the guess
+    CHECK(PassPixelAspect(m, dvd, 54, 36) == dvd);
+    CHECK(StageParamText(m, "pixel_aspect").empty());
+    CHECK(ColourPixelAspect({}, dvd, 54, 36) == dvd);  // the source's frames
+    CHECK(ColourPixelAspect(std::filesystem::path(DLSSVID_TEST_TMP) / "aspect_nowhere", dvd, 54, 36) == dvd);
+    const auto dir = std::filesystem::path(DLSSVID_TEST_TMP) / "aspect_colour" / "color_sr";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    m.stageParams["pixel_aspect"] = "1:1";
+    m.Save(dir);
+    CHECK(ColourPixelAspect(dir, dvd, 54, 36).num == 1);
+    CHECK(ColourPixelAspect(dir, {}, 54, 36).num == 0);
+}
+
+TEST_CASE("StretchedResultSize: the result of an anamorphic pass in square pixels, within 3840x2160 by the long side", "[unit][aspect]") {
+    using Size = std::pair<uint32_t, uint32_t>;
+    CHECK(StretchedResultSize({}, 4096, 2160) == Size{4096, 2160});  // square: as is, beyond the cap too
+    CHECK(StretchedResultSize(PixelAspect{32, 27}, 1440, 960) == Size{1706, 960});
+    CHECK(StretchedResultSize(PixelAspect{4, 3}, 2880, 2160) == Size{3840, 2160});  // at the cap: as is
+    CHECK(StretchedResultSize(PixelAspect{4, 3}, 3840, 2160) == Size{3840, 1620});  // 5120x2160 fit
+    CHECK(StretchedResultSize(PixelAspect{4, 1}, 1000, 540) == Size{3840, 518});
+    CHECK(StretchedResultSize(PixelAspect{27, 32}, 2160, 3240) == Size{2160, 3840});  // portrait at its cap
+    CHECK(StretchedResultSize(PixelAspect{1, 2}, 2160, 3840) == Size{1080, 3840});   // portrait 2160x7680 fit
+    CHECK(StretchedResultSize(PixelAspect{32, 27}, 0, 0) == Size{0, 0});
+}
+
 TEST_CASE("ResolveUpscaleTarget of an anamorphic input: the scale, the target and the cap are of the frame as shown", "[unit][aspect][upscale]") {
     const PixelAspect dvd{32, 27};
     UpscaleTarget t = ResolveUpscaleTarget(720, 480, 2.0, 0, 0, 3840, 2160, true, dvd);
@@ -147,7 +197,8 @@ TEST_CASE("EstimateRun of an anamorphic source: the stages make the grid, the re
         StageDecision d;
         d.name = name;
         d.action = "run";
-        d.params = EffectiveStageParams(name, nlohmann::json::object());
+        // NR's model at half the frame: its time then depends on the frame it runs at (at model_scale 1 one pass cancels out, review)
+        d.params = EffectiveStageParams(name, std::string(name) == "nr" ? nlohmann::json{{"model_scale", 0.5}} : nlohmann::json::object());
         plan.stages.push_back(d);
     }
     std::vector<ProcessStage> stages = DefaultProcessStages();
@@ -190,6 +241,18 @@ TEST_CASE("EstimateRun of an anamorphic source: the stages make the grid, the re
     const RunOutcome square = EstimateRun(plan, stages, src);
     CHECK(square.width == 108);
     CHECK(square.gridWidth == 108);
+    // NR alone on a grid the stretch would take beyond 4K: fit into 3840x2160 as process writes it
+    SourceInfo wide;
+    wide.width = 1000;
+    wide.height = 540;
+    wide.fps = 24.0;
+    wide.frames = 2;
+    wide.sar = PixelAspect{4, 1};
+    for (auto& s : stages) s.enabled = s.name == "nr";
+    const RunOutcome fit = EstimateRun(plan, stages, wide);
+    CHECK(fit.width == 3840);
+    CHECK(fit.height == 518);
+    CHECK(fit.gridWidth == 1000);
 }
 
 TEST_CASE("DLSS-G's camera takes the frame as shown: the grid of 32:27 pixels is 16:9", "[unit][aspect][fg]") {

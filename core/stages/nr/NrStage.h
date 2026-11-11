@@ -72,6 +72,7 @@ struct NrStageOptions {
     bool disableWhenUnavailable = false;
     ColorInfo color;
     Rational fps;
+    PixelAspect sar;                    // TASK-0073: the colour's pixels (RunNrFrames: ColourPixelAspect) - the record, the preview video
     std::string sourceFile, sourceHash;
     std::function<void(int64_t frame, double ms)> onFrame;
     // Frames with a lower index go through the model and the temporal filter for their history and are not output - no pass

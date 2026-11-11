@@ -161,6 +161,16 @@ UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohman
     return ResolveUpscaleTarget(sourceW, sourceH, Scale(p), p.value("target_width", 0u), p.value("target_height", 0u), 3840, 2160, capByLongSide, sar);
 }
 
+std::pair<uint32_t, uint32_t> StretchedResultSize(PixelAspect sar, uint32_t w, uint32_t h) {
+    if (sar.Square() || !w || !h) return {w, h};
+    const auto [dw, dh] = sar.DisplaySize(w, h);
+    const bool landscape = dw >= dh;
+    const double k = std::min((landscape ? 3840.0 : 2160.0) / dw, (landscape ? 2160.0 : 3840.0) / dh);
+    if (k >= 1.0) return {dw, dh};
+    auto down = [](double v) { return std::max(2u, static_cast<uint32_t>(std::floor(v / 2.0 + 1e-9)) * 2u); };
+    return {down(dw * k), down(dh * k)};
+}
+
 RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>& stages, const SourceInfo& source) {
     RunOutcome o;
     o.width = source.width;
@@ -193,7 +203,7 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
     o.gridWidth = o.width;
     o.gridHeight = o.height;
     if (!params[2].is_null() || !params[3].is_null() || !params[4].is_null()) {
-        const auto [dw, dh] = source.sar.DisplaySize(o.width, o.height);
+        const auto [dw, dh] = StretchedResultSize(source.sar, o.width, o.height);
         o.width = dw;
         o.height = dh;
     }

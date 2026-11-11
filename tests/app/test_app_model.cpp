@@ -1635,6 +1635,17 @@ TEST_CASE("AppModel opens an anamorphic clip as shown: the viewport, the source 
     REQUIRE(out);
     CHECK(out->text().startsWith(QString::fromUtf8("128×72")));
     CHECK(out->toolTip() == QString::fromUtf8("Стадии работают в кадре 108×72 (пиксели источника 32:27); при записи он растягивается до 128×72 с квадратными пикселями"));
+    CHECK(label->toolTip().contains(QString::fromUtf8("результат пишется в квадратных пикселях — в пропорциях показа")));
+    // no colour stage: the source passes through with its grid and pixels - the tooltip says so (review of TASK-0073)
+    model.setStageEnabled("upscale", false);
+    model.refreshPlan();
+    panel.refresh();
+    CHECK(label->toolTip().contains(QString::fromUtf8("без цветовых стадий результат пишется как есть — в этой сетке, с теми же пропорциями пикселя")));
+    CHECK(!label->toolTip().contains(QString::fromUtf8("в квадратных пикселях")));
+    CHECK(out->text().startsWith(QString::fromUtf8("54×36")));
+    model.setStageEnabled("upscale", true);
+    model.refreshPlan();
+    panel.refresh();
     // the viewport's labels: the size as shown, the technical tooltip both
     const ViewportSource* vs = model.store().FindSource("source");
     REQUIRE(vs);
@@ -1658,6 +1669,17 @@ TEST_CASE("AppModel opens an anamorphic clip as shown: the viewport, the source 
     plain.refresh();
     CHECK(!plain.findChild<QLabel*>("sourceFrame")->text().contains(QString::fromUtf8("пиксель")));
     CHECK(SourceSizeText(*square.store().FindSource("source")) == QString::fromUtf8("54×36"));
+    // turned by 90: the pixel named in the axes of the frame shown next to it, as the viewport's tooltip names it (review of TASK-0073)
+    spec.sar = PixelAspect{32, 27};
+    spec.orientation = {90, false};
+    AppModel turned(true);
+    turned.openVideo(Q(WriteClip(d / "turned.mkv", spec)));
+    turned.refreshPlan();
+    ProjectPanel tp(turned, queue);
+    tp.refresh();
+    CHECK(tp.findChild<QLabel*>("sourceFrame")->text().contains(QString::fromUtf8("36×54")));
+    CHECK(tp.findChild<QLabel*>("sourceFrame")->text().contains(QString::fromUtf8(" · пиксель 27:32, показ 36×64")));
+    CHECK(SourceTooltip(*turned.store().FindSource("source")).contains(QString::fromUtf8("(пиксель 27:32, показ 36x64)")));
     CHECK(!SourceTooltip(*square.store().FindSource("source")).contains(QString::fromUtf8("пиксель")));
     CHECK(!plain.findChild<QLabel*>("sourceFrame")->toolTip().contains(QString::fromUtf8("Пиксели")));
     CHECK(plain.findChild<QLabel*>("outVideo")->toolTip().isEmpty());

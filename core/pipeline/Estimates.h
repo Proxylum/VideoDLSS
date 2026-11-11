@@ -90,6 +90,10 @@ struct RunOutcome {
 // artifact_reduction_only, else the scale or target_width / target_height, even, capped at 3840x2160 by the long side (TASK-0072;
 // `capByLongSide = false`: by the axes, as before); `sar` - the source's pixels (TASK-0073: the target and the cap of the frame as shown).
 UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& params, bool capByLongSide = true, PixelAspect sar = {});
+// TASK-0073: the frame `process` writes of a colour pass w x h of pixels `sar`: stretched to square pixels (PixelAspect::DisplaySize), fit
+// into 3840x2160 by the long side when the stretch takes it beyond (an anamorphic 4K grid with no upscale to cap it: NVENC's H.264 stops at
+// 4096); square pixels - w x h as is.
+std::pair<uint32_t, uint32_t> StretchedResultSize(PixelAspect sar, uint32_t w, uint32_t h);
 
 // Combines the plan, the enabled stages' parameters and the source: resolution and rate after upscale / frame
 // generation, time and disk of what runs, time of a full run.

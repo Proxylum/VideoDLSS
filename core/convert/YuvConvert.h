@@ -23,7 +23,7 @@ private:
 };
 
 // The same layout at another size (TASK-0073: a pass of an anamorphic source stretched to square pixels when `process` encodes it):
-// Lanczos, the same on every CPU (SWS_BITEXACT); the same size is a plain copy.
+// Lanczos, the same on every CPU (SWS_BITEXACT); at the same size the samples come out as they are.
 class YuvResizer {
 public:
     YuvResizer() = default;

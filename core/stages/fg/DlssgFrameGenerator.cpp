@@ -271,9 +271,7 @@ void DlssgFrameGenerator::Generate(const FgInputs& in, std::vector<PassImage>& o
 nlohmann::json DlssgFrameGenerator::Describe() const {
     nlohmann::json j = {{"backend", "dlssg"}, {"feature", static_cast<int>(NVSDK_NGX_Feature_FrameGeneration)}, {"multiplier", config_.multiplier},
                         {"backbuffer_format", diag_.backbufferFormat},  {"guides", true},           {"camera", "synthetic (fov 60, static)"}};
-    // TASK-0073: the camera of the frame as shown - a standalone pass without it predates that (DecideStage)
-    if (!config_.pixelAspect.Square()) j["pixel_aspect"] = config_.pixelAspect.Token();
-    if (impl_) j["camera_aspect"] = impl_->camera.aspect;  // what cameraAspectRatio was given
+    if (impl_) j["camera_aspect"] = impl_->camera.aspect;  // what cameraAspectRatio was given: the frame as shown (TASK-0073)
     j["diagnostics"] = diag_.ToJson();
     return j;
 }

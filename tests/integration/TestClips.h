@@ -40,9 +40,11 @@ struct ClipSpec {
     std::string rotateTag;  // non-empty: the stream's old 'rotate' tag (degrees clockwise), written as well as any matrix
     // TASK-0073: the pixels' proportions, where they are said: "all" - the codec (FFV1 then at level 3: its slices carry it), the stream
     // (MKV DisplayWidth, MP4 / MOV pasp, AVI vprp) and the frames; "container" - the stream only; "codec" - the codec and the frames only
-    // (for a container without the field: a raw .m2v / .m4v, the bitstream says it)
+    // (with a container without the field - `format` "m4v", a raw MPEG-4 stream - the bitstream alone says it)
     PixelAspect sar;
     std::string sarIn = "all";
+    // The muxer by name (empty: by the file's extension - FFmpeg takes its MP4 'ipod' muxer for .m4v, not the raw one)
+    std::string format;
 };
 // The CpuFrame layout `WriteClip` feeds the encoder for a ClipSpec::pixFmt.
 FrameDesc FrameDescFor(const ClipSpec& spec);

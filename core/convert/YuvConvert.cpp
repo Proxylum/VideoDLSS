@@ -55,10 +55,6 @@ YuvResizer::~YuvResizer() {
 void YuvResizer::Resize(const CpuFrame& in, uint32_t width, uint32_t height, CpuFrame& out) {
     if (in.data.size() < in.desc.ByteSize()) Throw("YuvResizer: frame has no data");
     if (!width || !height) Throw("YuvResizer: empty target size");
-    if (width == in.desc.width && height == in.desc.height) {
-        out = in;
-        return;
-    }
     FrameDesc target = in.desc;
     target.width = width;
     target.height = height;

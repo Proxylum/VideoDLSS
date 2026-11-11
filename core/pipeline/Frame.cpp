@@ -1,6 +1,7 @@
 #include "pipeline/Frame.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <cstring>
 #include <numeric>
@@ -108,6 +109,23 @@ std::optional<DisplayOrientation> OrientationFromToken(std::string_view token) {
 }
 
 std::string PixelAspect::Token() const { return Square() ? std::string() : std::to_string(num) + ":" + std::to_string(den); }
+
+std::string PixelAspect::Stamp() const { return num == 0 ? std::string() : Square() ? std::string("1:1") : Token(); }
+
+std::optional<PixelAspect> PixelAspectFromStamp(std::string_view stamp) {
+    const size_t colon = stamp.find(':');
+    if (colon == std::string_view::npos) return std::nullopt;
+    int64_t num = 0, den = 0;
+    const std::string_view a = stamp.substr(0, colon), b = stamp.substr(colon + 1);
+    const auto ra = std::from_chars(a.data(), a.data() + a.size(), num);
+    const auto rb = std::from_chars(b.data(), b.data() + b.size(), den);
+    if (ra.ec != std::errc() || ra.ptr != a.data() + a.size() || rb.ec != std::errc() || rb.ptr != b.data() + b.size() || num <= 0 || den <= 0)
+        return std::nullopt;
+    if (num == den) return PixelAspect{1, 1};
+    const PixelAspect p = PixelAspectFrom(num, den);
+    if (p.Square()) return std::nullopt;  // not plausible
+    return p;
+}
 
 std::pair<uint32_t, uint32_t> PixelAspect::DisplaySize(uint32_t w, uint32_t h) const {
     if (Square() || !w || !h) return {w, h};  // square, or a size not known yet: as is

@@ -28,6 +28,7 @@
 #include "pipeline/ProcessRunner.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "util/Sha256.h"
+#include "util/Subprocess.h"
 #include "viewport/FrameStore.h"
 
 using namespace dlssvid;
@@ -168,7 +169,10 @@ TEST_CASE("VideoDecoder reads the pixels' proportions: the container's, else the
         ClipSpec raw = Anamorphic(64, 48);
         raw.codec = "mpeg4";
         raw.sarIn = "codec";
-        VideoDecoder dec(WriteClip(d / "raw.m4v", raw), VideoDecoder::Probe());
+        raw.format = "m4v";  // the raw muxer: no container field at all (by the extension FFmpeg writes an MP4 with pasp)
+        const auto file = WriteClip(d / "raw.m4v", raw);
+        CHECK(Summarize(file).streamSar.Square());
+        VideoDecoder dec(file, VideoDecoder::Probe());
         CHECK(dec.Info().sar == kDvdWide);
         CHECK(dec.Info().sarFrom == "bitstream");
     }
@@ -266,6 +270,94 @@ TEST_CASE("A colour pass already of the shown proportions is not stretched again
     gw.Finish();
     RunProcess(o);
     CHECK(Summarize(d / "result.mkv").width == 128);
+}
+
+TEST_CASE("An anamorphic stretch beyond 4K is fit into 3840x2160: 1000x540 at 4:1 through NR alone is 3840x518", "[integration][aspect][process][regression]") {
+    // review of TASK-0073: a grid with no upscale to cap it was stretched past 3840 (an anamorphic 4K at 4:3 to 5120x2160 - H.264 NVENC
+    // refuses it after the whole run)
+    const auto d = Dir("stretch_cap");
+    const auto clip = WriteClip(d / "clip.mkv", Anamorphic(1000, 540, PixelAspect{4, 1}, 2));
+    ProcessOptions o = Options(clip, d);
+    Only(o, {"nr"});
+    const ProcessResult r = RunProcess(o);
+    const StreamSummary s = Summarize(d / "result.mkv");
+    CHECK(s.width == 3840);
+    CHECK(s.height == 518);
+    CHECK(s.sar.Square());
+    CHECK(r.outputFormat.width == 3840);
+}
+
+TEST_CASE("An anamorphic upscale grid of the source's shown proportions is still stretched: the pass says its pixels", "[integration][aspect][process][regression]") {
+    // review of TASK-0073: HDV-like 72x54 at 4:3 (shown 96x54) with the target 128x54 makes the grid 96x54 - the proportions of the source as
+    // shown, which the guess for the passes of the build before took for square pixels: 96x54 was written, not 128x54
+    const auto d = Dir("stamped");
+    const auto clip = WriteClip(d / "clip.mkv", Anamorphic(72, 54, PixelAspect{4, 3}, 2));
+    ProcessOptions o = Options(clip, d);
+    Only(o, {"upscale", "nr"});
+    ApplyParamSpec(o.stages, "upscale.target_width=128");
+    ApplyParamSpec(o.stages, "upscale.target_height=54");
+    RunProcess(o);
+    CHECK(Manifest::Load(d / "passes" / "color_sr").width == 96);
+    CHECK(Manifest::Load(d / "passes" / "color_nr").stageParams.value("pixel_aspect", std::string()) == "4:3");
+    const StreamSummary s = Summarize(d / "result.mkv");
+    CHECK(s.width == 128);
+    CHECK(s.height == 54);
+}
+
+TEST_CASE("NR and FG of an anamorphic source take the pixels of the colour they read: a square pass of the build before stays square", "[integration][aspect][process][regression]") {
+    // review of TASK-0073: FG took the source's pixels for a color_sr that an explicit target of the build before had stretched already -
+    // DLSS-G's camera stretched it a second time and +fg.sar recomputed a right pass into a wrong one
+    const auto d = Dir("colour_pixels");
+    const auto clip = WriteClip(d / "clip.mkv", Anamorphic());
+    ProcessOptions o = Options(clip, d);
+    Only(o, {"nr", "fg"});  // fg: blend
+    auto colourPass = [&](uint32_t w, uint32_t h, const nlohmann::json& stageParams) {
+        std::filesystem::remove_all(o.passesRoot / "color_sr");
+        Manifest m = Manifest::ForPass(PassKind::ColorSr, w, h, FileFormat::Exr);
+        m.sourceHash = "sha256:" + Sha256FileCached(clip);
+        m.stageParams = stageParams;
+        PassWriter wr(o.passesRoot / "color_sr", m);
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, w, h));
+        wr.Finish();
+    };
+    auto recorded = [&](const char* pass) { return Manifest::Load(o.passesRoot / pass).stageParams.value("pixel_aspect", std::string()); };
+    ProcessOptions g = Options(clip, d);
+    Only(g, {"fg"});
+    ApplyParamSpec(g.stages, "fg.backend=dlssg");
+    colourPass(128, 72, {{"backend", "nis"}});  // an explicit target of the build before: square pixels, no record
+    RunProcess(o);
+    CHECK(recorded("color_nr") == "1:1");
+    CHECK(recorded("color_fg") == "1:1");
+    CHECK(Summarize(d / "result.mkv").width == 128);
+    CHECK(App(Decision(PlanProcess(g), "fg")).find("fg.sar") == std::string::npos);  // DLSS-G on square pixels: its camera as before
+    colourPass(108, 72, {{"backend", "nis"}, {"pixel_aspect", "32:27"}});  // the grid of this build
+    o.forceStages = {"nr", "fg"};  // both colour passes are hand-made without fingerprints: the same pseudo-fingerprint to the plan
+    RunProcess(o);
+    CHECK(recorded("color_nr") == "32:27");
+    CHECK(recorded("color_fg") == "32:27");
+    CHECK(Summarize(d / "result.mkv").width == 128);
+    CHECK_THAT(App(Decision(PlanProcess(g), "fg")), ContainsSubstring("+fg.sar"));
+}
+
+TEST_CASE("The stages' preview videos of an anamorphic clip carry its pixels' proportions", "[integration][aspect][cli][regression]") {
+    // review of TASK-0073: dlssvid nr --video wrote the grid without them - shown squeezed, while upscale's and fg's played 16:9
+    const auto d = Dir("previews");
+    const auto clip = WriteClip(d / "clip.mkv", Anamorphic());
+    const auto passes = d / "passes";
+    auto cli = [&](const std::string& stage, const std::string& backend, const char* video) {
+        std::string out;
+        return Subprocess::Run({DLSSVID_CLI_PATH, stage, "-i", clip.string(), "-o", passes.string(), "--backend", backend, "--warp", "--video", (d / video).string(),
+                                "--codec", "ffv1"},
+                               &out);
+    };
+    REQUIRE(cli("upscale", "nis", "sr.mkv") == 0);
+    REQUIRE(cli("nr", "stub", "nr.mkv") == 0);  // on color_sr
+    REQUIRE(cli("fg", "blend", "fg.mkv") == 0);  // on color_nr
+    for (const char* video : {"sr.mkv", "nr.mkv", "fg.mkv"}) {
+        INFO(video);
+        CHECK(Summarize(d / video).sar == kDvdWide);
+    }
+    CHECK(Manifest::Load(passes / "color_nr").stageParams.value("pixel_aspect", std::string()) == "32:27");
 }
 
 TEST_CASE("Passthrough keeps an anamorphic clip's grid bit for bit and writes its pixels' proportions", "[integration][aspect][passthrough][regression]") {
@@ -451,6 +543,19 @@ TEST_CASE("The plan's advice on an anamorphic source: masks of the shown frame f
     CHECK_THAT(Warnings(Decision(PlanProcess(u), "upscale")), ContainsSubstring("пропорции кадра в пикселях источника, а у источника пиксели 32:27"));
     ApplyParamSpec(u.stages, "upscale.target_width=128");
     CHECK(Warnings(Decision(PlanProcess(u), "upscale")).find("пикселях источника") == std::string::npos);
+    // turned by 90: a target of the stored frame as players show it unturned (64x36 of 54x36 at 32:27) squeezes the portrait (review)
+    ClipSpec turnedSpec = Anamorphic();
+    turnedSpec.orientation = {90, false};
+    const auto turned = WriteClip(d / "turned.mkv", turnedSpec);
+    std::filesystem::create_directories(d / "t");
+    ProcessOptions t = Options(turned, d / "t");
+    Only(t, {"upscale"});
+    ApplyParamSpec(t.stages, "upscale.target_width=128");
+    ApplyParamSpec(t.stages, "upscale.target_height=72");
+    CHECK_THAT(Warnings(Decision(PlanProcess(t), "upscale")), ContainsSubstring("128×72 — пропорции бокового кадра, а источник показывается повёрнутым (36×64)"));
+    ApplyParamSpec(t.stages, "upscale.target_width=72");  // the portrait as shown
+    ApplyParamSpec(t.stages, "upscale.target_height=128");
+    CHECK(Warnings(Decision(PlanProcess(t), "upscale")).find("бокового") == std::string::npos);
 }
 
 TEST_CASE("The viewport shows an anamorphic clip stretched: the reference image is the frame as shown", "[integration][aspect][viewport]") {

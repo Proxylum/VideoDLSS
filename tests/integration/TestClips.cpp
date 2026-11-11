@@ -108,7 +108,7 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     const std::string url = path.string();
 
     AVFormatContext* fmt = nullptr;
-    CheckAv(avformat_alloc_output_context2(&fmt, nullptr, nullptr, url.c_str()), "alloc output");
+    CheckAv(avformat_alloc_output_context2(&fmt, nullptr, spec.format.empty() ? nullptr : spec.format.c_str(), url.c_str()), "alloc output");
 
     // --- video (ffv1, lossless, unless the spec says otherwise) ---
     const AVCodec* venc = avcodec_find_encoder_by_name(spec.codec.c_str());

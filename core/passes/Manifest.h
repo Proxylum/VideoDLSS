@@ -99,4 +99,14 @@ struct Manifest {
     }
 };
 
+// A text a stage recorded in stage_params ("" when absent or of another type).
+std::string StageParamText(const Manifest& m, const char* key);
+// TASK-0073: the pixels of a colour pass of a source whose pixels are `sourceSar` (the axes of the frame the stages get, sourceW x sourceH):
+// what the pass recorded (stage_params.pixel_aspect, PixelAspect::Stamp); a pass of the build before without the record - the source's,
+// unless it has the proportions of the frame as shown and not of the grid (an explicit target then was taken in square pixels): {1, 1}.
+// A square source: {}.
+PixelAspect PassPixelAspect(const Manifest& m, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH);
+// The pixels of the colour a stage reads: the pass in `colorDir` (unreadable: the source's), the source's frames when empty.
+PixelAspect ColourPixelAspect(const std::filesystem::path& colorDir, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH);
+
 }  // namespace dlssvid

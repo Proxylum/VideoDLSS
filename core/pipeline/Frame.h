@@ -83,6 +83,9 @@ struct PixelAspect {
     PixelAspect Inverse() const { return Square() ? PixelAspect{} : PixelAspect{den, num}; }
     // "" (square) | "32:27": in logs, the settings note
     std::string Token() const;
+    // What a colour pass of a non-square source records of its pixels (stage_params.pixel_aspect): "32:27", or "1:1" for pixels known to be
+    // square ({1, 1}: a pass of the build before that an explicit target stretched already); "" for {} - a square source records nothing
+    std::string Stamp() const;
     // The frame a w x h grid of these pixels is shown as, in square pixels, nothing narrowed: wider than 1 - the width grows, narrower -
     // the height grows (720x480 at 8:9 -> 720x540); even sides. The grid itself when square.
     std::pair<uint32_t, uint32_t> DisplaySize(uint32_t w, uint32_t h) const;
@@ -92,6 +95,8 @@ struct PixelAspect {
 
 // num:den reduced; 0, negative or 1:1 - square; outside 1/4 .. 4 (a broken file: 1000:1) - square, `why` says so.
 PixelAspect PixelAspectFrom(int64_t num, int64_t den, std::string* why = nullptr);
+// A Stamp() read back: "1:1" -> {1, 1}, "32:27" -> {32, 27}; anything else (empty, malformed, not plausible) -> nullopt
+std::optional<PixelAspect> PixelAspectFromStamp(std::string_view stamp);
 
 // The layout of a stored frame `desc` once shown with `o`: the sides swapped for 90 / 270. The chroma grid must map onto itself for
 // the samples to be permuted exactly; where it does not - 4:2:2 turned by 90 / 270 (4:4:0 is not a format here), or an odd side of a

@@ -214,7 +214,6 @@ void VideoEncoder::WriteFrame(const CpuFrame& in) {
     frame_->colorspace = codec_->colorspace;
     frame_->color_primaries = codec_->color_primaries;
     frame_->color_trc = codec_->color_trc;
-    frame_->sample_aspect_ratio = codec_->sample_aspect_ratio;  // FFV1 writes the frame's
     CheckAv(av_frame_get_buffer(frame_, 0), "av_frame_get_buffer");
     CheckAv(av_frame_make_writable(frame_), "av_frame_make_writable");
     const bool wide = in.desc.HighBitDepth();
