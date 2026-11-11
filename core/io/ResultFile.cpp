@@ -63,9 +63,10 @@ std::string CheckEncodedResult(const fs::path& file, const ResultExpectation& ex
         if (!info.orientation.Identity())
             return "it carries a display orientation (" + info.orientation.Token() + "): the frames were written upright, a player would turn them again";
         // TASK-0073: the pixels as written - square for a result stretched to them, the source's SAR in passthrough. A muxer that keeps
-        // the frame as shown in whole pixels (WebM's DisplayWidth: 32:27 of 720 comes back 853:720) wrote the same picture
-        const bool sameShown = !expect.sar.Square() && !info.codedSar.Square() &&
-                               std::fabs(info.codedSar.Value() - expect.sar.Value()) * static_cast<double>(info.width) <= 1.0;
+        // the frame as shown in whole pixels wrote the same picture: WebM's DisplayWidth (32:27 of 720 comes back 853:720), Matroska
+        // leaving out a SAR that moves no pixel (14400:14399 of 1694 comes back square)
+        const bool sameShown =
+            !expect.sar.Square() && std::fabs(info.codedSar.Value() - expect.sar.Value()) * static_cast<double>(info.width) <= 1.0;
         if (!(info.codedSar == expect.sar) && !sameShown) {
             if (expect.sar.Square())
                 return "it carries a pixel aspect of " + info.codedSar.Token() + " (square pixels were written): players would stretch it";

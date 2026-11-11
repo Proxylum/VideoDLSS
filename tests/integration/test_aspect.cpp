@@ -453,6 +453,12 @@ TEST_CASE("The result check compares the pixels' proportions written with those 
     rounded.sar = PixelAspect{856, 720};
     CHECK_THAT(CheckEncodedResult(WriteClip(d / "off.mkv", rounded), ResultExpectation{720, 48, 3, false, kDvdWide}),
                ContainsSubstring("its pixels are 107:90, 32:27 was written"));
+    // a near-square SAR Matroska leaves out - it moves no pixel (14400:14399 of 1694, ffmpeg's scale=-2:720 of a 1920x816 film): read back
+    // square, the same picture (review of TASK-0073: a passthrough of it failed at the end)
+    const ClipSpec nearSquare = Anamorphic(1694, 16, PixelAspect{14400, 14399});
+    const auto nearFile = WriteClip(d / "near.mkv", nearSquare);
+    CHECK(Summarize(nearFile).sar.Square());
+    CHECK(CheckEncodedResult(nearFile, ResultExpectation{1694, 16, 3, false, PixelAspect{14400, 14399}}).empty());
 }
 
 TEST_CASE("A turned anamorphic clip: the proportions turn with the frame; passthrough and process as shown", "[integration][aspect][orientation]") {
@@ -610,6 +616,16 @@ TEST_CASE("The plan's advice on an anamorphic source: masks of the shown frame f
     }
     CHECK_THAT(mask(54, 36), ContainsSubstring("54×36 растянется на кадр 128×72"));  // review of TASK-0073: was «на кадр 152×72»
     CHECK(mask(64, 36).find("растянется") == std::string::npos);
+    std::filesystem::remove_all(o.passesRoot / "color_sr");
+    {  // a color_sr of an exact target (96 as shown, the grid 82 stretched 97.2): the warning names the frame as written (review)
+        Manifest m = Manifest::ForPass(PassKind::ColorSr, 82, 54, FileFormat::Exr);
+        m.sourceHash = "sha256:" + Sha256FileCached(clip);
+        m.stageParams = {{"pixel_aspect", "32:27"}, {"shown_size", {96, 54}}};
+        PassWriter wr(o.passesRoot / "color_sr", m);
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 82, 54));
+        wr.Finish();
+    }
+    CHECK_THAT(mask(100, 36), ContainsSubstring("100×36 растянется на кадр 96×54"));
     std::filesystem::remove_all(o.passesRoot / "color_sr");
     ProcessOptions u = Options(clip, d);
     Only(u, {"upscale"});

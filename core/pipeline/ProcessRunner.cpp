@@ -1014,6 +1014,7 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
     // turned source is no input of NR (DecideStage refuses it)
     uint32_t fw = ctx.sourceWidth, fh = ctx.sourceHeight;
     PixelAspect colourSar = ctx.sar;  // the pixels of that frame: a color_sr of the build before may be square already (review of TASK-0073)
+    std::optional<std::pair<uint32_t, uint32_t>> colourShown;  // ... and as shown: the upscale's target it records
     try {
         if (Manifest::Exists(ctx.root / "color_sr"))
             if (const Manifest sr = Manifest::Load(ctx.root / "color_sr");
@@ -1021,6 +1022,7 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
                 fw = sr.width;
                 fh = sr.height;
                 colourSar = PassPixelAspect(sr, ctx.sar, ctx.sourceWidth, ctx.sourceHeight);
+                colourShown = PassShownSize(sr, colourSar);
             }
     } catch (const std::exception&) {
     }
@@ -1030,7 +1032,7 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
     // TASK-0073: an anamorphic source is shown (and its masks drawn) stretched - a mask of the frame as shown fits as well: NR lays it on
     // its grid; the warning names the frame as shown
     if (!colourSar.Square()) {
-        const auto [sw, sh] = colourSar.DisplaySize(fw, fh);
+        const auto [sw, sh] = colourShown ? *colourShown : colourSar.DisplaySize(fw, fh);
         const double shownOff = mask / (static_cast<double>(sw) / sh) - 1.0;
         if (std::fabs(off) > 0.01) {
             off = shownOff;

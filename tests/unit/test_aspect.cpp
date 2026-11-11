@@ -3,6 +3,7 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <algorithm>
 #include <filesystem>
@@ -414,6 +415,9 @@ TEST_CASE("YuvResizer: the same layout at another size, Lanczos, repeatable; the
     CpuFrame empty, out;
     YuvResizer r;
     CHECK_THROWS(r.Resize(empty, 64, 36, out));
+    CpuFrame described;  // a layout without its samples: refused before swscale reads past them
+    described.desc = FrameDesc{54, 36, PixelFormat::Yuv420p, 8};
+    CHECK_THROWS_WITH(r.Resize(described, 64, 36, out), Catch::Matchers::ContainsSubstring("has no data"));
 }
 
 TEST_CASE("Settings note: an anamorphic source says its pixels - source: sar=32:27; a square one as before", "[unit][aspect][encode]") {
