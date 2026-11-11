@@ -335,6 +335,11 @@ TEST_CASE("NR and FG of an anamorphic source take the pixels of the colour they 
     ApplyParamSpec(remade.stages, "fg.backend=dlssg");
     remade.forceStages = {"nr"};
     CHECK(App(Decision(PlanProcess(remade), "fg")).find("fg.sar") == std::string::npos);
+    // ... but with color_sr remade too (upscale on): the grid
+    ProcessOptions all = remade;
+    for (auto& s : all.stages) s.enabled = s.enabled || s.name == "upscale";
+    all.forceStages = {"upscale", "nr"};
+    CHECK_THAT(App(Decision(PlanProcess(all), "fg")), ContainsSubstring("+fg.sar"));
     colourPass(108, 72, {{"backend", "nis"}, {"pixel_aspect", "32:27"}});  // the grid of this build
     // planned with NR remade: FG's colour is the pass this run makes (the grid), not the square color_nr still on disk
     ProcessOptions both = o;
