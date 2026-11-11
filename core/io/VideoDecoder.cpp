@@ -340,8 +340,8 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
         std::string sarWhy;
         info_.codedSar = PixelAspectFrom(guess.num, guess.den, &sarWhy);
         if (!sarWhy.empty()) Log()->log(options.probe ? spdlog::level::debug : spdlog::level::warn, "{}: {}", url, sarWhy);
-        // which one decided: the codec's when it says the same (a raw stream - libavformat copies it to the stream as well; MP4's pasp
-        // and the VUI agreeing), else the container's (MKV DisplayWidth over FFV1, MOV pasp over ProRes)
+        // which one decided: the codec's when it says the same (a raw stream: no container field, the guess falls back to the codec
+        // parameters; MP4's pasp and the VUI agreeing), else the container's (MKV DisplayWidth over FFV1, MOV pasp over ProRes)
         if (!info_.codedSar.Square())
             info_.sarFrom = PixelAspectFrom(vs->codecpar->sample_aspect_ratio.num, vs->codecpar->sample_aspect_ratio.den) == info_.codedSar ? "bitstream" : "container";
         info_.sar = info_.orientation.SwapsAxes() ? info_.codedSar.Inverse() : info_.codedSar;

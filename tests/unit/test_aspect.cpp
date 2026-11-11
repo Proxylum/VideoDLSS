@@ -146,6 +146,8 @@ TEST_CASE("PassResultSize: the frame as shown a pass records, else the pass stre
     CHECK(PassShownSize(m, dvd) == Size{98, 54});
     CHECK(PassShownSize(m, {}) == Size{82, 54});
     CHECK(ShownSizeMatches({3840, 2160}, {3836, 2160}));
+    CHECK(ShownSizeMatches({3840, 2160}, {3832, 2160}));   // 8 px: within 1 % (a wide SAR's capped grid rounded down)
+    CHECK(!ShownSizeMatches({3840, 2160}, {3790, 2160}));
     CHECK(!ShownSizeMatches({200, 54}, {98, 54}));
 }
 
@@ -251,6 +253,12 @@ TEST_CASE("ResolveUpscaleTarget of an anamorphic input: the scale, the target an
                 CHECK(p.displayHeight <= 3840);
             }
     CHECK(capped == 41 * 21 * 8);
+    // a grid that does not come out whole: rounded down along the stretched axis (701x470 32:27 x6 - 3818.2 as shown, 3221.6 of the grid)
+    const UpscaleTarget n = ResolveUpscaleTarget(701, 470, 6.0, 0, 0, 3840, 2160, true, PixelAspect{32, 27});
+    CHECK(n.capped);
+    CHECK(n.width == 3220);
+    CHECK(n.height == 2160);
+    CHECK(n.displayWidth == 3818);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}}, true, dvd).displayWidth == 1706);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}, {"target_width", 1920}}, true, dvd).width == 1620);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}, {"target_width", 1920}}).width == 1920);  // the square rule (the build before)
