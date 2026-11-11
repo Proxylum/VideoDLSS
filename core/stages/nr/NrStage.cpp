@@ -322,6 +322,7 @@ void NrStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams = bypass_ ? nlohmann::json{{"backend", options_.backend}, {"bypass", true}} : backends_[0]->Describe();
         m.stageParams["passes"] = stats_.passes;          // model passes: 0 in the bypass (the estimates read it)
         if (const std::string px = options_.sar.Stamp(); !px.empty()) m.stageParams["pixel_aspect"] = px;  // TASK-0073: what `process` encodes by
+        if (const auto shown = ColourShownSize(options_.colorDir, w, h)) m.stageParams["shown_size"] = {shown->first, shown->second};  // passed on
         if (!stats_.vramMibPerPass.empty()) m.stageParams["vram_mib_per_pass"] = stats_.vramMibPerPass;  // PR-5: each pass's feature
         m.stageParams["intensity"] = options_.intensity;  // our edit strength after the model, not the model's (PR-7)
         if (!bypass_) m.stageParams["model_intensity"] = kNrModelIntensity;  // what the model got: also the mark of a PR-7 pass

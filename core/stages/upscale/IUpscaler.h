@@ -91,7 +91,9 @@ struct UpscaleTarget {
     uint32_t width = 0, height = 0;
     double scale = 1.0;  // effective width scale
     bool capped = false;
-    uint32_t displayWidth = 0, displayHeight = 0;  // the frame as shown: width x height stretched to square pixels (the same when square)
+    // the frame as shown - what `process` stretches the grid to: the scale's / the target's size itself, even (an even grid stretched by
+    // the pixels may miss it by a rounding: 32:27, --target 1440x1080 makes the grid 1216x1080, 1441 as shown); the grid when square
+    uint32_t displayWidth = 0, displayHeight = 0;
 };
 UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uint32_t targetW = 0, uint32_t targetH = 0, uint32_t maxW = 3840,
                                    uint32_t maxH = 2160, bool capByLongSide = true, PixelAspect sar = {});

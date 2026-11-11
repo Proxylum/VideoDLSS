@@ -122,6 +122,7 @@ void FgStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["source_fps"] = options_.fps.num > 0 ? options_.fps.ToDouble() : 0.0;
         // TASK-0073: what `process` encodes by, what the camera of DLSS-G took; a standalone DLSS-G pass without it predates that (DecideStage)
         if (const std::string px = options_.sar.Stamp(); !px.empty()) m.stageParams["pixel_aspect"] = px;
+        if (const auto shown = ColourShownSize(options_.colorDir, w, h)) m.stageParams["shown_size"] = {shown->first, shown->second};  // passed on
         writer_ = std::make_unique<PassWriter>(OutDir(), m);
     }
     if (!options_.videoOut.empty()) {

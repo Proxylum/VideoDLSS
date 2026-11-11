@@ -1013,12 +1013,14 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
     // the frame NR runs at: color_sr of the clip (the upscale's --target included), else the source; a color_sr of the stored frame of a
     // turned source is no input of NR (DecideStage refuses it)
     uint32_t fw = ctx.sourceWidth, fh = ctx.sourceHeight;
+    PixelAspect colourSar = ctx.sar;  // the pixels of that frame: a color_sr of the build before may be square already (review of TASK-0073)
     try {
         if (Manifest::Exists(ctx.root / "color_sr"))
             if (const Manifest sr = Manifest::Load(ctx.root / "color_sr");
                 PassOfClip(sr) && !MadeFromStoredFrame(sr, ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
                 fw = sr.width;
                 fh = sr.height;
+                colourSar = PassPixelAspect(sr, ctx.sar, ctx.sourceWidth, ctx.sourceHeight);
             }
     } catch (const std::exception&) {
     }
@@ -1027,8 +1029,8 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
     double off = mask / (static_cast<double>(fw) / fh) - 1.0;
     // TASK-0073: an anamorphic source is shown (and its masks drawn) stretched - a mask of the frame as shown fits as well: NR lays it on
     // its grid; the warning names the frame as shown
-    if (!ctx.sar.Square()) {
-        const auto [sw, sh] = ctx.sar.DisplaySize(fw, fh);
+    if (!colourSar.Square()) {
+        const auto [sw, sh] = colourSar.DisplaySize(fw, fh);
         const double shownOff = mask / (static_cast<double>(sw) / sh) - 1.0;
         if (std::fabs(off) > 0.01) {
             off = shownOff;
@@ -1328,7 +1330,7 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     // TASK-0073: a pass of an anamorphic source is its grid - stretched to square pixels here (Lanczos, one axis), so that every player
     // shows the result in its proportions; `grid` is the frame converted, `target` the one written
     const PixelAspect sar = PassPixelAspect(m, info.sar, info.width, info.height);
-    const auto [rw, rh] = StretchedResultSize(sar, m.width, m.height);
+    const auto [rw, rh] = PassResultSize(m, info.sar, info.width, info.height);
     FrameDesc grid = of.desc;
     grid.width = m.width;
     grid.height = m.height;

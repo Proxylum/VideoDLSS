@@ -98,6 +98,41 @@ TEST_CASE("PixelAspect stamps of colour passes and the pixels of a pass read bac
     CHECK(ColourPixelAspect(dir, {}, 54, 36).num == 0);
 }
 
+TEST_CASE("PassResultSize: the frame as shown a pass records, else the pass stretched", "[unit][aspect]") {
+    using Size = std::pair<uint32_t, uint32_t>;
+    const PixelAspect dvd{32, 27};
+    Manifest m = Manifest::ForPass(PassKind::ColorSr, 82, 54, FileFormat::Exr);
+    m.stageParams = {{"pixel_aspect", "32:27"}};
+    CHECK(!RecordedShownSize(m));
+    CHECK(PassResultSize(m, dvd, 54, 36) == Size{98, 54});  // 82 x 32/27 = 97.2
+    m.stageParams["shown_size"] = {96, 54};
+    REQUIRE(RecordedShownSize(m));
+    CHECK(*RecordedShownSize(m) == Size{96, 54});
+    CHECK(PassResultSize(m, dvd, 54, 36) == Size{96, 54});  // the target
+    m.stageParams["shown_size"] = {200, 54};                // of another frame: not taken
+    CHECK(PassResultSize(m, dvd, 54, 36) == Size{98, 54});
+    for (const nlohmann::json bad : {nlohmann::json{96}, nlohmann::json{96, -54}, nlohmann::json{"96", 54}, nlohmann::json{0, 54}, nlohmann::json{96, 54, 1},
+                                     nlohmann::json("96x54")}) {
+        INFO(bad.dump());
+        m.stageParams["shown_size"] = bad;
+        CHECK(!RecordedShownSize(m));
+    }
+    m.stageParams["shown_size"] = {96, 54};
+    CHECK(PassResultSize(m, {}, 54, 36) == Size{82, 54});  // a square source: the pass as it is
+    m.stageParams["pixel_aspect"] = "1:1";
+    CHECK(PassResultSize(m, dvd, 54, 36) == Size{82, 54});  // square pixels: as it is
+    // passed on by NR and FG: the record of their colour of their size
+    const auto dir = std::filesystem::path(DLSSVID_TEST_TMP) / "aspect_shown" / "color_sr";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    m.stageParams["pixel_aspect"] = "32:27";
+    m.Save(dir);
+    CHECK(ColourShownSize(dir, 82, 54) == std::optional<Size>(Size{96, 54}));
+    CHECK(!ColourShownSize(dir, 164, 108));  // another frame
+    CHECK(!ColourShownSize({}, 82, 54));
+    CHECK(!ColourShownSize(dir.parent_path() / "nowhere", 82, 54));
+}
+
 TEST_CASE("StretchedResultSize: the result of an anamorphic pass in square pixels, within 3840x2160 by the long side", "[unit][aspect]") {
     using Size = std::pair<uint32_t, uint32_t>;
     CHECK(StretchedResultSize({}, 4096, 2160) == Size{4096, 2160});  // square: as is, beyond the cap too
@@ -131,6 +166,23 @@ TEST_CASE("ResolveUpscaleTarget of an anamorphic input: the scale, the target an
     t = ResolveUpscaleTarget(720, 480, 0.0, 0, 1080, 3840, 2160, true, dvd);
     CHECK(t.width == 1620);
     CHECK(t.displayWidth == 1920);
+    // the target itself as shown, though the grid stretched back misses it (review of TASK-0073): 10:11, 1920x1440 - the grid 1920x1310,
+    // stretched 1441; 32:27, 1440 wide - the grid 1216, stretched 1441.2
+    t = ResolveUpscaleTarget(720, 480, 0.0, 1920, 1440, 3840, 2160, true, PixelAspect{10, 11});
+    CHECK(t.width == 1920);
+    CHECK(t.height == 1310);
+    CHECK(t.displayWidth == 1920);
+    CHECK(t.displayHeight == 1440);
+    t = ResolveUpscaleTarget(720, 480, 0.0, 1440, 0, 3840, 2160, true, dvd);
+    CHECK(t.width == 1216);
+    CHECK(t.displayWidth == 1440);
+    CHECK(t.displayHeight == 810);
+    // near the cap, not capped: the frame as shown at the target, not 2 past the cap (97:80, 3840x2160 - the grid 3168 stretched is 3841.2)
+    t = ResolveUpscaleTarget(720, 480, 0.0, 3840, 2160, 3840, 2160, true, PixelAspect{97, 80});
+    CHECK(!t.capped);
+    CHECK(t.width == 3168);
+    CHECK(t.displayWidth == 3840);
+    CHECK(t.displayHeight == 2160);
     // HDV x3: 1920x1080 as shown is capped at 3840x2160 - the grid 2880x2160
     t = ResolveUpscaleTarget(1440, 1080, 3.0, 0, 0, 3840, 2160, true, PixelAspect{4, 3});
     CHECK(t.capped);
@@ -229,6 +281,9 @@ TEST_CASE("EstimateRun of an anamorphic source: the stages make the grid, the re
     const RunOutcome targeted = EstimateRun(plan, stages, src);
     CHECK(targeted.width == 128);  // the square rule: 128 of the grid, 152 as shown
     CHECK(targeted.gridWidth == 108);
+    for (auto& s : stages)
+        if (s.name == "upscale") s.params["target_width"] = 96;
+    CHECK(EstimateRun(plan, stages, src).width == 96);  // the target itself, not the grid 82 stretched (98)
     for (auto& s : stages) s.params.erase("target_width");
     // no colour stage: the source passes through with its proportions - the grid
     for (auto& s : stages) s.enabled = false;

@@ -164,6 +164,8 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         m.stageParams["jitter_phases"] = stats_.jitterPhases;
         // TASK-0073: the target taken in the pixels of the frame as shown - a standalone pass without it predates that (DecideStage)
         if (const std::string px = options_.sar.Stamp(); !px.empty()) m.stageParams["pixel_aspect"] = px;
+        // ... and the frame as shown the run stretches it to: the target itself (review of TASK-0073)
+        if (!options_.sar.Square() && !options_.artifactReductionOnly) m.stageParams["shown_size"] = {t.displayWidth, t.displayHeight};
         writer_ = std::make_unique<PassWriter>(OutDir(), m);
     }
     if (!options_.videoOut.empty()) {

@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "passes/Manifest.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/upscale/IUpscaler.h"
 
@@ -94,6 +95,9 @@ UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohman
 // into 3840x2160 by the long side when the stretch takes it beyond (an anamorphic 4K grid with no upscale to cap it: NVENC's H.264 stops at
 // 4096); square pixels - w x h as is.
 std::pair<uint32_t, uint32_t> StretchedResultSize(PixelAspect sar, uint32_t w, uint32_t h);
+// The frame `process` writes of a colour pass of a source of pixels `sourceSar` (sourceW x sourceH): of its pixels (PassPixelAspect)
+// the frame as shown it records (stage_params.shown_size: the upscale's target), else the pass stretched (StretchedResultSize).
+std::pair<uint32_t, uint32_t> PassResultSize(const Manifest& m, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH);
 
 // Combines the plan, the enabled stages' parameters and the source: resolution and rate after upscale / frame
 // generation, time and disk of what runs, time of a full run.

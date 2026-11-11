@@ -108,5 +108,10 @@ std::string StageParamText(const Manifest& m, const char* key);
 PixelAspect PassPixelAspect(const Manifest& m, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH);
 // The pixels of the colour a stage reads: the pass in `colorDir` (unreadable: the source's), the source's frames when empty.
 PixelAspect ColourPixelAspect(const std::filesystem::path& colorDir, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH);
+// TASK-0073: the frame as shown a colour pass of an anamorphic source records (stage_params.shown_size [w, h]: the upscale's target, which
+// its grid stretched may miss by a rounding); nullopt when not recorded or malformed.
+std::optional<std::pair<uint32_t, uint32_t>> RecordedShownSize(const Manifest& m);
+// That record of the colour pass in `colorDir` when the pass is of size w x h - NR and FG pass it on (their frame is their colour's).
+std::optional<std::pair<uint32_t, uint32_t>> ColourShownSize(const std::filesystem::path& colorDir, uint32_t w, uint32_t h);
 
 }  // namespace dlssvid

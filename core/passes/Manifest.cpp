@@ -231,6 +231,27 @@ PixelAspect PassPixelAspect(const Manifest& m, PixelAspect sourceSar, uint32_t s
     return shown && !grid ? PixelAspect{1, 1} : sourceSar;
 }
 
+std::optional<std::pair<uint32_t, uint32_t>> RecordedShownSize(const Manifest& m) {
+    if (!m.stageParams.is_object()) return std::nullopt;
+    const auto it = m.stageParams.find("shown_size");
+    if (it == m.stageParams.end() || !it->is_array() || it->size() != 2 || !(*it)[0].is_number_integer() || !(*it)[1].is_number_integer())
+        return std::nullopt;
+    const int64_t w = (*it)[0].get<int64_t>(), h = (*it)[1].get<int64_t>();
+    if (w <= 0 || h <= 0 || w > 16384 || h > 16384) return std::nullopt;
+    return std::pair<uint32_t, uint32_t>{static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+}
+
+std::optional<std::pair<uint32_t, uint32_t>> ColourShownSize(const std::filesystem::path& colorDir, uint32_t w, uint32_t h) {
+    if (colorDir.empty()) return std::nullopt;
+    try {
+        const Manifest m = Manifest::Load(colorDir);
+        if (m.width != w || m.height != h) return std::nullopt;
+        return RecordedShownSize(m);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 PixelAspect ColourPixelAspect(const std::filesystem::path& colorDir, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH) {
     if (sourceSar.Square() || colorDir.empty()) return sourceSar;
     try {

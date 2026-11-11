@@ -153,7 +153,7 @@ uint64_t BytesPerFrame(const std::string& stage, uint32_t sourceW, uint32_t sour
 UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& p, bool capByLongSide, PixelAspect sar) {
     if (p.value("artifact_reduction_only", false)) {
         UpscaleTarget t{sourceW, sourceH, 1.0, false};
-        const auto [dw, dh] = sar.DisplaySize(sourceW, sourceH);
+        const auto [dw, dh] = StretchedResultSize(sar, sourceW, sourceH);  // as `process` writes it (x1 records nothing)
         t.displayWidth = dw;
         t.displayHeight = dh;
         return t;
@@ -170,6 +170,17 @@ std::pair<uint32_t, uint32_t> StretchedResultSize(PixelAspect sar, uint32_t w, u
     // the side at the cap comes out at it exactly (an even cap), the other rounds to even
     auto even = [](double v) { return std::max(2u, static_cast<uint32_t>(std::lround(v / 2.0)) * 2u); };
     return {even(dw * k), even(dh * k)};
+}
+
+std::pair<uint32_t, uint32_t> PassResultSize(const Manifest& m, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH) {
+    const PixelAspect px = PassPixelAspect(m, sourceSar, sourceW, sourceH);
+    const auto stretched = StretchedResultSize(px, m.width, m.height);
+    if (px.Square()) return stretched;
+    // the record of the pass's own frame: each side within the roundings of the grid stretched (4 px, 1 % - a capped grid rounded down by
+    // up to 2 source pixels); a record of another frame is not taken
+    auto within = [](uint32_t a, uint32_t b) { return std::abs(static_cast<int64_t>(a) - static_cast<int64_t>(b)) <= 4 + static_cast<int64_t>(b) / 100; };
+    if (const auto shown = RecordedShownSize(m); shown && within(shown->first, stretched.first) && within(shown->second, stretched.second)) return *shown;
+    return stretched;
 }
 
 RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>& stages, const SourceInfo& source) {
@@ -191,12 +202,15 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
         if (s.name == "upscale") scale = Scale(p);
         if (s.name == "fg") multiplier = std::clamp(p.value("multiplier", 2), 1, 4);
     }
+    uint32_t shownW = 0, shownH = 0;  // the upscale's frame as shown (its target), what the run records and `process` writes
     if (!params[2].is_null() && source.width && source.height) {  // a size not known yet (the store's entry missing): 0x0, no throw
         // the frame UpscaleStage::Setup makes: «только подавление артефактов» keeps the source's, else the scale or the target, even, capped
         // at 3840x2160 (TASK-0071: 1080p x3 was shown 5760x3240 and NR's check ran at a frame the run never makes)
         const UpscaleTarget t = UpscaleOutputFor(source.width, source.height, params[2], true, source.sar);
         o.width = t.width;
         o.height = t.height;
+        shownW = t.displayWidth;
+        shownH = t.displayHeight;
         scale = t.scale;
     }
     // TASK-0073: the colour stages work on the grid; the result is it stretched to square pixels - unless no colour stage runs (the source
@@ -204,7 +218,7 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
     o.gridWidth = o.width;
     o.gridHeight = o.height;
     if (!params[2].is_null() || !params[3].is_null() || !params[4].is_null()) {
-        const auto [dw, dh] = StretchedResultSize(source.sar, o.width, o.height);
+        const auto [dw, dh] = shownW && shownH ? std::pair<uint32_t, uint32_t>{shownW, shownH} : StretchedResultSize(source.sar, o.width, o.height);
         o.width = dw;
         o.height = dh;
     } else if (!plan.finalPass.empty()) {
@@ -215,7 +229,7 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
             if (m.width && m.height) {
                 o.gridWidth = m.width;
                 o.gridHeight = m.height;
-                const auto [dw, dh] = StretchedResultSize(PassPixelAspect(m, source.sar, source.width, source.height), m.width, m.height);
+                const auto [dw, dh] = PassResultSize(m, source.sar, source.width, source.height);
                 o.width = dw;
                 o.height = dh;
             }

@@ -304,6 +304,25 @@ TEST_CASE("An anamorphic upscale grid of the source's shown proportions is still
     CHECK(s.height == 54);
 }
 
+TEST_CASE("An anamorphic target comes out exactly, through NR and FG too: 96 wide as shown, though the grid stretched is 97.2", "[integration][aspect][process][regression]") {
+    // review of TASK-0073: 54x36 at 32:27 with target_width 96 makes the grid 82x54 (81 rounded to even), which stretched is 97.2 - 98 was
+    // written. The upscale pass records the frame as shown, NR and FG pass it on, the encode stretches to it
+    const auto d = Dir("exact_target");
+    const auto clip = WriteClip(d / "clip.mkv", Anamorphic());
+    ProcessOptions o = Options(clip, d);
+    Only(o, {"upscale", "nr", "fg"});
+    ApplyParamSpec(o.stages, "upscale.target_width=96");
+    RunProcess(o);
+    CHECK(Manifest::Load(d / "passes" / "color_sr").width == 82);
+    for (const char* pass : {"color_sr", "color_nr", "color_fg"}) {
+        INFO(pass);
+        CHECK(Manifest::Load(d / "passes" / pass).stageParams.value("shown_size", nlohmann::json()) == nlohmann::json::array({96, 54}));
+    }
+    const StreamSummary s = Summarize(d / "result.mkv");
+    CHECK(s.width == 96);
+    CHECK(s.height == 54);
+}
+
 TEST_CASE("NR and FG of an anamorphic source take the pixels of the colour they read: a square pass of the build before stays square", "[integration][aspect][process][regression]") {
     // review of TASK-0073: FG took the source's pixels for a color_sr that an explicit target of the build before had stretched already -
     // DLSS-G's camera stretched it a second time and +fg.sar recomputed a right pass into a wrong one
@@ -496,6 +515,22 @@ TEST_CASE("An anamorphic source's target and cap are of the frame as shown: only
     RunProcess(o);
     CHECK(Manifest::Load(d / "passes" / "color_sr").width == 108);  // 128x72 as shown: 108x72 of the stored pixels
     CHECK(Summarize(d / "result.mkv").width == 128);
+    // the cap: HDV 1440x1080 at 4:3 x3 is the grid 2880x2160 by either rule - reused; 1440x800 at 32:27 x3 is 3240x1800 now (3840x2134
+    // by the square rule) - recomputed (review of TASK-0073)
+    {
+        std::filesystem::create_directories(d / "hdv");
+        std::filesystem::create_directories(d / "wide");
+        const auto hdv = WriteClip(d / "hdv.mkv", Anamorphic(1440, 1080, PixelAspect{4, 3}, 2));
+        ProcessOptions h = Options(hdv, d / "hdv");
+        Only(h, {"upscale"});
+        ApplyParamSpec(h.stages, "upscale.scale=3");
+        CHECK(App(Decision(PlanProcess(h), "upscale")).find("sr.sar") == std::string::npos);
+        const auto wide = WriteClip(d / "wide.mkv", Anamorphic(1440, 800, kDvdWide, 2));
+        ProcessOptions w = Options(wide, d / "wide");
+        Only(w, {"upscale"});
+        ApplyParamSpec(w.stages, "upscale.scale=3");
+        CHECK_THAT(App(Decision(PlanProcess(w), "upscale")), ContainsSubstring("+sr.sar"));
+    }
     // DLSS-G's camera takes the shown proportions: another picture
     ProcessOptions g = Options(clip, d);
     Only(g, {"fg"});
@@ -566,6 +601,16 @@ TEST_CASE("The plan's advice on an anamorphic source: masks of the shown frame f
     CHECK(mask(64, 36).find("растянется") == std::string::npos);  // the frame as shown: before TASK-0073 a warning
     CHECK(mask(54, 36).find("растянется") == std::string::npos);  // the grid
     CHECK_THAT(mask(100, 36), ContainsSubstring("100×36 растянется на кадр 64×36"));
+    {  // NR on a color_sr of the build before already in square pixels (128x72, no record): measured on it as it is, not stretched again
+        Manifest m = Manifest::ForPass(PassKind::ColorSr, 128, 72, FileFormat::Exr);
+        m.sourceHash = "sha256:" + Sha256FileCached(clip);
+        PassWriter wr(o.passesRoot / "color_sr", m);
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 128, 72));
+        wr.Finish();
+    }
+    CHECK_THAT(mask(54, 36), ContainsSubstring("54×36 растянется на кадр 128×72"));  // review of TASK-0073: was «на кадр 152×72»
+    CHECK(mask(64, 36).find("растянется") == std::string::npos);
+    std::filesystem::remove_all(o.passesRoot / "color_sr");
     ProcessOptions u = Options(clip, d);
     Only(u, {"upscale"});
     ApplyParamSpec(u.stages, "upscale.target_width=108");
@@ -664,7 +709,7 @@ TEST_CASE("hevc_nvenc keeps an anamorphic clip's proportions in passthrough; pro
     o.codec = "hevc_nvenc";
     RunProcess(o);
     const StreamSummary s = Summarize(d / "result.mp4");
-    CHECK(s.width == 606);  // 256x144 at 32:27 is 304x144 as shown, x2 (the grid 512x288)
+    CHECK(s.width == 606);  // 256x144 at 32:27 is 303.4x144 as shown, x2: 606.8, even 606 (the grid 512x288)
     CHECK(s.height == 288);
     CHECK(s.sar.Square());
     // DLSS-G takes the camera of the frame as shown and says so in its pass
@@ -676,5 +721,5 @@ TEST_CASE("hevc_nvenc keeps an anamorphic clip's proportions in passthrough; pro
     RunProcess(g);
     const nlohmann::json fg = Manifest::Load(d / "passes" / "color_fg").stageParams;
     CHECK(fg.value("pixel_aspect", std::string()) == "32:27");
-    CHECK(std::fabs(fg.value("camera_aspect", 0.0) / (304.0 / 144.0) - 1.0) < 0.01);  // 16:9-ish as shown, not 16:9 of the grid (1.78)
+    CHECK(std::fabs(fg.value("camera_aspect", 0.0) / (303.4 / 144.0) - 1.0) < 0.01);  // about 2.11:1 as shown, not 16:9 of the grid (1.78)
 }

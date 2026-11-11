@@ -118,9 +118,10 @@ UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uin
         t.height = s < 1.0 ? grid(h * s) : even(h);
     }
     t.scale = static_cast<double>(t.width) / inW;
-    const auto [dw, dh] = sar.DisplaySize(t.width, t.height);
-    t.displayWidth = dw;
-    t.displayHeight = dh;
+    // the frame as shown: the target asked for (capped: within the cap), not the grid stretched back - two roundings could miss it by 2
+    // or, near the cap, go past it (review of TASK-0073)
+    t.displayWidth = sar.Square() ? t.width : even(w);
+    t.displayHeight = sar.Square() ? t.height : even(h);
     return t;
 }
 
