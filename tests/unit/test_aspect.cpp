@@ -301,6 +301,17 @@ TEST_CASE("ResolveUpscaleTarget of an anamorphic input: the scale, the target an
                     if (a.width != b.width || a.height != b.height) FAIL(w << "x" << h << " side " << side << " at " << sar.Token());
                 }
     CHECK(oneSide > 10000);
+    // ... capped: the grid from the frame as shown within the cap, as for any capped target (review of TASK-0073)
+    const UpscaleTarget ch = ResolveUpscaleTarget(720, 480, 0.0, 0, 2400, 3840, 2160, true, PixelAspect{32, 27});
+    CHECK(ch.capped);
+    CHECK(ch.width == 3240);
+    CHECK(ch.height == 2160);
+    CHECK(ch.displayWidth == 3840);
+    const UpscaleTarget cw = ResolveUpscaleTarget(720, 480, 0.0, 4000, 0, 3840, 2160, true, PixelAspect{8, 9});
+    CHECK(cw.capped);
+    CHECK(cw.width == 2880);
+    CHECK(cw.height == 1920);
+    CHECK(cw.displayHeight == 2160);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}}, true, dvd).displayWidth == 1706);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}, {"target_width", 1920}}, true, dvd).width == 1620);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}, {"target_width", 1920}}).width == 1920);  // the square rule (the build before)
