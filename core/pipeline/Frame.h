@@ -89,6 +89,9 @@ struct PixelAspect {
     // The frame a w x h grid of these pixels is shown as, in square pixels, nothing narrowed: wider than 1 - the width grows, narrower -
     // the height grows (720x480 at 8:9 -> 720x540); even sides. The grid itself when square.
     std::pair<uint32_t, uint32_t> DisplaySize(uint32_t w, uint32_t h) const;
+    // Whether these pixels move the frame as shown of a w x h grid by half a pixel or more - 14400:14399 of 1694x720 (ffmpeg's scale=-2:720
+    // of a 1920x816 film) moves none: such a source is square (no stretch, no recompute)
+    bool MovesAPixel(uint32_t w, uint32_t h) const;
 
     bool operator==(const PixelAspect& o) const { return Square() ? o.Square() : num == o.num && den == o.den; }
 };

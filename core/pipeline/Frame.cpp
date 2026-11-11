@@ -112,6 +112,12 @@ std::string PixelAspect::Token() const { return Square() ? std::string() : std::
 
 std::string PixelAspect::Stamp() const { return num == 0 ? std::string() : Square() ? std::string("1:1") : Token(); }
 
+bool PixelAspect::MovesAPixel(uint32_t w, uint32_t h) const {
+    if (Square()) return false;
+    const double v = Value();
+    return v > 1.0 ? static_cast<double>(w) * (v - 1.0) >= 0.5 : static_cast<double>(h) * (1.0 / v - 1.0) >= 0.5;
+}
+
 std::optional<PixelAspect> PixelAspectFromStamp(std::string_view stamp) {
     const size_t colon = stamp.find(':');
     if (colon == std::string_view::npos) return std::nullopt;

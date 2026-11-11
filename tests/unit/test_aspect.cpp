@@ -58,6 +58,14 @@ TEST_CASE("PixelAspect: reduced, plausible or square; the frame as shown is neve
     CHECK(PixelAspect{64, 45}.DisplaySize(720, 576) == std::pair<uint32_t, uint32_t>{1024, 576});
     CHECK(PixelAspect{32, 27}.DisplaySize(54, 36) == std::pair<uint32_t, uint32_t>{64, 36});
     CHECK(PixelAspect{}.DisplaySize(721, 481) == std::pair<uint32_t, uint32_t>{721, 481});  // square: as is, odd too
+    // a pixel aspect that moves no pixel of the frame (review of TASK-0073): half a pixel or more moves one
+    CHECK(PixelAspect{32, 27}.MovesAPixel(720, 480));
+    CHECK(PixelAspect{8, 9}.MovesAPixel(720, 480));
+    CHECK(!PixelAspect{14400, 14399}.MovesAPixel(1694, 720));  // 0.12 px
+    CHECK(PixelAspect{14400, 14399}.MovesAPixel(7200, 720));   // 0.5 px
+    CHECK(!PixelAspect{10000, 10001}.MovesAPixel(720, 720));   // narrower: 0.07 px of the height
+    CHECK(PixelAspect{9000, 9001}.MovesAPixel(720, 4510));     // 0.501 px of the height
+    CHECK(!PixelAspect{}.MovesAPixel(720, 480));
     CHECK(PixelAspect{32, 27}.DisplaySize(0, 0) == std::pair<uint32_t, uint32_t>{0, 0});  // a size not known yet
 }
 
@@ -276,6 +284,23 @@ TEST_CASE("ResolveUpscaleTarget of an anamorphic input: the scale, the target an
                     if (a.width != b.width || a.height != b.height) FAIL(w << "x" << h << " x" << scale << " at " << sar.Token());
                 }
     CHECK(uncapped > 20000);
+    // a target of one side on the axis the pixels do not stretch: the other side as for square pixels (review of TASK-0073: 720x576 at
+    // 64:45 with the height 1060 gave 1324, the square rule's 1326)
+    CHECK(ResolveUpscaleTarget(720, 576, 0.0, 0, 1060, 3840, 2160, true, PixelAspect{64, 45}).width == 1326);
+    int oneSide = 0;
+    for (uint32_t w = 690; w <= 740; ++w)
+        for (uint32_t h = 470; h <= 590; h += 3)
+            for (uint32_t side = 600; side <= 1600; side += 17)
+                for (const PixelAspect sar : {PixelAspect{32, 27}, PixelAspect{64, 45}, PixelAspect{16, 15}, PixelAspect{12, 11}, PixelAspect{8, 9},
+                                              PixelAspect{10, 11}}) {
+                    const bool wider = sar.Value() > 1.0;
+                    const UpscaleTarget a = ResolveUpscaleTarget(w, h, 0.0, wider ? 0 : side, wider ? side : 0, 3840, 2160, true, sar);
+                    if (a.capped) continue;
+                    ++oneSide;
+                    const UpscaleTarget b = ResolveUpscaleTarget(w, h, 0.0, wider ? 0 : side, wider ? side : 0);
+                    if (a.width != b.width || a.height != b.height) FAIL(w << "x" << h << " side " << side << " at " << sar.Token());
+                }
+    CHECK(oneSide > 10000);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}}, true, dvd).displayWidth == 1706);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}, {"target_width", 1920}}, true, dvd).width == 1620);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}, {"target_width", 1920}}).width == 1920);  // the square rule (the build before)

@@ -340,6 +340,11 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
         std::string sarWhy;
         info_.codedSar = PixelAspectFrom(guess.num, guess.den, &sarWhy);
         if (!sarWhy.empty()) Log()->log(options.probe ? spdlog::level::debug : spdlog::level::warn, "{}: {}", url, sarWhy);
+        if (!info_.codedSar.Square() && !info_.codedSar.MovesAPixel(info_.codedWidth, info_.codedHeight)) {  // the same picture as square
+            Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "{}: a pixel aspect of {} moves no pixel of {}x{}: the pixels are taken as square",
+                       url, info_.codedSar.Token(), info_.codedWidth, info_.codedHeight);
+            info_.codedSar = {};
+        }
         // which one decided: the codec's when it says the same (a raw stream: no container field, the guess falls back to the codec
         // parameters; MP4's pasp and the VUI agreeing), else the container's (MKV DisplayWidth over FFV1, MOV pasp over ProRes)
         if (!info_.codedSar.Square())

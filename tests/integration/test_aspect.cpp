@@ -189,6 +189,18 @@ TEST_CASE("VideoDecoder reads the pixels' proportions: the container's, else the
         CHECK(over.Info().codedSar == kDvdWide);
         CHECK(over.Info().sarFrom == "container");
     }
+    // a pixel aspect that moves no pixel (pasp 14400:14399 of 1694 wide: ffmpeg's scale=-2:720): square (review of TASK-0073)
+    if (VideoEncoder::EncoderAvailable("prores_ks")) {
+        ClipSpec hair = Anamorphic(1694, 16, PixelAspect{14400, 14399});
+        hair.codec = "prores_ks";  // MPEG-4's own field holds 8 bits: its encoder would round the ratio away
+        hair.pixFmt = "yuv422p10le";
+        const auto file = WriteClip(d / "hair.mov", hair);
+        REQUIRE(Summarize(file).streamSar == PixelAspect{14400, 14399});
+        VideoDecoder dec(file, VideoDecoder::Probe());
+        CHECK(dec.Info().codedSar.Square());
+        CHECK(dec.Info().sar.Square());
+        CHECK(dec.Info().sarFrom.empty());
+    }
     // MOV's pasp
     if (VideoEncoder::EncoderAvailable("prores_ks")) {
         ClipSpec mov = Anamorphic(64, 36);
