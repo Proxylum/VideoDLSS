@@ -1656,6 +1656,20 @@ TEST_CASE("AppModel opens an anamorphic clip as shown: the viewport, the source 
     panel.refresh();
     CHECK(label->toolTip().contains(QString::fromUtf8("результат пишется в квадратных пикселях")));
     CHECK(out->text().startsWith(QString::fromUtf8("128×72")));
+    // a pass of the build before already in square pixels (128x72, the shown proportions, no record): written as it is - still not the
+    // source passed through
+    std::filesystem::remove_all(model.project().passesRoot / "color_sr");
+    {
+        Manifest m = Manifest::ForPass(PassKind::ColorSr, 128, 72, FileFormat::Exr);
+        m.sourceHash = model.plan().sourceHash;
+        PassWriter wr(model.project().passesRoot / "color_sr", m);
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 128, 72));
+        wr.Finish();
+    }
+    model.refreshPlan();
+    panel.refresh();
+    CHECK(out->text().startsWith(QString::fromUtf8("128×72")));
+    CHECK(label->toolTip().contains(QString::fromUtf8("результат пишется в квадратных пикселях")));
     std::filesystem::remove_all(model.project().passesRoot / "color_sr");
     model.setStageEnabled("upscale", true);
     model.refreshPlan();
