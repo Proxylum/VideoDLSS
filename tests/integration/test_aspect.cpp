@@ -5,6 +5,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -511,5 +512,7 @@ TEST_CASE("hevc_nvenc keeps an anamorphic clip's proportions in passthrough; pro
     ApplyParamSpec(g.stages, "fg.backend=dlssg");
     g.warp = false;
     RunProcess(g);
-    CHECK(Manifest::Load(d / "passes" / "color_fg").stageParams.value("pixel_aspect", std::string()) == "32:27");
+    const nlohmann::json fg = Manifest::Load(d / "passes" / "color_fg").stageParams;
+    CHECK(fg.value("pixel_aspect", std::string()) == "32:27");
+    CHECK(std::fabs(fg.value("camera_aspect", 0.0) / (304.0 / 144.0) - 1.0) < 0.01);  // 16:9-ish as shown, not 16:9 of the grid (1.78)
 }
