@@ -167,8 +167,9 @@ std::pair<uint32_t, uint32_t> StretchedResultSize(PixelAspect sar, uint32_t w, u
     const bool landscape = dw >= dh;
     const double k = std::min((landscape ? 3840.0 : 2160.0) / dw, (landscape ? 2160.0 : 3840.0) / dh);
     if (k >= 1.0) return {dw, dh};
-    auto down = [](double v) { return std::max(2u, static_cast<uint32_t>(std::floor(v / 2.0 + 1e-9)) * 2u); };
-    return {down(dw * k), down(dh * k)};
+    // the side at the cap comes out at it exactly (an even cap), the other rounds to even
+    auto even = [](double v) { return std::max(2u, static_cast<uint32_t>(std::lround(v / 2.0)) * 2u); };
+    return {even(dw * k), even(dh * k)};
 }
 
 RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>& stages, const SourceInfo& source) {

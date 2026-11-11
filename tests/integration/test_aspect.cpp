@@ -331,6 +331,11 @@ TEST_CASE("NR and FG of an anamorphic source take the pixels of the colour they 
     CHECK(Summarize(d / "result.mkv").width == 128);
     CHECK(App(Decision(PlanProcess(g), "fg")).find("fg.sar") == std::string::npos);  // DLSS-G on square pixels: its camera as before
     colourPass(108, 72, {{"backend", "nis"}, {"pixel_aspect", "32:27"}});  // the grid of this build
+    // planned with NR remade: FG's colour is the pass this run makes (the grid), not the square color_nr still on disk
+    ProcessOptions both = o;
+    ApplyParamSpec(both.stages, "fg.backend=dlssg");
+    both.forceStages = {"nr"};
+    CHECK_THAT(App(Decision(PlanProcess(both), "fg")), ContainsSubstring("+fg.sar"));
     o.forceStages = {"nr", "fg"};  // both colour passes are hand-made without fingerprints: the same pseudo-fingerprint to the plan
     RunProcess(o);
     CHECK(recorded("color_nr") == "32:27");
