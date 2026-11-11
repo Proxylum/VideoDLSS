@@ -15,6 +15,7 @@ file(MAKE_DIRECTORY "${DLSSVID_TEST_CWD}")
 # ---- Unit tests (no video files, WARP adapter unless a GPU is present) ----
 add_executable(dlssvid_unit_tests
   unit/test_frame.cpp
+  unit/test_orientation.cpp
   unit/test_d3d12_device.cpp
   unit/test_gpu_frame_cache.cpp
   unit/test_pipeline.cpp
@@ -83,6 +84,7 @@ add_executable(dlssvid_integration_tests
   integration/TestClips.cpp
   integration/test_passthrough.cpp
   integration/test_formats.cpp
+  integration/test_orientation.cpp
   integration/test_precision.cpp
   integration/test_cli.cpp
   integration/test_pass_sequence.cpp

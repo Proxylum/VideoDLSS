@@ -58,6 +58,9 @@ std::string CheckEncodedResult(const fs::path& file, const ResultExpectation& ex
     try {
         VideoDecoder probe(file, VideoDecoder::Probe());
         const VideoStreamInfo& info = probe.Info();
+        // the frames are written upright (TASK-0072): a display matrix on the result would turn them again in a player
+        if (!info.orientation.Identity())
+            return "it carries a display orientation (" + info.orientation.Token() + "): the frames were written upright, a player would turn them again";
         if (info.width != expect.width || info.height != expect.height)
             return "the video is " + std::to_string(info.width) + "x" + std::to_string(info.height) + ", " + std::to_string(expect.width) + "x" +
                    std::to_string(expect.height) + " was encoded";

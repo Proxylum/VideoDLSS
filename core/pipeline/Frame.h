@@ -2,14 +2,16 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace dlssvid {
 
-// Decoded frames keep their native planar YUV layout so that the passthrough path is bit-exact with FFmpeg and
-// nothing is lost before the stages convert to RGBA16F on the GPU. The 8-bit formats hold one byte per sample; the
+// Decoded frames keep their native planar YUV layout so that the passthrough path is bit-exact with FFmpeg (up to the
+// permutation of the samples that shows a rotated stream upright, OrientFrame) and nothing is lost before the stages convert to
+// RGBA16F on the GPU. The 8-bit formats hold one byte per sample; the
 // 16-bit ones hold little-endian 16-bit words with `FrameDesc::bitDepth` significant bits, LSB-aligned (10-bit video:
 // 0 .. 1023), the layout FFmpeg calls yuv420p10le / yuv422p10le / yuv444p10le.
 enum class PixelFormat : uint8_t { Yuv420p = 0, Yuv422p, Yuv444p, Yuv420p16, Yuv422p16, Yuv444p16 };
@@ -46,6 +48,37 @@ struct FrameDesc {
 
     bool operator==(const FrameDesc&) const = default;
 };
+
+// How a stored frame is shown (TASK-0072: a phone video kept landscape with a display matrix): turned clockwise by `rotate`
+// degrees (0 | 90 | 180 | 270), then mirrored left-right when `hflip`. The decoder applies it: the stages, the viewport and the
+// result see the frame as players show it.
+struct DisplayOrientation {
+    uint16_t rotate = 0;
+    bool hflip = false;
+
+    bool Identity() const { return rotate == 0 && !hflip; }
+    bool SwapsAxes() const { return rotate == 90 || rotate == 270; }
+    // The orientation that undoes this one: a turn back; a mirrored orientation is its own inverse.
+    DisplayOrientation Inverse() const { return hflip ? *this : DisplayOrientation{static_cast<uint16_t>((360 - rotate) % 360), false}; }
+    // "" | "r90" | "r180" | "r270" | "h" | "r90h" | "r180h" | "r270h": in a pass's source format (fingerprints) and the settings note.
+    std::string Token() const;
+    // "rotated 90 deg clockwise", "mirrored", "rotated 180 deg and mirrored": for logs and reports; "" for the identity.
+    std::string Describe() const;
+
+    bool operator==(const DisplayOrientation&) const = default;
+};
+
+// The orientation a token names ("" is the identity); nullopt for anything else.
+std::optional<DisplayOrientation> OrientationFromToken(std::string_view token);
+
+// The layout of a stored frame `desc` once shown with `o`: the sides swapped for 90 / 270. The chroma grid must map onto itself for
+// the samples to be permuted exactly; where it does not - 4:2:2 turned by 90 / 270 (4:4:0 is not a format here), or an odd side of a
+// subsampled axis that `o` reverses - the frame becomes 4:4:4 at the same bit depth, its chroma repeated (still exact).
+FrameDesc OrientedDesc(const FrameDesc& desc, DisplayOrientation o);
+
+struct CpuFrame;
+// `out` = `in` shown with `o` (layout OrientedDesc(in.desc, o)); index and pts carried over.
+void OrientFrame(const CpuFrame& in, DisplayOrientation o, CpuFrame& out);
 
 struct CpuFrame {
     FrameDesc desc;

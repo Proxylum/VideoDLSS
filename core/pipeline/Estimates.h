@@ -49,6 +49,10 @@ struct SourceInfo {
     bool audio = false;
     std::string codec;        // "hevc", "prores" ... (VideoStreamInfo::codecName)
     FrameDesc decoded;        // the layout the source decodes into (TASK-0034)
+    FrameDesc layout;         // the stream's own layout as shown (SourceLayout): what the encoder's «auto» follows
+    DisplayOrientation orientation;  // TASK-0072: how the source is shown (a phone video turned); width / height are as shown
+    std::string orientationFrom;     // "display matrix" | "rotate tag" | ""
+    uint32_t codedWidth = 0, codedHeight = 0;  // as stored
     int bitDepth = 8;         // of the source's own pixel format
     std::string chroma = "420";
 };
@@ -78,8 +82,9 @@ struct RunOutcome {
 };
 
 // The frame the upscale stage makes of a source of that size with these (effective) parameters - as UpscaleStage::Setup: the source's with
-// artifact_reduction_only, else the scale or target_width / target_height, even, capped at 3840x2160.
-UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& params);
+// artifact_reduction_only, else the scale or target_width / target_height, even, capped at 3840x2160 by the long side (TASK-0072;
+// `capByLongSide = false`: by the axes, as before).
+UpscaleTarget UpscaleOutputFor(uint32_t sourceW, uint32_t sourceH, const nlohmann::json& params, bool capByLongSide = true);
 
 // Combines the plan, the enabled stages' parameters and the source: resolution and rate after upscale / frame
 // generation, time and disk of what runs, time of a full run.

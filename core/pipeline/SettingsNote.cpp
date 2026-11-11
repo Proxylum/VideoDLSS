@@ -130,7 +130,7 @@ nlohmann::json Fg(const Manifest& m) {
 
 }  // namespace
 
-nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::string& finalPass) {
+nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::string& finalPass, DisplayOrientation sourceOrientation) {
     nlohmann::json out = {{"app", std::string("VideoDLSS ") + DLSSVID_VERSION}, {"stages", nlohmann::json::object()}};
     nlohmann::json& stages = out["stages"];
     auto mark = [](nlohmann::json s, const Manifest& m) {
@@ -147,6 +147,13 @@ nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::s
     };
     std::string pass = finalPass;
     std::optional<Manifest> m = stage(pass).empty() ? std::nullopt : Load(root / pass);
+    // TASK-0072: a source shown turned (a phone video): the frames were turned before every stage - the encoded pass's source format says
+    if (m)
+        if (const DisplayOrientation o = m->sourceFormat.empty() ? sourceOrientation : OrientationOfSourceFormat(m->sourceFormat); !o.Identity()) {
+            out["source"] = nlohmann::json::object();
+            if (o.rotate) out["source"]["rotate"] = o.rotate;
+            if (o.hflip) out["source"]["hflip"] = true;
+        }
     while (m) {
         const std::string name = stage(pass);
         stages[name] = mark(name == "fg" ? Fg(*m) : name == "nr" ? Nr(*m) : Upscale(*m), *m);
@@ -174,6 +181,13 @@ nlohmann::json BuildSettingsJson(const std::filesystem::path& root, const std::s
 
 std::string SettingsNoteText(const nlohmann::json& settings) {
     std::string note = settings.value("app", std::string("VideoDLSS"));
+    if (settings.contains("source") && settings["source"].is_object()) {  // TASK-0072: "source: rotate=90 hflip"
+        const nlohmann::json& src = settings["source"];
+        std::string seg = "source:";
+        if (src.contains("rotate")) seg += " rotate=" + Num(src["rotate"]);
+        if (src.value("hflip", false)) seg += " hflip";
+        note += " | " + seg;
+    }
     const nlohmann::json& stages = settings.contains("stages") ? settings["stages"] : nlohmann::json::object();
     // the order a reader expects (spec §2g); a key not listed follows, alphabetically
     const std::vector<std::pair<const char*, std::vector<std::string>>> order = {

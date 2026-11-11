@@ -73,7 +73,8 @@ std::unique_ptr<IUpscaler> CreateUpscaler(const std::string& backend) {
     Throw("unknown upscaler '" + backend + "' (dlss | nis | bicubic | trt | worker)");
 }
 
-UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uint32_t targetW, uint32_t targetH, uint32_t maxW, uint32_t maxH) {
+UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uint32_t targetW, uint32_t targetH, uint32_t maxW, uint32_t maxH,
+                                   bool capByLongSide) {
     if (!inW || !inH) Throw("ResolveUpscaleTarget: empty input");
     UpscaleTarget t;
     double w, h;
@@ -91,6 +92,7 @@ UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uin
         w = inW * scale;
         h = inH * scale;
     }
+    if (capByLongSide && h > w && maxW > maxH) std::swap(maxW, maxH);  // a portrait output: the long side is its height
     if (maxW && w > maxW) {
         h *= static_cast<double>(maxW) / w;
         w = maxW;

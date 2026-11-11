@@ -6,6 +6,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
+#include <libavutil/display.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 }
@@ -128,6 +129,15 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     vs->time_base = vctx->time_base;
     vs->avg_frame_rate = vctx->framerate;
     CheckAv(avcodec_parameters_from_context(vs->codecpar, vctx), "video params");
+    if (!spec.orientation.Identity()) {  // TASK-0072: a phone video's display matrix
+        AVPacketSideData* sd = av_packet_side_data_new(&vs->codecpar->coded_side_data, &vs->codecpar->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX,
+                                                       9 * sizeof(int32_t), 0);
+        if (!sd) Throw("test clip: no room for the display matrix");
+        auto* m = reinterpret_cast<int32_t*>(sd->data);
+        av_display_rotation_set(m, spec.orientation.rotate);
+        if (spec.orientation.hflip) av_display_matrix_flip(m, 1, 0);
+    }
+    if (!spec.rotateTag.empty()) av_dict_set(&vs->metadata, "rotate", spec.rotateTag.c_str(), 0);
 
     // --- audio (pcm_s16le sine) ---
     AVCodecContext* actx = nullptr;

@@ -1,5 +1,6 @@
 #include "pipeline/Frame.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "util/Error.h"
@@ -83,6 +84,105 @@ std::string FrameDesc::Name() const {
 std::string FrameDesc::Describe() const {
     const std::string_view c = ChromaName(format);
     return std::to_string(HighBitDepth() ? bitDepth : 8) + "-bit " + std::string(1, c[0]) + ":" + std::string(1, c[1]) + ":" + std::string(1, c[2]);
+}
+
+std::string DisplayOrientation::Token() const {
+    if (Identity()) return {};
+    return (rotate ? "r" + std::to_string(rotate) : std::string()) + (hflip ? "h" : "");
+}
+
+std::string DisplayOrientation::Describe() const {
+    if (Identity()) return {};
+    std::string s = rotate ? "rotated " + std::to_string(rotate) + " deg" + (rotate == 180 ? "" : " clockwise") : std::string();
+    if (hflip) s += rotate ? " and mirrored" : "mirrored";
+    return s;
+}
+
+std::optional<DisplayOrientation> OrientationFromToken(std::string_view token) {
+    for (const int r : {0, 90, 180, 270})
+        for (const bool h : {false, true})
+            if (const DisplayOrientation o{static_cast<uint16_t>(r), h}; o.Token() == token) return o;
+    return std::nullopt;
+}
+
+namespace {
+
+// The stored luma sample shown at (X, Y): sx = ax*X + bx*Y + cx, sy = ay*X + by*Y + cy, for a stored W x H frame. Shown = mirrored if
+// hflip (turned clockwise by rotate (stored)):
+//   0: (X, Y)          h: (W-1-X, Y)
+//   90: (Y, H-1-X)     90h: (Y, X)             (FFmpeg's transpose clock / cclock_flip)
+//   180: (W-1-X, H-1-Y)  180h: (X, H-1-Y)      (hflip+vflip / vflip)
+//   270: (W-1-Y, X)    270h: (W-1-Y, H-1-X)    (cclock / clock_flip)
+struct LumaMap {
+    int ax, bx, cx, ay, by, cy;
+};
+
+LumaMap MapFor(DisplayOrientation o, int w, int h) {
+    switch (o.rotate) {
+        case 90: return o.hflip ? LumaMap{0, 1, 0, 1, 0, 0} : LumaMap{0, 1, 0, -1, 0, h - 1};
+        case 180: return o.hflip ? LumaMap{1, 0, 0, 0, -1, h - 1} : LumaMap{-1, 0, w - 1, 0, -1, h - 1};
+        case 270: return o.hflip ? LumaMap{0, -1, w - 1, -1, 0, h - 1} : LumaMap{0, -1, w - 1, 1, 0, 0};
+        default: return o.hflip ? LumaMap{-1, 0, w - 1, 0, 1, 0} : LumaMap{1, 0, 0, 0, 1, 0};
+    }
+}
+
+bool ReversesStoredX(DisplayOrientation o) {
+    const LumaMap m = MapFor(o, 2, 2);
+    return m.ax < 0 || m.bx < 0;
+}
+
+bool ReversesStoredY(DisplayOrientation o) {
+    const LumaMap m = MapFor(o, 2, 2);
+    return m.ay < 0 || m.by < 0;
+}
+
+// One plane: each shown sample takes the stored sample under the top-left luma of its block (shifts: the plane's chroma shifts in the
+// shown and the stored layout, 0 for luma). In tiles, so that a turn reads the stored plane a band at a time.
+template <typename T>
+void OrientPlane(const T* src, size_t srcCols, T* dst, size_t dstCols, size_t dstRows, const LumaMap& m, int dsx, int dsy, int ssx, int ssy) {
+    constexpr size_t kTile = 32;
+    for (size_t ty = 0; ty < dstRows; ty += kTile)
+        for (size_t tx = 0; tx < dstCols; tx += kTile) {
+            const size_t ye = std::min(dstRows, ty + kTile), xe = std::min(dstCols, tx + kTile);
+            for (size_t y = ty; y < ye; ++y) {
+                const int ly = static_cast<int>(y) << dsy;
+                T* d = dst + y * dstCols;
+                for (size_t x = tx; x < xe; ++x) {
+                    const int lx = static_cast<int>(x) << dsx;
+                    const int sx = (m.ax * lx + m.bx * ly + m.cx) >> ssx;
+                    const int sy = (m.ay * lx + m.by * ly + m.cy) >> ssy;
+                    d[x] = src[static_cast<size_t>(sy) * srcCols + static_cast<size_t>(sx)];
+                }
+            }
+        }
+}
+
+}  // namespace
+
+FrameDesc OrientedDesc(const FrameDesc& desc, DisplayOrientation o) {
+    if (o.Identity()) return desc;
+    FrameDesc r = desc;
+    if (o.SwapsAxes()) std::swap(r.width, r.height);
+    const int sx = ChromaShiftX(desc.format), sy = ChromaShiftY(desc.format);
+    const bool exact = !(o.SwapsAxes() && sx != sy) && !(ReversesStoredX(o) && sx && (desc.width & 1u)) && !(ReversesStoredY(o) && sy && (desc.height & 1u));
+    if (!exact) r.format = desc.HighBitDepth() ? PixelFormat::Yuv444p16 : PixelFormat::Yuv444p;
+    return r;
+}
+
+void OrientFrame(const CpuFrame& in, DisplayOrientation o, CpuFrame& out) {
+    const FrameDesc& s = in.desc;
+    out.Allocate(OrientedDesc(s, o));
+    out.index = in.index;
+    out.pts = in.pts;
+    const LumaMap m = MapFor(o, static_cast<int>(s.width), static_cast<int>(s.height));
+    for (size_t p = 0; p < 3; ++p) {
+        const int dsx = p ? ChromaShiftX(out.desc.format) : 0, dsy = p ? ChromaShiftY(out.desc.format) : 0;
+        const int ssx = p ? ChromaShiftX(s.format) : 0, ssy = p ? ChromaShiftY(s.format) : 0;
+        if (s.HighBitDepth())
+            OrientPlane(in.Plane16(p), s.PlaneCols(p), out.Plane16(p), out.desc.PlaneCols(p), out.desc.PlaneHeight(p), m, dsx, dsy, ssx, ssy);
+        else
+            OrientPlane(in.Plane(p), s.PlaneCols(p), out.Plane(p), out.desc.PlaneCols(p), out.desc.PlaneHeight(p), m, dsx, dsy, ssx, ssy);
+    }
 }
 
 void CpuFrame::Allocate(const FrameDesc& d) {

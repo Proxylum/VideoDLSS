@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <string>
 #include <vector>
 
 #include "pipeline/Frame.h"
@@ -33,6 +34,10 @@ struct ClipSpec {
     int gop = 0;  // keyframe interval of the encoder (0 = its default: 12 for ffv1); 1 = intra only (TASK-0040)
     // The pts of frame i in 1/fps units (empty: i). A gap makes a variable-frame-rate clip (PR-10: the preview refuses to seek into it).
     std::function<int64_t(int64_t)> pts;
+    // TASK-0072: how players show the clip - a display matrix on the video stream (av_display_rotation_set clockwise, then
+    // av_display_matrix_flip left-right: FFmpeg's command line applies exactly this orientation), the frames written as they are (stored)
+    DisplayOrientation orientation;
+    std::string rotateTag;  // non-empty: the stream's old 'rotate' tag (degrees clockwise), written as well as any matrix
 };
 // The CpuFrame layout `WriteClip` feeds the encoder for a ClipSpec::pixFmt.
 FrameDesc FrameDescFor(const ClipSpec& spec);
@@ -42,7 +47,7 @@ std::filesystem::path WriteClip(const std::filesystem::path& path, const ClipSpe
 // Same with caller-supplied frames (the layout FrameDescFor(spec) expects; 8-bit 4:2:0 for p010le / yuv444p16le).
 std::filesystem::path WriteClipWith(const std::filesystem::path& path, const ClipSpec& spec, const std::function<CpuFrame(int64_t)>& frame);
 
-// Decodes every frame of a file with plain FFmpeg (software) into memory.
+// Decodes every frame of a file in software into memory - with the product's VideoDecoder: a clip shown turned comes turned (TASK-0072).
 std::vector<CpuFrame> DecodeAll(const std::filesystem::path& path);
 
 struct StreamSummary {

@@ -98,7 +98,9 @@ QString RecentPreviews::CacheDir() {
 void RecentPreviews::SetCacheDir(const QString& dir) { g_cacheDir = dir; }
 
 QString RecentPreviews::CacheFile(const QString& video, const QString& result) {
-    const QByteArray key = QCryptographicHash::hash((Stamp(video) + "\n" + (result.isEmpty() ? QString() : Stamp(result))).toUtf8(), QCryptographicHash::Sha1);
+    // "v2": the frames as shown (TASK-0072) - a thumbnail made of a turned source's stored frame, and its «1920×1080», are not reused
+    const QByteArray key =
+        QCryptographicHash::hash(("v2\n" + Stamp(video) + "\n" + (result.isEmpty() ? QString() : Stamp(result))).toUtf8(), QCryptographicHash::Sha1);
     return CacheDir() + "/" + QString::fromLatin1(key.toHex()) + ".png";
 }
 

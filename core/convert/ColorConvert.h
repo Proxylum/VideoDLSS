@@ -14,7 +14,8 @@ struct ColorInfo {
     ColorRange range = ColorRange::Limited;
 };
 
-// Stream metadata when present, otherwise BT.709 for >= 720 lines and BT.601 below (limited range).
+// Stream metadata when present, otherwise BT.709 for >= 720 lines of the stored frame (codedHeight: before a display turn, TASK-0072)
+// and BT.601 below (limited range).
 ColorInfo ColorInfoFromStream(const VideoStreamInfo& info);
 std::string_view ToString(ColorMatrix m);
 std::string_view ToString(ColorRange r);

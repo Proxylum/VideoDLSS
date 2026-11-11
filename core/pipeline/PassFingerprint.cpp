@@ -213,6 +213,18 @@ std::string ShortFingerprint(const std::string& fingerprint) {
 
 std::string PassFingerprint::Short() const { return ShortFingerprint(value); }
 
+std::string SourceFormatLabel(const FrameDesc& decoded, DisplayOrientation orientation) {
+    std::string s = decoded.Name();
+    if (!orientation.Identity()) s += "+" + orientation.Token();
+    return s;
+}
+
+DisplayOrientation OrientationOfSourceFormat(std::string_view label) {
+    const size_t plus = label.find('+');
+    if (plus == std::string_view::npos) return {};
+    return OrientationFromToken(label.substr(plus + 1)).value_or(DisplayOrientation{});
+}
+
 PassFingerprint ComputeFingerprint(const std::string& stage, const std::string& sourceHash, const nlohmann::json& params,
                                    const std::map<std::string, std::string>& inputs, const ToolInfo& tool, const std::string& sourceFormat) {
     PassFingerprint f;

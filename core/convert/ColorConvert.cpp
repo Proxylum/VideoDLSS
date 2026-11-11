@@ -19,7 +19,8 @@ ColorInfo ColorInfoFromStream(const VideoStreamInfo& info) {
     // AVCOL_SPC_*: 1 = BT.709, 5/6 = BT.601 (625/525); AVCOL_RANGE_JPEG = 2.
     if (info.colorSpace == 1) c.matrix = ColorMatrix::Bt709;
     else if (info.colorSpace == 5 || info.colorSpace == 6) c.matrix = ColorMatrix::Bt601;
-    else c.matrix = info.height >= 720 ? ColorMatrix::Bt709 : ColorMatrix::Bt601;
+    // untagged: by the stored height (TASK-0072: a 960x540 stream shown turned as 540x960 stays BT.601)
+    else c.matrix = (info.codedHeight ? info.codedHeight : info.height) >= 720 ? ColorMatrix::Bt709 : ColorMatrix::Bt601;
     c.range = info.colorRange == 2 ? ColorRange::Full : ColorRange::Limited;
     return c;
 }

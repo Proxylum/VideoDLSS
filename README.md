@@ -342,7 +342,7 @@ dlssvid process -i input.mp4 -o out.mp4 --param scenes.threshold=0.3 --plan   ::
 dlssvid flow    -i input.mp4 -o passes --no-scenes               :: without the list (default: <-o>\scenes when present; --scenes-dir <folder>)
 ```
 
-Upscale (stage 5): `color_sr` at x1.5 / x2 / x3 (output capped at 3840x2160), depth/MV guides from pass folders or
+Upscale (stage 5): `color_sr` at x1.5 / x2 / x3 (output capped at 3840x2160 by the long side: 2160x3840 for a portrait frame), depth/MV guides from pass folders or
 from the same pipeline, jitter emulation for DLSS.
 
 ```bat
@@ -479,7 +479,13 @@ result's bit depth and chroma are «auto» unless `--bit-depth 8|10|12` / `--chr
 the GUI, stored in the project) say otherwise: auto takes the source's bit depth within what the codec does and 4:2:0
 for the NVENC codecs, 4:2:2 for ProRes (4:4:4 when the source is), the source's own subsampling for FFV1. The stream is
 tagged with the matrix and range used (BT.709 / BT.601, limited / full) and the source's primaries and transfer; HEVC in
-MP4 / MOV gets the `hvc1` sample entry. HDR (PQ / HLG) stays out of scope: such sources are treated as SDR. The NVIDIA
+MP4 / MOV gets the `hvc1` sample entry. A phone video stored landscape with a display matrix (or the old `rotate` tag) is
+processed as players show it: the decoder turns the frames (a 4:2:2 stream turned by 90 deg, or a subsampled one with an odd
+side reversed, decodes as 4:4:4 of the same bit depth; the result's «auto» chroma stays the stream's), every stage and the
+viewport see them upright (a pass of a stage that is off, made from the stored frame by an earlier build or a standalone
+command, is not used: the plan refuses until that stage is switched on or the pass is deleted), and the result
+is written upright without a matrix (`dlssvid info` prints an `orientation:` line for such a file). The 4K cap of the
+upscale is by the long side: a portrait output goes up to 2160x3840. HDR (PQ / HLG) stays out of scope: such sources are treated as SDR. The NVIDIA
 passes keep the 10-bit gradations too: a shallow 10-bit ramp comes out of DLSS SR, NR and Frame Generation with one-code
 steps, no 8-bit staircase (measured, `docs/benchmarks.md`; the `[precision]` tests watch it).
 

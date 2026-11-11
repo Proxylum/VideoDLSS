@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <string_view>
 
 #include "gpu/GpuFrame.h"
 #include "pipeline/Frame.h"
@@ -28,8 +29,13 @@ struct Rational {
 enum class HwAccel { None, Cuda };
 
 struct VideoStreamInfo {
+    // The frame as shown (TASK-0072): the stored frame turned by `orientation`, what NextFrame yields.
     uint32_t width = 0;
     uint32_t height = 0;
+    uint32_t codedWidth = 0;   // the stored frame
+    uint32_t codedHeight = 0;
+    DisplayOrientation orientation;  // how players show the stream: its display matrix, else the 'rotate' tag
+    std::string orientationFrom;     // "display matrix" | "rotate tag"; "" when not turned
     Rational frameRate;    // av_guess_frame_rate
     Rational timeBase;     // stream time base (pts units)
     int64_t frameCount = 0;  // from container; 0 if unknown
@@ -39,7 +45,8 @@ struct VideoStreamInfo {
     int bitDepth = 8;         // bits per sample of the source pixel format
     std::string chroma = "420";  // chroma subsampling of the source: "420" | "422" | "444" | "other"
     FrameDesc decoded;        // the CpuFrame layout NextFrame() yields for this stream (width/height set): the native
-                              // planar YUV layout at the source's bit depth, or 8-bit 4:2:0 for formats that go through swscale
+                              // planar YUV layout at the source's bit depth, or 8-bit 4:2:0 for formats that go through swscale;
+                              // turned by `orientation` (OrientedDesc: 4:4:4 where the chroma grid does not map onto itself)
     int colorSpace = 2;       // AVColorSpace (2 = unspecified)
     int colorRange = 0;       // AVColorRange (0 = unspecified, 1 = limited/MPEG, 2 = full/JPEG)
     int colorPrimaries = 2;   // AVColorPrimaries (2 = unspecified)
@@ -84,12 +91,24 @@ inline constexpr int64_t kSequentialSeekFrames = 48;
 // 4:2:0 through swscale. `width` / `height` are left at 0.
 FrameDesc DecodedFrameDescFor(const std::string& pixelFormat);
 
+// The source's own layout, as shown: DecodedFrameDescFor(pixelFormat) at the shown size - what the encoder's «auto» follows (a 4:2:2
+// stream turned by 90 decodes as 4:4:4, its result stays 4:2:2; TASK-0072).
+FrameDesc SourceLayout(const VideoStreamInfo& info);
+
+// The orientation of a display matrix (AV_PKT_DATA_DISPLAYMATRIX: 3x3 int32, 16.16 / 2.30 fixed point) as FFmpeg's command line
+// applies it (fftools: transpose clock / cclock_flip, hflip / vflip, cclock / clock_flip). Not a multiple of 90 deg or degenerate: the
+// identity, `why` says so. The matrix's scale is not looked at (non-square pixels are another matter).
+DisplayOrientation OrientationFromDisplayMatrix(const int32_t matrix[9], std::string* why = nullptr);
+// The 'rotate' tag of older muxers: degrees clockwise ("90", "-90", "450"); not a whole multiple of 90: the identity, `why` says so.
+DisplayOrientation OrientationFromRotateTag(std::string_view tag, std::string* why = nullptr);
+
 // FFmpeg demuxer + video decoder producing tightly packed planar YUV CpuFrames in the source's own layout: 8-bit
 // 4:2:0 sources as before (bit-exact with FFmpeg), 10 / 12 / 16-bit and 4:2:2 / 4:4:4 sources in the matching 16-bit
 // or 8-bit planar format of Frame.h (MSB-aligned decoder outputs such as P010 are shifted to LSB alignment, so NVDEC
 // and software decoding agree bit for bit). With HwAccel::Cuda the stream is decoded by NVDEC; an NV12 frame stays in
 // CUDA memory (primary context) and is exposed as a GpuFrame, and the CPU copy is made only when asked for (bit-exact
-// NV12 -> YUV420P). Audio packets are handed to the sink untouched for stream copy.
+// NV12 -> YUV420P). Audio packets are handed to the sink untouched for stream copy. A stream shown turned (a display matrix, the
+// 'rotate' tag: a phone video) is turned on the CPU after the copy (OrientFrame) and has no GpuFrame (TASK-0072).
 // The container's global metadata (tags) of a media file, keys lower-cased (Matroska stores COMMENT): `comment`, `dlssvid_settings`
 // (PR-11). Throws when the file cannot be opened.
 std::map<std::string, std::string> ReadContainerTags(const std::filesystem::path& path);
@@ -131,8 +150,9 @@ public:
     // `gpu` (optional): filled with the on-device NV12 frame when decoding with NVDEC; it is
     // valid until the next NextFrame() call. `cpu = false` skips the device->host copy (the
     // CpuFrame then only carries index/pts/desc) — only allowed when gpu is requested. When NVDEC
-    // yields a layout other than NV12 (10/12-bit, 4:4:4), `gpu` stays invalid and the CpuFrame is
-    // always filled (in the source's own bit depth and chroma layout), whatever `cpu` says.
+    // yields a layout other than NV12 (10/12-bit, 4:4:4), or the stream is shown turned, `gpu` stays invalid and the CpuFrame is
+    // always filled (as Info().decoded: the source's bit depth and chroma layout, turned - 4:4:4 where the turn does not map the chroma
+    // grid onto itself, OrientedDesc), whatever `cpu` says.
     bool NextFrame(CpuFrame& out, GpuFrame* gpu = nullptr, bool cpu = true);
 
     // Random access: positions the decoder so that the next NextFrame() returns `index`
@@ -175,6 +195,9 @@ private:
     bool drained_ = false;
     bool warnedConversion_ = false;
     bool warnedNonNv12_ = false;  // NVDEC layout other than NV12: the GPU fast path is off for this stream
+    bool warnedTurnedGpu_ = false;  // a turned stream under NVDEC: no GpuFrame
+    bool checkedFrameMatrix_ = false;  // the first frame's own display matrix (an orientation SEI) compared with the stream's
+    CpuFrame unturned_;  // the frame as stored, before OrientFrame
     bool seeked_ = false;  // indices come from pts after a seek
     bool decodedSinceSeek_ = false;
     int64_t framesDecoded_ = 0, seeks_ = 0;

@@ -99,6 +99,9 @@ std::optional<std::filesystem::path> ValidProxy(const std::filesystem::path& vid
         std::ifstream(side) >> j;
         if (j.value("format", 0) != kProxyFormat) return std::nullopt;
         if (!(SourceStamp::FromJson(j.value("source", nlohmann::json::object())) == Stamp(video))) return std::nullopt;
+        // TASK-0072: the proxy holds the frames as the decoder shows them - made before a turn of the source was applied (no field: not
+        // turned), it is sideways; only such sources rebuild theirs (kProxyFormat would rebuild every project's)
+        if (j.value("orientation", std::string()) != VideoDecoder(video, VideoDecoder::Probe()).Info().orientation.Token()) return std::nullopt;
         return file;
     } catch (const std::exception& e) {
         Log()->debug("proxy {}: sidecar unreadable: {}", file.string(), e.what());
@@ -215,7 +218,8 @@ std::filesystem::path BuildProxy(const std::filesystem::path& video, const std::
                                  {"frames", expected},
                                  {"codec", codec},
                                  {"rate", {info.frameRate.num, info.frameRate.den}},
-                                 {"decoded", info.decoded.Name()}};
+                                 {"decoded", info.decoded.Name()},
+                                 {"orientation", info.orientation.Token()}};  // TASK-0072: "" not turned
     const auto sidePath = SidecarOf(passesRoot, name);
     const auto sideTmp = sidePath.string() + ".tmp";
     std::ofstream(sideTmp) << side.dump(2) << "\n";

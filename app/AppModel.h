@@ -369,6 +369,7 @@ private:
     bool engineerMode_ = false;
     bool loop_ = false;
     bool dirty_ = false;
+    bool adoptedView_ = false;  // a project's saved view was just adopted: reloadSources puts its centre back on the image once (TASK-0072)
     ProcessPlan plan_;
     std::optional<ProcessPlan> planNoForce_;  // PR-10: when a stage above NR is marked «пересчитать»
     std::optional<ProcessPlan> planNrSkipped_;  // TASK-0071: NR planned to run and FG on - the run's plan if NR is skipped (FG's card)

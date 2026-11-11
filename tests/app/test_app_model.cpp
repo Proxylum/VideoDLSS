@@ -49,7 +49,9 @@
 #endif
 #include <windows.h>
 
+#include <QCryptographicHash>
 #include <QFileInfo>
+#include <QImage>
 #include <QSettings>
 
 #include <catch2/catch_approx.hpp>
@@ -1373,6 +1375,209 @@ TEST_CASE("AppModel reports held frames as stale and plays only over resident fr
     for (int64_t f = 1; f < 40; ++f) expected.push_back(f);
     CHECK(visited == expected);
     CHECK(resident);
+}
+
+// ---- TASK-0072: a source shown turned (a phone video kept landscape with a display matrix) -----------------------------------------
+
+TEST_CASE("AppModel opens a turned clip as shown: the viewport, the source info, the panel's line", "[app][orientation]") {
+    App();
+    const auto d = Dir("turned_open");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    spec.orientation = {90, false};
+    AppModel model(true);
+    model.openVideo(Q(WriteClip(d / "clip.mkv", spec)));
+    model.refreshPlan();
+    CHECK(model.store().ImageWidth() == 32);  // the viewport's frame: as shown
+    CHECK(model.store().ImageHeight() == 48);
+    const SourceInfo& src = model.sourceInfo();
+    CHECK(src.width == 32);
+    CHECK(src.height == 48);
+    CHECK(src.orientation == DisplayOrientation{90, false});
+    CHECK(src.codedWidth == 48);
+    CHECK(src.codedHeight == 32);
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    auto* label = panel.findChild<QLabel*>("sourceFrame");
+    REQUIRE(label);
+    CHECK(label->text().startsWith(QString::fromUtf8("32×48")));
+    CHECK(label->text().contains(QString::fromUtf8(" · повёрнут на 90°")));
+    CHECK(label->toolTip().contains(QString::fromUtf8("Хранится 48×32, показывается повёрнутым по матрице дисплея")));
+    // a zoomed view saved over the stored frame: its centre back on the shown one when the project is opened (review of TASK-0072)
+    model.state().view = ViewTransform{2.f, 46.f, 30.f};
+    REQUIRE(model.saveProject());
+    model.openProject(Q(model.project().file));
+    CHECK(model.state().view.centerX == 32.f);
+    CHECK(model.state().view.centerY == 30.f);
+    // ... once: a centre the user pans off the image later stays at the end of a task
+    model.state().view.centerX = -10.f;
+    model.reloadSources();
+    CHECK(model.state().view.centerX == -10.f);
+    model.state().view = ViewTransform{};
+    // the old rotate tag, a mirror: the tooltip says where the turn comes from and what it is (review of TASK-0072)
+    spec.orientation = {};
+    spec.rotateTag = "90";
+    model.openVideo(Q(WriteClip(d / "tagged.mkv", spec)));
+    model.refreshPlan();
+    panel.refresh();
+    CHECK(label->toolTip().contains(QString::fromUtf8("показывается повёрнутым по тегу rotate")));
+    spec.rotateTag.clear();
+    spec.orientation = {0, true};
+    model.openVideo(Q(WriteClip(d / "mirrored.mkv", spec)));
+    model.refreshPlan();
+    panel.refresh();
+    CHECK(label->text().contains(QString::fromUtf8(" · отражён")));
+    CHECK(label->toolTip().contains(QString::fromUtf8("показывается отражённым по матрице дисплея")));
+    spec.orientation = {};
+    // an unturned clip: no word of a turn
+    spec.orientation = {};
+    model.openVideo(Q(WriteClip(d / "plain.mkv", spec)));
+    model.refreshPlan();
+    panel.refresh();
+    CHECK_FALSE(label->text().contains(QString::fromUtf8("повёрнут")));
+    CHECK_FALSE(label->toolTip().contains(QString::fromUtf8("Хранится")));
+    // «Что получится» of a turned 4:2:2 stream: the stream's 4:2:2 (FFV1 «auto» keeps the source's subsampling), not the 4:4:4 it decodes as
+    spec.orientation = {90, false};
+    spec.pixFmt = "yuv422p10le";
+    model.openVideo(Q(WriteClip(d / "clip422.mkv", spec)));
+    model.setEncode("ffv1", {});
+    model.refreshPlan();
+    CHECK(model.sourceInfo().decoded.format == PixelFormat::Yuv444p16);
+    CHECK(model.outcome().format.format == PixelFormat::Yuv422p16);
+    panel.refresh();
+    CHECK(label->text().contains(QString::fromUtf8("4:2:2")));
+}
+
+TEST_CASE("The plan blocks the run when the result would come from a turned source's stored-frame pass of a stage that is off", "[app][orientation][regression]") {
+    // review of TASK-0072: a plan-level refusal (no stage's) - the GUI blocks the run and says why
+    App();
+    const auto d = Dir("turned_blocker");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    spec.orientation = {90, false};
+    AppModel model(true);
+    model.openVideo(Q(WriteClip(d / "clip.mkv", spec)));
+    for (const char* stage : {"scenes", "depth", "flow", "upscale", "nr", "fg"}) model.setStageEnabled(stage, false);
+    const auto sr = model.project().passesRoot / "color_sr";
+    Manifest m = Manifest::ForPass(PassKind::ColorSr, 96, 64, FileFormat::Exr);  // the build before: the stored frame x2
+    m.sourceFormat = "yuv420p";
+    PassWriter wr(sr, m);
+    for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 96, 64));
+    wr.Finish();
+    model.refreshPlan();
+    CHECK(model.planBlocker().startsWith(QString::fromUtf8("Результат взялся бы из пасса color_sr (стадия «Апскейл»)")));
+    model.setStageEnabled("upscale", true);  // it remakes its pass
+    model.setStageParam("upscale", "backend", "nis");
+    model.refreshPlan();
+    CHECK(model.planBlocker().isEmpty());
+}
+
+TEST_CASE("RecentPreviews: a turned clip's thumbnail and line as shown; one the build before cached is not reused", "[app][orientation][previews][regression]") {
+    App();
+    const auto d = Dir("previews_turned");
+    RecentPreviews::SetCacheDir(Q(d / "cache"));
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    spec.orientation = {90, false};
+    const QString clip = Q(WriteClip(d / "clip.mkv", spec));
+    // what the build before cached under its key (the file's stamp only): the stored frame and its line
+    const QFileInfo fi(clip);
+    const QString stamp = clip + "|" + QString::number(fi.size()) + "|" + QString::number(fi.lastModified().toMSecsSinceEpoch());
+    const QString old = Q(d / "cache") + "/" + QString::fromLatin1(QCryptographicHash::hash((stamp + "\n").toUtf8(), QCryptographicHash::Sha1).toHex()) + ".png";
+    QDir().mkpath(Q(d / "cache"));
+    QImage sideways(96, 40, QImage::Format_RGB32);
+    sideways.fill(Qt::red);
+    sideways.setText("meta", QString::fromUtf8("48×32 24 fps"));
+    REQUIRE(sideways.save(old));
+    CHECK(RecentPreviews::CacheFile(clip, {}) != old);
+    const RecentPreviews::Preview p = RecentPreviews::Make(clip);
+    CHECK(p.meta == QString::fromUtf8("32×48 24 fps"));
+}
+
+TEST_CASE("Stage cards name the recompute of a source now shown turned and of the long-side 4K cap", "[app][orientation][regression]") {
+    App();
+    auto processed = [](const std::filesystem::path& d, const ClipSpec& spec, const std::function<void(Project&)>& edit) {
+        const auto clip = WriteClip(d / "clip.mkv", spec);
+        Project p = Project::Create(clip, d / "passes");
+        for (auto& st : p.stages) {
+            if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
+            if (st.name == "upscale") st.params["backend"] = "nis";
+            if (st.name == "fg") st.enabled = false;
+        }
+        edit(p);
+        p.resultVideo = d / "result.mkv";
+        p.codec = "ffv1";
+        p.Save(d / "proj.dlssvid.json");
+        std::string out;
+        REQUIRE(Subprocess::Run({DLSSVID_CLI_PATH, "process", "--project", (d / "proj.dlssvid.json").string(), "--warp", "--disable-unavailable"}, &out) == 0);
+    };
+    // a turned clip whose depth pass the build before made from the stored frame
+    const auto d = Dir("turned_cards");
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    spec.orientation = {180, false};
+    processed(d, spec, [](Project&) {});
+    Manifest legacy = Manifest::Load(d / "passes" / "depth_dlss");
+    REQUIRE(legacy.sourceFormat == "yuv420p+r180");
+    legacy.sourceFormat = "yuv420p";
+    legacy.fingerprint = ComputeFingerprint("depth", legacy.sourceHash, legacy.paramsCanonical, legacy.inputs, ToolInfo::FromJson(legacy.tool), "yuv420p").value;
+    legacy.Save(d / "passes" / "depth_dlss");
+    {
+        AppModel model(true);
+        model.openProject(Q(d / "proj.dlssvid.json"));
+        model.refreshPlan();
+        CHECK(model.cardState("depth").state == QString::fromUtf8("пересчёт: источник теперь показывается повёрнутым"));
+    }
+    // a mirror only: «отражённым», as the source line says (review of TASK-0072)
+    const auto m = Dir("mirrored_cards");
+    spec.orientation = {0, true};
+    processed(m, spec, [](Project&) {});
+    Manifest mirrored = Manifest::Load(m / "passes" / "depth_dlss");
+    REQUIRE(mirrored.sourceFormat == "yuv420p+h");
+    mirrored.sourceFormat = "yuv420p";
+    mirrored.fingerprint =
+        ComputeFingerprint("depth", mirrored.sourceHash, mirrored.paramsCanonical, mirrored.inputs, ToolInfo::FromJson(mirrored.tool), "yuv420p").value;
+    mirrored.Save(m / "passes" / "depth_dlss");
+    {
+        AppModel model(true);
+        model.openProject(Q(m / "proj.dlssvid.json"));
+        model.refreshPlan();
+        CHECK(model.cardState("depth").state == QString::fromUtf8("пересчёт: источник теперь показывается отражённым"));
+    }
+    // a portrait clip with a target 2400 high: capped at 2160 by the axes before (1216x2160), 1350x2400 now
+    const auto c = Dir("cap_cards");
+    ClipSpec portrait;
+    portrait.frames = 1;
+    portrait.width = 720;  // NIS scales by at most ~2x
+    portrait.height = 1280;
+    processed(c, portrait, [](Project& p) {
+        for (auto& st : p.stages) {
+            st.enabled = st.name == "upscale";
+            if (st.name == "upscale") st.params["target_height"] = 2400;
+        }
+    });
+    Manifest sr = Manifest::Load(c / "passes" / "color_sr");
+    REQUIRE(sr.width == 1350);
+    REQUIRE(sr.height == 2400);
+    std::string app = sr.tool.value("app", std::string());
+    REQUIRE(app.find("+sr.cap") != std::string::npos);
+    app.erase(app.find("+sr.cap"), 7);  // as the build before stamped it
+    sr.tool["app"] = app;
+    sr.fingerprint = ComputeFingerprint("upscale", sr.sourceHash, sr.paramsCanonical, sr.inputs, ToolInfo::FromJson(sr.tool), sr.sourceFormat).value;
+    sr.Save(c / "passes" / "color_sr");
+    AppModel model(true);
+    model.openProject(Q(c / "proj.dlssvid.json"));
+    model.refreshPlan();
+    CHECK(model.cardState("upscale").state == QString::fromUtf8("пересчёт: предел 4K для вертикального кадра — по длинной стороне"));
 }
 
 TEST_CASE("RecentPreviews makes a 96x40 frame and the size line of a clip and caches them", "[app][previews]") {

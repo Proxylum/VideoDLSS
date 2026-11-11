@@ -234,6 +234,7 @@ void AppModel::adoptProject(Project next) {
     cancelCheck();  // TASK-0071: its result is of the settings of the project before
     releasedFile_.clear();  // a run encoding the result of the project before: this project's videos are shown, the next encode line decides
     project_ = std::move(next);
+    adoptedView_ = true;
 }
 
 void AppModel::dropNrPreview() {
@@ -414,6 +415,12 @@ void AppModel::reloadSources() {
     timelineFps_ = Rational{0, 1};
     state().ResolveLegacyFrame(store_->FpsOf(baseSource()));  // projects before stage 9: frame -> time at the base rate
     state().time = std::clamp(state().time, 0.0, lastTime());
+    // a zoomed view saved over another frame (TASK-0072: the stored frame of a source shown turned now): its centre back on the image - once,
+    // when the project is adopted; a centre the user panned off the image later stays where it is (review of TASK-0072)
+    if (ViewTransform& v = state().view; std::exchange(adoptedView_, false) && !v.IsFit() && store_->ImageWidth() && store_->ImageHeight()) {
+        v.centerX = std::clamp(v.centerX, 0.f, static_cast<float>(store_->ImageWidth()));
+        v.centerY = std::clamp(v.centerY, 0.f, static_cast<float>(store_->ImageHeight()));
+    }
     emit sourcesChanged();
     requestFrames();
     emit stateChanged();
@@ -924,6 +931,11 @@ void AppModel::refreshPlan() {
         sourceInfo_.audio = probe.HasAudio();
         sourceInfo_.codec = probe.Info().codecName;
         sourceInfo_.decoded = probe.Info().decoded;
+        sourceInfo_.layout = SourceLayout(probe.Info());
+        sourceInfo_.orientation = probe.Info().orientation;
+        sourceInfo_.orientationFrom = probe.Info().orientationFrom;
+        sourceInfo_.codedWidth = probe.Info().codedWidth;
+        sourceInfo_.codedHeight = probe.Info().codedHeight;
         sourceInfo_.bitDepth = probe.Info().bitDepth;
         sourceInfo_.chroma = probe.Info().chroma;
         const ProcessOptions o = planOptions(true);
@@ -948,7 +960,7 @@ void AppModel::refreshPlan() {
         }
         outcome_ = EstimateRun(plan_, o.stages, sourceInfo_);
         // the result's layout: the encoder card's choice against the codec and the source (an impossible pair is a plan error)
-        const OutputFormat of = ResolveOutputFormat(project_.codec, project_.outputFormat, sourceInfo_.decoded);
+        const OutputFormat of = ResolveOutputFormat(project_.codec, project_.outputFormat, sourceInfo_.layout);  // the stream's, not a turn's 4:4:4
         outcome_.codec = project_.codec;
         outcome_.format = of.desc;
         outcome_.format.width = outcome_.width;
@@ -966,7 +978,7 @@ void AppModel::schedulePlan() { planTimer_.start(); }
 QString AppModel::planBlocker() const {
     for (const auto& d : plan_.stages)
         if (!d.error.empty()) return QString::fromStdString(d.error);
-    return {};
+    return QString::fromStdString(plan_.error);  // TASK-0072: no stage's
 }
 
 void AppModel::setStageEnabled(const std::string& stage, bool on) {
@@ -1191,6 +1203,17 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
             if (!names.isEmpty()) st.sub = tr("из-за «%1»").arg(names.join(", "));
         } else if (d->kind == "source_changed") {
             st.state = tr("другой исходник");
+            // TASK-0072: the same file, now shown turned (its display matrix) - the pass was made from the stored frame
+            if (d->diff.contains("source_format") && d->diff["source_format"].is_array() && d->diff["source_format"].size() == 2) {
+                const auto was = d->diff["source_format"][0], now = d->diff["source_format"][1];
+                if (was.is_string() && now.is_string() &&
+                    !(OrientationOfSourceFormat(was.get<std::string>()) == OrientationOfSourceFormat(now.get<std::string>()))) {
+                    const DisplayOrientation o = OrientationOfSourceFormat(now.get<std::string>());
+                    st.state = !o.rotate && o.hflip ? tr("пересчёт: источник теперь показывается отражённым")
+                               : o.hflip            ? tr("пересчёт: источник теперь показывается повёрнутым и отражённым")
+                                                    : tr("пересчёт: источник теперь показывается повёрнутым");
+                }
+            }
         } else if (d->kind == "forced") {
             st.state = tr("пересчёт (принудительно)");
         } else if (d->kind == "incomplete") {
@@ -1207,6 +1230,7 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
                 else if (has("nr.msize")) st.state = tr("пересчёт: защита интерфейса при масках разного размера");
                 else if (has("nr.gain")) st.state = tr("пересчёт: сила правки теперь после модели");
                 else if (has("nr.ev")) st.state = tr("пересчёт: экспозиция в ступенях EV");
+                else if (has("sr.cap")) st.state = tr("пересчёт: предел 4K для вертикального кадра — по длинной стороне");
             }
         } else {
             st.state = tr("пересчёт");
