@@ -260,6 +260,22 @@ TEST_CASE("ResolveUpscaleTarget of an anamorphic input: the scale, the target an
     CHECK(n.width == 3220);
     CHECK(n.height == 2160);
     CHECK(n.displayWidth == 3818);
+    // by the scale alone, not capped: the grid is the stored side times the scale exactly as for square pixels - no +sr.sar for it (review
+    // of TASK-0073: 706 x1.5 at 32:27 came out 1058, the square rule's 1060)
+    CHECK(ResolveUpscaleTarget(706, 480, 1.5, 0, 0, 3840, 2160, true, PixelAspect{32, 27}).width == 1060);
+    int uncapped = 0;
+    for (uint32_t w = 690; w <= 740; ++w)
+        for (uint32_t h = 470; h <= 490; ++h)
+            for (const double scale : {1.5, 2.0, 2.5, 3.0})
+                for (const PixelAspect sar : {PixelAspect{32, 27}, PixelAspect{8, 9}, PixelAspect{10, 11}, PixelAspect{64, 45}, PixelAspect{16, 15},
+                                              PixelAspect{40, 33}, PixelAspect{12, 11}, PixelAspect{16, 11}}) {
+                    const UpscaleTarget a = ResolveUpscaleTarget(w, h, scale, 0, 0, 3840, 2160, true, sar);
+                    if (a.capped) continue;
+                    ++uncapped;
+                    const UpscaleTarget b = ResolveUpscaleTarget(w, h, scale);
+                    if (a.width != b.width || a.height != b.height) FAIL(w << "x" << h << " x" << scale << " at " << sar.Token());
+                }
+    CHECK(uncapped > 20000);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}}, true, dvd).displayWidth == 1706);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}, {"target_width", 1920}}, true, dvd).width == 1620);
     CHECK(UpscaleOutputFor(720, 480, {{"scale", 2.0}, {"target_width", 1920}}).width == 1920);  // the square rule (the build before)

@@ -114,8 +114,11 @@ UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uin
         // the shown size back in the input's pixels: the stretched axis divided. Capped - rounded down, so that the frame as shown stays
         // within the cap (an even cap: the shown side rounds to at most it)
         auto grid = [&](double v) { return t.capped ? std::max(2u, static_cast<uint32_t>(std::floor(v / 2.0 + 1e-9)) * 2u) : even(v); };
-        t.width = s > 1.0 ? grid(w / s) : even(w);
-        t.height = s < 1.0 ? grid(h * s) : even(h);
+        // by the scale alone, not capped: the stored side times the scale, as for square pixels - divided back from the shown size it
+        // could land a hair under a .5 and round 2 lower (706 x1.5 at 32:27: 1058.9999999999998 -> 1058, not 1060; review of TASK-0073)
+        const bool scaled = !targetW && !targetH && !t.capped;
+        t.width = s > 1.0 ? (scaled ? even(inW * scale) : grid(w / s)) : even(w);
+        t.height = s < 1.0 ? (scaled ? even(inH * scale) : grid(h * s)) : even(h);
     }
     t.scale = static_cast<double>(t.width) / inW;
     // the frame as shown: the target asked for (capped: within the cap), not the grid stretched back - two roundings could miss it by 2
