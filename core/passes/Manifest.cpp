@@ -224,11 +224,21 @@ PixelAspect PassPixelAspect(const Manifest& m, PixelAspect sourceSar, uint32_t s
     if (sourceSar.Square()) return {};
     if (const auto stamped = PixelAspectFromStamp(StageParamText(m, "pixel_aspect"))) return *stamped;
     if (!m.width || !m.height || !sourceW || !sourceH) return sourceSar;
-    const auto [dw, dh] = sourceSar.DisplaySize(sourceW, sourceH);
-    const double aspect = static_cast<double>(m.width) / m.height;
-    const bool shown = std::fabs(aspect / (static_cast<double>(dw) / dh) - 1.0) <= 0.01;
-    const bool grid = std::fabs(aspect / (static_cast<double>(sourceW) / sourceH) - 1.0) <= 0.01;
-    return shown && !grid ? PixelAspect{1, 1} : sourceSar;
+    // off the grid's proportions: square (review of TASK-0073 - not only the proportions as shown: a target 1920x1080 of an 8:9 source)
+    const bool grid = std::fabs((static_cast<double>(m.width) / m.height) / (static_cast<double>(sourceW) / sourceH) - 1.0) <= 0.01;
+    return grid ? sourceSar : PixelAspect{1, 1};
+}
+
+bool ShownSizeMatches(std::pair<uint32_t, uint32_t> recorded, std::pair<uint32_t, uint32_t> stretched) {
+    auto within = [](uint32_t a, uint32_t b) { return std::abs(static_cast<int64_t>(a) - static_cast<int64_t>(b)) <= 4 + static_cast<int64_t>(b) / 100; };
+    return within(recorded.first, stretched.first) && within(recorded.second, stretched.second);
+}
+
+std::pair<uint32_t, uint32_t> PassShownSize(const Manifest& m, PixelAspect px) {
+    const auto stretched = px.DisplaySize(m.width, m.height);
+    if (px.Square()) return stretched;
+    if (const auto shown = RecordedShownSize(m); shown && ShownSizeMatches(*shown, stretched)) return *shown;
+    return stretched;
 }
 
 std::optional<std::pair<uint32_t, uint32_t>> RecordedShownSize(const Manifest& m) {

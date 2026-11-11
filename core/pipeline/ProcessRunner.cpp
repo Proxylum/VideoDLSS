@@ -1327,7 +1327,8 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
         Throw("process: " + passDir.string() + " was made from the stored frame of a source shown " + info.orientation.Describe() +
               ": the result would not be shown so - enable the stage that makes it or remove the pass");
     const OutputFormat of = ResolveOutputFormat(encode.codec, encode.format, SourceLayout(info));  // the stream's chroma, not a turn's 4:4:4
-    // TASK-0073: a pass of an anamorphic source is its grid - stretched to square pixels here (Lanczos, one axis), so that every player
+    // TASK-0073: a pass of an anamorphic source is its grid - stretched to square pixels here (Lanczos: the stretched axis, both when fit
+    // into the cap), so that every player
     // shows the result in its proportions; `grid` is the frame converted, `target` the one written
     const PixelAspect sar = PassPixelAspect(m, info.sar, info.width, info.height);
     const auto [rw, rh] = PassResultSize(m, info.sar, info.width, info.height);

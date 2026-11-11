@@ -1708,6 +1708,19 @@ TEST_CASE("AppModel opens an anamorphic clip as shown: the viewport, the source 
     CHECK(tp.findChild<QLabel*>("sourceFrame")->text().contains(QString::fromUtf8("36×54")));
     CHECK(tp.findChild<QLabel*>("sourceFrame")->text().contains(QString::fromUtf8(" · пиксель 27:32, показ 36×64")));
     CHECK(SourceTooltip(*turned.store().FindSource("source")).contains(QString::fromUtf8("(пиксель 27:32, показ 36x64)")));
+    // a pass's label: the frame as shown it records (an exact target 96 of the grid 82 at 32:27, stretched 97.2), review of TASK-0073
+    {
+        Manifest m = Manifest::ForPass(PassKind::ColorSr, 82, 54, FileFormat::Exr);
+        m.stageParams = {{"pixel_aspect", "32:27"}, {"shown_size", {96, 54}}};
+        PassWriter wr(d / "labels" / "color_sr", m);
+        wr.WriteFrame(0, MakePassImage(PassKind::ColorSr, 82, 54));
+        wr.Finish();
+        auto labelled = FrameStore::PassFolderSource(d / "labels" / "color_sr", "color_sr", "color_sr");
+        REQUIRE(labelled);
+        labelled->sar = PixelAspect{32, 27};
+        CHECK(SourceSizeText(*labelled) == QString::fromUtf8("96×54"));
+        CHECK(SourceTooltip(*labelled).contains(QString::fromUtf8("показ 96x54")));
+    }
     CHECK(!SourceTooltip(*square.store().FindSource("source")).contains(QString::fromUtf8("пиксель")));
     CHECK(!plain.findChild<QLabel*>("sourceFrame")->toolTip().contains(QString::fromUtf8("Пиксели")));
     CHECK(plain.findChild<QLabel*>("outVideo")->toolTip().isEmpty());

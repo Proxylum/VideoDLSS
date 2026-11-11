@@ -79,6 +79,10 @@ TEST_CASE("PixelAspect stamps of colour passes and the pixels of a pass read bac
     m.width = 128;                                     // the frame as shown, no record: an explicit target of the build before
     CHECK(PassPixelAspect(m, dvd, 54, 36).num == 1);
     CHECK(PassPixelAspect(m, dvd, 54, 36).Square());
+    m.width = 144;                                     // 2:1, another target of both sides then: square too (review of TASK-0073)
+    CHECK(PassPixelAspect(m, dvd, 54, 36).num == 1);
+    CHECK(PassPixelAspect(m, PixelAspect{8, 9}, 72, 48).num == 1);  // NTSC 4:3 with a 16:9 target: neither the grid's nor as shown
+    m.width = 128;
     m.stageParams["pixel_aspect"] = "32:27";          // the record wins over the guess
     CHECK(PassPixelAspect(m, dvd, 54, 36) == dvd);
     m.width = 108;
@@ -135,6 +139,14 @@ TEST_CASE("PassResultSize: the frame as shown a pass records, else the pass stre
     CHECK(!ColourShownSize(dir, 164, 108));  // another frame
     CHECK(!ColourShownSize({}, 82, 54));
     CHECK(!ColourShownSize(dir.parent_path() / "nowhere", 82, 54));
+    // the frame as shown for the viewport: the record, else the pass stretched (no cap: the viewport shows it as it is)
+    m.stageParams["shown_size"] = {96, 54};
+    CHECK(PassShownSize(m, dvd) == Size{96, 54});
+    m.stageParams.erase("shown_size");
+    CHECK(PassShownSize(m, dvd) == Size{98, 54});
+    CHECK(PassShownSize(m, {}) == Size{82, 54});
+    CHECK(ShownSizeMatches({3840, 2160}, {3836, 2160}));
+    CHECK(!ShownSizeMatches({200, 54}, {98, 54}));
 }
 
 TEST_CASE("StretchedResultSize: the result of an anamorphic pass in square pixels, within 3840x2160 by the long side", "[unit][aspect]") {
@@ -346,7 +358,7 @@ TEST_CASE("DLSS-G's camera takes the frame as shown: the grid of 32:27 pixels is
     CHECK(c.viewToClip[0] == Approx(c.viewToClip[5] / c.aspect));
 }
 
-TEST_CASE("YuvResizer: the same layout at another size, Lanczos, deterministic; the same size a copy", "[unit][aspect][convert]") {
+TEST_CASE("YuvResizer: the same layout at another size, Lanczos, repeatable; the same size a copy", "[unit][aspect][convert]") {
     for (const FrameDesc desc : {FrameDesc{54, 36, PixelFormat::Yuv420p, 8}, FrameDesc{54, 36, PixelFormat::Yuv420p16, 10}, FrameDesc{54, 36, PixelFormat::Yuv444p, 8}}) {
         INFO(desc.Name());
         CpuFrame in;
@@ -382,7 +394,7 @@ TEST_CASE("YuvResizer: the same layout at another size, Lanczos, deterministic; 
         CHECK(at(1, 3, 3) == 128);  // flat chroma stays exact
         uint32_t lowest = 255;  // Lanczos rings at the edge: below the dark level just before it (bilinear would not)
         for (uint32_t x = 0; x < 64; ++x) lowest = std::min(lowest, at(0, x, 10));
-        CHECK(lowest < 40);
+        CHECK(lowest <= 33);  // Lanczos-3: about 31 at x 30; swscale's bicubic about 36 (review of TASK-0073)
         CHECK(at(0, 4, 10) == 40);  // away from the edge: the level kept
         CHECK(at(0, 60, 10) == 200);
         uint32_t edge = 0;  // the edge moved from 27 of 54 to 32 of 64: the half-way crossing between 31 and 33

@@ -276,7 +276,8 @@ void FrameStore::SetSources(std::vector<ViewportSource> sources) {
     bool fromSource = false;
     for (const auto& s : sources_) {
         if (s.name == "source" || imageW_ == 0) {
-            const auto [w, h] = s.sar.DisplaySize(s.width, s.height);  // TASK-0073: as shown
+            // TASK-0073: as shown - a pass by its record (the upscale's target)
+            const auto [w, h] = !s.isVideo && s.manifest ? PassShownSize(*s.manifest, s.sar) : s.sar.DisplaySize(s.width, s.height);
             imageW_ = w;
             imageH_ = h;
         }

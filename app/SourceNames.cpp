@@ -55,7 +55,7 @@ QString SourceTooltip(const ViewportSource& s) {
     QString t = QString::fromStdString(s.name);
     if (s.width && s.height) t += QString("  %1x%2").arg(s.width).arg(s.height);
     if (s.width && s.height && !s.sar.Square()) {  // TASK-0073: the stored grid and the frame as shown
-        const auto [w, h] = s.sar.DisplaySize(s.width, s.height);
+        const auto [w, h] = s.manifest ? PassShownSize(*s.manifest, s.sar) : s.sar.DisplaySize(s.width, s.height);  // a pass: its record
         t += Tr(" (пиксель %1, показ %2x%3)").arg(QString::fromStdString(s.sar.Token())).arg(w).arg(h);
     }
     if (s.isStatic) t += Tr("  статичная маска: один кадр на всё время");  // PR-8
@@ -69,7 +69,7 @@ QString SourceTooltip(const ViewportSource& s) {
 
 QString SourceSizeText(const ViewportSource& s) {
     if (!s.width || !s.height) return {};
-    const auto [w, h] = s.sar.DisplaySize(s.width, s.height);
+    const auto [w, h] = s.manifest ? PassShownSize(*s.manifest, s.sar) : s.sar.DisplaySize(s.width, s.height);  // a pass: its record
     return QString("%1×%2").arg(w).arg(h);
 }
 

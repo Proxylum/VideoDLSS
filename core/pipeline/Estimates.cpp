@@ -176,10 +176,8 @@ std::pair<uint32_t, uint32_t> PassResultSize(const Manifest& m, PixelAspect sour
     const PixelAspect px = PassPixelAspect(m, sourceSar, sourceW, sourceH);
     const auto stretched = StretchedResultSize(px, m.width, m.height);
     if (px.Square()) return stretched;
-    // the record of the pass's own frame: each side within the roundings of the grid stretched (4 px, 1 % - a capped grid rounded down by
-    // up to 2 source pixels); a record of another frame is not taken
-    auto within = [](uint32_t a, uint32_t b) { return std::abs(static_cast<int64_t>(a) - static_cast<int64_t>(b)) <= 4 + static_cast<int64_t>(b) / 100; };
-    if (const auto shown = RecordedShownSize(m); shown && within(shown->first, stretched.first) && within(shown->second, stretched.second)) return *shown;
+    // the record of the pass's own frame (within the cap by how it is made: the target as shown)
+    if (const auto shown = RecordedShownSize(m); shown && ShownSizeMatches(*shown, stretched)) return *shown;
     return stretched;
 }
 

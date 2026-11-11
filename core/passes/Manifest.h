@@ -102,9 +102,9 @@ struct Manifest {
 // A text a stage recorded in stage_params ("" when absent or of another type).
 std::string StageParamText(const Manifest& m, const char* key);
 // TASK-0073: the pixels of a colour pass of a source whose pixels are `sourceSar` (the axes of the frame the stages get, sourceW x sourceH):
-// what the pass recorded (stage_params.pixel_aspect, PixelAspect::Stamp); a pass of the build before without the record - the source's,
-// unless it has the proportions of the frame as shown and not of the grid (an explicit target then was taken in square pixels): {1, 1}.
-// A square source: {}.
+// what the pass recorded (stage_params.pixel_aspect, PixelAspect::Stamp); a pass without the record (of the build before; depth, vectors,
+// masks) - the source's when it has the grid's proportions, else {1, 1}: the build before moved a pass off them only by an explicit target
+// of both sides, taken in square pixels, and a mask drawn over the frame as shown is square. A square source: {}.
 PixelAspect PassPixelAspect(const Manifest& m, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH);
 // The pixels of the colour a stage reads: the pass in `colorDir` (unreadable: the source's), the source's frames when empty.
 PixelAspect ColourPixelAspect(const std::filesystem::path& colorDir, PixelAspect sourceSar, uint32_t sourceW, uint32_t sourceH);
@@ -113,5 +113,11 @@ PixelAspect ColourPixelAspect(const std::filesystem::path& colorDir, PixelAspect
 std::optional<std::pair<uint32_t, uint32_t>> RecordedShownSize(const Manifest& m);
 // That record of the colour pass in `colorDir` when the pass is of size w x h - NR and FG pass it on (their frame is their colour's).
 std::optional<std::pair<uint32_t, uint32_t>> ColourShownSize(const std::filesystem::path& colorDir, uint32_t w, uint32_t h);
+// Whether a recorded frame as shown is this one's - the grid stretched - to the roundings of a grid (each side within 4 px and 1 %; a capped
+// grid is rounded down by up to 2 source pixels): a record of another frame is not taken.
+bool ShownSizeMatches(std::pair<uint32_t, uint32_t> recorded, std::pair<uint32_t, uint32_t> stretched);
+// The frame as shown of a pass of pixels `px` (the viewport's labels and reference): its record when it matches, else the pass stretched
+// (PixelAspect::DisplaySize); square pixels - the pass as it is.
+std::pair<uint32_t, uint32_t> PassShownSize(const Manifest& m, PixelAspect px);
 
 }  // namespace dlssvid

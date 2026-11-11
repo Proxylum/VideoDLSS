@@ -669,6 +669,11 @@ TEST_CASE("The viewport shows an anamorphic clip stretched: the reference image 
     store.SetSources({sr, depth});
     CHECK(store.ImageWidth() == 128);
     CHECK(store.ImageHeight() == 72);
+    // ... its frame as shown too: an exact target 96 of the grid 82 (stretched 97.2)
+    const ViewportSource exact = pass("color_nr", PassKind::ColorNr, 82, 54, {{"pixel_aspect", "32:27"}, {"shown_size", {96, 54}}});
+    store.SetSources({exact});
+    CHECK(store.ImageWidth() == 96);
+    CHECK(store.ImageHeight() == 54);
 }
 
 TEST_CASE("dlssvid info names an anamorphic clip's pixels; a square clip's info is as before", "[integration][aspect][cli]") {
