@@ -121,6 +121,10 @@ TEST_CASE("PassResultSize: the frame as shown a pass records, else the pass stre
     CHECK(PassResultSize(m, {}, 54, 36) == Size{82, 54});  // a square source: the pass as it is
     m.stageParams["pixel_aspect"] = "1:1";
     CHECK(PassResultSize(m, dvd, 54, 36) == Size{82, 54});  // square pixels: as it is
+    m.stageParams["shown_size"] = {84, 54};                 // ... whatever a record near it says
+    CHECK(PassResultSize(m, dvd, 54, 36) == Size{82, 54});
+    CHECK(PassResultSize(m, {}, 54, 36) == Size{82, 54});
+    m.stageParams["shown_size"] = {96, 54};
     // passed on by NR and FG: the record of their colour of their size
     const auto dir = std::filesystem::path(DLSSVID_TEST_TMP) / "aspect_shown" / "color_sr";
     std::filesystem::remove_all(dir);
