@@ -185,7 +185,21 @@ struct RunContext {
     uint64_t vramBytes = 0;                      // 0: unknown, no VRAM error
     bool skipExisting = true;
     std::set<std::string> force;  // stages recomputed on request
+    // TASK-0074: the colour passes of the colour stages switched off (color_sr, color_nr, color_fg) - no input of the stages below and
+    // not the result: a stage off is out of the result. They stay on disk and count again when the stage is on. Depth, flow and the scene
+    // list of a stage off are still read (an external pass: «действует список с диска», a depth_dlss imported)
+    std::set<std::string> switchedOff;
 };
+
+// The colour stages whose pass is out of the run while they are off (TASK-0074)
+constexpr const char* kColourStages[] = {"upscale", "nr", "fg"};
+
+std::filesystem::path ExistingPass(const RunContext& ctx, std::initializer_list<const char*> names) {
+    for (const char* n : names)
+        if (!ctx.switchedOff.count(n))
+            if (auto p = ExistingPass(ctx.root, {n}); !p.empty()) return p;
+    return {};
+}
 
 // The passes on disk (or, while planning, as they will be after the stages decided so far): pass -> fingerprint;
 // legacy passes get a stable pseudo-fingerprint. `ran` lists the passes this plan (re)writes.
@@ -225,6 +239,7 @@ void RefreshFromDisk(PlanState& s, const RunContext& ctx) {
             }
             continue;
         }
+        if (ctx.switchedOff.count(name)) continue;  // TASK-0074: its stage is off - no input of the stages below, not the result
         try {
             const Manifest m = Manifest::Load(root / name);
             if (!PassOfClip(m)) {  // a part of the clip or an A/B run: no input of the stages below (its own stage still sees it)
@@ -398,6 +413,25 @@ const char* StalePassReason(const std::string& stage, const Manifest& m) {
     if (const char* broken = BrokenPassReason(stage, m)) return broken;
     if (AbNrPass(stage, m)) return kAbPass;
     return nullptr;
+}
+
+// The colour a pass of nr or fg was made from by its own record (stage_params.color_source, written by NrStage / FgStage): "color_sr",
+// "color_nr" or "video"; empty when the record does not tell (no field, fg's bare "pass" of before PR-11, a folder of another name).
+std::string RecordedColourInput(const std::string& stage, const Manifest& m) {
+    if ((stage != "nr" && stage != "fg") || !m.stageParams.is_object()) return {};
+    const auto it = m.stageParams.find("color_source");
+    if (it == m.stageParams.end() || !it->is_string()) return {};
+    std::string s = it->get<std::string>();
+    if (s == "video") return s;
+    if (stage == "nr") return s == "color_sr" || s == "slot" ? "color_sr" : std::string();  // "slot": the cache's color_sr
+    if (s.rfind("pass:", 0) == 0 || s.rfind("slot:", 0) == 0) s = s.substr(5);
+    return s == "color_nr" || s == "color_sr" ? s : std::string();
+}
+
+// The colour the plan's nr or fg reads: its colour input, else the decoded frame
+std::string PlannedColourInput(const std::string& stage, const std::map<std::string, std::string>& inputs) {
+    if (stage == "fg" && inputs.count("color_nr")) return "color_nr";
+    return inputs.count("color_sr") ? "color_sr" : "video";
 }
 
 // A complete history version of `pass` with this fingerprint, if any.
@@ -662,6 +696,15 @@ StageDecision DecideStage(const RunContext& ctx, const ProcessStage& stage, cons
                                  : made.empty()               ? "made without the scene list"
                                                               : "made with another scene list",
                 true);
+        } else if (const std::string colourMade = RecordedColourInput(name, m), colourWant = PlannedColourInput(name, d.inputs);
+                   !colourMade.empty() && colourMade != colourWant) {
+            // TASK-0074: a standalone nr / fg pass made from another colour than the stage reads now (fg over color_nr with nr switched off)
+            // would bring that stage back into the result: kept in the history, not adopted
+            nlohmann::json passes = nlohmann::json::array();
+            for (const std::string& pass : {colourMade, colourWant})
+                if (pass != "video") passes.push_back(pass);
+            d.diff["inputs"] = passes;
+            run("input_changed", "made from " + colourMade + ", the stage reads " + colourWant + " now", true);
         } else if (name == "nr" && ControlMaskLabelOf(m) != controlWant) {
             // PR-8: a standalone NR pass made without the control mask NR reads now (or with another, or with one that is gone) is
             // another picture: kept in the history, not adopted under this fingerprint
@@ -821,6 +864,9 @@ Prepared Prepare(const ProcessOptions& options) {
             Throw("process: unknown stage '" + s.name + "' " + PipelineStageNamesText());
         if (s.enabled) r.wanted[s.name] = s;
     }
+    for (const char* stage : kColourStages)
+        if (!r.wanted.count(stage))
+            for (const auto& pass : StageFamilyPasses(stage)) r.ctx.switchedOff.insert(pass);
     std::vector<std::string> problems;
     for (const auto& [name, s] : r.wanted)
         for (const auto& p : ValidateStageParams(name, s.params)) problems.push_back(p);
@@ -942,24 +988,6 @@ std::optional<ScenesSource> ProjectScenes(const RunContext& ctx, StageDecision& 
 // PR-8: the control mask NR will read. Unreadable stops NR before it runs (the plan would otherwise reuse a pass of the old stamp: the
 // mask's fingerprint comes from its manifest, RefreshFromDisk does not reread the file); a mask file edited in place stops it at reuse
 // too. Proportions more than 1 % off the frame: a warning - the mask stretches. Texts in Russian: they go to the card as they are.
-// TASK-0072: the colour pass the result would come from when it is of a stage the run does not run (off) and was made from the stored frame
-// of a source shown turned - what to say; empty otherwise. `runs`: whether the run runs a stage (makes or reuses its pass as shown).
-std::string StoredFrameResult(const RunContext& ctx, const std::function<bool(const std::string&)>& runs) {
-    if (ctx.orientation.Identity()) return {};
-    for (const auto& [pass, stage] : {std::pair<const char*, const char*>{"color_fg", "fg"}, {"color_nr", "nr"}, {"color_sr", "upscale"}}) {
-        if (runs(stage)) return {};  // its pass, or a later one, is the result
-        if (!Manifest::Exists(ctx.root / pass) || !PassOfClip(ctx.root / pass)) continue;
-        try {
-            if (MadeFromStoredFrame(Manifest::Load(ctx.root / pass), ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight))
-                return "Результат взялся бы из пасса " + std::string(pass) + StageRu(pass) + ": он " + MadeFromStoredRu(ctx.orientation) +
-                       ". Включите эту стадию или удалите пасс";
-        } catch (const std::exception&) {
-        }
-        return {};
-    }
-    return {};
-}
-
 void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
     std::string why;
     const auto info = ReadControlMaskInfo(ctx.root / kControlMaskPass, &why);
@@ -972,11 +1000,11 @@ void AdviseControlMask(const RunContext& ctx, StageDecision& d) {
             d.warnings.push_back("маска управления не читается (" + why + ") и не применяется");
         return;
     }
-    // the frame NR runs at: color_sr of the clip (the upscale's --target included), else the source; a color_sr of the stored frame of a
-    // turned source is no input of NR (DecideStage refuses it)
+    // the frame NR runs at: color_sr of the clip (the upscale's --target included), else the source - also with the upscale off (TASK-0074);
+    // a color_sr of the stored frame of a turned source is no input of NR (DecideStage refuses it)
     uint32_t fw = ctx.sourceWidth, fh = ctx.sourceHeight;
     try {
-        if (Manifest::Exists(ctx.root / "color_sr"))
+        if (!ctx.switchedOff.count("color_sr") && Manifest::Exists(ctx.root / "color_sr"))
             if (const Manifest sr = Manifest::Load(ctx.root / "color_sr");
                 PassOfClip(sr) && !MadeFromStoredFrame(sr, ctx.orientation, ctx.sourceWidth, ctx.sourceHeight, ctx.codedWidth, ctx.codedHeight)) {
                 fw = sr.width;
@@ -1156,7 +1184,6 @@ nlohmann::json ProcessPlan::ToJson() const {
     for (const auto& s : stages) st.push_back(s.ToJson());
     nlohmann::json j = {{"passes_root", passesRoot.string()}, {"source_hash", sourceHash}, {"frames", frames},       {"stages", st},
                         {"final_pass", finalPass},            {"run_count", runCount},    {"reuse_count", reuseCount}};
-    if (!error.empty()) j["error"] = error;
     if (scenesOnDisk)
         j["scenes_on_disk"] = {{"count", scenesOnDisk->count}, {"frames", scenesOnDisk->frames}, {"threshold", scenesOnDisk->threshold}, {"off", scenesOnDisk->off}};
     return j;
@@ -1349,9 +1376,8 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
         (d.action == "run" ? plan.runCount : plan.reuseCount)++;
         plan.stages.push_back(std::move(d));
     }
+    // TASK-0074: a colour pass of a stage off is not the result - also not one of a turned source's stored frame (TASK-0072 refused that)
     plan.finalPass = ProjectedFinalPass(state);
-    // a run that encodes nothing (--no-encode: the stages before NR for the preview) takes no result (review of TASK-0072)
-    if (options.encode) plan.error = StoredFrameResult(pr.ctx, [&](const std::string& stage) { return pr.wanted.count(stage) > 0; });
     return plan;
 }
 
@@ -1451,6 +1477,9 @@ ProcessResult RunProcess(const ProcessOptions& options) {
     const RunContext& ctx = pr.ctx;
     const std::filesystem::path& root = ctx.root;
     std::filesystem::create_directories(root);
+    for (const auto& pass : ctx.switchedOff)  // TASK-0074: kept, not used - it counts again when its stage is switched on
+        if (Manifest::Exists(root / pass))
+            Log()->info("process: {} is off — {} stays on disk, neither an input of the stages below nor the result", StageForPass(pass), pass);
     const std::string& sourceFile = pr.sourceFile;
     const std::string& sourceHash = ctx.sourceHash;
     auto progressFor = [&](const std::string& stage) {
@@ -1459,11 +1488,6 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         };
     };
 
-    // TASK-0072: the result would come from a pass of a stage that is off, made from the stored frame of a turned source - refused before
-    // any stage runs (the plan says it: ProcessPlan::error)
-    if (options.encode)  // --no-encode takes no result
-        if (const std::string why = StoredFrameResult(ctx, [&](const std::string& stage) { return pr.wanted.count(stage) > 0; }); !why.empty())
-            Throw("process: " + why);
     PlanState state;
     bool retiredAny = false;
     // TASK-0071: a color_sr made by NIS because DLSS could not run is stamped with the fingerprint of the settings asked for - a later
@@ -1625,7 +1649,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
                 VideoDecoder decoder(options.input);
                 NrStageOptions o;
                 o.outputDir = root;
-                o.colorDir = ExistingPass(root, {"color_sr"});
+                o.colorDir = ExistingPass(ctx, {"color_sr"});  // the upscale off: the decoded frame (TASK-0074)
                 o.depthDir = ExistingPass(root, {"depth_dlss"});
                 o.mvDir = ExistingPass(root, {"mv_dlss"});
                 o.masksDir = root;
@@ -1646,7 +1670,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             } else if (name == "fg") {
                 FgStageOptions o;
                 o.outputDir = root;
-                o.colorDir = ExistingPass(root, {"color_nr", "color_sr"});
+                o.colorDir = ExistingPass(ctx, {"color_nr", "color_sr"});  // as StageInputCandidates, without a stage switched off (TASK-0074)
                 o.depthDir = ExistingPass(root, {"depth_dlss"});
                 o.mvDir = ExistingPass(root, {"mv_dlss"});
                 o.disableWhenUnavailable = options.disableUnavailable;
@@ -1880,8 +1904,9 @@ ProcessResult RunProcess(const ProcessOptions& options) {
     }
 
     // ---- encode the last colour pass, or pass the source through ----
-    // fg failed or disabled: its input, not a color_fg left from an older run (an incomplete one would cut the result short)
-    result.finalPass = fgSkipped ? fgColorDir : ExistingPass(root, {"color_fg", "color_nr", "color_sr"});
+    // fg failed or disabled: its input, not a color_fg left from an older run (an incomplete one would cut the result short); a colour
+    // stage switched off in the project is not in the result, its pass stays on disk (TASK-0074)
+    result.finalPass = fgSkipped ? fgColorDir : ExistingPass(ctx, {"color_fg", "color_nr", "color_sr"});
     ProcessStageReport enc;
     enc.name = "encode";
     if (fgSkipped) enc.reason = "fg skipped: encoded from " + (result.finalPass.empty() ? std::string("the source") : result.finalPass.filename().string());

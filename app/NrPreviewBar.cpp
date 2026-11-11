@@ -216,6 +216,8 @@ void NrPreviewBar::refresh() {
     before_->setVisible(has);
     {
         const QSignalBlocker b(before_);
+        // NR's input: the upscale's color_sr, or the source with the upscale switched off (TASK-0074, AppModel::nrPreviewBefore)
+        before_->setItemText(1, model_.stageOn("upscale") ? tr("Апскейл") : tr("Исходник"));
         before_->setCurrentIndex(model_.nrPreviewBeforeChoice() == "sr" ? 1 : 0);
     }
     save_->setVisible(has);

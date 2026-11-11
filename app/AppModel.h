@@ -110,6 +110,7 @@ public:
     QString sourceHashStatus() const;                        // «совпадает с пассами» / «N пассов от другого исходника» / «пассов нет»
     StageCardState cardState(const std::string& stage) const;
     StageEntry* stageEntry(const std::string& stage);
+    bool stageOn(const std::string& stage) const;  // the project's stage is ticked (a stage the file lacks is off)
     bool forced(const std::string& stage) const { return force_.count(stage) > 0; }
     QStringList processArgs() const;  // dlssvid process --project <file> --disable-unavailable [--force a,b]
     // TASK-0071: whether NR / FG can run here - the line of their card. «Проверить» runs `dlssvid nr|fg --check` with the project's

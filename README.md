@@ -402,7 +402,10 @@ dlssvid compare --ref full_rate.mp4 --test passes\color_fg --start 1 --step 2   
 ```
 
 The whole pipeline (stage 8): stages run one after another over the pass cache, a complete pass is reused, the last
-colour pass is encoded with the audio copied from the source. Stage parameters are the project's JSON keys. A pass is
+colour pass is encoded with the audio copied from the source. A colour stage switched off (an unticked card, a stage
+`--stages` leaves out) is out of the result: its `color_sr` / `color_nr` / `color_fg` stays on disk but is neither read by
+the stages below nor encoded, and counts again when the stage is on; depth, vectors and the scene list of a stage off are
+still read as they are (external passes). Stage parameters are the project's JSON keys. A pass is
 reused only when its fingerprint matches (stage 9: source hash, canonical parameters, the fingerprints of the passes it
 read, the tool — app version, backend, model, NVIDIA DLL hash); a changed parameter recomputes that stage and the ones
 below it, the replaced folder is kept as a version in `<pass>.v/` and comes back without recomputing when the

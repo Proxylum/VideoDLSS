@@ -7,10 +7,12 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
 
 #include "TestClips.h"
+#include "io/VideoDecoder.h"
 #include "passes/PassSequence.h"
 #include "passes/formats/PngIO.h"
 #include "pipeline/ControlMask.h"
@@ -776,7 +778,9 @@ TEST_CASE("RunProcess: a color_nr of a part of the clip (nr --start) is recomput
 }
 
 // Review of TASK-0047: the frame-0 rule was in PassComplete only - with nr off in the project, fg took a color_nr of a part of
-// the clip as its colour («has no frame 0») and the encode put frame F at t=0. Such a pass is no input and not the result.
+// the clip as its colour («has no frame 0») and the encode put frame F at t=0. Such a pass is no input and not the result. Since
+// TASK-0074 the color_nr of nr off is out anyway; the rule still decides for the passes of a stage off that are read as they are
+// (the vectors, below).
 TEST_CASE("RunProcess: a part of the clip under the passes root is neither fg's input nor the result", "[integration][process][regression]") {
     ClipSpec spec;
     spec.frames = 4;
@@ -805,10 +809,24 @@ TEST_CASE("RunProcess: a part of the clip under the passes root is neither fg's 
     CHECK(r.framesOut == first.framesOut);
     for (auto& s : o.stages)
         if (s.name == "fg") s.enabled = false;
-    std::filesystem::remove_all(o.passesRoot / "color_fg");  // a disabled stage's pass would still be the result
     r = RunProcess(o);
     CHECK(r.finalPass.filename() == "color_sr");  // the result is not the part of the clip (before: color_nr, 2 frames)
     CHECK(r.framesOut == 4);
+
+    // flow off: its vectors are read as they are - but not a part of the clip (`flow` over frames 2..3 only)
+    for (auto& s : o.stages) s.enabled = s.name != "flow" && s.name != "nr";
+    {
+        const Manifest mv = Manifest::Load(o.passesRoot / "mv_dlss");
+        std::filesystem::remove_all(o.passesRoot / "mv_dlss");
+        PassWriter w(o.passesRoot / "mv_dlss", Manifest::ForPass(PassKind::MvDlss, mv.width, mv.height, FileFormat::Exr));
+        for (int64_t i : {2, 3}) w.WriteFrame(i, MakePassImage(PassKind::MvDlss, mv.width, mv.height));
+        w.Finish();
+    }
+    CHECK_FALSE(Decision(PlanProcess(o), "fg").inputs.count("mv_dlss"));
+    r = RunProcess(o);
+    CHECK(Report(r, "fg").status == "ran");  // its vectors are gone: input changed
+    CHECK_FALSE(Manifest::Load(o.passesRoot / "color_fg").inputs.count("mv_dlss"));
+    CHECK(r.finalPass.filename() == "color_fg");
 }
 
 // TASK-0048 (spec §2e): the A/B switches are not parameters - an nr pass a standalone run made with them (stage_params.ab) is
@@ -857,7 +875,8 @@ TEST_CASE("RunProcess: an nr pass made with the A/B switches of a standalone run
     CHECK(abKept);
 }
 
-// Review of TASK-0048: an A/B color_nr under the passes root was fg's colour and the result when nr is off in the project
+// Review of TASK-0048: an A/B color_nr under the passes root was fg's colour and the result when nr is off in the project. Since
+// TASK-0074 any color_nr of nr off is out: this guards the user's case; an A/B pass of nr on is judged by DecideStage (the test above)
 TEST_CASE("RunProcess: an A/B pass under the passes root is neither fg's input nor the result", "[integration][process][regression]") {
     ClipSpec spec;
     spec.frames = 4;
@@ -888,7 +907,6 @@ TEST_CASE("RunProcess: an A/B pass under the passes root is neither fg's input n
     CHECK(r.framesOut == first.framesOut);
     for (auto& s : o.stages)
         if (s.name == "fg") s.enabled = false;
-    std::filesystem::remove_all(o.passesRoot / "color_fg");
     r = RunProcess(o);
     CHECK(r.finalPass.filename() == "color_sr");  // the result is not the A/B pass
 }
@@ -998,11 +1016,13 @@ TEST_CASE("RunProcess: an nr pass with the guides off is not recomputed when the
     const auto inputs = Manifest::Load(o.passesRoot / "color_nr").inputs;
     CHECK_FALSE(inputs.count("depth_dlss"));
     CHECK_FALSE(inputs.count("mv_dlss"));
-    // another depth_dlss; upscale off - it reads the depth, a new color_sr would recompute nr through its colour input
+    // another depth_dlss; the upscale stays on (nis reads no depth, PR-13: color_sr is reused) - off, nr would read the source instead of
+    // its color_sr (TASK-0074) and rerun for that
     ApplyParamSpec(o.stages, "depth.z_far=500");
-    for (auto& s : o.stages) s.enabled = s.name == "depth" || s.name == "flow" || s.name == "nr";
+    for (auto& s : o.stages) s.enabled = s.name == "depth" || s.name == "flow" || s.name == "upscale" || s.name == "nr";
     const ProcessResult r = RunProcess(o);
     CHECK(Report(r, "depth").status == "ran");
+    CHECK(Report(r, "upscale").status == "reused");
     CHECK(Report(r, "nr").status == "reused");  // before: input_changed
 }
 
@@ -1194,7 +1214,9 @@ TEST_CASE("RunProcess: an fg stage that throws mid-run is failed with disableUna
         o.warp = true;
         o.frames = 3;
         RunProcess(o);  // color_nr of 3 frames
-        for (auto& s : o.stages) s.enabled = s.name == "fg";
+        // the upscale and nr on and reused (the MKV has no frame count: their 3 frames count as complete) - off, fg would not read their
+        // passes (TASK-0074); scenes, depth and flow off: their passes on disk are read as they are
+        for (auto& s : o.stages) s.enabled = s.name == "upscale" || s.name == "nr" || s.name == "fg";
         o.frames = -1;
         o.forceStages = {"fg"};  // the MKV has no frame count: a 3-frame color_fg counts as complete, so force the rerun
         o.output = dir / "r2.mkv";
@@ -1208,8 +1230,8 @@ TEST_CASE("RunProcess: an fg stage that throws mid-run is failed with disableUna
         CHECK(fg.details["isolated"] == isolated);
         CHECK(r.finalPass == o.passesRoot / "color_nr");
         CHECK(r.framesOut == 3);
-        REQUIRE(r.warnings.size() == 2);  // the failure, and the list of the first run covers frames 0..2 only (PR-13)
-        CHECK(std::any_of(r.warnings.begin(), r.warnings.end(), [](const std::string& w) { return w.find("known for frames 0..2 only") != std::string::npos; }));
+        REQUIRE(r.warnings.size() == 3);  // the failure, and to nr and fg: the list of the first run covers frames 0..2 only (PR-13)
+        CHECK(std::count_if(r.warnings.begin(), r.warnings.end(), [](const std::string& w) { return w.find("known for frames 0..2 only") != std::string::npos; }) == 2);
         CHECK(Report(r, "encode").status == "ran");
         CHECK(!std::filesystem::exists(o.passesRoot / "color_fg"));    // the half-written pass of this run is removed,
         CHECK(!std::filesystem::exists(o.passesRoot / "color_fg.v"));  // not kept as a version
@@ -1492,4 +1514,236 @@ TEST_CASE("RunProcess: fg disabled over an older color_fg encodes color_nr, not 
     CHECK(Report(r, "fg").status == "disabled");
     CHECK(r.finalPass == o.passesRoot / "color_nr");  // the input of the disabled stage, never a color_fg left from another run
     CHECK(r.framesOut == 3);                           // color_nr of the first run (the MKV has no frame count: reused)
+}
+
+// ---- TASK-0074: a colour stage switched off is out of the result --------------------------------------------------------------------
+// Found in the review of TASK-0071: `--stages upscale` after `--stages upscale,nr` encoded color_nr and the settings note said «nr: stub» -
+// every colour pass under the root was an input of the stages below and the result, whatever was on. A colour stage off (an unticked card,
+// a stage --stages leaves out) is out now: its pass is no input and not the result; it stays on disk and counts again when the stage is on.
+// Depth, flow and the scene list of a stage off are still read as they are (external passes: test_process_versions, «legacy_yup»).
+namespace {
+
+ProcessOptions SwitchOptions(const std::filesystem::path& dir, int frames) {
+    ClipSpec spec;
+    spec.frames = frames;
+    spec.width = 48;
+    spec.height = 32;
+    ProcessOptions o;
+    o.input = WriteClip(dir / "clip.mkv", spec);
+    o.output = dir / "result.mkv";
+    o.passesRoot = dir / "passes";
+    o.stages = StubStages(2);
+    o.codec = "ffv1";
+    o.warp = true;
+    return o;
+}
+
+void SwitchStage(ProcessOptions& o, const std::string& name, bool on) {
+    for (auto& s : o.stages)
+        if (s.name == name) s.enabled = on;
+}
+
+std::string Note(const std::filesystem::path& video) {
+    const auto tags = ReadContainerTags(video);
+    return tags.count("comment") ? tags.at("comment") : std::string();
+}
+
+// what a standalone run of the stage leaves: no version block (its own record, stage_params, stays)
+void StripVersionBlock(const std::filesystem::path& dir) {
+    const auto file = dir / Manifest::kFileName;
+    nlohmann::json j;
+    std::ifstream(file) >> j;
+    for (const char* key : {"fingerprint", "inputs", "tool", "params_canonical", "created"}) j.erase(key);
+    std::ofstream(file) << j.dump(2);
+}
+
+std::string ColourSource(const std::filesystem::path& dir) { return Manifest::Load(dir).stageParams.value("color_source", std::string()); }
+
+}  // namespace
+
+TEST_CASE("RunProcess: nr switched off is out of the result - encoded from color_sr; its color_nr stays and counts again", "[integration][process][nr][regression]") {
+    const auto dir = Dir("switch_nr");
+    ProcessOptions o = SwitchOptions(dir, 4);
+    SwitchStage(o, "fg", false);
+    const ProcessResult first = RunProcess(o);
+    REQUIRE(first.finalPass == o.passesRoot / "color_nr");
+    REQUIRE(Note(o.output).find("| nr: stub") != std::string::npos);
+    const std::string nrFingerprint = Manifest::Load(o.passesRoot / "color_nr").fingerprint;
+    const size_t versions = ListPassVersions(o.passesRoot, "color_nr").size();
+
+    SwitchStage(o, "nr", false);
+    CHECK(PlanProcess(o).finalPass == "color_sr");  // before: color_nr
+    const ProcessResult r = RunProcess(o);
+    CHECK(r.finalPass == o.passesRoot / "color_sr");  // before: color_nr
+    CHECK(Report(r, "encode").outDir == o.passesRoot / "color_sr");
+    const std::string note = Note(o.output);
+    CHECK(note.find("| upscale: nis x2") != std::string::npos);
+    CHECK(note.find("nr:") == std::string::npos);  // before: «| nr: stub ...»
+    // kept as it was: neither rewritten nor moved to the history
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").fingerprint == nrFingerprint);
+    CHECK(ListPassVersions(o.passesRoot, "color_nr").size() == versions);
+
+    SwitchStage(o, "nr", true);  // on again: reused, and the result is NR's
+    CHECK(PlanProcess(o).finalPass == "color_nr");
+    const ProcessResult back = RunProcess(o);
+    CHECK(Report(back, "nr").status == "reused");
+    CHECK(back.finalPass == o.passesRoot / "color_nr");
+    CHECK(Note(o.output).find("| nr: stub") != std::string::npos);
+}
+
+TEST_CASE("RunProcess: fg switched off is out of the result - color_nr at the source's rate; its color_fg stays and counts again", "[integration][process][fg][regression]") {
+    const auto dir = Dir("switch_fg");
+    ProcessOptions o = SwitchOptions(dir, 4);
+    const ProcessResult first = RunProcess(o);
+    REQUIRE(first.finalPass == o.passesRoot / "color_fg");
+    REQUIRE(first.framesOut == FgFrameCount(4, 2));
+    const std::string fgFingerprint = Manifest::Load(o.passesRoot / "color_fg").fingerprint;
+
+    SwitchStage(o, "fg", false);
+    CHECK(PlanProcess(o).finalPass == "color_nr");  // before: color_fg
+    const ProcessResult r = RunProcess(o);
+    CHECK(r.finalPass == o.passesRoot / "color_nr");
+    CHECK(r.framesOut == 4);  // before: 7 frames at twice the rate - «Что получится» said the source's rate
+    CHECK(r.outputFps.ToDouble() == Approx(first.outputFps.ToDouble() / 2));
+    CHECK(Note(o.output).find("fg:") == std::string::npos);
+    CHECK(Manifest::Load(o.passesRoot / "color_fg").fingerprint == fgFingerprint);
+
+    SwitchStage(o, "fg", true);
+    const ProcessResult back = RunProcess(o);
+    CHECK(Report(back, "fg").status == "reused");
+    CHECK(back.finalPass == o.passesRoot / "color_fg");
+    CHECK(back.framesOut == FgFrameCount(4, 2));
+}
+
+TEST_CASE("RunProcess: fg's colour with nr switched off is color_sr; the color_fg made from color_nr comes back from the history", "[integration][process][fg][regression]") {
+    const auto dir = Dir("switch_fg_input");
+    ProcessOptions o = SwitchOptions(dir, 4);
+    RunProcess(o);
+    const std::string overNr = Manifest::Load(o.passesRoot / "color_fg").fingerprint;
+
+    SwitchStage(o, "nr", false);
+    const StageDecision fg = Decision(PlanProcess(o), "fg");
+    CHECK(fg.action == "run");
+    CHECK(fg.kind == "input_changed");
+    CHECK(fg.inputs.count("color_sr"));
+    CHECK_FALSE(fg.inputs.count("color_nr"));  // before: the color_nr of the stage switched off - and reused
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "fg").status == "ran");
+    const Manifest m = Manifest::Load(o.passesRoot / "color_fg");
+    CHECK(m.inputs.count("color_sr"));
+    CHECK_FALSE(m.inputs.count("color_nr"));
+    CHECK(ColourSource(o.passesRoot / "color_fg") == "pass:color_sr");
+    CHECK(r.finalPass == o.passesRoot / "color_fg");
+    const std::string note = Note(o.output);
+    CHECK(note.find("| fg: blend x2") != std::string::npos);
+    CHECK(note.find("nr:") == std::string::npos);
+
+    SwitchStage(o, "nr", true);  // its color_nr is reused, and the color_fg made from it comes back from the history
+    const ProcessResult back = RunProcess(o);
+    CHECK(Report(back, "nr").status == "reused");
+    CHECK(Report(back, "fg").status == "reused");
+    CHECK_FALSE(Report(back, "fg").restored.empty());
+    CHECK(Manifest::Load(o.passesRoot / "color_fg").fingerprint == overNr);
+}
+
+TEST_CASE("RunProcess: the upscale switched off - nr reads the source, not the color_sr left on disk; nothing on - the source passes through", "[integration][process][nr][regression]") {
+    const auto dir = Dir("switch_upscale");
+    ProcessOptions o = SwitchOptions(dir, 3);
+    SwitchStage(o, "fg", false);
+    RunProcess(o);
+    REQUIRE(Manifest::Load(o.passesRoot / "color_nr").width == 96);
+
+    SwitchStage(o, "upscale", false);
+    const StageDecision nr = Decision(PlanProcess(o), "nr");
+    CHECK(nr.action == "run");
+    CHECK_FALSE(nr.inputs.count("color_sr"));
+    const ProcessResult r = RunProcess(o);
+    CHECK(Manifest::Load(o.passesRoot / "color_nr").width == 48);  // the source's frame: before, 96 from the color_sr of the stage off
+    CHECK(ColourSource(o.passesRoot / "color_nr") == "video");
+    CHECK(r.finalPass == o.passesRoot / "color_nr");
+    CHECK(Note(o.output).find("upscale:") == std::string::npos);
+
+    SwitchStage(o, "nr", false);  // no colour stage on: the source, not the color_sr left on disk
+    CHECK(PlanProcess(o).finalPass.empty());
+    const ProcessResult plain = RunProcess(o);
+    CHECK(plain.finalPass.empty());
+    CHECK(Report(plain, "encode").status == "passthrough");
+    CHECK(plain.outputFormat.width == 48);
+    CHECK(std::filesystem::exists(o.passesRoot / "color_sr" / Manifest::kFileName));
+}
+
+// A standalone pass of a stage below - no fingerprint, adopted when complete - made from the colour of a stage now off would bring that
+// stage back: its own record (stage_params.color_source) is held against the colour the stage reads now.
+TEST_CASE("RunProcess: a standalone nr or fg pass made from the colour of a stage switched off is not adopted; one of the same colour is", "[integration][process][regression]") {
+    const auto dir = Dir("switch_legacy");
+    ProcessOptions o = SwitchOptions(dir, 4);
+    RunProcess(o);
+    REQUIRE(ColourSource(o.passesRoot / "color_fg") == "pass:color_nr");
+    StripVersionBlock(o.passesRoot / "color_fg");
+
+    SwitchStage(o, "nr", false);
+    const StageDecision fg = Decision(PlanProcess(o), "fg");
+    CHECK(fg.action == "run");
+    CHECK(fg.kind == "input_changed");
+    CHECK(fg.detail == "made from color_nr, the stage reads color_sr now");
+    CHECK(fg.diff["inputs"] == nlohmann::json::array({"color_nr", "color_sr"}));
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "fg").status == "ran");  // before: reused (adopted) - NR back in the result
+    CHECK(ColourSource(o.passesRoot / "color_fg") == "pass:color_sr");
+    CHECK(Note(o.output).find("nr:") == std::string::npos);
+    bool kept = false;  // in the history to compare, as an A/B pass is
+    for (const auto& v : ListPassVersions(o.passesRoot, "color_fg")) kept = kept || (!v.current && Manifest::Load(v.dir).fingerprint.empty());
+    CHECK(kept);
+
+    StripVersionBlock(o.passesRoot / "color_fg");  // made from color_sr, and fg reads color_sr: adopted
+    const StageDecision same = Decision(PlanProcess(o), "fg");
+    CHECK(same.action == "reuse");
+    CHECK(same.kind == "legacy");
+
+    // nr's own: made from color_sr, adopted with the upscale off it would be the upscale's picture
+    SwitchStage(o, "nr", true);
+    SwitchStage(o, "fg", false);
+    RunProcess(o);
+    REQUIRE(ColourSource(o.passesRoot / "color_nr") == "color_sr");
+    StripVersionBlock(o.passesRoot / "color_nr");
+    SwitchStage(o, "upscale", false);
+    const StageDecision nr = Decision(PlanProcess(o), "nr");
+    CHECK(nr.action == "run");
+    CHECK(nr.detail == "made from color_sr, the stage reads video now");
+    CHECK(nr.diff["inputs"] == nlohmann::json::array({"color_sr"}));
+}
+
+// The control mask's proportions are held against the frame NR runs at: the source's with the upscale off, not a color_sr left on disk
+TEST_CASE("the plan holds the control mask against the source's frame with the upscale off, not against the color_sr on disk", "[integration][process][mask][regression]") {
+    const auto dir = Dir("switch_mask");
+    ProcessOptions o = SwitchOptions(dir, 2);
+    ApplyParamSpec(o.stages, "upscale.backend=bicubic");  // nis keeps the aspect
+    ApplyParamSpec(o.stages, "upscale.target_width=96");
+    ApplyParamSpec(o.stages, "upscale.target_height=96");
+    for (auto& s : o.stages) s.enabled = s.name == "upscale";
+    RunProcess(o);
+    REQUIRE(Manifest::Load(o.passesRoot / "color_sr").height == 96);
+    ImportControlMask(MaskFile(dir / "frame.png", 96, 64, 30000), o.passesRoot);  // the source's 3:2
+    SwitchStage(o, "nr", true);
+    const StageDecision on = Decision(PlanProcess(o), "nr");
+    REQUIRE(on.warnings.size() == 1);
+    CHECK_THAT(on.warnings[0], Catch::Matchers::ContainsSubstring("растянется на кадр 96×96"));
+    SwitchStage(o, "upscale", false);
+    CHECK(Decision(PlanProcess(o), "nr").warnings.empty());  // before: «растянется на кадр 96×96» - the color_sr of the stage off
+}
+
+// fg skipped as unavailable encodes its input: with nr switched off that is color_sr, never the color_nr left by nr
+TEST_CASE("RunProcess: fg skipped as unavailable with nr switched off encodes color_sr, not the color_nr of the stage off", "[integration][process][fg][regression]") {
+    const auto dir = Dir("switch_fg_skipped");
+    ProcessOptions o = SwitchOptions(dir, 3);
+    RunProcess(o);  // color_nr and color_fg on disk
+    SwitchStage(o, "nr", false);
+    ApplyParamSpec(o.stages, "fg.backend=dlssg");  // no DLSS-G on WARP: skipped with --disable-unavailable
+    o.disableUnavailable = true;
+    const ProcessResult r = RunProcess(o);
+    CHECK(Report(r, "fg").status == "disabled");
+    CHECK(r.finalPass == o.passesRoot / "color_sr");  // before: color_nr of the stage off
+    CHECK(r.framesOut == 3);
+    CHECK(Note(o.output).find("nr:") == std::string::npos);
+    CHECK(std::filesystem::exists(o.passesRoot / "color_nr" / Manifest::kFileName));
 }
