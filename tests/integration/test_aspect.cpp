@@ -722,6 +722,13 @@ TEST_CASE("The plan's advice on an anamorphic source: masks of the shown frame f
         wr.Finish();
     }
     CHECK_THAT(Decision(PlanProcess(tm), "nr").error, ContainsSubstring("сделан по боковому кадру"));
+    // with every colour stage off the result would be taken from it: refused before any stage, and by the encode itself (review)
+    Only(tm, {});
+    CHECK_THROWS_WITH(RunProcess(tm), ContainsSubstring("Результат взялся бы из пасса color_sr"));
+    CHECK_FALSE(std::filesystem::exists(tm.output));
+    EncodeSettings es;
+    es.codec = "ffv1";
+    CHECK_THROWS_WITH(EncodePassToVideo(tm.passesRoot / "color_sr", turned, d / "tm" / "direct.mkv", es), ContainsSubstring("made from the stored frame"));
 }
 
 TEST_CASE("The viewport shows an anamorphic clip stretched: the reference image is the frame as shown", "[integration][aspect][viewport]") {

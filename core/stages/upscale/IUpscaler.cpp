@@ -127,6 +127,13 @@ UpscaleTarget ResolveUpscaleTarget(uint32_t inW, uint32_t inH, double scale, uin
         if (t.capped && (t.width < inW || t.height < inH)) {
             t.width = inW;
             t.height = inH;
+            // ... and the frame as shown is the input as shown fit into the cap by its long side - what the encode writes of that grid
+            // (StretchedResultSize), not a target of other proportions (review of TASK-0073)
+            const auto [dw, dh] = sar.DisplaySize(inW, inH);
+            const double capLong = std::max(maxW, maxH) ? std::max(maxW, maxH) : 1e9, capShort = std::min(maxW, maxH) ? std::min(maxW, maxH) : 1e9;
+            const double k = std::min({1.0, capLong / std::max(dw, dh), capShort / std::min(dw, dh)});
+            w = dw * k;
+            h = dh * k;
         }
     }
     t.scale = static_cast<double>(t.width) / inW;

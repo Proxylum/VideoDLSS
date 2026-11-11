@@ -62,9 +62,13 @@ void UpscaleStage::Setup(uint32_t w, uint32_t h) {
         if (t.capped)
             Log()->warn("upscale: target capped to {}x{} (v1 limit {}x{} by the long side, ТЗ §3)", t.displayWidth, t.displayHeight,
                         std::max(options_.maxWidth, options_.maxHeight), std::min(options_.maxWidth, options_.maxHeight));
-        if (!options_.sar.Square())
-            Log()->info("upscale: pixels {} - {}x{} as shown is {}x{} of the source's pixels", options_.sar.Token(), t.displayWidth, t.displayHeight, t.width,
-                        t.height);
+        if (!options_.sar.Square()) {
+            const auto [gw, gh] = options_.sar.DisplaySize(t.width, t.height);  // the grid as shown, before any fit into the cap
+            Log()->info("upscale: pixels {} - {}x{} of the source's pixels, {}x{} as shown{}", options_.sar.Token(), t.width, t.height, gw, gh,
+                        gw > t.displayWidth || gh > t.displayHeight
+                            ? fmt::format(", fit into {}x{} when process writes it", t.displayWidth, t.displayHeight)
+                            : std::string());
+        }
     }
     inW_ = w;
     inH_ = h;

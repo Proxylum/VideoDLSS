@@ -5,6 +5,7 @@
 
 #include "passes/Manifest.h"
 #include "pipeline/PassFingerprint.h"
+#include "pipeline/PassVersions.h"
 #include "stages/ParamSchema.h"
 #include "stages/fg/IFrameGenerator.h"
 #include "stages/nr/NrStage.h"
@@ -238,9 +239,10 @@ RunOutcome EstimateRun(const ProcessPlan& plan, const std::vector<ProcessStage>&
     // what that pass gives, NR and FG over it pass its record on or have none (review of TASK-0073)
     if (!params[2].is_null() && !source.sar.Square())
         for (const StageDecision& d : plan.stages)
-            if (d.name == "upscale" && d.action == "reuse") {
+            if (d.name == "upscale" && (d.action == "reuse" || d.action == "restore")) {  // restored: the version from the history
                 try {
-                    const Manifest m = Manifest::Load(plan.passesRoot / "color_sr");
+                    const Manifest m = Manifest::Load(d.action == "restore" ? PassHistoryDir(plan.passesRoot, "color_sr") / d.version
+                                                                             : plan.passesRoot / "color_sr");
                     if (m.width && m.height) {
                         o.gridWidth = m.width;
                         o.gridHeight = m.height;

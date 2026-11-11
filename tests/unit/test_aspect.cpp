@@ -14,6 +14,7 @@
 #include "passes/Manifest.h"
 #include "pipeline/Estimates.h"
 #include "pipeline/Frame.h"
+#include "pipeline/PassVersions.h"
 #include "pipeline/SettingsNote.h"
 #include "stages/ParamSchema.h"
 #include "stages/fg/IFrameGenerator.h"
@@ -315,6 +316,13 @@ TEST_CASE("ResolveUpscaleTarget of an anamorphic input: the scale, the target an
     CHECK(past.displayWidth == 3840);
     CHECK(past.displayHeight == 1620);
     CHECK(ResolveUpscaleTarget(3840, 2160, 2.0).width == 3840);  // the square rule: the same grid - no +sr.sar
+    // ... whatever the target: the frame as shown is what the encode writes of that grid (review: 7680x4320 said 3840x2160)
+    const UpscaleTarget pastT = ResolveUpscaleTarget(3840, 2160, 0.0, 7680, 4320, 3840, 2160, true, PixelAspect{4, 3});
+    CHECK(pastT.width == 3840);
+    CHECK(pastT.height == 2160);
+    CHECK(pastT.displayWidth == 3840);
+    CHECK(pastT.displayHeight == 1620);
+    CHECK(ResolveUpscaleTarget(3840, 1600, 0.0, 7680, 4320, 3840, 2160, true, PixelAspect{4, 3}).displayHeight == 1200);
     const UpscaleTarget past2 = ResolveUpscaleTarget(2880, 2160, 2.0, 0, 0, 3840, 2160, true, PixelAspect{2, 1});
     CHECK(past2.width == 2880);
     CHECK(past2.height == 2160);
@@ -450,6 +458,14 @@ TEST_CASE("EstimateRun of an anamorphic source: the stages make the grid, the re
     old.stageParams = {{"pixel_aspect", "32:27"}, {"shown_size", {1248, 720}}};  // a pass of this build
     old.Save(reusedRoot / "color_sr");
     CHECK(EstimateRun(reused, stages, dvd).width == 1248);
+    // restored from the history: that version (review of TASK-0073)
+    const auto version = PassHistoryDir(reusedRoot, "color_sr") / "v1";
+    std::filesystem::create_directories(version);
+    Manifest restored = Manifest::ForPass(PassKind::ColorSr, 1054, 720, FileFormat::Exr);
+    restored.Save(version);
+    reused.stages[0].action = "restore";
+    reused.stages[0].version = "v1";
+    CHECK(EstimateRun(reused, stages, dvd).width == 1250);
 }
 
 TEST_CASE("DLSS-G's camera takes the frame as shown: the grid of 32:27 pixels is 16:9", "[unit][aspect][fg]") {
