@@ -18,6 +18,7 @@
 #include "gpu/D3D12Device.h"
 #include "io/ResultFile.h"
 #include "io/VideoDecoder.h"
+#include "io/EncodeDefaults.h"
 #include "io/VideoEncoder.h"
 #include "passes/Manifest.h"
 #include "passes/PassImage.h"
@@ -394,6 +395,29 @@ TEST_CASE("The stages' preview videos of an anamorphic clip carry its pixels' pr
     CHECK(Manifest::Load(passes / "color_nr").stageParams.value("pixel_aspect", std::string()) == "32:27");
 }
 
+TEST_CASE("The encode of an anamorphic pass chooses the bitrate for the frame it writes, not the grid", "[integration][aspect][process]") {
+    // review of TASK-0073: DVD x2 - the grid 1440x960 is written 1706x960; the bitrate must be the larger frame's
+    if (!VideoEncoder::EncoderAvailable("mpeg2video")) SKIP("mpeg2video unavailable");  // lossy, a bitrate of its own (not NVENC: any PC)
+    const auto d = Dir("bitrate");
+    const auto clip = WriteClip(d / "clip.mkv", Anamorphic(720, 480, kDvdWide, 2));
+    Manifest m = Manifest::ForPass(PassKind::ColorSr, 1440, 960, FileFormat::Exr);
+    m.sourceHash = "sha256:" + Sha256FileCached(clip);
+    m.stageParams = {{"pixel_aspect", "32:27"}};
+    {
+        PassWriter wr(d / "passes" / "color_sr", m);
+        for (int64_t f = 0; f < 2; ++f) wr.WriteFrame(f, MakePassImage(PassKind::ColorSr, 1440, 960));
+        wr.Finish();
+    }
+    EncodeSettings es;
+    es.codec = "mpeg2video";
+    const EncodeReport r = EncodePassToVideo(d / "passes" / "color_sr", clip, d / "result.mkv", es);
+    CHECK(r.format.width == 1706);
+    const std::string shown = BitrateOption(RecommendedBitrateMbps("mpeg2video", 1706, 960, 24.0));
+    REQUIRE(shown != BitrateOption(RecommendedBitrateMbps("mpeg2video", 1440, 960, 24.0)));  // the two frames' rates differ
+    REQUIRE(r.codecOptions.count("b"));
+    CHECK(r.codecOptions.at("b") == shown);
+}
+
 TEST_CASE("Passthrough keeps an anamorphic clip's grid bit for bit and writes its pixels' proportions", "[integration][aspect][passthrough][regression]") {
     // before TASK-0073: the result had none - shown 3:2 instead of 16:9
     const auto d = Dir("passthrough");
@@ -587,6 +611,14 @@ TEST_CASE("A standalone upscale or DLSS-G pass made before the pixels' proportio
     CHECK(Decision(PlanProcess(g), "fg").kind != "tool_changed");
     legacy("color_fg", PassKind::ColorFg, 54, 36, FgFrameCount(3, 2), {{"backend", "rife"}});  // no camera: not this case
     CHECK(Decision(PlanProcess(g), "fg").detail.find("camera") == std::string::npos);
+    // by the scale alone the grid is the same by either rule: a pass of the build before is adopted, record or not (review of TASK-0073)
+    ProcessOptions s = Options(clip, d);
+    Only(s, {"upscale"});
+    legacy("color_sr", PassKind::ColorSr, 108, 72, 3, {{"backend", "nis"}});
+    const StageDecision byScale = Decision(PlanProcess(s), "upscale");
+    CHECK(byScale.action == "reuse");
+    CHECK(byScale.kind == "legacy");
+    CHECK(App(byScale).find("sr.sar") == std::string::npos);
 }
 
 TEST_CASE("The plan's advice on an anamorphic source: masks of the shown frame fit, a target of the grid's proportions distorts", "[integration][aspect][process][mask]") {
@@ -647,6 +679,16 @@ TEST_CASE("The plan's advice on an anamorphic source: masks of the shown frame f
     ApplyParamSpec(t.stages, "upscale.target_width=72");  // the portrait as shown
     ApplyParamSpec(t.stages, "upscale.target_height=128");
     CHECK(Warnings(Decision(PlanProcess(t), "upscale")).find("бокового") == std::string::npos);
+    // NR's mask drawn over the stored frame as players show it unturned (64x36 of 54x36 at 32:27): sideways too (review of TASK-0073)
+    std::filesystem::create_directories(d / "tm");
+    ProcessOptions tm = Options(turned, d / "tm");
+    Only(tm, {"nr"});
+    {
+        PassWriter wr(tm.passesRoot / "mask_ui", Manifest::ForPass(PassKind::Mask, 64, 36, FileFormat::Png));
+        for (int64_t f = 0; f < 3; ++f) wr.WriteFrame(f, MakePassImage(PassKind::Mask, 64, 36, PixelType::U8));
+        wr.Finish();
+    }
+    CHECK_THAT(Warnings(Decision(PlanProcess(tm), "nr")), ContainsSubstring("Сделана по боковому кадру: маска ui"));
 }
 
 TEST_CASE("The viewport shows an anamorphic clip stretched: the reference image is the frame as shown", "[integration][aspect][viewport]") {

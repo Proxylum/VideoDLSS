@@ -1076,7 +1076,11 @@ void AdviseTurnedMasks(const RunContext& ctx, StageDecision& d) {
         if (!ctx.orientation.SwapsAxes() || !mw || !mh || !ctx.codedWidth || !ctx.codedHeight) continue;
         const double aspect = static_cast<double>(mw) / mh;
         const double stored = static_cast<double>(ctx.codedWidth) / ctx.codedHeight, shown = static_cast<double>(ctx.sourceWidth) / ctx.sourceHeight;
-        if (std::fabs(aspect / stored - 1.0) <= 0.01 && std::fabs(aspect / shown - 1.0) > 0.01) sideways.push_back(pass);
+        // ... or the stored frame as players show it unturned: an anamorphic one stretched (720x480 at 32:27 - 854x480, review of TASK-0073)
+        const auto [cw, ch] = ctx.codedSar.DisplaySize(ctx.codedWidth, ctx.codedHeight);
+        const double storedShown = static_cast<double>(cw) / ch;
+        if ((std::fabs(aspect / stored - 1.0) <= 0.01 || std::fabs(aspect / storedShown - 1.0) <= 0.01) && std::fabs(aspect / shown - 1.0) > 0.01)
+            sideways.push_back(pass);
     }
     if (!sideways.empty()) {
         std::vector<std::string> names;  // as the GUI names them: «маска управления», «маска ui»
@@ -1360,6 +1364,7 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     r.fps = eo.frameRate;
     r.format = target;
     r.pixelFormat = encoder.PixelFormatName();
+    r.codecOptions = eo.codecOptions;
     if (decoder.HasAudio()) {
         encoder.AddAudioStreamCopy(decoder.AudioCodecParameters(), decoder.AudioTimeBase());
         decoder.SetAudioPacketSink([&encoder](AVPacket* pkt) { encoder.WriteAudioPacket(pkt); });
