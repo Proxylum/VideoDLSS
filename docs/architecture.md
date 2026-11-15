@@ -355,6 +355,18 @@ AppModel (Qt) ── ViewportWindow / панели ── TaskQueue (dlssvid <st
   создаёт контекст раньше с планированием по умолчанию — `VideoDecoder` перед `av_hwdevice_ctx_create` выравнивает
   флаги `cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync)` (cudart применяет их и к активному контексту), иначе
   векторы декодировали бы программно и кормили OFA с CPU (регрессионный тест `[nvdec][regression]`).
+- **AV1 только через NVDEC (TASK-0076).** В сборке FFmpeg нет программного декодера AV1 (`--disable-libdav1d`,
+  `--disable-libaom`), а встроенный `av1` работает только с hwaccel: без него каждый пакет — ENOSYS («Function not
+  implemented»). `HardwareOnlyDecoder` (`core/io/NvdecSupport`) узнаёт такой декодер; `VideoDecoder` включает для него NVDEC
+  на первом `NextFrame` (`StartNvdec`: проверка, устройство CUDA, `codec_` пересоздаётся на устройстве — до первого пакета),
+  что бы ни говорил `Options::hwaccel`; открытие ради `Info()` GPU не трогает. Кадры идут на хост, как при любом NVDEC;
+  `GpuFrame` и быстрый путь OFA — только когда `HwAccel::Cuda` просили (`UsingHwAccel` фиксируется при открытии,
+  `DecodesOnNvdec` говорит, откуда кадры). `CheckDecodeSupport` спрашивает драйвер один раз на процесс и разрядность
+  (`cuvidGetDecoderCaps` через загрузчик ffnvcodec, на временном контексте — первичный контекст декодеров не трогается):
+  формат (8/10 бит 4:2:0), CUDA, AV1 в NVDEC, пределы размера. Отказ — `DecodeUnavailable` с причиной: `process` — до
+  стадий и до part-файла, вьюпорт — на источнике (`ViewportSource::undecodable`, декодер не открывается), GUI — ошибка
+  плана по-русски (`app/DecodeText`), `info` — строка `decode:`. ENOSYS на первом кадре (драйвер не ответил заранее)
+  переводится в тот же отказ. `DLSSVID_FAKE_NVDEC_AV1` подменяет ответ драйвера для тестов.
 - **Результат и его действия (TASK-0013).** Строка `app/ResultBar` под панелью сравнения появляется, когда у проекта
   есть видео результата (`AppModel::resultInfo` из источника «result» кэша кадров + проба звука при перечитывании,
   `resultSummary`: «3840×1600 · 48 fps · 479 кадров · со звуком · обновлён сегодня 19:23 · готов за 11:22» — время

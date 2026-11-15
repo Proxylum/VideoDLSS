@@ -92,6 +92,10 @@
 #include "passes/PassSequence.h"
 #include "viewport/Project.h"
 #include "viewport/ViewportProxy.h"
+#include "DecodeText.h"
+#include "gpu/D3D12Device.h"
+#include "io/NvdecSupport.h"
+#include "io/VideoEncoder.h"
 
 using namespace dlssvid;
 using namespace dlssvid::test;
@@ -7244,4 +7248,156 @@ TEST_CASE("AppModel: the NR preview's before side set to the upscale is the sour
     CHECK(model.state().CompareSide(false)->source == "source");  // before: the color_sr of the upscale switched off
     CHECK(before->itemText(before->findData("sr")) == QString::fromUtf8("Исходник"));  // what that side shows now
     QSettings().remove("card/nr/previewBefore");
+}
+
+// TASK-0076: this build has no software AV1 decoder - AV1 decodes only on NVDEC. A machine whose GPU cannot says why in the GUI's words.
+namespace {
+// DLSSVID_FAKE_NVDEC_AV1 for one scope (nullptr: unset); the value before it comes back afterwards.
+struct FakeNvdecEnv {
+    std::optional<std::string> before;
+    explicit FakeNvdecEnv(const char* value) {
+        if (const char* e = std::getenv("DLSSVID_FAKE_NVDEC_AV1")) before = e;
+        _putenv_s("DLSSVID_FAKE_NVDEC_AV1", value ? value : "");
+    }
+    ~FakeNvdecEnv() { _putenv_s("DLSSVID_FAKE_NVDEC_AV1", before ? before->c_str() : ""); }
+};
+
+VideoStreamInfo Av1StreamInfo(const std::string& pixelFormat, int bitDepth) {
+    VideoStreamInfo i;
+    i.codecName = "av1";
+    i.hardwareOnly = true;
+    i.pixelFormat = pixelFormat;
+    i.bitDepth = bitDepth;
+    i.width = i.codedWidth = 320;
+    i.height = i.codedHeight = 192;
+    return i;
+}
+
+QPushButton* ProcessButton(QWidget& panel) {
+    for (QPushButton* b : panel.findChildren<QPushButton*>())
+        if (b->text().startsWith(QString::fromUtf8("Обработать"))) return b;
+    return nullptr;
+}
+}  // namespace
+
+TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here; a video that decodes has no text", "[app][av1]") {
+    App();
+    // decodes: in software, on NVDEC, or not checked yet - nothing to say
+    VideoStreamInfo h264 = Av1StreamInfo("yuv420p", 8);
+    h264.codecName = "h264";
+    h264.hardwareOnly = false;
+    CHECK(SourceDecodeText(JudgeDecode(h264, nullptr)).isEmpty());
+    CHECK(SourceDecodeText(JudgeDecode(Av1StreamInfo("yuv420p", 8), nullptr)).isEmpty());
+
+    CHECK(SourceDecodeText(JudgeDecode(Av1StreamInfo("yuv444p", 8), nullptr)) ==
+          QString::fromUtf8("Видео не открыть: AV1 в формате yuv444p. В этой сборке AV1 декодирует только видеокарта NVIDIA (NVDEC), а она берёт AV1 "
+                            "лишь 8 и 10 бит 4:2:0."));
+    NvdecAv1Caps noCuda;
+    noCuda.checked = true;
+    noCuda.why = "nvcuda.dll could not be loaded (no NVIDIA driver)";
+    const DecodeSupport nc = JudgeDecode(Av1StreamInfo("yuv420p", 8), &noCuda);
+    REQUIRE(nc.block == DecodeBlock::NoCuda);
+    CHECK(SourceDecodeText(nc) == QString::fromUtf8("Видео не открыть: AV1 в этой сборке декодирует только видеокарта NVIDIA (NVDEC), а CUDA недоступна "
+                                                    "(nvcuda.dll could not be loaded (no NVIDIA driver))."));
+    NvdecAv1Caps noAv1;
+    noAv1.checked = true;
+    noAv1.cuda = true;
+    noAv1.gpu = "NVIDIA GeForce GTX 1080";
+    const DecodeSupport na = JudgeDecode(Av1StreamInfo("yuv420p10le", 10), &noAv1);
+    REQUIRE(na.block == DecodeBlock::NoAv1);
+    CHECK(SourceDecodeText(na) == QString::fromUtf8("Видео не открыть: видеокарта NVIDIA GeForce GTX 1080 не декодирует AV1 10 бит, а программного декодера "
+                                                    "AV1 в этой сборке нет. AV1 декодируют, например, RTX 30 и новее."));
+    NvdecAv1Caps limits = noAv1;
+    limits.supported = true;
+    limits.gpu = "NVIDIA GeForce RTX 4090";
+    limits.minWidth = 400;
+    limits.minHeight = 128;
+    limits.maxWidth = 8192;
+    limits.maxHeight = 8192;
+    limits.maxMacroblocks = 262144;
+    const DecodeSupport sz = JudgeDecode(Av1StreamInfo("yuv420p", 8), &limits);
+    REQUIRE(sz.block == DecodeBlock::Size);
+    CHECK(SourceDecodeText(sz) == QString::fromUtf8("Видео не открыть: кадр AV1 320×192 вне пределов видеокарты NVIDIA GeForce RTX 4090 (от 400×128 до 8192×8192)."));
+    const DecodeSupport failed = RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecFailed, "");
+    CHECK(SourceDecodeText(failed) == QString::fromUtf8("Видео не открыть: видеокарта не начала декодировать этот AV1, а программного декодера AV1 в этой сборке нет. "
+                                                        "Подробности — в журнале."));
+    CHECK(SourceDecodeShort() == QString::fromUtf8(" · не декодируется"));
+}
+
+TEST_CASE("AppModel opens an AV1 video as any other; without NVDEC AV1 the plan says why, Process is off, the source is marked and no proxy is built",
+          "[app][gpu][av1]") {
+    App();
+    {
+        D3D12Device dev;
+        if (dev.IsWarp() || !dev.IsNvidia() || !VideoEncoder::EncoderAvailable("av1_nvenc")) SKIP("no NVIDIA GPU with av1_nvenc");
+    }
+    const auto d = Dir("av1_source");
+    ClipSpec spec;
+    spec.width = 320;  // NVENC refuses tiny frames
+    spec.height = 192;
+    spec.frames = 24;
+    spec.gop = 8;  // av1_nvenc: longer than its B-frame run + 1
+    spec.codec = "av1_nvenc";
+    std::filesystem::path clip;
+    try {
+        clip = WriteClip(d / "clip.mp4", spec);
+    } catch (const std::exception& e) {
+        SKIP("av1_nvenc did not write the clip: " << e.what());
+    }
+
+    QSettings().setValue("view/autoProxy", false);  // no background build decoding on the GPU here
+    {
+        AppModel model(true);
+        model.openVideo(Q(clip));
+        REQUIRE(model.hasProject());
+        CHECK(model.planError().isEmpty());
+        CHECK(model.sourceInfo().codec == "av1");
+        const ViewportSource* src = model.store().FindSource("source");
+        REQUIRE(src);
+        CHECK_FALSE(src->undecodable);
+        model.store().WaitForCurrent();
+        CHECK(model.frameStateOf("source") == FrameState::Ready);
+        TaskQueue queue;
+        ProjectPanel panel(model, queue);
+        panel.refresh();
+        QPushButton* process = ProcessButton(panel);
+        REQUIRE(process);
+        CHECK(process->isEnabled());
+    }
+
+    FakeNvdecEnv fake("no-av1");  // a GPU without AV1 in its NVDEC (GTX 10 / 16, RTX 20)
+    QSettings().setValue("view/autoProxy", true);  // a proxy would be built for this source - if it could be decoded
+    {
+        AppModel model(true);
+        model.openVideo(Q(clip));
+        REQUIRE(model.hasProject());
+        const DecodeSupport expected = CheckDecodeSupport(VideoDecoder(clip, VideoDecoder::Probe()).Info());
+        REQUIRE(expected.block == DecodeBlock::NoAv1);
+        INFO("planError: " << model.planError().toStdString());
+        CHECK(model.planError() == SourceDecodeText(expected));
+        CHECK(model.planError() == QString::fromUtf8("Видео не открыть: видеокарта DLSSVID_FAKE_NVDEC_AV1 не декодирует AV1 8 бит, а программного декодера "
+                                                     "AV1 в этой сборке нет. AV1 декодируют, например, RTX 30 и новее."));
+        TaskQueue queue;
+        ProjectPanel panel(model, queue);
+        panel.refresh();
+        QPushButton* process = ProcessButton(panel);
+        REQUIRE(process);
+        CHECK_FALSE(process->isEnabled());
+        const ViewportSource* src = model.store().FindSource("source");
+        REQUIRE(src);  // listed with its size and duration
+        CHECK(src->width == 320);
+        REQUIRE(src->undecodable);
+        CHECK(src->undecodable->block == DecodeBlock::NoAv1);
+        model.store().WaitForCurrent();
+        CHECK(model.frameStateOf("source") == FrameState::Missing);
+        CHECK(model.store().Stats("source").decodedFrames == 0);
+        CHECK_FALSE(model.proxyBuilding());
+        model.startProxies();
+        CHECK_FALSE(model.proxyBuilding());
+        // the plan again (a parameter edited): the same reason
+        model.refreshPlan();
+        INFO("planError again: " << model.planError().toStdString());
+        CHECK(model.planError() == SourceDecodeText(expected));
+    }
+    QSettings().remove("view/autoProxy");
 }

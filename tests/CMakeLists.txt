@@ -25,6 +25,7 @@ add_executable(dlssvid_unit_tests
   unit/test_pass_image.cpp
   unit/test_manifest.cpp
   unit/test_formats.cpp
+  unit/test_nvdec_support.cpp
   unit/test_depth_convert.cpp
   unit/test_mv_convert.cpp
   unit/test_color_convert.cpp
@@ -85,6 +86,7 @@ add_executable(dlssvid_integration_tests
   integration/TestClips.cpp
   integration/test_passthrough.cpp
   integration/test_formats.cpp
+  integration/test_av1_decode.cpp
   integration/test_orientation.cpp
   integration/test_aspect.cpp
   integration/test_precision.cpp

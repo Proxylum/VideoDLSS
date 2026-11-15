@@ -218,7 +218,7 @@ The application never redistributes NVIDIA binaries; every file below comes from
 | `nvngx_dlssg.dll` | the same DLSS SDK folder | `bin\nvidia\` | DLSS Frame Generation (`fg`, RTX 40 and newer) |
 | `nvngx_dlssnr.dll` | your own copy from a driver or game with DLSS 5 — RTX 50: as is; RTX 20/30/40: patched on your machine with `dlssvid nr-patch` ([dlssnr-patcher](https://github.com/dev-camo/dlssnr-patcher) + the `ptxas` / `fatbinary` / `cuobjdump` tools of CUDA Toolkit 13.3) | `bin\nvidia\` (the patch leaves a sidecar `nvngx_dlssnr.dll.patch.json`) | Neural Rendering (`nr`; the GUI has a «Пропатчить DLL…» button) |
 | `nvofapi64.dll` | ships with the driver | nothing to do | Optical Flow Accelerator (`flow --backend ofa`) |
-| NVDEC / NVENC | ship with the driver | nothing to do | `--hwaccel cuda` decoding, `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` encoding (10-bit HEVC Main 10 / 4:4:4 and AV1 on RTX 40 and newer) |
+| NVDEC / NVENC | ship with the driver | nothing to do | `--hwaccel cuda` decoding, every AV1 source (no software AV1 decoder in this build), `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` encoding (10-bit HEVC Main 10 / 4:4:4 and AV1 on RTX 40 and newer) |
 
 `DLSSVID_NVIDIA_DLL_DIR` or `--dll-dir` points at another folder of DLSS DLLs; `bin\dlssvid.exe nr --check` and
 `fg --check` print which file was found, its SHA-256 and whether the feature can be created on this GPU / driver.
@@ -282,6 +282,15 @@ build\release\bin\dlssvid process --passthrough -i input.mp4 -o output.mkv --cod
 ```
 
 `--hwaccel cuda` decodes with NVDEC; `--warp` runs on the D3D12 software adapter (tests, CI without a GPU).
+
+**AV1 sources decode on the GPU.** This build of FFmpeg has no software AV1 decoder, so an AV1 video (phones, OBS, YouTube,
+an `av1_nvenc` result) is always decoded by NVDEC — in the viewport, the stages, `process` and the passthrough, whatever
+`--hwaccel` says. NVDEC decodes AV1 as 8 or 10-bit 4:2:0 on GPUs that have an AV1 decoder (for example, GeForce RTX 30 series
+and newer; the driver is asked, the series is only an example). `dlssvid info` prints how a file decodes (`decode:` line).
+A file this machine cannot decode is refused before anything runs, with the reason — the GUI says it instead of the plan
+and keeps «Обработать» off, the viewport cell reads «· не декодируется». The decoder is CUDA device 0, as FFmpeg's NVDEC
+takes it: on a PC with several GPUs it may not be the one the stages run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-av1`
+stands in for the driver's answer (tests, reproducing a support case).
 
 Paths may contain any letters: `dlssvid` and `dlssvid-gui` run with UTF-8 as their code page. The CLI prints UTF-8,
 so in a console with the OEM code page (866 on Russian Windows) Cyrillic in its output reads wrong; `chcp 65001` first.
@@ -476,7 +485,8 @@ depth or chroma it cannot encode fails the run at the encode, after the stages (
 encoder the run would use (`encode:` line, `encode` in `--json`); the project file is never changed.
 
 **Bit depth and chroma.** The decoder keeps a source's own layout — 8, 10, 12 or 16 bits, 4:2:0 / 4:2:2 / 4:4:4 (HEVC
-Main 10 and Rext, AV1 10-bit, ProRes, FFV1, DNxHR …), with NVDEC and software decoding bit-exact to each other — and
+Main 10 and Rext, AV1 10-bit, ProRes, FFV1, DNxHR …), with NVDEC and software decoding bit-exact to each other (AV1 has
+only NVDEC here) — and
 every stage converts it to RGBA16F without a stop at 8 bits; `dlssvid info` prints what a file decodes into. The
 result's bit depth and chroma are «auto» unless `--bit-depth 8|10|12` / `--chroma 420|422|444` (or the encoder card of
 the GUI, stored in the project) say otherwise: auto takes the source's bit depth within what the codec does and 4:2:0

@@ -219,12 +219,27 @@ TEST_CASE("NVENC 10-bit: HEVC Main 10 and Rext 4:4:4, AV1 10-bit; H.264 refuses"
     REQUIRE(rext.size() == 2);
     CHECK(rext[0].desc == d444);
     if (VideoEncoder::EncoderAvailable("av1_nvenc")) {
+        // only the encode may be missing on a GPU; the decode is checked outside: this build decodes AV1 only on NVDEC (TASK-0076), and
+        // a catch around it hid that every AV1 decode failed («Function not implemented»)
+        bool encoded = false;
         try {
-            const auto av1 = RoundTrip(dir / "av1.mp4", "av1_nvenc", d420, 2, eo);
-            CHECK(Summarize(dir / "av1.mp4").pixelFormat == "yuv420p10le");
-            CHECK(av1.size() == 2);
+            VideoEncoder::Options av1o = eo;
+            av1o.codec = "av1_nvenc";
+            av1o.frameRate = Rational{24, 1};
+            VideoEncoder enc(dir / "av1.mp4", d420, av1o);
+            enc.Open();
+            for (int i = 0; i < 2; ++i) enc.WriteFrame(SyntheticFrame(i, d420));
+            enc.Close();
+            encoded = true;
         } catch (const std::exception& e) {
             WARN("av1_nvenc 10-bit not available on this GPU: " << e.what());
+        }
+        if (encoded) {
+            CHECK(Summarize(dir / "av1.mp4").pixelFormat == "yuv420p10le");
+            const auto av1 = DecodeAll(dir / "av1.mp4");
+            REQUIRE(av1.size() == 2);
+            CHECK(av1[0].desc == d420);
+            CHECK(Diff16(av1[1], SyntheticFrame(1, d420), 0, &mx) < 24.0);
         }
     }
     // H.264 NVENC lists p010le but the hardware encodes 8-bit only: the open fails with a readable message

@@ -53,7 +53,7 @@ QImage FirstFrame(const QString& file) {
     QImage last;
     PixelAspect sar;
     try {
-        VideoDecoder dec(FsPath(file));  // CPU decode: one frame, any GPU stays free for the pipeline
+        VideoDecoder dec(FsPath(file));  // CPU decode: one frame, any GPU stays free for the pipeline (AV1: NVDEC, the only decoder - TASK-0076)
         sar = dec.Info().sar;
         const ColorInfo color = ColorInfoFromStream(dec.Info());
         CpuFrame f;
