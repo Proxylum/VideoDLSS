@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -77,5 +78,23 @@ struct StreamSummary {
     std::string comment;  // the container's `comment` tag (the settings note, PR-11)
 };
 StreamSummary Summarize(const std::filesystem::path& path);
+
+// FFmpeg's log while it lives (still written to stderr as before): what an encoder said when it refused. One at a time.
+class FfmpegLogCapture {
+public:
+    FfmpegLogCapture();
+    ~FfmpegLogCapture();
+    FfmpegLogCapture(const FfmpegLogCapture&) = delete;
+    FfmpegLogCapture& operator=(const FfmpegLogCapture&) = delete;
+    std::string Text() const;
+
+private:
+    std::string text_;
+};
+// An encoder refusing what this machine lacks, in NVENC's words: «... not supported», «unsupported», «No capable devices found».
+bool SaysUnsupported(const std::string& text);
+// WriteClip; nullopt (`why` says what the encoder said) when the encoder refuses the spec as not supported here (a GPU tests skip). Any
+// other failure throws: a test fails on it rather than skipping (a broken spec or a regression is not «unsupported»).
+std::optional<std::filesystem::path> WriteClipIfSupported(const std::filesystem::path& path, const ClipSpec& spec, std::string* why = nullptr);
 
 }  // namespace dlssvid::test

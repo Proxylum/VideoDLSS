@@ -11,8 +11,11 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 }
 
+#include <cctype>
 #include <cmath>
+#include <cstdarg>
 #include <cstring>
+#include <mutex>
 
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
@@ -314,6 +317,62 @@ StreamSummary Summarize(const std::filesystem::path& path) {
     av_packet_free(&pkt);
     avformat_close_input(&fmt);
     return s;
+}
+
+namespace {
+std::mutex g_logMutex;
+std::string* g_logSink = nullptr;  // the capture in force (one at a time), under g_logMutex
+
+void CaptureLog(void* avcl, int level, const char* fmt, va_list vl) {
+    va_list copy;
+    va_copy(copy, vl);
+    av_log_default_callback(avcl, level, fmt, vl);  // stderr as before
+    if (level <= av_log_get_level()) {
+        char line[1024];
+        int prefix = 1;
+        av_log_format_line2(avcl, level, fmt, copy, line, sizeof line, &prefix);
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        if (g_logSink) *g_logSink += line;
+    }
+    va_end(copy);
+}
+}  // namespace
+
+FfmpegLogCapture::FfmpegLogCapture() {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    g_logSink = &text_;
+    av_log_set_callback(CaptureLog);
+}
+
+FfmpegLogCapture::~FfmpegLogCapture() {
+    av_log_set_callback(av_log_default_callback);
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    g_logSink = nullptr;
+}
+
+std::string FfmpegLogCapture::Text() const {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    return text_;
+}
+
+bool SaysUnsupported(const std::string& text) {
+    std::string lower = text;
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const char* words : {"not supported", "unsupported", "no capable devices"})
+        if (lower.find(words) != std::string::npos) return true;
+    return false;
+}
+
+std::optional<std::filesystem::path> WriteClipIfSupported(const std::filesystem::path& path, const ClipSpec& spec, std::string* why) {
+    FfmpegLogCapture log;
+    try {
+        return WriteClip(path, spec);
+    } catch (const std::exception& e) {
+        const std::string said = std::string(e.what()) + "\n" + log.Text();
+        if (!SaysUnsupported(said)) throw;
+        if (why) *why = said;
+        return std::nullopt;
+    }
 }
 
 }  // namespace dlssvid::test

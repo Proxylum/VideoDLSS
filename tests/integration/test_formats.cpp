@@ -222,6 +222,7 @@ TEST_CASE("NVENC 10-bit: HEVC Main 10 and Rext 4:4:4, AV1 10-bit; H.264 refuses"
         // only the encode may be missing on a GPU; the decode is checked outside: this build decodes AV1 only on NVDEC (TASK-0076), and
         // a catch around it hid that every AV1 decode failed («Function not implemented»)
         bool encoded = false;
+        FfmpegLogCapture log;  // NVENC says «not supported» in FFmpeg's log, the exception carries only the error code
         try {
             VideoEncoder::Options av1o = eo;
             av1o.codec = "av1_nvenc";
@@ -232,7 +233,9 @@ TEST_CASE("NVENC 10-bit: HEVC Main 10 and Rext 4:4:4, AV1 10-bit; H.264 refuses"
             enc.Close();
             encoded = true;
         } catch (const std::exception& e) {
-            WARN("av1_nvenc 10-bit not available on this GPU: " << e.what());
+            const std::string said = std::string(e.what()) + "\n" + log.Text();
+            if (!SaysUnsupported(said)) FAIL("av1_nvenc 10-bit failed: " << said);  // only «not supported here» is a skip
+            WARN("av1_nvenc 10-bit not supported on this GPU: " << said);
         }
         if (encoded) {
             CHECK(Summarize(dir / "av1.mp4").pixelFormat == "yuv420p10le");

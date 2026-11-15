@@ -21,6 +21,7 @@ extern "C" {
 #include <vector>
 
 #ifdef DLSSVID_WITH_CUDA
+#include <cuda.h>
 #include <cuda_runtime.h>
 #endif
 
@@ -51,9 +52,16 @@ AVBufferRef* CreateCudaDevice(std::string* why) {
     // FFmpeg retains the primary context and insists on CU_CTX_SCHED_BLOCKING_SYNC; a stage that used the CUDA
     // runtime before this decoder (TensorRT depth, OFA) has already created it with the default scheduling, and
     // FFmpeg then refuses NVDEC ("Primary context already active with incompatible flags") and the stage decodes
-    // in software. cudart applies the flags to the active primary context too: align them first.
-    if (const cudaError_t e = cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync); e != cudaSuccess)
-        Log()->debug("cudaSetDeviceFlags(BlockingSync) before NVDEC: {}", cudaGetErrorString(e));
+    // in software. cudart applies the flags to the active primary context too: align them first - only then. An inactive one FFmpeg
+    // sets itself, and cudaSetDeviceFlags would start it for the runtime and keep it to the process's end (TASK-0076: the GUI's viewport
+    // decodes AV1 on NVDEC, and a run must get that memory back when the decoder closes).
+    unsigned flags = 0;
+    int active = 0;
+    CUdevice dev = 0;
+    if (cuInit(0) == CUDA_SUCCESS && cuDeviceGet(&dev, 0) == CUDA_SUCCESS && cuDevicePrimaryCtxGetState(dev, &flags, &active) == CUDA_SUCCESS && active &&
+        (flags & CU_CTX_SCHED_MASK) != CU_CTX_SCHED_BLOCKING_SYNC)
+        if (const cudaError_t e = cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync); e != cudaSuccess)
+            Log()->debug("cudaSetDeviceFlags(BlockingSync) before NVDEC: {}", cudaGetErrorString(e));
 #endif
     AVBufferRef* device = nullptr;
     if (const int err = av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, AV_CUDA_USE_PRIMARY_CONTEXT); err < 0) {

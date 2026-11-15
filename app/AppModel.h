@@ -112,6 +112,7 @@ public:
     const DecodeSupport& sourceDecode() const { return sourceDecode_; }
     // TASK-0076: a run gets the GPU memory the viewport's NVDEC decoders hold (an AV1 video); a later frame opens one again
     void releaseNvdec();
+    void noteSourceRefused();  // TASK-0076: a refusal the viewport met on the source's first frame becomes the plan's verdict
     // a stage the run would refuse although the plan exists (depth does not fit the GPU, TASK-0039): «Обработать» waits
     QString planBlocker() const;
     QString sourceHashStatus() const;                        // «совпадает с пассами» / «N пассов от другого исходника» / «пассов нет»

@@ -240,11 +240,8 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
         s.why = "software (" + info.codecName + ")";
         return s;
     }
-    if (info.pixelFormat == "unknown") {  // the probe did not learn it: NVDEC decides on the first frame
-        s.why = "NVDEC (" + info.codecName + "), the sample layout is not known before the first frame";
-        return s;
-    }
-    if (info.pixelFormat != "yuv420p" && info.pixelFormat != "yuv420p10le") return Refuse(s, DecodeBlock::Layout);
+    const bool unknown = info.pixelFormat == "unknown";  // the probe did not learn it: NVDEC decides on the first frame (CUDA is asked)
+    if (!unknown && info.pixelFormat != "yuv420p" && info.pixelFormat != "yuv420p10le") return Refuse(s, DecodeBlock::Layout);
     if (!caps || !caps->checked) {  // the driver could not be asked: go on blind, as FFmpeg does
         s.why = "NVDEC (" + info.codecName + "), not checked" + (caps && !caps->why.empty() ? ": " + caps->why : std::string());
         return s;
@@ -252,6 +249,10 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
     if (!caps->cuda) return Refuse(s, DecodeBlock::NoCuda);
     if (caps->nvdecMissing) return Refuse(s, DecodeBlock::NoNvdec);
     if (!caps->supported) return Refuse(s, DecodeBlock::NoAv1);
+    if (unknown) {
+        s.why = "NVDEC (" + info.codecName + ") on '" + caps->gpu + "', the sample layout is not known before the first frame";
+        return s;
+    }
     const uint64_t macroblocks = static_cast<uint64_t>((info.codedWidth + 15) / 16) * ((info.codedHeight + 15) / 16);
     if (info.codedWidth < caps->minWidth || info.codedHeight < caps->minHeight || info.codedWidth > caps->maxWidth || info.codedHeight > caps->maxHeight ||
         macroblocks > caps->maxMacroblocks)
@@ -275,9 +276,9 @@ NvdecAv1Caps QueryNvdecAv1Caps(int bitDepth) {
 
 DecodeSupport CheckDecodeSupport(const VideoStreamInfo& info) {
     if (!info.hardwareOnly) return JudgeDecode(info, nullptr);
-    if (const DecodeSupport pre = JudgeDecode(info, nullptr); !pre.Ok() || info.pixelFormat == "unknown") return pre;  // the layout first: no GPU asked
+    if (const DecodeSupport pre = JudgeDecode(info, nullptr); !pre.Ok()) return pre;  // the layout first: no GPU asked
     if (const auto fake = FakeCaps()) return JudgeDecode(info, &*fake);
-    const NvdecAv1Caps caps = QueryNvdecAv1Caps(info.bitDepth);
+    const NvdecAv1Caps caps = QueryNvdecAv1Caps(info.pixelFormat == "unknown" ? 8 : info.bitDepth);  // unknown: what 8 bits says
     return JudgeDecode(info, &caps);
 }
 

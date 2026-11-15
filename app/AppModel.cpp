@@ -758,7 +758,20 @@ void AppModel::markDirty() {
 
 void AppModel::notifyFramesUpdated() {
     noteScrubReady();
+    noteSourceRefused();
     emit framesUpdated();
+}
+
+void AppModel::noteSourceRefused() {
+    // TASK-0076: NVDEC refused the source's first frame in the viewport (the driver could not be asked before): the plan says it now -
+    // «Обработать», Ctrl+Return, the preview and the stage runs stop, as for a refusal known in advance
+    if (!hasProject() || !sourceDecode_.Ok() || !store_) return;
+    if (const auto refused = store_->Undecodable("source")) {
+        sourceDecode_ = *refused;
+        planError_ = SourceDecodeText(sourceDecode_);
+        plan_ = {};
+        emit planChanged();
+    }
 }
 
 // ---- comparison in one action ----------------------------------------------------------------------
@@ -954,6 +967,8 @@ void AppModel::refreshPlan() {
         sourceInfo_.bitDepth = probe.Info().bitDepth;
         sourceInfo_.chroma = probe.Info().chroma;
         sourceDecode_ = CheckDecodeSupport(probe.Info());
+        if (sourceDecode_.Ok())  // TASK-0076: the driver could not be asked and NVDEC refused the viewport's first frame
+            if (const auto refused = store_->Undecodable("source")) sourceDecode_ = *refused;
         if (!sourceDecode_.Ok()) {  // TASK-0076: AV1 without NVDEC AV1 - «Обработать» and the stage runs stay off
             planError_ = SourceDecodeText(sourceDecode_);
             emit planChanged();
@@ -1143,7 +1158,8 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     for (const auto& s : plan_.stages)
         if (s.name == stage) d = &s;
     if (!d) {
-        st.state = planError_.isEmpty() ? tr("—") : planError_;
+        // TASK-0076: the source's refusal is said once, under «Что получится» - a card gets a short line, not the whole paragraph
+        st.state = !sourceDecode_.Ok() ? tr("не запустить: исходник не декодируется на этом компьютере") : planError_.isEmpty() ? tr("—") : planError_;
         return st;
     }
     const std::string primary = d->outputs.empty() ? stage : d->outputs.back();
@@ -2070,6 +2086,7 @@ void AppModel::checkStage(const std::string& stage) {
     if (checkProcess_ || !hasProject()) return;
     const StageAvailability a = availability(stage);
     if (!a.checkable) return;
+    releaseNvdec();  // TASK-0076: the check's NGX feature gets the memory of the viewport's NVDEC decoders
     // a folder of its own: a cancelled check that ends late removes only its files
     const QString dir = QDir(QDir::tempPath()).filePath(QString("dlssvid-check-%1-%2").arg(QCoreApplication::applicationPid()).arg(++checkSerial_));
     QDir().mkpath(dir);

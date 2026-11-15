@@ -231,6 +231,7 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.sar = info.sar;
         s.color = ColorInfoFromStream(info);
         s.hasColor = true;
+        s.hardwareOnly = info.hardwareOnly;
         if (info.hardwareOnly)  // TASK-0076: asked once here (the answer is cached), not by a decoder on every frame
             if (DecodeSupport d = CheckDecodeSupport(info); !d.Ok()) {
                 Log()->log(SaidOnce(file.string()) ? spdlog::level::warn : spdlog::level::debug, "video {} ('{}') cannot be decoded here: {}",
@@ -321,14 +322,16 @@ std::optional<DecodeSupport> FrameStore::Undecodable(const std::string& name) co
 }
 
 void FrameStore::ReleaseNvdecDecoders() {
-    std::vector<SourceRuntime*> runtimes;
+    std::vector<SourceRuntime*> runtimes;  // the videos that decode on NVDEC only: a software decoder is not waited for (GUI thread)
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& [name, rt] : runtimes_) runtimes.push_back(rt.get());
+        for (const auto& s : sources_)
+            if (s.isVideo && s.hardwareOnly)
+                if (const auto it = runtimes_.find(s.name); it != runtimes_.end()) runtimes.push_back(it->second.get());
     }
     for (SourceRuntime* rt : runtimes) {
         std::lock_guard<std::mutex> guard(rt->mutex);  // waits for a load in flight on it
-        if (rt->decoder && rt->decoder->DecodesOnNvdec()) rt->decoder.reset();
+        if (rt->decoder && rt->decoder->HoldsCudaDevice()) rt->decoder.reset();
     }
 }
 
@@ -541,9 +544,15 @@ void FrameStore::LoaderMain() {
         try {
             result = LoadOne(key);
         } catch (const DecodeUnavailable& e) {  // TASK-0076: NVDEC refused the video - its later frames open no decoder
+            SourceRuntime* refused = nullptr;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 refusedInLoad_.emplace(key.source, e.support);
+                if (const auto it = runtimes_.find(key.source); it != runtimes_.end()) refused = it->second.get();
+            }
+            if (refused) {  // the refused decoder still holds the CUDA device: let it go now (SetSources waits for this load: still valid)
+                std::lock_guard<std::mutex> guard(refused->mutex);
+                refused->decoder.reset();
             }
             Log()->log(SaidOnce(e.what()) ? spdlog::level::warn : spdlog::level::debug, "'{}' cannot be decoded here: {}", key.source, e.what());
             Loaded l;

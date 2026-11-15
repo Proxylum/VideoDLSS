@@ -368,7 +368,12 @@ void MainWindow::selectSource(int hotkey) {
 QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std::string>& sources) {
     QString s = tech;
     for (const auto& name : sources)
-        if (const auto d = model_.store().Undecodable(name)) s += "\n" + HumanSourceName(name) + ": " + SourceDecodeText(*d);
+        if (const auto d = model_.store().Undecodable(name)) {
+            const ViewportSource* src = model_.store().FindSource(name);
+            s += "\n" + HumanSourceName(name) + ": " +
+                 (src && !src->proxy.empty() ? tr("показан по прокси перемотки; само видео на этом компьютере не декодируется, обработать его нельзя")
+                                             : SourceDecodeText(*d));
+        }
     return s;
 }
 

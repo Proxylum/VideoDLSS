@@ -23,12 +23,17 @@
 #include "io/NvdecSupport.h"
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
+#include "passes/Manifest.h"
 #include "passes/PassSequence.h"
 #include "passes/formats/PngIO.h"
 #include "viewport/FrameStore.h"
 #include "viewport/Project.h"
 #include "viewport/ViewportProxy.h"
 #include "viewport/ViewportRenderer.h"
+
+#ifdef DLSSVID_WITH_CUDA
+#include <cuda.h>
+#endif
 
 using namespace dlssvid;
 using namespace dlssvid::test;
@@ -63,8 +68,8 @@ bool HaveAv1Encoder() { return HaveNvidia() && VideoEncoder::EncoderAvailable("a
 constexpr uint32_t kW = 320, kH = 192;  // NVENC refuses tiny frames: the size the other GPU tests use
 
 // An AV1 clip from av1_nvenc: 8-bit 4:2:0 in MP4, or 10-bit (p010le in, Main 10-bit out) in MKV; a keyframe every 8 frames.
-// nullopt when this GPU's encoder does not take it (the test is skipped then).
-std::optional<std::filesystem::path> Av1Clip(const std::filesystem::path& dir, bool tenBit, int frames) {
+// nullopt when this GPU's encoder says it does not support it (`why`: its words); any other failure throws - the test fails.
+std::optional<std::filesystem::path> Av1Clip(const std::filesystem::path& dir, bool tenBit, int frames, std::string* why) {
     ClipSpec spec;
     spec.width = kW;
     spec.height = kH;
@@ -72,18 +77,15 @@ std::optional<std::filesystem::path> Av1Clip(const std::filesystem::path& dir, b
     spec.gop = 8;  // av1_nvenc: longer than its B-frame run + 1
     spec.codec = "av1_nvenc";
     spec.pixFmt = tenBit ? "p010le" : "yuv420p";
-    try {
-        return WriteClip(dir / (tenBit ? "av1_10.mkv" : "av1_8.mp4"), spec);
-    } catch (const std::exception& e) {
-        WARN("av1_nvenc did not write the clip: " << e.what());
-        return std::nullopt;
-    }
+    return WriteClipIfSupported(dir / (tenBit ? "av1_10.mkv" : "av1_8.mp4"), spec, why);
 }
 
-#define REQUIRE_AV1_CLIP(var, dir, tenBit, frames)                       \
-    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");         \
-    const auto var##Opt = Av1Clip(dir, tenBit, frames);                  \
-    if (!var##Opt) SKIP("av1_nvenc did not take the clip on this GPU"); \
+// SKIP only without an NVIDIA GPU with av1_nvenc, or when the encoder says the clip is not supported here
+#define REQUIRE_AV1_CLIP(var, dir, tenBit, frames)                                 \
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");                   \
+    std::string var##Why;                                                          \
+    const auto var##Opt = Av1Clip(dir, tenBit, frames, &var##Why);                 \
+    if (!var##Opt) SKIP("av1_nvenc does not support the clip here: " << var##Why); \
     const std::filesystem::path var = *var##Opt
 
 // Mean absolute difference of the luma of a decoded frame (8-bit, or high bit depth brought down to 8) from SyntheticFrame(i).
@@ -582,9 +584,10 @@ struct Av1Store {
     D3D12Device dev{D3D12Device::Options{true, false}};
     std::unique_ptr<FrameStore> store;
     ViewportRenderer renderer{dev};
-    explicit Av1Store(int prefetch = 1) {
+    explicit Av1Store(int prefetch = 1, int loaderThreads = 0) {
         FrameStore::Options opt;
         opt.prefetch = prefetch;
+        opt.loaderThreads = loaderThreads;
         store = std::make_unique<FrameStore>(dev, opt);
     }
     // The frame's settled status: WaitForCurrent returns once it is resident or marked missing, and a frame a prefetch marked missing
@@ -894,4 +897,132 @@ TEST_CASE("NVDEC refusing the first frame: render and process say why, nothing i
         CHECK_FALSE(std::filesystem::exists(result));
         CHECK_FALSE(AnyPartFile(dir));
     }
+}
+
+namespace {
+// Whether the primary CUDA context of device 0 is active - held by someone in this process (an NVDEC decoder's device, the CUDA runtime);
+// nullopt: no CUDA here
+std::optional<bool> PrimaryContextActive() {
+#ifdef DLSSVID_WITH_CUDA
+    CUdevice dev = 0;
+    unsigned flags = 0;
+    int active = 0;
+    if (cuInit(0) != CUDA_SUCCESS || cuDeviceGet(&dev, 0) != CUDA_SUCCESS || cuDevicePrimaryCtxGetState(dev, &flags, &active) != CUDA_SUCCESS)
+        return std::nullopt;
+    return active != 0;
+#else
+    return std::nullopt;
+#endif
+}
+}  // namespace
+
+TEST_CASE("FrameStore lets the CUDA device go: a decoder NVDEC refused is closed at once, ReleaseNvdecDecoders closes the one decoding",
+          "[integration][viewport][gpu][av1]") {
+    // The primary context goes inactive when its last holder closes - checkable only where nothing else holds it: the CUDA runtime keeps
+    // it to the process's end once started (VideoDecoder starts it only to align the flags of a context already active), so the case
+    // checks first that nothing in this process holds it - ctest runs each case in a process of its own
+    const auto before = PrimaryContextActive();
+    if (!before) SKIP("no CUDA driver here");
+    if (*before) SKIP("the primary CUDA context is held by an earlier case in this process: run this case alone");
+    const auto dir = Dir("store_cuda");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    CHECK(PrimaryContextActive() == false);  // av1_nvenc wrote the clip in a context of its own
+    {
+        // NVDEC refuses the first frame: the loader closes the refused decoder - its CUDA device - at once
+        FakeNvdecEnv fake("first-frame");
+        Av1Store s(0, 1);
+        const auto found = FrameStore::VideoSource("source", clip);
+        REQUIRE(found);
+        s.store->SetSources({*found});
+        REQUIRE(s.Load(3) == FrameStore::Status::Missing);
+        REQUIRE(s.store->Undecodable("source"));
+        CHECK(PrimaryContextActive() == false);
+        s.store->ReleaseNvdecDecoders();  // nothing left to let go
+        CHECK(PrimaryContextActive() == false);
+    }
+    // a decoder on NVDEC holds it until ReleaseNvdecDecoders; the next frame opens one again; the store closing lets it go too
+    {
+        Av1Store s(0, 1);
+        s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+        REQUIRE(s.Load(2) == FrameStore::Status::Ready);
+        CHECK(PrimaryContextActive() == true);
+        s.store->ReleaseNvdecDecoders();
+        CHECK(PrimaryContextActive() == false);
+        REQUIRE(s.Load(9) == FrameStore::Status::Ready);
+        CHECK(PrimaryContextActive() == true);
+    }
+    CHECK(PrimaryContextActive() == false);
+    // the same for a decoder asked for HwAccel::Cuda (the device at the open): closing it lets the context go
+    {
+        VideoDecoder dec(clip, VideoDecoder::Options{HwAccel::Cuda});
+        CHECK(dec.HoldsCudaDevice());
+        CHECK(PrimaryContextActive() == true);
+    }
+    CHECK(PrimaryContextActive() == false);
+}
+
+TEST_CASE("HoldsCudaDevice: from the device's creation to the decoder's end - also when NVDEC then refused the stream", "[integration][gpu][av1]") {
+    const auto dir = Dir("holds_device");
+    REQUIRE_AV1_CLIP(clip, dir, false, 8);
+    {
+        VideoDecoder dec(clip);
+        CHECK_FALSE(dec.HoldsCudaDevice());  // no device before the first frame
+        CpuFrame f;
+        REQUIRE(dec.NextFrame(f));
+        CHECK(dec.HoldsCudaDevice());
+        CHECK(dec.DecodesOnNvdec());
+    }
+    {
+        FakeNvdecEnv fake("first-frame");
+        VideoDecoder dec(clip);
+        CHECK(RefusalOfNextFrame(dec));
+        CHECK(dec.HoldsCudaDevice());  // refused, still holding it: FrameStore closes such a decoder
+        CHECK_FALSE(dec.DecodesOnNvdec());
+    }
+    {
+        FakeNvdecEnv fake("no-av1");
+        VideoDecoder dec(clip);
+        CHECK(RefusalOfNextFrame(dec));
+        CHECK_FALSE(dec.HoldsCudaDevice());  // refused before the device was made
+    }
+}
+
+TEST_CASE("dlssvid nr without NVDEC AV1: refused when its colour comes from the video, not when the colour pass serves the range",
+          "[integration][cli][gpu][av1]") {
+    const auto dir = Dir("nr_refused");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    const std::string c = clip.string();
+    const auto passes = dir / "passes";
+    // the colour pass, made where NVDEC decodes AV1
+    REQUIRE(RunAll({"upscale", "--backend", "bicubic", "--warp", "-i", c, "-o", passes.string()}, dir / "upscale.log").code == 0);
+    REQUIRE(std::filesystem::exists(passes / "color_sr"));
+    FakeNvdecEnv fake("no-av1");
+    // from frame 0, or a warm-up reaching back to it: NR walks the video even with the colour pass - refused before the hash, the GPU, NGX
+    struct Refused {
+        const char* name;
+        std::vector<std::string> range;
+    };
+    const Refused refused[] = {{"whole", {}}, {"warmup to 0", {"--start", "2", "--frames", "2", "--warmup", "2"}}};
+    for (const Refused& r : refused) {
+        std::vector<std::string> args{"nr", "--backend", "stub", "--warp", "-i", c, "-o", passes.string()};
+        args.insert(args.end(), r.range.begin(), r.range.end());
+        const auto run = RunAll(args, dir / "nr_refused.log");
+        INFO(r.name << ":\n" << run.out);
+        CHECK(run.code != 0);
+        CHECK_THAT(run.out, ContainsSubstring(c + ": " + kNoAv1Reason));
+        CHECK_THAT(run.out, !ContainsSubstring("D3D12 device"));
+        CheckNoEnosys(run.out);
+        CHECK_FALSE(std::filesystem::exists(passes / "color_nr"));
+    }
+    // a range past frame 0 with the colour pass: its frames come from color_sr by index - the video is not decoded, nothing refuses
+    const auto part = RunAll({"nr", "--backend", "stub", "--warp", "-i", c, "-o", passes.string(), "--start", "6", "--frames", "3", "--warmup", "2"},
+                             dir / "nr_part.log");
+    INFO(part.out);
+    CHECK(part.code == 0);
+    CHECK_THAT(part.out, !ContainsSubstring(kNoAv1Reason));
+    CheckNoEnosys(part.out);
+    REQUIRE(std::filesystem::exists(passes / "color_nr" / Manifest::kFileName));
+    const Manifest m = Manifest::Load(passes / "color_nr");
+    CHECK(m.firstFrame == 6);
+    CHECK(m.lastFrame == 8);
 }

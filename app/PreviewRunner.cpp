@@ -193,6 +193,7 @@ uint64_t PreviewRunner::freeBytes() const { return freeSpace_ ? freeSpace_() : m
 
 QString PreviewRunner::appBlock(const NrPreviewJob* job) const {
     if (!model_.hasProject()) return Tr("Превью недоступно: нет проекта");
+    if (!model_.sourceDecode().Ok()) return Tr("Превью недоступно: исходник не декодируется на этом компьютере");  // TASK-0076: the reason is above
     if (!model_.planError().isEmpty()) return Tr("Превью недоступно: %1").arg(model_.planError());
     if (tasks_.mainBusy()) return Tr("Идёт обработка — превью будет доступно после неё");
     if (model_.controlMaskBusy()) return Tr("Загружается маска управления — подождите");

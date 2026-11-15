@@ -23,7 +23,10 @@ ProjectTasks::ProjectTasks(AppModel& model, TaskQueue& tasks, QObject* parent) :
         const Project& p = model_.project();
         origins_[id] = {model_.generation(), p.passesRoot, QString::fromStdWString(p.sourceVideo.filename().wstring()), p.resultVideo};
     });
-    connect(&tasks_, &TaskQueue::previewStarted, this, [this](int) { model_.cancelCheck(); });  // the NR preview, as a task
+    connect(&tasks_, &TaskQueue::previewStarted, this, [this](int) {  // the NR preview, as a task
+        model_.cancelCheck();
+        model_.releaseNvdec();  // TASK-0076
+    });
     // TASK-0070: the run encodes the new result next to the old one, to be renamed over it: the viewer lets the old file go. By the file,
     // not the project: a project opened again since, or another one with the same result file, shows that file too.
     connect(&tasks_, &TaskQueue::taskProgress, this, [this](int id, const TaskQueue::Progress& progress) {

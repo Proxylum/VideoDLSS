@@ -53,8 +53,10 @@ struct ViewportSource {
     std::shared_ptr<const Manifest> manifest;
     // A static pass (PR-8: mask_control, Manifest::IsStatic): its one frame stands at every time - no duration of its own
     bool isStatic = false;
-    // Videos (TASK-0076): a stream this machine cannot decode (AV1 without NVDEC AV1) and why; its frames are missing, no decoder opens
+    // Videos (TASK-0076): a stream this machine cannot decode (AV1 without NVDEC AV1) and why; the original's decoder never opens - its
+    // frames come from the proxy when there is one, else they are missing
     std::optional<DecodeSupport> undecodable;
+    bool hardwareOnly = false;  // TASK-0076: the video decodes on NVDEC only (VideoStreamInfo::hardwareOnly)
     bool HasFrame(int64_t f) const { return f >= firstFrame && (lastFrame < 0 || f <= lastFrame); }
 };
 

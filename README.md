@@ -128,6 +128,7 @@ videos, which only NVDEC decodes in this build (see «AV1 sources decode on the 
 | Windows 10/11 x64 | everything | the pipeline is D3D12 + CUDA, Windows only; paths with non-ASCII letters (Cyrillic and others) need Windows 10 version 1903 or newer |
 | NVIDIA GPU | DLSS SR and NIS: RTX 20 and newer · DLSS Frame Generation: RTX 40 and newer (x3/x4 on RTX 50) · Neural Rendering: RTX 50 with the official DLL, RTX 20/30/40 with a patched copy · TensorRT models (depth, flow, Real-ESRGAN, RIFE): RTX 20 and newer | engines are built for your GPU on first use; other GPUs and the WARP software adapter run the non-NVIDIA backends only |
 | NVIDIA driver | ≥ 616.56 for Neural Rendering; any recent driver for the rest | `nvofapi64.dll` (Optical Flow) and NVDEC / NVENC come with the driver |
+| A GPU whose NVDEC decodes AV1 | AV1 sources and results (8 / 10-bit 4:2:0): this build has no software AV1 decoder | for example, GeForce RTX 30 series and newer; `dlssvid info <file>` says whether this one does |
 | CUDA 12 runtime (`cudart64_12.dll`) | NVDEC frames on the GPU, TensorRT | from the CUDA Toolkit 12.x installer (on `PATH`) or bundled in the full package |
 | TensorRT 10.16 runtime (`nvinfer_10.dll`, `nvonnxparser_10.dll`, `nvinfer_plugin_10.dll`, builder resources) | depth (DA3, VDA), SEA-RAFT flow, Real-ESRGAN, RIFE | the pip package `tensorrt-cu12==10.16.1.11` in the Python environment is found by itself; or `DLSSVID_TENSORRT_DIR`; or `bin\tensorrt\` of the full package |
 | Python 3.12 + the venv of `models\export\requirements.txt` (PyTorch cu126) | ONNX export of every model on first use, `depth_worker` (DA3 / VDA in PyTorch), `sr_worker` (RealBasicVSR), `nr-patch` | found at `models\export\.venv\Scripts\python.exe` or `DLSSVID_PYTHON` |
@@ -286,16 +287,19 @@ build\release\bin\dlssvid process --passthrough -i input.mp4 -o output.mkv --cod
 
 **AV1 sources decode on the GPU.** This build of FFmpeg has no software AV1 decoder, so an AV1 video (phones, OBS, YouTube,
 an `av1_nvenc` result) is always decoded by NVDEC — in the viewport, the stages, `process` and the passthrough, whatever
-`--hwaccel` says. NVDEC decodes AV1 as 8 or 10-bit 4:2:0 on GPUs that have an AV1 decoder (for example, GeForce RTX 30 series
-and newer; the driver is asked, the series is only an example). `dlssvid info` prints how a file decodes (`decode:` line).
-The driver is asked once (format, CUDA, NVDEC, AV1, frame size): a file it says this machine cannot decode is refused with the
-reason before the work starts — `process` before its stages, a single stage command before its model, the GUI instead of
-the plan with «Обработать» and the stage runs off, the viewport cell reads «· не декодируется» (its tooltip says why), no
-proxy is built. A driver that cannot be asked leaves it to the first frame, refused then with the same kind of message. A
-scrubbing proxy built earlier (on another PC) still shows such a source. The GUI's viewport decodes an AV1 video on NVDEC
-in its own process and lets that decoder go when a run is queued. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it:
-on a PC with several GPUs it may not be the one the stages run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame`
-stands in for the driver's answer (tests, reproducing a support case). The executables still need the NVIDIA driver to start.
+`--hwaccel` says. This build decodes AV1 only as 8 or 10-bit 4:2:0, on GPUs whose NVDEC has an AV1 decoder (for example,
+GeForce RTX 30 series and newer; the driver is asked, the series is only an example). `dlssvid info` prints how a file
+decodes (`decode:` line). The sample layout is checked from the file; the driver is asked once (CUDA, NVDEC, AV1 at that
+depth, the frame size limits). A file this machine cannot decode is refused with the reason before the work starts —
+`process` before its stages, a stage command before its model (`nr` reading its colour from `color_sr` from a frame past 0
+decodes no video and is not refused), the GUI instead of the plan with «Обработать», Ctrl+Return, the preview and the stage
+runs off, the viewport cell reads «· не декодируется» (its tooltip says why), no proxy is built. A driver that cannot be
+asked leaves it to the first frame: refused then without the exact reason («NVDEC refused this AV1 stream»), and the GUI
+stops the runs as soon as its viewport met it. A scrubbing proxy built earlier (on another PC) still shows such a source.
+The GUI's viewport decodes an AV1 video on NVDEC in its own process and lets that decoder go when a run, a preview or a
+stage check is queued. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be
+the one the stages run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame` stands in for the driver's answer
+(tests, reproducing a support case).
 
 Paths may contain any letters: `dlssvid` and `dlssvid-gui` run with UTF-8 as their code page. The CLI prints UTF-8,
 so in a console with the OEM code page (866 on Russian Windows) Cyrillic in its output reads wrong; `chcp 65001` first.
@@ -342,7 +346,7 @@ dlssvid render -i input.mp4 --passes passes --bench 60                         :
 dlssvid render --project p.json --frame 10 --source depth_raw --save-state -o x.png   :: write the state back into the project
 ```
 
-Scene cuts (PR-13): one pass over the source's luma on the CPU (~2-3 ms a 1080p frame, decoding included) into
+Scene cuts (PR-13): one pass over the source's luma on the CPU (~2-3 ms a 1080p frame, decoding included; AV1 is decoded on NVDEC) into
 `passes\scenes` - the cut list and every frame's score, no frames. `process` runs it first; flow writes zero vectors at a cut,
 DLSS SR and the RealBasicVSR worker start their history again, NR resets the model and the flicker filter, FG holds the last
 frame of a shot instead of blending two. Another threshold is applied to the stored scores without decoding; the stages below

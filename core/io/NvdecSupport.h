@@ -28,7 +28,7 @@ enum class DecodeBlock {
     NoNvdec,      // CUDA is there, the driver's video decoder (nvcuvid.dll) is not
     NoAv1,        // the GPU's NVDEC has no AV1 decoder at the stream's depth
     Size,         // the frame is outside the sizes the GPU's NVDEC decodes
-    NvdecFailed,  // NVDEC was asked and refused on the first frame (FFmpeg's reason is in its log)
+    NvdecFailed,  // NVDEC was asked and refused a frame - the first one, or a later one (why: on the first frame / after N frames)
 };
 
 // What the driver says of AV1 decoding on CUDA device 0 (FFmpeg's NVDEC takes that one), at one bit depth, 4:2:0.
@@ -57,9 +57,10 @@ struct DecodeSupport {
     bool Ok() const { return block == DecodeBlock::None; }
 };
 
-// The verdict from the stream and what NVDEC said (`caps` null: not asked). Order: a decoder with a software path is fine; an unknown
-// pixel format is left to NVDEC (decided on the first frame); a layout this build does not decode AV1 in (8 / 10-bit 4:2:0 only) is
-// refused before the GPU is asked; no answer from the driver goes on blind (as FFmpeg does); then no CUDA, no nvcuvid, no AV1, the size.
+// The verdict from the stream and what NVDEC said (`caps` null: not asked). Order: a decoder with a software path is fine; a layout this
+// build does not decode AV1 in (8 / 10-bit 4:2:0 only) is refused before the GPU is asked; no answer from the driver goes on blind (as
+// FFmpeg does); then no CUDA, no nvcuvid, no AV1; an unknown pixel format (the probe did not learn it) is left to the first frame from
+// there on; then the size.
 DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps);
 
 // The driver's answer for AV1 4:2:0 at `bitDepth` (8 / 10): cuInit, device 0, a temporary context of its own (the primary context the

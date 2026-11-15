@@ -710,6 +710,7 @@ bool ProjectPanel::canProcess() const {
 void ProjectPanel::processAll() {
     Project& p = model_.project();
     if (p.sourceVideo.empty()) return;
+    model_.refreshPlanIfPending();  // Ctrl+Return right after an edit: the verdict of the plan it would run
     if (!canProcess()) return;
     if (!model_.saveForRun()) return;
     std::vector<TaskQueue::StagePlan> plan;

@@ -123,9 +123,10 @@ DisplayOrientation OrientationFromRotateTag(std::string_view tag, std::string* w
 // CUDA memory (primary context) and is exposed as a GpuFrame, and the CPU copy is made only when asked for (bit-exact
 // NV12 -> YUV420P). Audio packets are handed to the sink untouched for stream copy. A stream shown turned (a display matrix, the
 // 'rotate' tag: a phone video) is turned on the CPU after the copy (OrientFrame) and has no GpuFrame (TASK-0072).
-// A decoder without a software path (this build's AV1, TASK-0076, NvdecSupport.h) decodes on NVDEC whatever the options say: the
-// device is created on the first NextFrame (an open that only reads Info() never touches the GPU), and a stream this GPU cannot decode
-// is refused then with DecodeUnavailable, naming the reason. Its frames go to the host as with any NVDEC decode; a GpuFrame is handed
+// A decoder without a software path (this build's AV1, TASK-0076, NvdecSupport.h) decodes on NVDEC whatever the options say: with
+// HwAccel::Cuda the device is created at the open, as for any codec; otherwise on the first NextFrame (StartNvdec reopens codec_ on it) -
+// a Probe() open never creates one. A stream this GPU cannot decode is refused then (or at RequireDecodable) with DecodeUnavailable,
+// naming the reason; NVDEC refusing a frame is kept and said again on every later NextFrame. Its frames go to the host as with any NVDEC decode; a GpuFrame is handed
 // out only when HwAccel::Cuda asked for it (UsingHwAccel).
 
 // The container's global metadata (tags) of a media file, keys lower-cased (Matroska stores COMMENT): `comment`, `dlssvid_settings`
@@ -165,6 +166,8 @@ public:
     bool UsingHwAccel() const { return gpuFrames_; }
     // A frame came from NVDEC (asked for and the codec has it, or a hardware-only decoder past its first frame).
     bool DecodesOnNvdec() const { return nvdecFrames_; }
+    // A CUDA device is held (HwAccel::Cuda at the open, or StartNvdec - even one NVDEC then refused): closing the decoder lets it go.
+    bool HoldsCudaDevice() const { return hwDevice_ != nullptr; }
     // TASK-0076: refuses at once (DecodeUnavailable) a stream this machine cannot decode - a command calls it before its heavy preparation
     // (hashing, a model, an NGX feature) instead of learning it on the first frame. A no-op for a decoder with a software path.
     void RequireDecodable() const;
