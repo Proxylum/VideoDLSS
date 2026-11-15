@@ -441,6 +441,7 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
         return {};
     };
     o.colorDir = autoDir(a.colorDir, "color_sr");
+    if (o.colorDir.empty()) decoder.RequireDecodable();  // TASK-0076: the colour comes from the video - refused before hashing it and the NGX feature
     o.depthDir = autoDir(a.depthDir, "depth_dlss");
     o.mvDir = autoDir(a.mvDir, "mv_dlss");
     o.masksDir = !a.masksDir.empty() ? std::filesystem::path(a.masksDir) : a.noAuto ? std::filesystem::path() : std::filesystem::path(a.output);

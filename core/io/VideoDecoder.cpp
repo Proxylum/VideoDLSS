@@ -38,6 +38,7 @@ int kHardwareOnly = 1;
 
 AVPixelFormat GetHwFormat(AVCodecContext* ctx, const AVPixelFormat* formats) {
     const bool hardwareOnly = ctx->opaque == &kHardwareOnly;
+    if (hardwareOnly && FakeNvdecRefusesFrames()) return AV_PIX_FMT_NONE;  // DLSSVID_FAKE_NVDEC_AV1=first-frame (tests)
     const AVPixelFormat f = PickNvdecFormat(formats, hardwareOnly);
     if (f != AV_PIX_FMT_CUDA && !hardwareOnly) Log()->warn("NVDEC pixel format not offered by decoder, falling back to software");
     return f;
@@ -310,7 +311,7 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     }
     gpuFrames_ = hwDevice_ != nullptr;
     indexRate_ = options.indexRate;
-    OpenCodec();
+    codec_ = OpenCodec(hwDevice_);
 
     frame_ = av_frame_alloc();
     swFrame_ = av_frame_alloc();
@@ -385,6 +386,7 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
         info_.audioCodecName = d ? d->name : "unknown";
     }
     info_.hardwareOnly = hwOnly_;
+    info_.nvdecCodec = HasNvdecHwaccel(decoder);
 
     Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "open {}: {}x{} {} {} ({}) {}/{} fps, {} frames{}{}", url, info_.width, info_.height,
                info_.codecName, info_.pixelFormat, info_.decoded.Describe(), fr.num, fr.den, info_.frameCount,
@@ -411,39 +413,59 @@ VideoDecoder::~VideoDecoder() {
     avformat_close_input(&fmt_);
 }
 
-void VideoDecoder::OpenCodec() {
+AVCodecContext* VideoDecoder::OpenCodec(AVBufferRef* device) const {
     AVStream* vs = fmt_->streams[videoStream_];
-    codec_ = avcodec_alloc_context3(decoder_);
-    if (!codec_) Throw("avcodec_alloc_context3 failed");
-    CheckAv(avcodec_parameters_to_context(codec_, vs->codecpar), "avcodec_parameters_to_context");
-    codec_->pkt_timebase = vs->time_base;
-    codec_->opaque = hwOnly_ ? &kHardwareOnly : nullptr;
-    if (hwDevice_) {
-        codec_->hw_device_ctx = av_buffer_ref(hwDevice_);
-        codec_->get_format = GetHwFormat;
-    } else {
-        // software decoding: frame + slice threads, count chosen by libavcodec (viewport scrubbing at 1080p); an intra
-        // proxy: slice threads only (a seek then costs one decode)
-        codec_->thread_count = 0;
-        codec_->thread_type = sliceThreadsOnly_ ? FF_THREAD_SLICE : FF_THREAD_FRAME | FF_THREAD_SLICE;
+    AVCodecContext* c = avcodec_alloc_context3(decoder_);
+    if (!c) Throw("avcodec_alloc_context3 failed");
+    try {
+        CheckAv(avcodec_parameters_to_context(c, vs->codecpar), "avcodec_parameters_to_context");
+        c->pkt_timebase = vs->time_base;
+        c->opaque = hwOnly_ ? &kHardwareOnly : nullptr;
+        if (device) {
+            c->hw_device_ctx = av_buffer_ref(device);
+            c->get_format = GetHwFormat;
+        } else {
+            // software decoding: frame + slice threads, count chosen by libavcodec (viewport scrubbing at 1080p); an intra
+            // proxy: slice threads only (a seek then costs one decode)
+            c->thread_count = 0;
+            c->thread_type = sliceThreadsOnly_ ? FF_THREAD_SLICE : FF_THREAD_FRAME | FF_THREAD_SLICE;
+        }
+        CheckAv(avcodec_open2(c, decoder_, nullptr), "avcodec_open2");
+    } catch (...) {
+        avcodec_free_context(&c);
+        throw;
     }
-    CheckAv(avcodec_open2(codec_, decoder_, nullptr), "avcodec_open2");
+    return c;
+}
+
+void VideoDecoder::RequireDecodable() const {
+    if (!hwOnly_) return;
+    if (refused_) throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
+    if (const DecodeSupport s = CheckDecodeSupport(info_); !s.Ok()) throw DecodeUnavailable(s, url_ + ": " + s.why);
 }
 
 void VideoDecoder::StartNvdec() {
     // TASK-0076: before the first packet only (NextFrame is the one place packets are sent; a seek before it only flushed codec_ and
-    // moved the demuxer, which stays where it is)
+    // moved the demuxer, which stays where it is). Nothing changes until it all worked: a refusal leaves the decoder as it was
     const DecodeSupport support = CheckDecodeSupport(info_);
     if (!support.Ok()) throw DecodeUnavailable(support, url_ + ": " + support.why);
     if (!hwDevice_) {
         std::string why;
-        hwDevice_ = CreateCudaDevice(&why);
-        if (!hwDevice_) {
+        AVBufferRef* device = CreateCudaDevice(&why);
+        if (!device) {
             const DecodeSupport s = RefusedDecode(info_, DecodeBlock::NoCuda, "the CUDA device could not be created: " + why);
             throw DecodeUnavailable(s, url_ + ": " + s.why);
         }
+        AVCodecContext* reopened = nullptr;
+        try {
+            reopened = OpenCodec(device);
+        } catch (...) {
+            av_buffer_unref(&device);
+            throw;
+        }
         avcodec_free_context(&codec_);
-        OpenCodec();
+        codec_ = reopened;
+        hwDevice_ = device;
     }
     nvdecStarted_ = true;
     Log()->log(probe_ ? spdlog::level::debug : spdlog::level::info, "{}: {} has no software decoder in this build, decoding on {}", url_, info_.codecName,
@@ -452,9 +474,10 @@ void VideoDecoder::StartNvdec() {
 
 void VideoDecoder::CheckDecode(int err, const char* what) {
     if (err >= 0) return;
-    if (hwOnly_ && err == AVERROR(ENOSYS)) {  // av1dec without a working hwaccel: every frame header would fail the same way
-        const DecodeSupport s = RefusedDecode(info_, DecodeBlock::NvdecFailed, "");
-        throw DecodeUnavailable(s, url_ + ": " + s.why);
+    if (hwOnly_ && err == AVERROR(ENOSYS)) {  // av1dec without a working hwaccel: every frame header would fail the same way - kept
+        refused_ = std::make_shared<const DecodeSupport>(
+            RefusedDecode(info_, DecodeBlock::NvdecFailed, framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "on the first frame"));
+        throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }
     CheckAv(err, what);
 }
@@ -471,6 +494,11 @@ Rational VideoDecoder::AudioTimeBase() const {
 
 bool VideoDecoder::NextFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     if (gpu) *gpu = GpuFrame{};
+    if (gpu && !gpuFrames_) {  // GpuFrames only when HwAccel::Cuda asked for them (a hardware-only decoder on NVDEC unasked: host frames)
+        gpu = nullptr;
+        cpu = true;
+    }
+    if (refused_) throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     if (hwOnly_ && !nvdecStarted_) StartNvdec();  // TASK-0076: first, before a packet reaches codec_
     if (drained_) return false;
     for (;;) {
@@ -525,6 +553,7 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     }
     AVFrame* src = frame_;
     if (frame_->format == AV_PIX_FMT_CUDA) {
+        nvdecFrames_ = true;
         if (gpu && !info_.orientation.Identity()) {
             // a turned stream: the NV12 frame on the device is stored, not shown - no GpuFrame (OFA re-initialises for ABGR uploads of
             // the turned CPU frame, as for 10-bit streams)

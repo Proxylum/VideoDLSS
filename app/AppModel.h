@@ -108,6 +108,10 @@ public:
     // it - TASK-0073), else the source's; {0, 0} unknown. The preview's estimate and calibration key
     std::pair<uint32_t, uint32_t> nrColorSize() const;
     QString planError() const { return planError_; }         // why there is no plan (bad parameters, no video)
+    // TASK-0076: whether this machine decodes the source (AV1 without NVDEC AV1: not) - the plan's verdict, Ok while there is none
+    const DecodeSupport& sourceDecode() const { return sourceDecode_; }
+    // TASK-0076: a run gets the GPU memory the viewport's NVDEC decoders hold (an AV1 video); a later frame opens one again
+    void releaseNvdec();
     // a stage the run would refuse although the plan exists (depth does not fit the GPU, TASK-0039): «Обработать» waits
     QString planBlocker() const;
     QString sourceHashStatus() const;                        // «совпадает с пассами» / «N пассов от другого исходника» / «пассов нет»
@@ -382,6 +386,7 @@ private:
     RunOutcome outcome_;
     SourceInfo sourceInfo_;
     QString planError_;
+    DecodeSupport sourceDecode_;
     std::set<std::string> force_;
     std::map<std::string, int> history_;  // pass -> previous versions on disk
     QTimer planTimer_;

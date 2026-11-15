@@ -364,6 +364,14 @@ void MainWindow::selectSource(int hotkey) {
     model_.showSource(chips[static_cast<size_t>(hotkey - 1)].source);
 }
 
+// TASK-0076: the tooltip of a cell showing a video this machine cannot decode says why and what to do
+QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std::string>& sources) {
+    QString s = tech;
+    for (const auto& name : sources)
+        if (const auto d = model_.store().Undecodable(name)) s += "\n" + HumanSourceName(name) + ": " + SourceDecodeText(*d);
+    return s;
+}
+
 void MainWindow::updateCellLabels() {
     const ViewportState& st = model_.state();
     const bool grid = st.mode == ViewMode::Grid;
@@ -371,7 +379,7 @@ void MainWindow::updateCellLabels() {
         cellLabels_[i]->setVisible(grid ? (st.expandedCell < 0 || st.expandedCell == static_cast<int>(i)) : i == 0);
         if (grid) {
             cellLabels_[i]->setText(cellLabel(HumanSourceName(st.gridSources[i]), st.gridSources[i]));
-            cellLabels_[i]->setToolTip(QString::fromStdString(st.gridSources[i]));
+            cellLabels_[i]->setToolTip(withDecodeReason(QString::fromStdString(st.gridSources[i]), {st.gridSources[i]}));
         }
     }
     if (!grid) {
@@ -379,7 +387,7 @@ void MainWindow::updateCellLabels() {
             const LayerState* after = st.CompareSide(true);
             cellLabels_[0]->setText(tr("ДО: %1   |   ПОСЛЕ: %2").arg(cellLabel(HumanSourceName(before->source), before->source, false),
                                                                        cellLabel(HumanSourceName(after->source), after->source)));
-            cellLabels_[0]->setToolTip(QString::fromStdString(before->source + " | " + after->source));
+            cellLabels_[0]->setToolTip(withDecodeReason(QString::fromStdString(before->source + " | " + after->source), {before->source, after->source}));
         } else {
             QString t, tech;
             for (const auto& l : st.layers) {
@@ -387,7 +395,9 @@ void MainWindow::updateCellLabels() {
                 tech += (tech.isEmpty() ? "" : " + ") + QString::fromStdString(l.source);
             }
             cellLabels_[0]->setText(cellLabel(t, model_.baseSource()));
-            cellLabels_[0]->setToolTip(tech);
+            std::vector<std::string> names;
+            for (const auto& l : st.layers) names.push_back(l.source);
+            cellLabels_[0]->setToolTip(withDecodeReason(tech, names));
         }
     }
 }
@@ -407,11 +417,7 @@ QString MainWindow::cellLabel(const QString& title, const std::string& source, b
     switch (model_.frameStateOf(source)) {
         case FrameState::Loading:
         case FrameState::Stale: s += tr(" · загрузка…"); break;  // stale: the previous frame stays on screen meanwhile
-        case FrameState::Missing: {
-            const ViewportSource* src = model_.store().FindSource(source);
-            s += src && src->undecodable ? SourceDecodeShort() : tr(" · нет кадра");  // TASK-0076: AV1 without NVDEC AV1
-            break;
-        }
+        case FrameState::Missing: s += model_.store().Undecodable(source) ? SourceDecodeShort() : tr(" · нет кадра"); break;  // TASK-0076
         default: break;
     }
     return s;

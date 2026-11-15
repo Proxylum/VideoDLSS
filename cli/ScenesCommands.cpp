@@ -35,6 +35,7 @@ int CmdScenes(const ScenesCommands::Args& a) {
         Throw("scenes: " + all);
     }
     VideoDecoder decoder(a.input);
+    decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
     const auto& info = decoder.Info();
     ScenesStageOptions o;
     o.threshold = a.threshold;

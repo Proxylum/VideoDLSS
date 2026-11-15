@@ -130,6 +130,7 @@ std::filesystem::path BuildProxy(const std::filesystem::path& video, const std::
     };
 
     VideoDecoder dec(video);
+    dec.RequireDecodable();  // TASK-0076: before the part file
     const VideoStreamInfo info = dec.Info();
     if (info.frameRate.num <= 0 || info.frameRate.den <= 0) return fail("the stream has no frame rate");
     // indices from pts as the viewport sees them after a seek

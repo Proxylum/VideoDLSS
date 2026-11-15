@@ -171,6 +171,13 @@ void BuildMissingProxies(const Project& project, const std::vector<std::string>&
                 std::printf("%s: proxy up to date: %s\n", name.c_str(), valid->string().c_str());
                 continue;
             }
+        {  // TASK-0076: nothing here decodes it (AV1 without NVDEC AV1) - the other proxy and the render go on
+            VideoDecoder probe(video, VideoDecoder::Probe());
+            if (const DecodeSupport d = CheckDecodeSupport(probe.Info()); !d.Ok()) {
+                std::printf("%s: no proxy, the video cannot be decoded here: %s\n", name.c_str(), d.why.c_str());
+                continue;
+            }
+        }
         const ProxyPlan plan = PlanProxy(video);
         if (!plan.needed && !force) {
             std::printf("%s: no proxy needed (%s)\n", name.c_str(), plan.reason.c_str());
@@ -355,7 +362,7 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
     for (const auto& n : needed) any = any || store.StatusAt(st.time, n) == FrameStore::Status::Ready;
     if (!any) {
         for (const auto& n : needed)  // TASK-0076: a video this machine cannot decode says why
-            if (const ViewportSource* src = store.FindSource(n); src && src->undecodable) Throw("render: '" + n + "': " + src->undecodable->why);
+            if (const auto d = store.Undecodable(n)) Throw("render: '" + n + "': " + d->why);  // the probe's verdict or NVDEC refusing the first frame
         Throw("render: " + FormatTimecode(st.time) + " has none of the requested sources");
     }
     if (!a.output.empty()) {

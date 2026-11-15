@@ -116,7 +116,8 @@ bin\dlssvid.exe process -i clip.mp4 -o result.mp4     :: depth -> flow -> upscal
 ```
 
 Without an NVIDIA GPU the CLI and the viewport still work on the D3D12 software adapter (`--warp`) with the
-non-NVIDIA backends: NIS / bicubic upscale, the blend frame generator, the stub depth / NR backends.
+non-NVIDIA backends: NIS / bicubic upscale, the blend frame generator, the stub depth / NR backends — except for AV1
+videos, which only NVDEC decodes in this build (see «AV1 sources decode on the GPU» below).
 
 ## Requirements
 
@@ -287,10 +288,14 @@ build\release\bin\dlssvid process --passthrough -i input.mp4 -o output.mkv --cod
 an `av1_nvenc` result) is always decoded by NVDEC — in the viewport, the stages, `process` and the passthrough, whatever
 `--hwaccel` says. NVDEC decodes AV1 as 8 or 10-bit 4:2:0 on GPUs that have an AV1 decoder (for example, GeForce RTX 30 series
 and newer; the driver is asked, the series is only an example). `dlssvid info` prints how a file decodes (`decode:` line).
-A file this machine cannot decode is refused before anything runs, with the reason — the GUI says it instead of the plan
-and keeps «Обработать» off, the viewport cell reads «· не декодируется». The decoder is CUDA device 0, as FFmpeg's NVDEC
-takes it: on a PC with several GPUs it may not be the one the stages run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-av1`
-stands in for the driver's answer (tests, reproducing a support case).
+The driver is asked once (format, CUDA, NVDEC, AV1, frame size): a file it says this machine cannot decode is refused with the
+reason before the work starts — `process` before its stages, a single stage command before its model, the GUI instead of
+the plan with «Обработать» and the stage runs off, the viewport cell reads «· не декодируется» (its tooltip says why), no
+proxy is built. A driver that cannot be asked leaves it to the first frame, refused then with the same kind of message. A
+scrubbing proxy built earlier (on another PC) still shows such a source. The GUI's viewport decodes an AV1 video on NVDEC
+in its own process and lets that decoder go when a run is queued. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it:
+on a PC with several GPUs it may not be the one the stages run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame`
+stands in for the driver's answer (tests, reproducing a support case). The executables still need the NVIDIA driver to start.
 
 Paths may contain any letters: `dlssvid` and `dlssvid-gui` run with UTF-8 as their code page. The CLI prints UTF-8,
 so in a console with the OEM code page (866 on Russian Windows) Cyrillic in its output reads wrong; `chcp 65001` first.

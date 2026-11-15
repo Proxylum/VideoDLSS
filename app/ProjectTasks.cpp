@@ -19,6 +19,7 @@ ProjectTasks::ProjectTasks(AppModel& model, TaskQueue& tasks, QObject* parent) :
     // at the queueing, not at the start: a task waits in the queue while another project is opened
     connect(&tasks_, &TaskQueue::taskQueued, this, [this](int id) {
         model_.cancelCheck();  // TASK-0071: a check's NGX feature does not share the GPU with a run (nothing is stored of it)
+        model_.releaseNvdec();  // TASK-0076: nor the viewport's NVDEC decoders of an AV1 video (opened again by a later frame)
         const Project& p = model_.project();
         origins_[id] = {model_.generation(), p.passesRoot, QString::fromStdWString(p.sourceVideo.filename().wstring()), p.resultVideo};
     });

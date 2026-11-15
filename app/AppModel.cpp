@@ -469,6 +469,10 @@ void AppModel::releaseResult(const std::filesystem::path& file) {
 
 void AppModel::requestFrames() { store_->SetCurrentTime(state().time, neededSources()); }
 
+void AppModel::releaseNvdec() {
+    if (store_) store_->ReleaseNvdecDecoders();
+}
+
 void AppModel::startProxies() {
     if (!hasProject() || project_.passesRoot.empty() || !std::filesystem::exists(project_.sourceVideo)) return;
     if (!QSettings().value("view/autoProxy", true).toBool()) return;
@@ -478,7 +482,7 @@ void AppModel::startProxies() {
         const std::filesystem::path video = std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo;
         if (video.empty() || !std::filesystem::exists(video) || ValidProxy(video, project_.passesRoot, name)) continue;
         if (isReleased(video)) continue;  // being replaced (TASK-0070)
-        if (const ViewportSource* s = store_ ? store_->FindSource(name) : nullptr; s && s->undecodable) continue;  // TASK-0076: nothing to decode it with
+        if (store_ && store_->Undecodable(name)) continue;  // TASK-0076: nothing here decodes it
         names << name;
     }
     if (names.isEmpty()) return;
@@ -914,6 +918,7 @@ ProcessOptions AppModel::planOptions(bool withForce) {
 }
 
 void AppModel::refreshPlan() {
+    sourceDecode_ = {};  // TASK-0076: set again below for the source of this plan
     planTimer_.stop();
     plan_ = ProcessPlan{};
     planNoForce_.reset();
@@ -948,8 +953,9 @@ void AppModel::refreshPlan() {
         sourceInfo_.sarFrom = probe.Info().sarFrom;
         sourceInfo_.bitDepth = probe.Info().bitDepth;
         sourceInfo_.chroma = probe.Info().chroma;
-        if (const DecodeSupport s = CheckDecodeSupport(probe.Info()); !s.Ok()) {  // TASK-0076: AV1 without NVDEC AV1 - «Обработать» stays off
-            planError_ = SourceDecodeText(s);
+        sourceDecode_ = CheckDecodeSupport(probe.Info());
+        if (!sourceDecode_.Ok()) {  // TASK-0076: AV1 without NVDEC AV1 - «Обработать» and the stage runs stay off
+            planError_ = SourceDecodeText(sourceDecode_);
             emit planChanged();
             return;
         }
@@ -983,6 +989,7 @@ void AppModel::refreshPlan() {
         for (const auto& v : ListPassVersions(project_.passesRoot))
             if (!v.current) ++history_[v.pass];
     } catch (const DecodeUnavailable& e) {  // TASK-0076: in the GUI's words
+        sourceDecode_ = e.support;
         planError_ = SourceDecodeText(e.support);
     } catch (const std::exception& e) {
         planError_ = QString::fromUtf8(e.what());

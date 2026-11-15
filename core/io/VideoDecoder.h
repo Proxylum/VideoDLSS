@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -20,6 +21,8 @@ struct AVBufferRef;
 struct SwsContext;
 
 namespace dlssvid {
+
+struct DecodeSupport;
 
 struct Rational {
     int num = 0;
@@ -63,6 +66,7 @@ struct VideoStreamInfo {
     // TASK-0076: the decoder has no software path (this build's AV1, NvdecSupport.h): the frames come from NVDEC whatever
     // Options::hwaccel says, and CheckDecodeSupport says whether this GPU takes the stream
     bool hardwareOnly = false;
+    bool nvdecCodec = false;  // NVDEC decodes this codec at all (HasNvdecHwaccel): HwAccel::Cuda can take it
 };
 
 // Keyframes of a video stream from its packets (demux only, no decoding; TASK-0040): the longest run of frames from
@@ -159,8 +163,11 @@ public:
     // HwAccel::Cuda was asked and the device is up: NextFrame hands out GpuFrames (the on-device fast path). Fixed at the open: a
     // hardware-only decoder (TASK-0076) decoding on NVDEC without being asked does not turn it on - its consumers stay on host frames.
     bool UsingHwAccel() const { return gpuFrames_; }
-    // The frames come from NVDEC (asked for, or a hardware-only decoder past its first frame).
-    bool DecodesOnNvdec() const { return hwDevice_ != nullptr; }
+    // A frame came from NVDEC (asked for and the codec has it, or a hardware-only decoder past its first frame).
+    bool DecodesOnNvdec() const { return nvdecFrames_; }
+    // TASK-0076: refuses at once (DecodeUnavailable) a stream this machine cannot decode - a command calls it before its heavy preparation
+    // (hashing, a model, an NGX feature) instead of learning it on the first frame. A no-op for a decoder with a software path.
+    void RequireDecodable() const;
 
     using AudioPacketSink = std::function<void(AVPacket*)>;
     void SetAudioPacketSink(AudioPacketSink sink) { audioSink_ = std::move(sink); }
@@ -194,9 +201,9 @@ public:
 
 private:
     Rational IndexRate() const { return indexRate_.num > 0 && indexRate_.den > 0 ? indexRate_ : info_.frameRate; }
-    void OpenCodec();   // codec_ for the video stream: on hwDevice_ when there is one, else software threads
+    AVCodecContext* OpenCodec(AVBufferRef* device) const;  // a codec context for the video stream: on `device`, else software threads
     void StartNvdec();  // a hardware-only decoder before its first packet: check the GPU, create the device, reopen codec_ on it
-    void CheckDecode(int err, const char* what);  // CheckAv, with ENOSYS of a hardware-only decoder as the refusal it is
+    void CheckDecode(int err, const char* what);  // CheckAv, with ENOSYS of a hardware-only decoder as the refusal it is (kept: refused_)
     bool ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu);
     int64_t IndexFromPts(int64_t pts) const;
     bool DiscardFrames(int64_t upTo);  // decode and drop frames until nextIndex_ == upTo
@@ -210,6 +217,8 @@ private:
     bool hwOnly_ = false;        // TASK-0076: HardwareOnlyDecoder(decoder_)
     bool nvdecStarted_ = false;  // StartNvdec ran (the GPU checked, codec_ on the device)
     bool gpuFrames_ = false;     // UsingHwAccel()
+    bool nvdecFrames_ = false;   // DecodesOnNvdec()
+    std::shared_ptr<const DecodeSupport> refused_;  // NVDEC refused this stream: every later NextFrame says so again
     AVBufferRef* hwDevice_ = nullptr;
     AVFrame* frame_ = nullptr;
     AVFrame* swFrame_ = nullptr;

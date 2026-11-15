@@ -89,6 +89,12 @@ public:
     void SetSources(std::vector<ViewportSource> sources);
     const std::vector<ViewportSource>& Sources() const { return sources_; }
     const ViewportSource* FindSource(const std::string& name) const;
+    // TASK-0076: why the video `name` cannot be decoded here - the probe's verdict (ViewportSource::undecodable) or NVDEC refusing its
+    // first frame in a loader; nullopt: it decodes (or is no video)
+    std::optional<DecodeSupport> Undecodable(const std::string& name) const;
+    // TASK-0076: closes the videos' decoders that hold NVDEC (an AV1 source in the GUI process): a run gets that memory; a later frame of
+    // the viewport opens one again
+    void ReleaseNvdecDecoders();
     // Pass folders with a manifest directly under passesRoot, named by their folder (the texture kind comes from the manifest).
     static std::vector<ViewportSource> DiscoverPasses(const std::filesystem::path& passesRoot);
     // Previous versions under <pass>.v/ as sources named "<pass>@<id>" (stage 9: compare versions with the wipe).
@@ -230,6 +236,7 @@ private:
     D3D12Device& device_;
     Options options_;
     std::vector<ViewportSource> sources_;
+    std::map<std::string, DecodeSupport> refusedInLoad_;  // TASK-0076: NVDEC refused a video in a loader (under mutex_; SetSources forgets)
     std::map<std::string, std::unique_ptr<SourceRuntime>> runtimes_;
     uint32_t imageW_ = 0, imageH_ = 0;
     Rational fps_{0, 1};

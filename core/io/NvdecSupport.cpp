@@ -47,13 +47,17 @@ void LoaderLog(const char* format, ...) {
 }
 }  // namespace nvdec_detail
 
-bool HardwareOnlyDecoder(const AVCodec* codec) {
-    if (!codec || codec->id != AV_CODEC_ID_AV1 || std::string(codec->name) != "av1") return false;
+bool HasNvdecHwaccel(const AVCodec* codec) {
+    if (!codec) return false;
     for (int i = 0;; ++i) {
         const AVCodecHWConfig* c = avcodec_get_hw_config(codec, i);
         if (!c) return false;
         if (c->device_type == AV_HWDEVICE_TYPE_CUDA && (c->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) return true;
     }
+}
+
+bool HardwareOnlyDecoder(const AVCodec* codec) {
+    return codec && codec->id == AV_CODEC_ID_AV1 && std::string(codec->name) == "av1" && HasNvdecHwaccel(codec);
 }
 
 AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly) {
@@ -68,13 +72,21 @@ namespace {
 
 std::string Depth(int bitDepth) { return std::to_string(bitDepth) + "-bit"; }
 
+std::string Layout(const DecodeSupport& s) {  // «10-bit 4:4:4 (yuv444p10le)», «8-bit monochrome / other (gray)»
+    const std::string chroma = s.chroma == "420" ? "4:2:0" : s.chroma == "422" ? "4:2:2" : s.chroma == "444" ? "4:4:4" : "monochrome / other";
+    return Depth(s.bitDepth) + " " + chroma + " (" + s.pixelFormat + ")";
+}
+
 std::string RefusalText(const DecodeSupport& s) {
     const std::string codec = "AV1";
     switch (s.block) {
         case DecodeBlock::Layout:
-            return codec + " " + s.pixelFormat + " cannot be decoded here - this build has no software AV1 decoder and NVDEC decodes AV1 only as 8 or 10-bit 4:2:0";
+            return codec + " " + Layout(s) + " cannot be decoded here - this build has no software AV1 decoder and decodes AV1 on NVDEC only as 8 or 10-bit 4:2:0";
         case DecodeBlock::NoCuda:
             return codec + " decodes only on an NVIDIA GPU (NVDEC) in this build - there is no software AV1 decoder - and CUDA is unavailable: " + s.caps.why;
+        case DecodeBlock::NoNvdec:
+            return codec + " decodes only on NVDEC in this build - there is no software AV1 decoder - and the NVIDIA driver's video decoder is missing: " +
+                   s.caps.why;
         case DecodeBlock::NoAv1:
             return "the GPU '" + s.caps.gpu + "' has no NVDEC AV1 decoder for " + Depth(s.bitDepth) +
                    " 4:2:0 (for example, GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder" +
@@ -84,8 +96,7 @@ std::string RefusalText(const DecodeSupport& s) {
                    std::to_string(s.caps.minWidth) + "x" + std::to_string(s.caps.minHeight) + " to " + std::to_string(s.caps.maxWidth) + "x" +
                    std::to_string(s.caps.maxHeight) + ", at most " + std::to_string(s.caps.maxMacroblocks) + " macroblocks)";
         case DecodeBlock::NvdecFailed:
-            return "NVDEC did not start decoding this AV1 stream and this build has no software AV1 decoder (FFmpeg's reason is in its log)" +
-                   (s.caps.why.empty() ? std::string() : ": " + s.caps.why);
+            return "NVDEC refused this AV1 stream and this build has no software AV1 decoder" + (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::None: break;
     }
     return {};
@@ -98,22 +109,34 @@ DecodeSupport Refuse(DecodeSupport s, DecodeBlock block) {
     return s;
 }
 
-// DLSSVID_FAKE_NVDEC_AV1: the driver's answer stood in for (no-cuda | no-av1); nullopt: not set (or not understood - said once)
-std::optional<NvdecAv1Caps> FakeCaps() {
+std::string FakeValue() {
     const char* v = std::getenv("DLSSVID_FAKE_NVDEC_AV1");
-    if (!v || !*v) return std::nullopt;
+    return v ? std::string(v) : std::string();
+}
+
+// DLSSVID_FAKE_NVDEC_AV1: the driver's answer stood in for (no-cuda | no-nvdec | no-av1 | first-frame); nullopt: not set (or not
+// understood - said once)
+std::optional<NvdecAv1Caps> FakeCaps() {
+    const std::string value = FakeValue();
+    if (value.empty()) return std::nullopt;
     static std::once_flag said;
-    const std::string value = v;
     NvdecAv1Caps c;
     c.checked = true;
+    c.why = "DLSSVID_FAKE_NVDEC_AV1=" + value;
     if (value == "no-cuda") {
-        c.why = "DLSSVID_FAKE_NVDEC_AV1=no-cuda";
+    } else if (value == "no-nvdec") {
+        c.cuda = true;
+        c.nvdecMissing = true;
+        c.gpu = "DLSSVID_FAKE_NVDEC_AV1";
     } else if (value == "no-av1") {
         c.cuda = true;
         c.gpu = "DLSSVID_FAKE_NVDEC_AV1";
-        c.why = "DLSSVID_FAKE_NVDEC_AV1=no-av1";
+    } else if (value == "first-frame") {  // no answer: the stream goes on unchecked, and NVDEC refuses it on its first frame
+        c.checked = false;
+        c.cuda = true;
+        c.gpu = "DLSSVID_FAKE_NVDEC_AV1";
     } else {
-        std::call_once(said, [&] { Log()->warn("DLSSVID_FAKE_NVDEC_AV1='{}' is not no-cuda | no-av1: ignored", value); });
+        std::call_once(said, [&] { Log()->warn("DLSSVID_FAKE_NVDEC_AV1='{}' is not no-cuda | no-nvdec | no-av1 | first-frame: ignored", value); });
         return std::nullopt;
     }
     std::call_once(said, [&] { Log()->warn("DLSSVID_FAKE_NVDEC_AV1={}: NVDEC's AV1 answer is faked", value); });
@@ -165,6 +188,7 @@ NvdecAv1Caps QueryLive(int bitDepth) {
     if (cu->cuDeviceGetName(name, static_cast<int>(sizeof name) - 1, dev) == CUDA_SUCCESS) c.gpu = name;
     if (cuvid_load_functions(&cv, nullptr) < 0) {  // the driver has no video decoder library: NVDEC is not there
         c.checked = true;
+        c.nvdecMissing = true;
         c.why = "nvcuvid.dll could not be loaded";
         return c;
     }
@@ -205,8 +229,10 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
     DecodeSupport s;
     s.hardwareOnly = info.hardwareOnly;
     s.codec = info.codecName;
+    s.nvdecCodec = info.nvdecCodec;
     s.pixelFormat = info.pixelFormat;
     s.bitDepth = info.bitDepth;
+    s.chroma = info.chroma;
     s.width = info.codedWidth;
     s.height = info.codedHeight;
     if (caps) s.caps = *caps;
@@ -224,6 +250,7 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
         return s;
     }
     if (!caps->cuda) return Refuse(s, DecodeBlock::NoCuda);
+    if (caps->nvdecMissing) return Refuse(s, DecodeBlock::NoNvdec);
     if (!caps->supported) return Refuse(s, DecodeBlock::NoAv1);
     const uint64_t macroblocks = static_cast<uint64_t>((info.codedWidth + 15) / 16) * ((info.codedHeight + 15) / 16);
     if (info.codedWidth < caps->minWidth || info.codedHeight < caps->minHeight || info.codedWidth > caps->maxWidth || info.codedHeight > caps->maxHeight ||
@@ -260,8 +287,11 @@ DecodeSupport RefusedDecode(const VideoStreamInfo& info, DecodeBlock block, cons
     return Refuse(s, block);
 }
 
+bool FakeNvdecRefusesFrames() { return FakeValue() == "first-frame"; }
+
 std::string DescribeDecode(const DecodeSupport& s) {
-    if (!s.hardwareOnly) return s.why + ", NVDEC with --hwaccel cuda";
+    if (!s.hardwareOnly)
+        return s.why + (s.nvdecCodec ? "; NVDEC with --hwaccel cuda when the GPU decodes this layout" : "; NVDEC does not decode this codec");
     if (!s.Ok()) return "unavailable - " + s.why;
     return "NVDEC only (" + s.codec + ": no software AV1 decoder in this build): " + s.why;
 }

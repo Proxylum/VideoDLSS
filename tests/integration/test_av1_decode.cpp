@@ -6,12 +6,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "TestClips.h"
@@ -25,6 +27,7 @@
 #include "passes/formats/PngIO.h"
 #include "viewport/FrameStore.h"
 #include "viewport/Project.h"
+#include "viewport/ViewportProxy.h"
 #include "viewport/ViewportRenderer.h"
 
 using namespace dlssvid;
@@ -50,10 +53,12 @@ struct FakeNvdecEnv {
     ~FakeNvdecEnv() { _putenv_s("DLSSVID_FAKE_NVDEC_AV1", before ? before->c_str() : ""); }
 };
 
-bool HaveAv1Encoder() {
+bool HaveNvidia() {
     D3D12Device dev;
-    return !dev.IsWarp() && dev.IsNvidia() && VideoEncoder::EncoderAvailable("av1_nvenc");
+    return !dev.IsWarp() && dev.IsNvidia();
 }
+
+bool HaveAv1Encoder() { return HaveNvidia() && VideoEncoder::EncoderAvailable("av1_nvenc"); }
 
 constexpr uint32_t kW = 320, kH = 192;  // NVENC refuses tiny frames: the size the other GPU tests use
 
@@ -176,16 +181,18 @@ TEST_CASE("An AV1 clip decodes on NVDEC with the default options: no device befo
                 CHECK(LumaDiff(frames[i], static_cast<int64_t>(i) + 4) > own + 5.0);
             }
 
-            // --hwaccel cuda: the device at the open, GpuFrames for 8-bit NV12, the same host frames bit for bit
+            // --hwaccel cuda: the device at the open (DecodesOnNvdec only with a frame from it), GpuFrames for 8-bit NV12, the same host
+            // frames bit for bit
             VideoDecoder hw(clip, VideoDecoder::Options{HwAccel::Cuda});
             CHECK(hw.UsingHwAccel());
-            CHECK(hw.DecodesOnNvdec());
+            CHECK_FALSE(hw.DecodesOnNvdec());
             CpuFrame cpu;
             GpuFrame gpu;
             size_t n = 0;
             while (hw.NextFrame(cpu, &gpu, true)) {
                 REQUIRE(n < frames.size());
                 INFO("frame " << n);
+                CHECK(hw.DecodesOnNvdec());
                 CHECK(gpu.Valid() == !tenBit);  // P010 is not the NV12 fast path
                 CHECK(cpu.index == frames[n].index);
                 CHECK(cpu.desc == frames[n].desc);
@@ -193,8 +200,49 @@ TEST_CASE("An AV1 clip decodes on NVDEC with the default options: no device befo
                 ++n;
             }
             CHECK(n == frames.size());
+
+            // a GpuFrame asked for without --hwaccel cuda: none is handed out, the host frame is filled even when skipping it was asked
+            VideoDecoder unasked(clip);
+            n = 0;
+            while (unasked.NextFrame(cpu, &gpu, false)) {
+                REQUIRE(n < frames.size());
+                INFO("frame " << n << " without --hwaccel cuda");
+                CHECK_FALSE(gpu.Valid());
+                CHECK(gpu.y == 0);
+                CHECK(cpu.desc == frames[n].desc);
+                CHECK(cpu.data == frames[n].data);
+                ++n;
+            }
+            CHECK(n == frames.size());
+            CHECK(unasked.DecodesOnNvdec());
+            CHECK_FALSE(unasked.UsingHwAccel());
         }
     }
+}
+
+TEST_CASE("DecodesOnNvdec says where the frames came from: an FFV1 clip with --hwaccel cuda decodes in software", "[integration][gpu][av1]") {
+    if (!HaveNvidia()) SKIP("no NVIDIA GPU");  // a CUDA device for HwAccel::Cuda
+    ClipSpec spec;
+    spec.frames = 3;
+    spec.width = 48;
+    spec.height = 32;
+    const auto clip = WriteClip(Dir("ffv1_cuda") / "clip.mkv", spec);
+    VideoDecoder dec(clip, VideoDecoder::Options{HwAccel::Cuda});
+    CHECK_FALSE(dec.Info().hardwareOnly);
+    CHECK_FALSE(dec.Info().nvdecCodec);
+    if (!dec.UsingHwAccel()) SKIP("CUDA hwaccel not available");
+    CHECK_NOTHROW(dec.RequireDecodable());  // a software decoder: nothing to refuse
+    CpuFrame f;
+    GpuFrame gpu;
+    int n = 0;
+    while (dec.NextFrame(f, &gpu, true)) {
+        CHECK_FALSE(gpu.Valid());
+        CHECK(f.data == SyntheticFrame(n, 48, 32).data);
+        ++n;
+    }
+    CHECK(n == 3);
+    CHECK(dec.UsingHwAccel());        // asked for, the device is up
+    CHECK_FALSE(dec.DecodesOnNvdec());  // but FFV1 has no NVDEC: no frame came from it
 }
 
 TEST_CASE("AV1 on NVDEC seeks like a sequential decode: SeekToFrame both ways and before the first frame, SeekToKeyframeBefore",
@@ -397,7 +445,7 @@ TEST_CASE("dlssvid process --passthrough, render, upscale and info take an AV1 s
     plain.height = 32;
     const auto ffv1 = RunAll({"info", WriteClip(dir / "ffv1.mkv", plain).string()}, dir / "info_ffv1.log");
     CHECK(ffv1.code == 0);
-    CHECK_THAT(ffv1.out, ContainsSubstring("decode:      software (ffv1), NVDEC with --hwaccel cuda"));
+    CHECK_THAT(ffv1.out, ContainsSubstring("decode:      software (ffv1); NVDEC does not decode this codec"));
 }
 
 TEST_CASE("Without NVDEC AV1 every command refuses an AV1 source with the reason, before it writes anything (DLSSVID_FAKE_NVDEC_AV1)",
@@ -511,5 +559,339 @@ TEST_CASE("VideoDecoder and FrameStore::VideoSource refuse an AV1 stream NVDEC c
             CHECK(source->undecodable->block == expected);
             CHECK_THAT(source->undecodable->why, ContainsSubstring(std::string("DLSSVID_FAKE_NVDEC_AV1=") + fake));
         }
+    }
+}
+
+namespace {
+// NextFrame's DecodeUnavailable (FAIL when a frame comes or another error is thrown)
+std::optional<DecodeUnavailable> RefusalOfNextFrame(VideoDecoder& dec) {
+    CpuFrame f;
+    try {
+        if (dec.NextFrame(f)) FAIL("a frame was decoded: " << f.index);
+        else FAIL("the stream ended without a refusal");
+    } catch (const DecodeUnavailable& e) {
+        return e;
+    } catch (const std::exception& e) {
+        FAIL("another error than DecodeUnavailable: " << e.what());
+    }
+    return std::nullopt;
+}
+
+// A FrameStore of one video source on the WARP adapter, and what the viewport would show of frame `f`
+struct Av1Store {
+    D3D12Device dev{D3D12Device::Options{true, false}};
+    std::unique_ptr<FrameStore> store;
+    ViewportRenderer renderer{dev};
+    explicit Av1Store(int prefetch = 1) {
+        FrameStore::Options opt;
+        opt.prefetch = prefetch;
+        store = std::make_unique<FrameStore>(dev, opt);
+    }
+    // The frame's settled status: WaitForCurrent returns once it is resident or marked missing, and a frame a prefetch marked missing
+    // may be asked for again as the current one - its status is Loading meanwhile
+    FrameStore::Status Load(int64_t f) {
+        store->SetCurrentFrame(f, {"source"});
+        store->WaitForCurrent();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        FrameStore::Status st = store->GetStatus(f, "source");
+        while ((st == FrameStore::Status::Loading || st == FrameStore::Status::Queued) && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            store->Update();
+            st = store->GetStatus(f, "source");
+        }
+        return st;
+    }
+    // the frame's texels equal the colour conversion of `ref` (a decode on NVDEC)
+    void CheckTexels(int64_t f, const CpuFrame& ref, const ColorInfo& ci) {
+        const FrameTextures tex = store->Textures(f);
+        REQUIRE(tex.count("source") == 1);
+        const LayerTexture& t = tex.at("source");
+        const PassImage rgb = YuvToRgb(ref, ci, PixelType::F16);
+        for (auto [x, y] : {std::pair<uint32_t, uint32_t>{5, 7}, {200, 100}, {kW - 1, kH - 1}}) {
+            const auto v = renderer.ReadTexel(t, x, y);
+            CHECK(v[0] == rgb.Get(x, y, 0));
+            CHECK(v[1] == rgb.Get(x, y, 1));
+            CHECK(v[2] == rgb.Get(x, y, 2));
+        }
+    }
+};
+
+const std::string kNoAv1Reason = "the GPU 'DLSSVID_FAKE_NVDEC_AV1' has no NVDEC AV1 decoder for 8-bit 4:2:0";
+const std::string kFirstFrameReason = "NVDEC refused this AV1 stream and this build has no software AV1 decoder (on the first frame)";
+}  // namespace
+
+TEST_CASE("NVDEC refusing the first frame (DLSSVID_FAKE_NVDEC_AV1=first-frame) is a DecodeUnavailable the decoder keeps", "[integration][gpu][av1]") {
+    const auto dir = Dir("first_frame");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    std::optional<FakeNvdecEnv> fake;
+    fake.emplace("first-frame");
+    VideoDecoder dec(clip);
+    CHECK_NOTHROW(dec.RequireDecodable());  // the driver told nothing in advance: not refused before a frame
+    const auto first = RefusalOfNextFrame(dec);
+    REQUIRE(first);
+    CHECK(first->support.block == DecodeBlock::NvdecFailed);
+    CHECK(first->support.why == kFirstFrameReason);
+    CHECK(std::string(first->what()) == clip.string() + ": " + kFirstFrameReason);
+    CHECK_FALSE(dec.DecodesOnNvdec());
+    // the stand-in gone: what refuses now is the decoder's memory of the refusal - not FFmpeg's next error («Missing Sequence Header»)
+    fake.reset();
+    for (int i = 0; i < 3; ++i) {
+        INFO("NextFrame after the refusal, " << i);
+        const auto again = RefusalOfNextFrame(dec);
+        REQUIRE(again);
+        CHECK(again->support.block == DecodeBlock::NvdecFailed);
+        CHECK(std::string(again->what()) == std::string(first->what()));
+    }
+    try {
+        dec.RequireDecodable();
+        FAIL("RequireDecodable passed a decoder NVDEC refused");
+    } catch (const DecodeUnavailable& e) {
+        CHECK(e.support.block == DecodeBlock::NvdecFailed);
+        CHECK(std::string(e.what()) == std::string(first->what()));
+    }
+    // a new decoder of the same file decodes (nothing of the refusal is kept beyond its decoder)
+    VideoDecoder fresh(clip);
+    CpuFrame f;
+    REQUIRE(fresh.NextFrame(f));
+    CHECK(f.index == 0);
+}
+
+TEST_CASE("RequireDecodable refuses before any frame a stream NVDEC cannot decode; the refusal leaves the decoder usable", "[integration][gpu][av1]") {
+    const auto dir = Dir("require");
+    REQUIRE_AV1_CLIP(clip, dir, false, 8);
+    const std::vector<CpuFrame> ref = DecodeSequential(clip);
+    REQUIRE(ref.size() == 8);
+    VideoDecoder dec(clip);
+    CHECK_NOTHROW(dec.RequireDecodable());  // this GPU decodes it
+    {
+        FakeNvdecEnv fake("no-av1");
+        try {
+            dec.RequireDecodable();
+            FAIL("RequireDecodable passed without NVDEC AV1");
+        } catch (const DecodeUnavailable& e) {
+            CHECK(e.support.block == DecodeBlock::NoAv1);
+            CHECK_THAT(std::string(e.what()), ContainsSubstring(clip.string() + ": " + kNoAv1Reason));
+        }
+        CHECK_FALSE(dec.DecodesOnNvdec());
+        const auto refused = RefusalOfNextFrame(dec);  // the same at the first frame
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::NoAv1);
+        CHECK_FALSE(dec.DecodesOnNvdec());
+    }
+    // the GPU's answer again: the decoder the refusal left behind decodes from the first frame, as a new one would
+    CHECK_NOTHROW(dec.RequireDecodable());
+    CpuFrame f;
+    for (size_t i = 0; i < ref.size(); ++i) {
+        REQUIRE(dec.NextFrame(f));
+        CHECK(f.index == static_cast<int64_t>(i));
+        CHECK(f.data == ref[i].data);
+    }
+    CHECK(dec.DecodesOnNvdec());
+}
+
+TEST_CASE("FrameStore: NVDEC refusing a video in a loader marks it undecodable until the sources are set again", "[integration][viewport][gpu][av1]") {
+    const auto dir = Dir("store_first_frame");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    const std::vector<CpuFrame> ref = DecodeSequential(clip);
+    REQUIRE(ref.size() == 24);
+    const ColorInfo ci = ColorInfoFromStream(VideoDecoder(clip, VideoDecoder::Probe()).Info());
+    Av1Store s;
+    {
+        FakeNvdecEnv fake("first-frame");
+        const auto found = FrameStore::VideoSource("source", clip);
+        REQUIRE(found);
+        CHECK_FALSE(found->undecodable);  // the probe cannot tell: the driver said nothing in advance
+        s.store->SetSources({*found});
+        CHECK_FALSE(s.store->Undecodable("source"));
+        CHECK(s.Load(3) == FrameStore::Status::Missing);
+        const auto marked = s.store->Undecodable("source");
+        REQUIRE(marked);
+        CHECK(marked->block == DecodeBlock::NvdecFailed);
+        CHECK(marked->why == kFirstFrameReason);
+        // the later frames stay missing - no frame was decoded, none is
+        for (const int64_t f : {4, 15, 0}) {
+            INFO("frame " << f);
+            CHECK(s.Load(f) == FrameStore::Status::Missing);
+            CHECK(s.store->Undecodable("source"));
+        }
+        CHECK(s.store->Stats("source").decodedFrames == 0);
+        // set again (a reload): the refusal is forgotten, the next load asks NVDEC again - and is refused again
+        s.store->SetSources({*found});
+        CHECK_FALSE(s.store->Undecodable("source"));
+        CHECK(s.Load(5) == FrameStore::Status::Missing);
+        CHECK(s.store->Undecodable("source"));
+    }
+    // the stand-in gone and the sources set again: the frames show
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    CHECK_FALSE(s.store->Undecodable("source"));
+    REQUIRE(s.Load(7) == FrameStore::Status::Ready);
+    s.CheckTexels(7, ref[7], ci);
+}
+
+TEST_CASE("FrameStore shows a video this machine cannot decode through its proxy", "[integration][viewport][gpu][av1][proxy]") {
+    const auto dir = Dir("store_proxy");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    const std::vector<CpuFrame> ref = DecodeSequential(clip);
+    REQUIRE(ref.size() == 24);
+    const ColorInfo ci = ColorInfoFromStream(VideoDecoder(clip, VideoDecoder::Probe()).Info());
+    const auto passes = dir / "passes";
+    BuildProxy(clip, passes, "source");  // made here, where NVDEC decodes AV1 (the proxy is FFV1: software everywhere)
+    REQUIRE(ValidProxy(clip, passes, "source"));
+    {
+        FakeNvdecEnv fake("no-av1");
+        Av1Store s;
+        s.store->SetSources(Project::Create(clip, passes).Sources());
+        const ViewportSource* src = s.store->FindSource("source");
+        REQUIRE(src);
+        REQUIRE(src->undecodable);  // still undecodable here ...
+        CHECK(src->undecodable->block == DecodeBlock::NoAv1);
+        CHECK_FALSE(src->proxy.empty());
+        for (const int64_t f : {12, 3, 23, 4}) {  // ... and shown through the proxy, jumps and a step alike
+            INFO("frame " << f);
+            REQUIRE(s.Load(f) == FrameStore::Status::Ready);
+            s.CheckTexels(f, ref[static_cast<size_t>(f)], ci);
+        }
+        CHECK(s.store->Stats("source").proxyLoads > 0);
+        CHECK(s.store->Undecodable("source"));
+    }
+}
+
+TEST_CASE("FrameStore::ReleaseNvdecDecoders closes a video's decoder on NVDEC; the next frames open one again", "[integration][viewport][gpu][av1]") {
+    // a run queued in the GUI gets the memory the viewport's NVDEC decoders hold (AppModel::releaseNvdec)
+    const auto dir = Dir("store_release");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    const std::vector<CpuFrame> ref = DecodeSequential(clip);
+    REQUIRE(ref.size() == 24);
+    const ColorInfo ci = ColorInfoFromStream(VideoDecoder(clip, VideoDecoder::Probe()).Info());
+    Av1Store s(0);  // no prefetch: no load runs after the current frame's
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());  // no proxy: the original's decoder on NVDEC
+    REQUIRE(s.Load(2) == FrameStore::Status::Ready);
+    CHECK(s.store->Stats("source").decodedFrames > 0);
+    s.store->ReleaseNvdecDecoders();
+    CHECK(s.store->Stats("source").decodedFrames == 0);  // the stats count the decoders open: none is
+    for (const int64_t f : {3, 20}) {
+        INFO("frame " << f << " after the release");
+        REQUIRE(s.Load(f) == FrameStore::Status::Ready);
+        s.CheckTexels(f, ref[static_cast<size_t>(f)], ci);
+    }
+    CHECK(s.store->Stats("source").decodedFrames > 0);
+}
+
+TEST_CASE("BuildProxy refuses a video NVDEC cannot decode before it writes anything", "[integration][gpu][av1][proxy]") {
+    const auto dir = Dir("proxy_refused");
+    REQUIRE_AV1_CLIP(clip, dir, false, 8);
+    FakeNvdecEnv fake("no-av1");
+    const auto passes = dir / "passes";
+    try {
+        BuildProxy(clip, passes, "source");
+        FAIL("BuildProxy built a proxy without NVDEC AV1");
+    } catch (const DecodeUnavailable& e) {
+        CHECK(e.support.block == DecodeBlock::NoAv1);
+    }
+    CHECK_FALSE(ValidProxy(clip, passes, "source"));
+    CHECK_FALSE(std::filesystem::exists(ProxyFile(passes, "source")));
+    CHECK_FALSE(std::filesystem::exists(ProxyDir(passes) / "source.building.mkv"));
+}
+
+TEST_CASE("Without NVDEC AV1 the stage commands refuse an AV1 source at once: the reason, no GPU device, no pass written",
+          "[integration][cli][gpu][av1]") {
+    const auto dir = Dir("refused_commands");
+    REQUIRE_AV1_CLIP(clip, dir, false, 8);
+    // a scenes pass made where NVDEC decodes AV1: its scores would let scenes re-derive the cuts without decoding - the refusal comes
+    // first, the pass is not retired to its history
+    const auto scenesRoot = dir / "scenes_root";
+    REQUIRE(RunAll({"scenes", "-i", clip.string(), "-o", scenesRoot.string()}, dir / "scenes_first.log").code == 0);
+    REQUIRE(std::filesystem::exists(scenesRoot / "scenes"));
+    FakeNvdecEnv fake("no-av1");
+    const auto out = dir / "passes";
+    struct Command {
+        const char* name;
+        std::vector<std::string> args;
+        std::filesystem::path pass;  // what it would write
+    };
+    const std::string c = clip.string(), o = out.string();
+    const Command commands[] = {
+        {"depth", {"depth", "-i", c, "-o", o, "--backend", "stub"}, out / "depth_raw"},
+        {"flow", {"flow", "-i", c, "-o", o, "--backend", "stub"}, out / "mv_raw"},
+        {"scenes", {"scenes", "-i", c, "-o", o}, out / "scenes"},
+        {"fg", {"fg", "-i", c, "-o", o, "--backend", "blend"}, out / "color_fg"},
+        {"nr", {"nr", "--backend", "stub", "--warp", "-i", c, "-o", o}, out / "color_nr"},
+        {"upscale", {"upscale", "--backend", "bicubic", "--warp", "-i", c, "-o", o}, out / "color_sr"},
+        {"export", {"export", "-i", c, "-o", (dir / "exported").string()}, dir / "exported"},
+        {"compare", {"compare", "--ref", c, "--test", c, "-q", "--json", (dir / "compare.json").string()}, dir / "compare.json"},
+    };
+    for (const Command& cmd : commands) {
+        const auto r = RunAll(cmd.args, dir / (std::string(cmd.name) + ".log"));
+        INFO(cmd.name << ":\n" << r.out);
+        CHECK(r.code != 0);
+        CHECK_THAT(r.out, ContainsSubstring(c + ": " + kNoAv1Reason));
+        CHECK_THAT(r.out, !ContainsSubstring("D3D12 device"));  // refused before the GPU work, the model and the hash
+        CheckNoEnosys(r.out);
+        CHECK_FALSE(std::filesystem::exists(cmd.pass));
+        if (std::string(cmd.name) == "compare") {  // refused at its first video: the second is not opened
+            size_t opens = 0;
+            for (size_t at = r.out.find("] open "); at != std::string::npos; at = r.out.find("] open ", at + 1)) ++opens;
+            CHECK(opens == 1);
+        }
+    }
+    const auto sc = RunAll({"scenes", "-i", c, "-o", scenesRoot.string()}, dir / "scenes_again.log");
+    INFO("scenes over its earlier pass:\n" << sc.out);
+    CHECK(sc.code != 0);
+    CHECK_THAT(sc.out, ContainsSubstring(c + ": " + kNoAv1Reason));
+    CHECK(std::filesystem::exists(scenesRoot / "scenes"));
+    CHECK_FALSE(std::filesystem::exists(scenesRoot / "scenes.v"));
+}
+
+TEST_CASE("dlssvid proxy and render --proxy build skip a video this machine cannot decode, saying why", "[integration][cli][gpu][av1][proxy]") {
+    const auto dir = Dir("proxy_cli");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    FakeNvdecEnv fake("no-av1");
+    const auto passes = dir / "passes";
+    const std::string said = "source: no proxy, the video cannot be decoded here: " + kNoAv1Reason;
+    for (const bool force : {false, true}) {
+        std::vector<std::string> args{"proxy", "-i", clip.string(), "--passes", passes.string(), "--sources", "source"};
+        if (force) args.push_back("--force");
+        const auto r = RunAll(args, dir / (force ? "proxy_force.log" : "proxy.log"));
+        INFO((force ? "--force" : "") << "\n" << r.out);
+        CHECK(r.code == 0);  // the other videos and the render go on
+        CHECK_THAT(r.out, ContainsSubstring(said));
+        CHECK_FALSE(ValidProxy(clip, passes, "source"));
+        CHECK_FALSE(std::filesystem::exists(ProxyDir(passes) / "source.building.mkv"));
+    }
+    const auto png = dir / "frame.png";
+    const auto rd = RunAll({"render", "--warp", "-i", clip.string(), "--passes", passes.string(), "--proxy", "build", "--frame", "2", "-o", png.string()},
+                           dir / "render.log");
+    INFO(rd.out);
+    CHECK(rd.code != 0);
+    CHECK_THAT(rd.out, ContainsSubstring(said));
+    CHECK_THAT(rd.out, ContainsSubstring("render: 'source': " + kNoAv1Reason));
+    CHECK_FALSE(std::filesystem::exists(png));
+}
+
+TEST_CASE("NVDEC refusing the first frame: render and process say why, nothing is written", "[integration][cli][gpu][av1]") {
+    const auto dir = Dir("first_frame_cli");
+    REQUIRE_AV1_CLIP(clip, dir, false, 8);
+    FakeNvdecEnv fake("first-frame");
+    const auto png = dir / "frame.png";
+    const auto rd = RunAll({"render", "--warp", "-i", clip.string(), "--frame", "2", "-o", png.string()}, dir / "render.log");
+    {
+        INFO(rd.out);
+        CHECK(rd.code != 0);
+        CHECK_THAT(rd.out, ContainsSubstring("render: 'source': " + kFirstFrameReason));
+        CHECK_THAT(rd.out, !ContainsSubstring("has none of the requested sources"));
+        CHECK_THAT(rd.out, !ContainsSubstring("Function not implemented"));
+        CHECK_FALSE(std::filesystem::exists(png));
+    }
+    // process: the check before the run cannot tell (the driver said nothing) - the decoder's refusal on the first frame ends it, the
+    // partial result goes with it
+    const auto result = dir / "pt.mkv";
+    const auto pt = RunAll({"process", "-i", clip.string(), "-o", result.string(), "--passthrough", "--warp", "--codec", "ffv1"}, dir / "pt.log");
+    {
+        INFO(pt.out);
+        CHECK(pt.code != 0);
+        CHECK_THAT(pt.out, ContainsSubstring(clip.string() + ": " + kFirstFrameReason));
+        CHECK_THAT(pt.out, !ContainsSubstring("Function not implemented"));
+        CHECK_FALSE(std::filesystem::exists(result));
+        CHECK_FALSE(AnyPartFile(dir));
     }
 }

@@ -446,7 +446,7 @@ void ProjectPanel::refresh() {
     const int toRun = std::max(0, out.stagesToRun - 1);  // the encode is not a «stage» for the button
     process_->setText(toRun > 0 ? tr("Обработать · %1").arg(Plural(toRun, tr("стадия"), tr("стадии"), tr("стадий"))) : tr("Обработать · только кодирование"));
     // a preview does not hold processing back: «Обработать» preempts it (TaskQueue)
-    process_->setEnabled(hasSource && model_.planError().isEmpty() && model_.planBlocker().isEmpty() && !tasks_.mainBusy() && !model_.controlMaskBusy());
+    process_->setEnabled(hasSource && canProcess());
     if (hasSource && model_.planError().isEmpty() && !model_.planBlocker().isEmpty()) {  // a stage the run would refuse
         outError_->setText(model_.planBlocker());
         outError_->setVisible(true);
@@ -701,11 +701,16 @@ void ProjectPanel::updateGates() {
     for (StageCard* card : cards_) card->refreshBusy();
 }
 
+bool ProjectPanel::canProcess() const {
+    // PR-8: the mask's import (its plan would read the folder being renamed); PR-10: a run waiting for a preempted preview's process to exit;
+    // TASK-0076: a plan error (an AV1 source this machine cannot decode among them) holds Ctrl+Return as it holds the button
+    return model_.planError().isEmpty() && model_.planBlocker().isEmpty() && !tasks_.mainBusy() && !model_.controlMaskBusy();
+}
+
 void ProjectPanel::processAll() {
     Project& p = model_.project();
     if (p.sourceVideo.empty()) return;
-    if (model_.controlMaskBusy()) return;  // PR-8: Ctrl+Return too waits for the mask's import (its plan would read the folder being renamed)
-    if (tasks_.mainBusy()) return;         // PR-10: a second press while the run waits for a preempted preview's process to exit
+    if (!canProcess()) return;
     if (!model_.saveForRun()) return;
     std::vector<TaskQueue::StagePlan> plan;
     for (const StageEstimate& e : model_.outcome().stages) {
@@ -728,6 +733,7 @@ void ProjectPanel::runStage(const std::string& stage) {
     for (const auto& s : p.stages)
         if (s.name == stage) st = &s;
     if (!st || p.sourceVideo.empty()) return;
+    if (!model_.sourceDecode().Ok()) return;  // TASK-0076: the plan says why (the stage would refuse the source at once)
     QStringList args{QString::fromStdString(st->name), "-i", QString::fromStdWString(p.sourceVideo.wstring()), "-o", QString::fromStdWString(p.passesRoot.wstring())};
     // one mapping of the schema keys to the command's options, checked against every command (tests/integration/test_cli.cpp)
     for (const std::string& a : StageCliArgs(st->name, st->params)) args << QString::fromStdString(a);

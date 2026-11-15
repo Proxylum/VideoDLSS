@@ -49,6 +49,7 @@ private:
     void refreshVersions();
     void updateGates();  // PR-10: what waits for a preview, without the whole refresh (a preview starts and ends in seconds)
     void runStage(const std::string& stage);
+    bool canProcess() const;  // «Обработать» and Ctrl+Return: no plan error nor blocker, no run nor mask import in progress
     void processAll();  // save the project and run `dlssvid process --project` (the whole pipeline -> result)
     void patchDll();    // nr stage: dlssnr-patcher over the user's nvngx_dlssnr.dll (`dlssvid nr-patch`)
     void choosePassesRoot();  // «Пассы · изменить…»: another folder for the passes (tens of GB)

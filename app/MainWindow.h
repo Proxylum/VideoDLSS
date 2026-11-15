@@ -48,6 +48,7 @@ protected:
 
 private:
     void buildMenus();
+    QString withDecodeReason(const QString& tech, const std::vector<std::string>& sources);
     void updateCellLabels();
     QString cellLabel(const QString& title, const std::string& source, bool withTime = true);
     void saveScreenshot();

@@ -199,6 +199,17 @@ std::vector<ViewportSource> FrameStore::DiscoverPassVersions(const std::filesyst
     return out;
 }
 
+namespace {
+// TASK-0076: a video that cannot be decoded here is said once per process at warning level - the GUI sets its sources again on many
+// occasions (a preview, a mask, the result let go), each would say it again
+bool SaidOnce(const std::string& what) {
+    static std::mutex mutex;
+    static std::set<std::string> said;
+    std::lock_guard<std::mutex> lock(mutex);
+    return said.insert(what).second;
+}
+}  // namespace
+
 std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, const std::filesystem::path& file) {
     if (file.empty() || !std::filesystem::exists(file)) return std::nullopt;
     try {
@@ -222,7 +233,8 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.hasColor = true;
         if (info.hardwareOnly)  // TASK-0076: asked once here (the answer is cached), not by a decoder on every frame
             if (DecodeSupport d = CheckDecodeSupport(info); !d.Ok()) {
-                Log()->warn("video {} ('{}') cannot be decoded here: {}", file.string(), name, d.why);
+                Log()->log(SaidOnce(file.string()) ? spdlog::level::warn : spdlog::level::debug, "video {} ('{}') cannot be decoded here: {}",
+                           file.string(), name, d.why);
                 s.undecodable = std::move(d);
             }
         return s;
@@ -257,6 +269,7 @@ void FrameStore::SetSources(std::vector<ViewportSource> sources) {
     idleCv_.wait(lock, [&] { return inFlight_.empty(); });  // loaders may still use the old runtimes
     sources_ = std::move(sources);
     runtimes_.clear();
+    refusedInLoad_.clear();
     for (const auto& s : sources_) runtimes_[s.name] = std::make_unique<SourceRuntime>();
     loaded_.clear();
     kept_.clear();
@@ -297,6 +310,26 @@ void FrameStore::SetSources(std::vector<ViewportSource> sources) {
     }
     for (const auto& s : sources_)  // a static source has no length: one frame would not make the time line one frame long
         if (s.lastFrame >= 0 && !s.isStatic) duration_ = std::max(duration_, static_cast<double>(s.lastFrame + 1) / FpsOf(s.name));
+}
+
+std::optional<DecodeSupport> FrameStore::Undecodable(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& s : sources_)
+        if (s.name == name && s.undecodable) return s.undecodable;
+    if (const auto it = refusedInLoad_.find(name); it != refusedInLoad_.end()) return it->second;
+    return std::nullopt;
+}
+
+void FrameStore::ReleaseNvdecDecoders() {
+    std::vector<SourceRuntime*> runtimes;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto& [name, rt] : runtimes_) runtimes.push_back(rt.get());
+    }
+    for (SourceRuntime* rt : runtimes) {
+        std::lock_guard<std::mutex> guard(rt->mutex);  // waits for a load in flight on it
+        if (rt->decoder && rt->decoder->DecodesOnNvdec()) rt->decoder.reset();
+    }
 }
 
 const ViewportSource* FrameStore::FindSource(const std::string& name) const {
@@ -507,6 +540,16 @@ void FrameStore::LoaderMain() {
         LoadResult result;
         try {
             result = LoadOne(key);
+        } catch (const DecodeUnavailable& e) {  // TASK-0076: NVDEC refused the video - its later frames open no decoder
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                refusedInLoad_.emplace(key.source, e.support);
+            }
+            Log()->log(SaidOnce(e.what()) ? spdlog::level::warn : spdlog::level::debug, "'{}' cannot be decoded here: {}", key.source, e.what());
+            Loaded l;
+            l.key = key;
+            l.missing = true;
+            result.loaded.push_back(std::move(l));
         } catch (const std::exception& e) {
             Log()->warn("frame {} of '{}' failed to load: {}", key.frame, key.source, e.what());
             Loaded l;
@@ -595,6 +638,7 @@ FrameStore::LoadResult FrameStore::LoadOne(const Key& key) {
             return r;
         }
         src = *s;
+        if (const auto r = refusedInLoad_.find(key.source); r != refusedInLoad_.end() && !src.undecodable) src.undecodable = r->second;
         rt = it->second.get();
     }
     if (src.isVideo) return LoadVideo(key, src, *rt);
@@ -705,7 +749,8 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
             for (const auto& f : frames) fs.kept_.erase(Key{f.index, source});
         }
     } cleanup{*this, key.source, kept};
-    if (!src.HasFrame(key.frame) || src.undecodable) {  // TASK-0076: a stream that cannot be decoded here opens no decoder (said at VideoSource)
+    // TASK-0076: a stream that cannot be decoded here opens no decoder (said once); its proxy (software, lossless) still shows it
+    if (!src.HasFrame(key.frame) || (src.undecodable && src.proxy.empty())) {
         missing = true;
     } else {
         bool done = false;
@@ -713,7 +758,7 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
             // hybrid (TASK-0040): a step forward walks the original decoder that stands just before the target; a jump
             // decodes one frame of the intra proxy - on its own decoder, so it does not wait for a walk in progress
             std::unique_lock<std::mutex> guard(rt.mutex, std::try_to_lock);
-            if (guard.owns_lock() && rt.decoder && !rt.decoder->Drained() && rt.decoder->PositionKnown() && key.frame >= rt.decoder->NextIndex() &&
+            if (guard.owns_lock() && !src.undecodable && rt.decoder && !rt.decoder->Drained() && rt.decoder->PositionKnown() && key.frame >= rt.decoder->NextIndex() &&
                 key.frame - rt.decoder->NextIndex() <= kWalkLimit) {
                 openOriginal();
                 tDecoder = Clock::now();

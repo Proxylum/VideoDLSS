@@ -219,6 +219,7 @@ int CmdDepth(const DepthArgs& a) {
     if (!choice.family.empty())
         Log()->info("depth: model {} ({}), window {} / overlap {}", choice.modelId, choice.license, choice.window, choice.overlap);
     VideoDecoder decoder(a.input);
+    decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
     const auto& info = decoder.Info();
     DepthStageOptions o;
     o.backend = a.backend;
@@ -300,6 +301,7 @@ int CmdFlow(const FlowArgs& a) {
     if (a.hwaccel == "cuda") dopt.hwaccel = HwAccel::Cuda;
     else if (a.hwaccel != "none") Throw("--hwaccel must be none|cuda");
     VideoDecoder decoder(a.input, dopt);
+    decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
     const auto& info = decoder.Info();
     FlowStageOptions o;
     o.backend = a.backend;
@@ -427,6 +429,7 @@ int CmdExport(const ExportArgs& a) {
 
     if (!a.input.empty()) {
         decoder = std::make_unique<VideoDecoder>(a.input);
+        decoder->RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
         const auto& info = decoder->Info();
         ColorInfo ci = ColorInfoFromStream(info);
         if (a.matrix == "bt601") ci.matrix = ColorMatrix::Bt601;
