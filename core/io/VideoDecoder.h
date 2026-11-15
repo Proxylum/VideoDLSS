@@ -11,6 +11,7 @@
 #include "pipeline/Frame.h"
 
 struct AVFormatContext;
+struct AVCodec;
 struct AVCodecContext;
 struct AVFrame;
 struct AVPacket;
@@ -59,6 +60,9 @@ struct VideoStreamInfo {
     int colorTrc = 2;         // AVColorTransferCharacteristic (2 = unspecified)
     bool hasAudio = false;
     std::string audioCodecName;
+    // TASK-0076: the decoder has no software path (this build's AV1, NvdecSupport.h): the frames come from NVDEC whatever
+    // Options::hwaccel says, and CheckDecodeSupport says whether this GPU takes the stream
+    bool hardwareOnly = false;
 };
 
 // Keyframes of a video stream from its packets (demux only, no decoding; TASK-0040): the longest run of frames from
@@ -115,6 +119,11 @@ DisplayOrientation OrientationFromRotateTag(std::string_view tag, std::string* w
 // CUDA memory (primary context) and is exposed as a GpuFrame, and the CPU copy is made only when asked for (bit-exact
 // NV12 -> YUV420P). Audio packets are handed to the sink untouched for stream copy. A stream shown turned (a display matrix, the
 // 'rotate' tag: a phone video) is turned on the CPU after the copy (OrientFrame) and has no GpuFrame (TASK-0072).
+// A decoder without a software path (this build's AV1, TASK-0076, NvdecSupport.h) decodes on NVDEC whatever the options say: the
+// device is created on the first NextFrame (an open that only reads Info() never touches the GPU), and a stream this GPU cannot decode
+// is refused then with DecodeUnavailable, naming the reason. Its frames go to the host as with any NVDEC decode; a GpuFrame is handed
+// out only when HwAccel::Cuda asked for it (UsingHwAccel).
+
 // The container's global metadata (tags) of a media file, keys lower-cased (Matroska stores COMMENT): `comment`, `dlssvid_settings`
 // (PR-11). Throws when the file cannot be opened.
 std::map<std::string, std::string> ReadContainerTags(const std::filesystem::path& path);
@@ -147,7 +156,11 @@ public:
     bool HasAudio() const { return audioStream_ >= 0; }
     const AVCodecParameters* AudioCodecParameters() const;
     Rational AudioTimeBase() const;
-    bool UsingHwAccel() const { return hwDevice_ != nullptr; }
+    // HwAccel::Cuda was asked and the device is up: NextFrame hands out GpuFrames (the on-device fast path). Fixed at the open: a
+    // hardware-only decoder (TASK-0076) decoding on NVDEC without being asked does not turn it on - its consumers stay on host frames.
+    bool UsingHwAccel() const { return gpuFrames_; }
+    // The frames come from NVDEC (asked for, or a hardware-only decoder past its first frame).
+    bool DecodesOnNvdec() const { return hwDevice_ != nullptr; }
 
     using AudioPacketSink = std::function<void(AVPacket*)>;
     void SetAudioPacketSink(AudioPacketSink sink) { audioSink_ = std::move(sink); }
@@ -181,6 +194,9 @@ public:
 
 private:
     Rational IndexRate() const { return indexRate_.num > 0 && indexRate_.den > 0 ? indexRate_ : info_.frameRate; }
+    void OpenCodec();   // codec_ for the video stream: on hwDevice_ when there is one, else software threads
+    void StartNvdec();  // a hardware-only decoder before its first packet: check the GPU, create the device, reopen codec_ on it
+    void CheckDecode(int err, const char* what);  // CheckAv, with ENOSYS of a hardware-only decoder as the refusal it is
     bool ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu);
     int64_t IndexFromPts(int64_t pts) const;
     bool DiscardFrames(int64_t upTo);  // decode and drop frames until nextIndex_ == upTo
@@ -188,6 +204,12 @@ private:
 
     AVFormatContext* fmt_ = nullptr;
     AVCodecContext* codec_ = nullptr;
+    const AVCodec* decoder_ = nullptr;
+    std::string url_;
+    bool probe_ = false, sliceThreadsOnly_ = false;
+    bool hwOnly_ = false;        // TASK-0076: HardwareOnlyDecoder(decoder_)
+    bool nvdecStarted_ = false;  // StartNvdec ran (the GPU checked, codec_ on the device)
+    bool gpuFrames_ = false;     // UsingHwAccel()
     AVBufferRef* hwDevice_ = nullptr;
     AVFrame* frame_ = nullptr;
     AVFrame* swFrame_ = nullptr;

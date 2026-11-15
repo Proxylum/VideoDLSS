@@ -11,6 +11,7 @@
 #include "convert/YuvConvert.h"
 #include "gpu/D3D12Device.h"
 #include "io/EncodeDefaults.h"
+#include "io/NvdecSupport.h"
 #include "io/OutputFormat.h"
 #include "io/ResultFile.h"
 #include "io/VideoEncoder.h"
@@ -893,6 +894,8 @@ Prepared Prepare(const ProcessOptions& options) {
         VideoDecoder probe(options.input, VideoDecoder::Probe());
         r.info = probe.Info();
     }
+    // TASK-0076: a stream this machine cannot decode (AV1 without NVDEC AV1) is refused before a stage starts, with the reason
+    if (const DecodeSupport s = CheckDecodeSupport(r.info); !s.Ok()) throw DecodeUnavailable(s, "process: " + options.input.string() + ": " + s.why);
     // frame count of the source: containers without one (MKV) report 0 -> unknown (-1)
     r.sourceFrames = r.info.frameCount > 0 ? r.info.frameCount : -1;
     r.ctx.needed = options.frames > 0 ? (r.sourceFrames > 0 ? std::min<int64_t>(options.frames, r.sourceFrames) : options.frames) : r.sourceFrames;
@@ -1493,6 +1496,8 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         VideoDecoder probe(options.input, VideoDecoder::Probe());
         info = probe.Info();
     }
+    if (const DecodeSupport s = CheckDecodeSupport(info); !s.Ok())  // TASK-0076: before the part file and the stages (passthrough skips Prepare)
+        throw DecodeUnavailable(s, "process: " + options.input.string() + ": " + s.why);
     // frame count of the source: containers without one (MKV) report 0 -> unknown (-1)
     const int64_t sourceFrames = info.frameCount > 0 ? info.frameCount : -1;
     const int64_t needed = options.frames > 0 ? (sourceFrames > 0 ? std::min<int64_t>(options.frames, sourceFrames) : options.frames) : sourceFrames;

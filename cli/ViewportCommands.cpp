@@ -353,7 +353,11 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
     const PassImage img = renderAt(st.time);
     bool any = false;
     for (const auto& n : needed) any = any || store.StatusAt(st.time, n) == FrameStore::Status::Ready;
-    if (!any) Throw("render: " + FormatTimecode(st.time) + " has none of the requested sources");
+    if (!any) {
+        for (const auto& n : needed)  // TASK-0076: a video this machine cannot decode says why
+            if (const ViewportSource* src = store.FindSource(n); src && src->undecodable) Throw("render: '" + n + "': " + src->undecodable->why);
+        Throw("render: " + FormatTimecode(st.time) + " has none of the requested sources");
+    }
     if (!a.output.empty()) {
         std::filesystem::create_directories(std::filesystem::absolute(a.output).parent_path());
         WritePng(a.output, img);

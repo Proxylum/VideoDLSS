@@ -24,6 +24,8 @@ extern "C" {
 #include <cuda_runtime.h>
 #endif
 
+#include "io/NvdecFormat.h"
+#include "io/NvdecSupport.h"
 #include "util/Error.h"
 #include "util/Log.h"
 
@@ -31,12 +33,33 @@ namespace dlssvid {
 
 namespace {
 
-AVPixelFormat GetHwFormat(AVCodecContext*, const AVPixelFormat* formats) {
-    for (const AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p) {
-        if (*p == AV_PIX_FMT_CUDA) return *p;
+// AVCodecContext::opaque of a hardware-only decoder (TASK-0076): get_format must not fall back to a software format it does not have
+int kHardwareOnly = 1;
+
+AVPixelFormat GetHwFormat(AVCodecContext* ctx, const AVPixelFormat* formats) {
+    const bool hardwareOnly = ctx->opaque == &kHardwareOnly;
+    const AVPixelFormat f = PickNvdecFormat(formats, hardwareOnly);
+    if (f != AV_PIX_FMT_CUDA && !hardwareOnly) Log()->warn("NVDEC pixel format not offered by decoder, falling back to software");
+    return f;
+}
+
+AVBufferRef* CreateCudaDevice(std::string* why) {
+    // Primary CUDA context: device pointers are then usable from cudart, TensorRT and the
+    // Optical Flow API in this process without context juggling.
+#ifdef DLSSVID_WITH_CUDA
+    // FFmpeg retains the primary context and insists on CU_CTX_SCHED_BLOCKING_SYNC; a stage that used the CUDA
+    // runtime before this decoder (TensorRT depth, OFA) has already created it with the default scheduling, and
+    // FFmpeg then refuses NVDEC ("Primary context already active with incompatible flags") and the stage decodes
+    // in software. cudart applies the flags to the active primary context too: align them first.
+    if (const cudaError_t e = cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync); e != cudaSuccess)
+        Log()->debug("cudaSetDeviceFlags(BlockingSync) before NVDEC: {}", cudaGetErrorString(e));
+#endif
+    AVBufferRef* device = nullptr;
+    if (const int err = av_hwdevice_ctx_create(&device, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, AV_CUDA_USE_PRIMARY_CONTEXT); err < 0) {
+        if (why) *why = AvErrorToString(err);
+        return nullptr;
     }
-    Log()->warn("NVDEC pixel format not offered by decoder, falling back to software");
-    return formats[0];
+    return device;
 }
 
 // How a decoded AVFrame layout maps onto a CpuFrame without swscale: planar YUV at 8 / 10 / 12 / 16 bits and
@@ -263,7 +286,8 @@ FrameIndexScan ScanFrameIndex(const std::filesystem::path& path, int64_t upTo, R
 }
 
 VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& options) {
-    const std::string url = path.string();
+    url_ = path.string();
+    const std::string& url = url_;
     CheckAv(avformat_open_input(&fmt_, url.c_str(), nullptr, nullptr), "avformat_open_input");
     CheckAv(avformat_find_stream_info(fmt_, nullptr), "avformat_find_stream_info");
 
@@ -274,40 +298,19 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     if (audioStream_ < 0) audioStream_ = -1;
 
     AVStream* vs = fmt_->streams[videoStream_];
-    codec_ = avcodec_alloc_context3(decoder);
-    if (!codec_) Throw("avcodec_alloc_context3 failed");
-    CheckAv(avcodec_parameters_to_context(codec_, vs->codecpar), "avcodec_parameters_to_context");
-    codec_->pkt_timebase = vs->time_base;
-
+    decoder_ = decoder;
+    hwOnly_ = HardwareOnlyDecoder(decoder);
+    probe_ = options.probe;
+    sliceThreadsOnly_ = options.sliceThreadsOnly;
     if (options.hwaccel == HwAccel::Cuda) {
-        // Primary CUDA context: device pointers are then usable from cudart, TensorRT and the
-        // Optical Flow API in this process without context juggling.
-#ifdef DLSSVID_WITH_CUDA
-        // FFmpeg retains the primary context and insists on CU_CTX_SCHED_BLOCKING_SYNC; a stage that used the CUDA
-        // runtime before this decoder (TensorRT depth, OFA) has already created it with the default scheduling, and
-        // FFmpeg then refuses NVDEC ("Primary context already active with incompatible flags") and the stage decodes
-        // in software. cudart applies the flags to the active primary context too: align them first.
-        if (const cudaError_t e = cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync); e != cudaSuccess)
-            Log()->debug("cudaSetDeviceFlags(BlockingSync) before NVDEC: {}", cudaGetErrorString(e));
-#endif
-        const int err = av_hwdevice_ctx_create(&hwDevice_, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, AV_CUDA_USE_PRIMARY_CONTEXT);
-        if (err < 0) {
-            Log()->warn("CUDA hwaccel unavailable ({}), decoding in software", AvErrorToString(err));
-            hwDevice_ = nullptr;
-        } else {
-            codec_->hw_device_ctx = av_buffer_ref(hwDevice_);
-            codec_->get_format = GetHwFormat;
-        }
+        std::string why;
+        hwDevice_ = CreateCudaDevice(&why);
+        // a hardware-only decoder has no software to fall back to: StartNvdec tries again and refuses with the reason
+        if (!hwDevice_ && !hwOnly_) Log()->warn("CUDA hwaccel unavailable ({}), decoding in software", why);
     }
-
-    if (!hwDevice_) {
-        // software decoding: frame + slice threads, count chosen by libavcodec (viewport scrubbing at 1080p); an intra
-        // proxy: slice threads only (a seek then costs one decode)
-        codec_->thread_count = 0;
-        codec_->thread_type = options.sliceThreadsOnly ? FF_THREAD_SLICE : FF_THREAD_FRAME | FF_THREAD_SLICE;
-    }
+    gpuFrames_ = hwDevice_ != nullptr;
     indexRate_ = options.indexRate;
-    CheckAv(avcodec_open2(codec_, decoder, nullptr), "avcodec_open2");
+    OpenCodec();
 
     frame_ = av_frame_alloc();
     swFrame_ = av_frame_alloc();
@@ -381,10 +384,12 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
         const AVCodecDescriptor* d = avcodec_descriptor_get(fmt_->streams[audioStream_]->codecpar->codec_id);
         info_.audioCodecName = d ? d->name : "unknown";
     }
+    info_.hardwareOnly = hwOnly_;
 
     Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "open {}: {}x{} {} {} ({}) {}/{} fps, {} frames{}{}", url, info_.width, info_.height,
                info_.codecName, info_.pixelFormat, info_.decoded.Describe(), fr.num, fr.den, info_.frameCount,
-               info_.hasAudio ? ", audio " + info_.audioCodecName : "", hwDevice_ ? ", NVDEC" : "");
+               info_.hasAudio ? ", audio " + info_.audioCodecName : "",
+               hwDevice_ ? ", NVDEC" : hwOnly_ ? ", NVDEC only (no software decoder)" : "");
     if (!info_.orientation.Identity())
         Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info, "open {}: stored {}x{}, shown {} ({}): the frames are turned so", url,
                    info_.codedWidth, info_.codedHeight, info_.orientation.Describe(), info_.orientationFrom);
@@ -406,6 +411,54 @@ VideoDecoder::~VideoDecoder() {
     avformat_close_input(&fmt_);
 }
 
+void VideoDecoder::OpenCodec() {
+    AVStream* vs = fmt_->streams[videoStream_];
+    codec_ = avcodec_alloc_context3(decoder_);
+    if (!codec_) Throw("avcodec_alloc_context3 failed");
+    CheckAv(avcodec_parameters_to_context(codec_, vs->codecpar), "avcodec_parameters_to_context");
+    codec_->pkt_timebase = vs->time_base;
+    codec_->opaque = hwOnly_ ? &kHardwareOnly : nullptr;
+    if (hwDevice_) {
+        codec_->hw_device_ctx = av_buffer_ref(hwDevice_);
+        codec_->get_format = GetHwFormat;
+    } else {
+        // software decoding: frame + slice threads, count chosen by libavcodec (viewport scrubbing at 1080p); an intra
+        // proxy: slice threads only (a seek then costs one decode)
+        codec_->thread_count = 0;
+        codec_->thread_type = sliceThreadsOnly_ ? FF_THREAD_SLICE : FF_THREAD_FRAME | FF_THREAD_SLICE;
+    }
+    CheckAv(avcodec_open2(codec_, decoder_, nullptr), "avcodec_open2");
+}
+
+void VideoDecoder::StartNvdec() {
+    // TASK-0076: before the first packet only (NextFrame is the one place packets are sent; a seek before it only flushed codec_ and
+    // moved the demuxer, which stays where it is)
+    const DecodeSupport support = CheckDecodeSupport(info_);
+    if (!support.Ok()) throw DecodeUnavailable(support, url_ + ": " + support.why);
+    if (!hwDevice_) {
+        std::string why;
+        hwDevice_ = CreateCudaDevice(&why);
+        if (!hwDevice_) {
+            const DecodeSupport s = RefusedDecode(info_, DecodeBlock::NoCuda, "the CUDA device could not be created: " + why);
+            throw DecodeUnavailable(s, url_ + ": " + s.why);
+        }
+        avcodec_free_context(&codec_);
+        OpenCodec();
+    }
+    nvdecStarted_ = true;
+    Log()->log(probe_ ? spdlog::level::debug : spdlog::level::info, "{}: {} has no software decoder in this build, decoding on {}", url_, info_.codecName,
+               support.why);
+}
+
+void VideoDecoder::CheckDecode(int err, const char* what) {
+    if (err >= 0) return;
+    if (hwOnly_ && err == AVERROR(ENOSYS)) {  // av1dec without a working hwaccel: every frame header would fail the same way
+        const DecodeSupport s = RefusedDecode(info_, DecodeBlock::NvdecFailed, "");
+        throw DecodeUnavailable(s, url_ + ": " + s.why);
+    }
+    CheckAv(err, what);
+}
+
 const AVCodecParameters* VideoDecoder::AudioCodecParameters() const {
     return audioStream_ >= 0 ? fmt_->streams[audioStream_]->codecpar : nullptr;
 }
@@ -418,6 +471,7 @@ Rational VideoDecoder::AudioTimeBase() const {
 
 bool VideoDecoder::NextFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     if (gpu) *gpu = GpuFrame{};
+    if (hwOnly_ && !nvdecStarted_) StartNvdec();  // TASK-0076: first, before a packet reaches codec_
     if (drained_) return false;
     for (;;) {
         if (ReceiveFrame(out, gpu, cpu)) return true;
@@ -429,13 +483,15 @@ bool VideoDecoder::NextFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         // Feed the next video packet; route audio packets to the sink.
         const int err = av_read_frame(fmt_, packet_);
         if (err == AVERROR_EOF) {
-            CheckAv(avcodec_send_packet(codec_, nullptr), "avcodec_send_packet(flush)");
+            CheckDecode(avcodec_send_packet(codec_, nullptr), "avcodec_send_packet(flush)");
             eofSent_ = true;
             continue;
         }
         CheckAv(err, "av_read_frame");
         if (packet_->stream_index == videoStream_) {
-            CheckAv(avcodec_send_packet(codec_, packet_), "avcodec_send_packet");
+            const int sent = avcodec_send_packet(codec_, packet_);
+            if (sent < 0) av_packet_unref(packet_);
+            CheckDecode(sent, "avcodec_send_packet");
         } else if (packet_->stream_index == audioStream_ && audioSink_) {
             audioSink_(packet_);
         }
@@ -450,7 +506,7 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         drained_ = true;
         return false;
     }
-    CheckAv(err, "avcodec_receive_frame");
+    CheckDecode(err, "avcodec_receive_frame");
 
     const int64_t pts = frame_->best_effort_timestamp != AV_NOPTS_VALUE ? frame_->best_effort_timestamp : frame_->pts;
     int64_t index = nextIndex_;

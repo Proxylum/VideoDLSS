@@ -25,6 +25,7 @@
 #include <cmath>
 
 #include "CompareBar.h"
+#include "DecodeText.h"
 #include "InspectorPanel.h"
 #include "LogPanel.h"
 #include "PreviewRunner.h"
@@ -406,7 +407,11 @@ QString MainWindow::cellLabel(const QString& title, const std::string& source, b
     switch (model_.frameStateOf(source)) {
         case FrameState::Loading:
         case FrameState::Stale: s += tr(" · загрузка…"); break;  // stale: the previous frame stays on screen meanwhile
-        case FrameState::Missing: s += tr(" · нет кадра"); break;
+        case FrameState::Missing: {
+            const ViewportSource* src = model_.store().FindSource(source);
+            s += src && src->undecodable ? SourceDecodeShort() : tr(" · нет кадра");  // TASK-0076: AV1 without NVDEC AV1
+            break;
+        }
         default: break;
     }
     return s;

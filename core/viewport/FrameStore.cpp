@@ -220,6 +220,11 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.sar = info.sar;
         s.color = ColorInfoFromStream(info);
         s.hasColor = true;
+        if (info.hardwareOnly)  // TASK-0076: asked once here (the answer is cached), not by a decoder on every frame
+            if (DecodeSupport d = CheckDecodeSupport(info); !d.Ok()) {
+                Log()->warn("video {} ('{}') cannot be decoded here: {}", file.string(), name, d.why);
+                s.undecodable = std::move(d);
+            }
         return s;
     } catch (const std::exception& e) {
         Log()->warn("video {} not usable as source '{}': {}", file.string(), name, e.what());
@@ -700,7 +705,7 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
             for (const auto& f : frames) fs.kept_.erase(Key{f.index, source});
         }
     } cleanup{*this, key.source, kept};
-    if (!src.HasFrame(key.frame)) {
+    if (!src.HasFrame(key.frame) || src.undecodable) {  // TASK-0076: a stream that cannot be decoded here opens no decoder (said at VideoSource)
         missing = true;
     } else {
         bool done = false;

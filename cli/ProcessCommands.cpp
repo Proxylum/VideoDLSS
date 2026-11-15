@@ -442,7 +442,7 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_option("--bit-depth,--bit_depth", pa_.bitDepth,
                          "result bit depth: auto | 8 | 10 | 12 (auto: the source's within the codec — 10-bit HEVC / AV1 / ProRes / FFV1, 8-bit H.264)");
     process_->add_option("--chroma", pa_.chroma, "result chroma subsampling: auto | 420 | 422 | 444 (auto: 4:2:0 for NVENC, 4:2:2 for ProRes, the source's for FFV1)");
-    process_->add_option("--hwaccel", pa_.hwaccel, "source decode for the encode / passthrough step: none | cuda")->default_val("none");
+    process_->add_option("--hwaccel", pa_.hwaccel, "source decode for the encode / passthrough step: none | cuda (AV1 always decodes on NVDEC: this build has no software AV1 decoder)")->default_val("none");
     process_->add_option("--frames", pa_.frames, "process at most N source frames")->default_val(-1);
     process_->add_flag("--warp", pa_.warp, "use the WARP software adapter");
     process_->add_flag("--passthrough", pa_.passthrough, "decode -> GPU -> encode without processing (stage 0)");

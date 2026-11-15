@@ -14,6 +14,7 @@
 #include <optional>
 
 #include "ControlMaskText.h"
+#include "DecodeText.h"
 #include "ParamText.h"
 #include "PresetStore.h"
 #include "SourceNames.h"
@@ -477,6 +478,7 @@ void AppModel::startProxies() {
         const std::filesystem::path video = std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo;
         if (video.empty() || !std::filesystem::exists(video) || ValidProxy(video, project_.passesRoot, name)) continue;
         if (isReleased(video)) continue;  // being replaced (TASK-0070)
+        if (const ViewportSource* s = store_ ? store_->FindSource(name) : nullptr; s && s->undecodable) continue;  // TASK-0076: nothing to decode it with
         names << name;
     }
     if (names.isEmpty()) return;
@@ -946,6 +948,11 @@ void AppModel::refreshPlan() {
         sourceInfo_.sarFrom = probe.Info().sarFrom;
         sourceInfo_.bitDepth = probe.Info().bitDepth;
         sourceInfo_.chroma = probe.Info().chroma;
+        if (const DecodeSupport s = CheckDecodeSupport(probe.Info()); !s.Ok()) {  // TASK-0076: AV1 without NVDEC AV1 - «Обработать» stays off
+            planError_ = SourceDecodeText(s);
+            emit planChanged();
+            return;
+        }
         const ProcessOptions o = planOptions(true);
         plan_ = PlanProcess(o);
         // PR-10: the preview reads the stages above NR as they are - a «пересчитать» mark there would make them «run» for it
@@ -975,6 +982,8 @@ void AppModel::refreshPlan() {
         outcome_.format.height = outcome_.height;
         for (const auto& v : ListPassVersions(project_.passesRoot))
             if (!v.current) ++history_[v.pass];
+    } catch (const DecodeUnavailable& e) {  // TASK-0076: in the GUI's words
+        planError_ = SourceDecodeText(e.support);
     } catch (const std::exception& e) {
         planError_ = QString::fromUtf8(e.what());
     }

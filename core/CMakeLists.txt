@@ -83,6 +83,7 @@ add_library(dlssvid_core STATIC
   gpu/D3D12Device.h gpu/D3D12Device.cpp
   gpu/GpuFrameCache.h gpu/GpuFrameCache.cpp
   io/VideoDecoder.h io/VideoDecoder.cpp
+  io/NvdecSupport.h io/NvdecSupport.cpp io/NvdecFormat.h
   io/VideoEncoder.h io/VideoEncoder.cpp
   io/EncodeDefaults.h io/EncodeDefaults.cpp
   io/OutputFormat.h io/OutputFormat.cpp

@@ -18,6 +18,7 @@
 
 #include "convert/ColorConvert.h"
 #include "gpu/D3D12Device.h"
+#include "io/NvdecSupport.h"
 #include "io/VideoDecoder.h"
 #include "passes/Manifest.h"
 #include "passes/PassImage.h"
@@ -52,6 +53,8 @@ struct ViewportSource {
     std::shared_ptr<const Manifest> manifest;
     // A static pass (PR-8: mask_control, Manifest::IsStatic): its one frame stands at every time - no duration of its own
     bool isStatic = false;
+    // Videos (TASK-0076): a stream this machine cannot decode (AV1 without NVDEC AV1) and why; its frames are missing, no decoder opens
+    std::optional<DecodeSupport> undecodable;
     bool HasFrame(int64_t f) const { return f >= firstFrame && (lastFrame < 0 || f <= lastFrame); }
 };
 

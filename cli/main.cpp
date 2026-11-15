@@ -20,6 +20,7 @@
 #include "convert/DepthConvert.h"
 #include "convert/MvConvert.h"
 #include "gpu/D3D12Device.h"
+#include "io/NvdecSupport.h"
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
@@ -142,6 +143,7 @@ int CmdInfo(const std::string& input, bool warp) {
     std::printf("video:       %s %ux%u %s (%s, %s range)\n", i.codecName.c_str(), i.width, i.height, i.pixelFormat.c_str(),
                 std::string(ToString(ci.matrix)).c_str(), std::string(ToString(ci.range)).c_str());
     std::printf("samples:     %d-bit %s, decoded as %s (%s)\n", i.bitDepth, i.chroma.c_str(), i.decoded.Name().c_str(), i.decoded.Describe().c_str());
+    std::printf("decode:      %s\n", DescribeDecode(CheckDecodeSupport(i)).c_str());  // TASK-0076: software, or NVDEC only (AV1) and whether it takes it
     if (!i.orientation.Identity())  // TASK-0072: the frames are turned as players show them
         std::printf("orientation: %s (%s), stored %ux%u\n", i.orientation.Describe().c_str(), i.orientationFrom.c_str(), i.codedWidth, i.codedHeight);
     if (!i.sar.Square()) {  // TASK-0073: non-square pixels - the result of process is stretched to square ones
@@ -876,7 +878,7 @@ int main(int argc, char** argv) {
     flow->add_option("-o,--output", fa.output, "pass root folder (writes mv_raw/ and mv_dlss/)")->required();
     flow->add_option("--backend", fa.backend, "ofa | searaft | stub")->default_val("ofa");
     flow->add_option("--model", fa.model, "registry model id (searaft)");
-    flow->add_option("--hwaccel", fa.hwaccel, "decoder: cuda (NVDEC frames feed OFA directly) | none")->default_val("cuda");
+    flow->add_option("--hwaccel", fa.hwaccel, "decoder: cuda (NVDEC frames feed OFA directly) | none (AV1 always decodes on NVDEC: this build has no software AV1 decoder)")->default_val("cuda");
     flow->add_option("--max-res,--max_res", fa.maxRes, "searaft: model input cap on the shorter side")->default_val(720);
     flow->add_flag("--fp32", fa.fp32, "searaft: fp32 engine");
     flow->add_option("--frames", fa.frames, "process at most N frames")->default_val(-1);
