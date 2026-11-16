@@ -117,8 +117,8 @@ std::optional<NativeLayout> NativeLayoutFor(AVPixelFormat fmt, int streamDepth) 
     return NativeLayout{FrameDesc{0, 0, PixelFormatFor(chroma, bitDepth), static_cast<uint8_t>(bitDepth)}, shiftRight, semi};
 }
 
-// TASK-0076: the payload of the (last) sequence header OBU in `data` - AV1's low-overhead format, as MP4 / MKV / WebM / IVF carry it, or
-// an av1C record (its configOBUs after the 4-byte header). Empty: none, or the data does not read as OBUs
+}  // namespace
+
 std::string_view Av1SequenceHeader(const uint8_t* data, size_t size) {
     if (!data) return {};
     if (size >= 4 && data[0] == 0x81) {  // av1C: marker 1, version 1 (an OBU header's top bit is 0)
@@ -155,6 +155,115 @@ std::string_view Av1SequenceHeader(const uint8_t* data, size_t size) {
     }
     return found;
 }
+
+std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view header) {
+    size_t bit = 0;
+    bool ok = true;
+    const auto f = [&](int n) -> uint32_t {  // f(n) of the AV1 specification, most significant bit first
+        uint32_t v = 0;
+        for (int i = 0; i < n; ++i) {
+            if (bit >= header.size() * 8) {
+                ok = false;
+                return 0;
+            }
+            v = (v << 1) | ((static_cast<uint8_t>(header[bit / 8]) >> (7 - bit % 8)) & 1u);
+            ++bit;
+        }
+        return v;
+    };
+    const auto uvlc = [&] {
+        int zeros = 0;
+        while (ok && !f(1))
+            if (++zeros >= 32) ok = false;
+        if (ok && zeros) f(zeros);
+    };
+    Av1SequenceKey k;
+    k.profile = f(3);
+    f(1);  // still_picture
+    const bool reduced = f(1);
+    bool decoderModel = false, initialDisplay = false;
+    int bufferDelayLength = 0;
+    if (reduced) {
+        f(5);  // seq_level_idx[0]
+    } else {
+        if (f(1)) {  // timing_info_present_flag
+            f(32);
+            f(32);
+            if (f(1)) uvlc();  // equal_picture_interval: num_ticks_per_picture_minus_1
+            decoderModel = f(1);
+            if (decoderModel) {
+                bufferDelayLength = static_cast<int>(f(5)) + 1;
+                f(32);
+                f(5);
+                f(5);
+            }
+        }
+        initialDisplay = f(1);
+        const uint32_t points = f(5) + 1;
+        for (uint32_t i = 0; ok && i < points; ++i) {
+            f(12);                 // operating_point_idc
+            if (f(5) > 7) f(1);    // seq_level_idx, seq_tier
+            if (decoderModel && f(1)) {  // operating_parameters_info - the part a repeat may change
+                f(bufferDelayLength);
+                f(bufferDelayLength);
+                f(1);
+            }
+            if (initialDisplay && f(1)) f(4);
+        }
+    }
+    const int widthBits = static_cast<int>(f(4)) + 1, heightBits = static_cast<int>(f(4)) + 1;
+    k.maxWidth = f(widthBits) + 1;
+    k.maxHeight = f(heightBits) + 1;
+    if (!reduced && f(1)) {  // frame_id_numbers_present_flag
+        f(4);
+        f(3);
+    }
+    f(1);  // use_128x128_superblock
+    f(1);  // enable_filter_intra
+    f(1);  // enable_intra_edge_filter
+    if (!reduced) {
+        f(4);  // enable_interintra_compound, enable_masked_compound, enable_warped_motion, enable_dual_filter
+        const bool orderHint = f(1);
+        if (orderHint) f(2);  // enable_jnt_comp, enable_ref_frame_mvs
+        const uint32_t screenContent = f(1) ? 2 : f(1);  // seq_choose_screen_content_tools, else seq_force_screen_content_tools
+        if (screenContent > 0 && !f(1)) f(1);            // seq_choose_integer_mv, else seq_force_integer_mv
+        if (orderHint) f(3);                              // order_hint_bits_minus_1
+    }
+    f(3);  // enable_superres, enable_cdef, enable_restoration
+    // color_config
+    const bool high = f(1);
+    k.bitDepth = k.profile == 2 && high ? (f(1) ? 12 : 10) : high ? 10 : 8;
+    k.mono = k.profile == 1 ? false : f(1);
+    uint32_t primaries = 2, transfer = 2, matrix = 2;
+    if (f(1)) {  // color_description_present_flag
+        primaries = f(8);
+        transfer = f(8);
+        matrix = f(8);
+    }
+    if (k.mono) {
+        k.subsamplingX = k.subsamplingY = 1;
+    } else if (primaries == 1 && transfer == 13 && matrix == 0) {  // CP_BT_709, TC_SRGB, MC_IDENTITY
+        k.rgb = true;
+        k.subsamplingX = k.subsamplingY = 0;
+    } else {
+        f(1);  // color_range
+        if (k.profile == 0) {
+            k.subsamplingX = k.subsamplingY = 1;
+        } else if (k.profile == 1) {
+            k.subsamplingX = k.subsamplingY = 0;
+        } else if (k.bitDepth == 12) {
+            k.subsamplingX = f(1);
+            k.subsamplingY = k.subsamplingX ? f(1) : 0;
+        } else {
+            k.subsamplingX = 1;
+            k.subsamplingY = 0;
+        }
+    }
+    if (!ok) return std::nullopt;
+    return k;
+}
+
+namespace {
 
 // "420" | "422" | "444" | "other" (RGB, grey) - the VideoStreamInfo::chroma of a pixel format
 std::string ChromaOf(const AVPixFmtDescriptor* d) {
@@ -208,7 +317,7 @@ std::optional<StreamPart> StreamPartOf(const std::string& why) {
     }
     if (learnedAt != std::string::npos) {
         const size_t in = why.rfind(", in ", learnedAt);
-        if (in == std::string::npos) return std::nullopt;
+        if (in == std::string::npos || learnedAt < in + 5) return std::nullopt;
         StreamPart part;
         part.learned = true;
         part.pixelFormat = why.substr(in + 5, learnedAt - in - 5);
@@ -587,7 +696,12 @@ void VideoDecoder::StartNvdec() {
 void VideoDecoder::FollowSequenceHeader() {
     const std::string_view sequence = Av1SequenceHeader(packet_->data, static_cast<size_t>(std::max(packet_->size, 0)));
     if (sequence.empty()) return;
-    if (!nvdecSequence_.empty() && sequence != nvdecSequence_ && hwDevice_) {
+    // the same key (size, depth, chroma): the decoder NVDEC made goes on - av1dec gives it the new header's fields frame by frame, as it
+    // does without this (a repeat that differs in operating_parameters_info only, within one coded video sequence: a new decoder there
+    // would lose the reference frames). A header that does not parse: by its bytes
+    const auto now = Av1SequenceKeyOf(sequence), before = Av1SequenceKeyOf(nvdecSequence_);
+    const bool other = now && before ? !(*now == *before) : sequence != nvdecSequence_;
+    if (!nvdecSequence_.empty() && other && hwDevice_) {
         // a new coded video sequence (a recording whose size or depth changes, two videos joined): av1dec would decode it on the NVDEC
         // decoder made for the last one (av1dec.c get_pixel_format: the CUDA format is still offered - no new decoder; nvdec.c makes its
         // decoder and surfaces for the size it starts with) - a decoder of its own, on the same device, as one that started there. The
@@ -609,7 +723,8 @@ void VideoDecoder::CheckDecode(int err, const char* what) {
     if (hwOnly_ && err == AVERROR(ENOSYS)) {  // av1dec without a working hwaccel: every frame header would fail the same way - kept (this
         // decoder must not be fed again). The driver having said it takes the stream, NVDEC did not start (memory, the driver): a new
         // decoder may succeed - the refusal is transient
-        // (only on the first frame: frames decoded before it, NVDEC did start - a later refusal is the stream's, a new sequence header)
+        // (only on this decoder's first frame: frames decoded by it, NVDEC did start - a later refusal is the stream's; a new sequence
+        // header in other parameters has a decoder of its own, FollowSequenceHeader)
         // («on the first frame» is this decoder's first: one that started with a seek may meet a later part of the stream. av1dec has
         // parsed its sequence header by now: other parameters than the probe's - a part NVDEC does not take, the stream's verdict)
         const char* swFmt = codec_->sw_pix_fmt != AV_PIX_FMT_NONE ? av_get_pix_fmt_name(codec_->sw_pix_fmt) : nullptr;

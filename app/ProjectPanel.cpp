@@ -29,6 +29,7 @@
 #include "TaskQueue.h"
 #include "io/EncodeDefaults.h"
 #include "io/OutputFormat.h"
+#include "io/VideoDecoder.h"
 #include "passes/ScenesPass.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
@@ -367,7 +368,14 @@ void ProjectPanel::refresh() {
                             .arg(QString::number(src.fps, 'g', 5))
                             .arg(src.frames)
                             .arg(QString::number(src.fps > 0 ? src.frames / src.fps : 0.0, 'f', 1));
-        if (!src.codec.empty()) frame += " · " + AppModel::formatLabel(src.codec, src.layout.width ? src.layout : src.decoded);  // «HEVC 10 бит 4:4:4»
+        // TASK-0076: a layout the probe did not learn is not shown as the defaults it has - the one a refusal learned, else «not known»
+        const DecodeSupport& decode = model_.sourceDecode();
+        const bool unknown = src.pixelFormat == "unknown";
+        const bool learned = unknown && !decode.Ok() && !decode.part && !decode.pixelFormat.empty() && decode.pixelFormat != "unknown";
+        if (!src.codec.empty())
+            frame += " · " + (!unknown  ? AppModel::formatLabel(src.codec, src.layout.width ? src.layout : src.decoded)  // «HEVC 10 бит 4:4:4»
+                              : learned ? AppModel::formatLabel(src.codec, DecodedFrameDescFor(decode.pixelFormat))
+                                        : AppModel::codecLabel(src.codec) + tr(", формат заранее неизвестен"));
         // TASK-0072: a phone video stored landscape, shown turned - as in a player
         if (!src.orientation.Identity())
             frame += src.orientation.rotate ? tr(" · повёрнут на %1°").arg(src.orientation.rotate) + (src.orientation.hflip ? tr(" и отражён") : QString())
@@ -376,17 +384,15 @@ void ProjectPanel::refresh() {
         const auto [shownW, shownH] = src.sar.DisplaySize(src.width, src.height);
         if (!src.sar.Square()) frame += tr(" · пиксель %1, показ %2×%3").arg(QString::fromStdString(src.sar.Token())).arg(shownW).arg(shownH);
         sourceFrame_->setText(frame);
-        // TASK-0076: a layout the probe did not learn is not shown as the defaults it has (the refusal of it names the one learned); a
-        // refusal of a part names that part
-        const DecodeSupport& decode = model_.sourceDecode();
+        // TASK-0076: the same reading in the tooltip (a refusal learned the layout, or it is not known in advance); a refusal of a part
+        // names that part
         const auto layoutOf = [this](int depth, const std::string& chroma) { return tr("%1 бит %2").arg(depth).arg(QString::fromStdString(chroma)); };
-        const bool unknown = src.pixelFormat == "unknown";
-        QString stream = unknown ? tr("формат станет известен на первом кадре") : layoutOf(src.bitDepth, src.chroma);
+        QString stream = learned   ? layoutOf(decode.bitDepth, decode.chroma)
+                         : unknown ? tr("формат заранее неизвестен (его узнаёт декодер на первом кадре)")
+                                   : layoutOf(src.bitDepth, src.chroma);
         if (!decode.Ok() && decode.part)
             stream += decode.pixelFormat != src.pixelFormat ? tr(", в части — %1").arg(layoutOf(decode.bitDepth, decode.chroma))
                                                             : tr(", в части — кадр %1×%2").arg(decode.width).arg(decode.height);
-        else if (!decode.Ok() && unknown && !decode.pixelFormat.empty() && decode.pixelFormat != "unknown")
-            stream = layoutOf(decode.bitDepth, decode.chroma);
         QString tip = src.codec.empty() ? QString()
                       : !decode.Ok()    ? tr("Поток: %1; на этом компьютере не декодируется").arg(stream)
                       : unknown         ? tr("Поток: %1").arg(stream)

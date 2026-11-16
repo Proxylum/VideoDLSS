@@ -86,6 +86,19 @@ struct StreamPart {
 std::string StreamPartWords(const StreamPart& part);
 std::optional<StreamPart> StreamPartOf(const std::string& why);  // the last such words in `why`; nullopt: none
 
+// TASK-0076: the payload of the (last) sequence header OBU in `data` - AV1's low-overhead format, as MP4 / MKV / WebM / IVF carry it, or
+// an av1C record (its configOBUs after the 4-byte header). Empty: none, or the data does not read as OBUs
+std::string_view Av1SequenceHeader(const uint8_t* data, size_t size);
+// What FFmpeg's NVDEC makes its decoder for, from a sequence header's payload (AV1 5.5): av1dec sets the size and the software format
+// from these (set_context_with_sequence, get_sw_pixel_format). Two headers with the same key decode on the same NVDEC decoder - a repeat
+// that differs in operating_parameters_info only (AV1 7.5), a video joined to one like it. nullopt: the header does not parse
+struct Av1SequenceKey {
+    uint32_t profile = 0, bitDepth = 8, subsamplingX = 1, subsamplingY = 1, maxWidth = 0, maxHeight = 0;
+    bool mono = false, rgb = false;  // rgb: BT.709 primaries, sRGB transfer, identity matrix (4:4:4 RGB)
+    bool operator==(const Av1SequenceKey&) const = default;
+};
+std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view sequenceHeader);
+
 // Keyframes of a video stream from its packets (demux only, no decoding; TASK-0040): the longest run of frames from
 // a keyframe to the next one or to the end - what a seek into the stream may have to decode.
 struct KeyframeScan {

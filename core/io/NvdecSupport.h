@@ -92,8 +92,10 @@ DecodeSupport CheckDecodeSupport(const VideoStreamInfo& info);
 bool FakeNvdecRefusesFrames();
 // DLSSVID_FAKE_NVDEC_AV1=device-fails: VideoDecoder::StartNvdec does not get its CUDA device (out of GPU memory, as it were).
 bool FakeNvdecDeviceFails();
-// DLSSVID_FAKE_NVDEC_AV1=later-frame: VideoDecoder takes NVDEC refusing a frame after a few decoded ones (a new sequence header NVDEC
-// does not take - not reproducible with a clip NVENC writes).
+// DLSSVID_FAKE_NVDEC_AV1=later-frame: VideoDecoder takes NVDEC refusing a frame after a few decoded by the same decoder - NvdecFailed,
+// the stream's. A guard: FFmpeg 7.1.1 refuses with ENOSYS when it asks for a format after a sequence header, and a new one in other
+// parameters opens a decoder of its own (VideoDecoder::FollowSequenceHeader), whose refusal is judged as a part of the stream or as a
+// start failure; a header Av1SequenceHeader does not find would come here.
 bool FakeNvdecRefusesLater();
 
 // The refusal `block` of the stream, `detail` saying what failed (VideoDecoder: no CUDA device when it is created, NVDEC refusing the

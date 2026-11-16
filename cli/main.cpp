@@ -142,7 +142,10 @@ int CmdInfo(const std::string& input, bool warp) {
     std::printf("file:        %s\n", input.c_str());
     std::printf("video:       %s %ux%u %s (%s, %s range)\n", i.codecName.c_str(), i.width, i.height, i.pixelFormat.c_str(),
                 std::string(ToString(ci.matrix)).c_str(), std::string(ToString(ci.range)).c_str());
-    std::printf("samples:     %d-bit %s, decoded as %s (%s)\n", i.bitDepth, i.chroma.c_str(), i.decoded.Name().c_str(), i.decoded.Describe().c_str());
+    if (i.pixelFormat == "unknown")  // TASK-0076: bitDepth / chroma / decoded are defaults then, not the stream's
+        std::printf("samples:     not known before the first frame (the probe did not learn the pixel format)\n");
+    else
+        std::printf("samples:     %d-bit %s, decoded as %s (%s)\n", i.bitDepth, i.chroma.c_str(), i.decoded.Name().c_str(), i.decoded.Describe().c_str());
     std::printf("decode:      %s\n", DescribeDecode(CheckDecodeSupport(i)).c_str());  // TASK-0076: software, or NVDEC only (AV1) and whether it takes it
     if (!i.orientation.Identity())  // TASK-0072: the frames are turned as players show them
         std::printf("orientation: %s (%s), stored %ux%u\n", i.orientation.Describe().c_str(), i.orientationFrom.c_str(), i.codedWidth, i.codedHeight);

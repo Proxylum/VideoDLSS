@@ -22,7 +22,7 @@ QString SourceDecodeText(const DecodeSupport& s) {
     switch (s.block) {
         case DecodeBlock::Layout:
             if (s.part)  // TASK-0076: a part of the video in another format (a new sequence header)
-                return Tr("Видео AV1 не декодируется на этом компьютере: в нём есть часть в формате %1, а такой AV1 эта версия программы не "
+                return Tr("Видео AV1 не декодируется на этом компьютере: в нём есть часть, формат которой (%1) эта версия программы не "
                           "декодирует — AV1 декодирует только видеокарта, и только 8 и 10 бит 4:2:0. Что сделать: %2.")
                     .arg(LayoutText(s), transcode);
             return Tr("Видео AV1 не декодируется на этом компьютере: его формат (%1) эта версия программы не декодирует — AV1 декодирует только "

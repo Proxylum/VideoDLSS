@@ -1,6 +1,6 @@
-// TASK-0076: which streams decode only on NVDEC, and whether NVDEC takes them. The driver is asked through FFmpeg's own run-time loader
-// (ffnvcodec's dynlink_loader.h: nvcuda.dll and nvcuvid.dll loaded on demand), never through <cuda.h> or the CUDA runtime - this
-// unit must not be mixed with them, and the loader's types stay inside it.
+// TASK-0076: which streams decode only on NVDEC, and whether NVDEC takes them. The driver is asked through ffnvcodec's run-time loader
+// (dynlink_loader.h: nvcuda.dll and nvcuvid.dll loaded on demand) with FFmpeg's load flags, never through <cuda.h> or the CUDA runtime -
+// this unit must not be mixed with them, and the loader's types stay inside it.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -8,8 +8,16 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 
+#include <windows.h>
+
 #include <cstdarg>
 #include <cstdio>
+
+// nvcuda.dll / nvcuvid.dll as FFmpeg's NVDEC loads them (its compat/cuda/dynlink_loader.h over compat/w32dlfcn.h: the program's folder and
+// System32, not the current folder or PATH): the probe judges the library the decoder will use, and runs no other one
+#define FFNV_LOAD_FUNC(path) LoadLibraryExA((path), nullptr, LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)
+#define FFNV_SYM_FUNC(lib, sym) GetProcAddress((lib), (sym))
+#define FFNV_FREE_FUNC(lib) FreeLibrary(lib)
 
 namespace dlssvid::nvdec_detail {
 void LoaderLog(const char* format, ...);  // the loader's messages at debug level (by default it prints to stderr)

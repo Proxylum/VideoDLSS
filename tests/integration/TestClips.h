@@ -111,5 +111,8 @@ std::filesystem::path RepeatIvf(const std::filesystem::path& src, int copies, co
 std::string TwelveBitTemporalUnit(const std::string& unit);
 // a temporal unit without its sequence header OBUs
 std::string WithoutSequenceHeaders(const std::string& unit);
+// a temporal unit whose sequence headers (av1_nvenc's: no timing info, no initial display delay) say an initial display delay - other
+// bytes, the same decoder (size, depth, chroma)
+std::string InitialDisplayDelayTemporalUnit(const std::string& unit);
 
 }  // namespace dlssvid::test

@@ -599,6 +599,78 @@ std::string TwelveBitTemporalUnit(const std::string& unit) {
     return out;
 }
 
+// A sequence header of av1_nvenc's (no timing info, no decoder model, no initial display delay) with an initial display delay of 10
+// frames for every operating point (AV1 5.5: initial_display_delay_present_flag and _minus_1) - everything else as it was: a header with
+// other bytes and the same decoder (size, depth, chroma)
+std::string InitialDisplayDelaySequenceHeader(const std::string& payload) {
+    BitReader b{payload};
+    const uint32_t profile = b.f(3), still = b.f(1);
+    Need(b.f(1) == 0, __LINE__);  // reduced_still_picture_header
+    Need(b.f(1) == 0, __LINE__);  // timing_info_present_flag
+    Need(b.f(1) == 0, __LINE__);  // initial_display_delay_present_flag
+    const uint32_t points = b.f(5) + 1;
+    struct Point {
+        uint32_t idc, level, tier;
+    };
+    std::vector<Point> ops;
+    for (uint32_t i = 0; i < points; ++i) {
+        Point p{b.f(12), b.f(5), 0};
+        if (p.level > 7) p.tier = b.f(1);
+        ops.push_back(p);
+    }
+    // the trailing one bit: the last bit set
+    size_t trailing = payload.size() * 8;
+    while (trailing > 0 && !((static_cast<uint8_t>(payload[(trailing - 1) / 8]) >> (7 - (trailing - 1) % 8)) & 1u)) --trailing;
+    Need(trailing > b.pos, __LINE__);
+    --trailing;
+    BitWriter w;
+    w.put(profile, 3);
+    w.put(still, 1);
+    w.put(0, 1);  // reduced_still_picture_header
+    w.put(0, 1);  // timing_info_present_flag
+    w.put(1, 1);  // initial_display_delay_present_flag
+    w.put(points - 1, 5);
+    for (const Point& p : ops) {
+        w.put(p.idc, 12);
+        w.put(p.level, 5);
+        if (p.level > 7) w.put(p.tier, 1);
+        w.put(1, 1);  // initial_display_delay_present_for_this_op
+        w.put(9, 4);  // initial_display_delay_minus_1
+    }
+    BitReader rest{payload};
+    rest.pos = b.pos;
+    while (rest.pos < trailing) w.put(rest.f(1), 1);
+    w.put(1, 1);  // trailing bits
+    while (w.pos % 8) w.put(0, 1);
+    return w.out;
+}
+
+std::string InitialDisplayDelayTemporalUnit(const std::string& unit) {
+    std::string out;
+    for (size_t at = 0; at < unit.size();) {
+        const uint8_t head = static_cast<uint8_t>(unit[at]);
+        const int type = (head >> 3) & 15;
+        Need((head & 2), __LINE__);  // obu_has_size_field
+        const size_t headSize = (head & 4) ? 2 : 1;
+        uint64_t size = 0;
+        size_t sizeBytes = 0;
+        for (;; ++sizeBytes) {
+            Need(at + headSize + sizeBytes < unit.size(), __LINE__);
+            const uint8_t byte = static_cast<uint8_t>(unit[at + headSize + sizeBytes]);
+            size |= static_cast<uint64_t>(byte & 0x7f) << (7 * sizeBytes);
+            if (!(byte & 0x80)) {
+                ++sizeBytes;
+                break;
+            }
+        }
+        const std::string payload = unit.substr(at + headSize + sizeBytes, static_cast<size_t>(size));
+        const std::string written = type == 1 ? InitialDisplayDelaySequenceHeader(payload) : payload;  // OBU_SEQUENCE_HEADER
+        out += unit.substr(at, headSize) + Leb128(written.size()) + written;
+        at += headSize + sizeBytes + static_cast<size_t>(size);
+    }
+    return out;
+}
+
 // The temporal unit without its sequence header OBUs (the frames after it need one met before)
 std::string WithoutSequenceHeaders(const std::string& unit) {
     std::string out;

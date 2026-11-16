@@ -7537,10 +7537,17 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     DecodeSupport layoutPart = JudgeDecode(Av1StreamInfo("yuv420p12le", 12, "420"), nullptr);
     REQUIRE(layoutPart.block == DecodeBlock::Layout);
     layoutPart.part = true;
-    CHECK(SourceDecodeText(layoutPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть в формате 12 бит 4:2:0, а такой AV1 эта "
+    CHECK(SourceDecodeText(layoutPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть, формат которой (12 бит 4:2:0) эта "
                                                             "версия программы не декодирует — AV1 декодирует только видеокарта, и только 8 и 10 бит 4:2:0. "
                                                             "Что сделать: ") +
                                           transcode + ".");
+    DecodeSupport grayPart = JudgeDecode(Av1StreamInfo("gray12le", 12, "other"), nullptr);
+    REQUIRE(grayPart.block == DecodeBlock::Layout);
+    grayPart.part = true;
+    CHECK(SourceDecodeText(grayPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть, формат которой (12 бит, монохромный или "
+                                                          "особый формат) эта версия программы не декодирует — AV1 декодирует только видеокарта, и только 8 "
+                                                          "и 10 бит 4:2:0. Что сделать: ") +
+                                        transcode + ".");
     DecodeSupport av1Part = na;
     av1Part.part = true;
     CHECK(SourceDecodeText(av1Part) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть AV1 10 бит, а такой AV1 видеокарта NVIDIA "
@@ -7884,6 +7891,30 @@ TEST_CASE("AppModel: the viewport's refusal when the plan stops before the sourc
     const std::vector<QPushButton*> runs = RunAloneButtons(panel);
     CHECK(runs.size() >= 4);
     for (QPushButton* b : runs) {
+        CHECK_FALSE(b->isEnabled());
+        CHECK(b->toolTip() == SourceDecodeText(refused));
+    }
+    // a plan made again (an edit), the video still gone: the verdict is the plan's own now - not lost to a refresh
+    model.setStageEnabled("fg", true);
+    model.refreshPlan();
+    CHECK(model.planError() == QString::fromUtf8("видео не найдено"));
+    CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);
+    CHECK(model.sourceDecode().why == refused.why);
+    panel.refresh();
+    for (QPushButton* b : RunAloneButtons(panel)) {
+        CHECK_FALSE(b->isEnabled());
+        CHECK(b->toolTip() == SourceDecodeText(refused));
+    }
+    // a file there that does not probe (the plan fails on it): the verdict kept as well
+    std::ofstream(source, std::ios::binary) << "not a video";
+    model.refreshPlan();
+    INFO("planError: " << model.planError().toStdString());
+    CHECK_FALSE(model.planError().isEmpty());
+    CHECK(model.planError() != QString::fromUtf8("видео не найдено"));
+    CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);
+    CHECK(model.sourceDecode().why == refused.why);
+    panel.refresh();
+    for (QPushButton* b : RunAloneButtons(panel)) {
         CHECK_FALSE(b->isEnabled());
         CHECK(b->toolTip() == SourceDecodeText(refused));
     }
@@ -9001,7 +9032,7 @@ TEST_CASE("AppModel: a background proxy build that met a part of the stream the 
     CHECK(text.contains(QString::fromUtf8("12 бит")));
     CHECK_FALSE(text.contains(QString::fromUtf8("обновите драйвер")));  // not «the GPU refused it»
     CHECK(model.sourceDecode().part);
-    CHECK(text.contains(QString::fromUtf8("в нём есть часть в формате 12 бит 4:2:0")));
+    CHECK(text.contains(QString::fromUtf8("в нём есть часть, формат которой (12 бит 4:2:0)")));
     {
         TaskQueue queue;
         ProjectPanel panel(model, queue);
@@ -9148,7 +9179,12 @@ TEST_CASE("ProjectPanel's source row of a stream whose layout the probe did not 
         TaskQueue queue;
         ProjectPanel panel(model, queue);
         panel.refresh();
-        CHECK(panel.findChild<QLabel*>("sourceFrame")->toolTip() == QString::fromUtf8("Поток: формат станет известен на первом кадре"));  // not the defaults
+        const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
+        REQUIRE(row);
+        CHECK(row->toolTip() == QString::fromUtf8("Поток: формат заранее неизвестен (его узнаёт декодер на первом кадре)"));  // not the defaults
+        INFO("row: " << row->text().toStdString());
+        CHECK(row->text().endsWith(QString::fromUtf8(" · AV1, формат заранее неизвестен")));
+        CHECK_FALSE(row->text().contains(QString::fromUtf8("8 бит 4:2:0")));
         SettleAny(model, 0, 6);
     }
     AppModel model(true);
@@ -9168,7 +9204,12 @@ TEST_CASE("ProjectPanel's source row of a stream whose layout the probe did not 
     TaskQueue queue;
     ProjectPanel panel(model, queue);
     panel.refresh();
-    CHECK(panel.findChild<QLabel*>("sourceFrame")->toolTip() == QString::fromUtf8("Поток: 12 бит 420; на этом компьютере не декодируется"));
+    const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
+    REQUIRE(row);
+    CHECK(row->toolTip() == QString::fromUtf8("Поток: 12 бит 420; на этом компьютере не декодируется"));
+    INFO("row: " << row->text().toStdString());
+    CHECK(row->text().endsWith(QString::fromUtf8(" · AV1 12 бит 4:2:0")));  // the layout the refusal learned
+    CHECK_FALSE(row->text().contains(QString::fromUtf8("неизвестен")));
     SettleAny(model, 164, 176);
 }
 
@@ -9247,4 +9288,42 @@ TEST_CASE("AppModel playing does not ask NVDEC again on each tick for a video it
     const int64_t at = static_cast<int64_t>(std::llround(model.time() * 24.0));  // the window of the frame shown (6 frames on either side)
     SettleAny(model, std::max<int64_t>(0, at - 6), std::min<int64_t>(23, at + 6));
     fake.reset();
+}
+
+TEST_CASE("ProjectPanel's source row of a video refused for the frame size of a part: the part's frame named", "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_part_size_row");  // its own clip: the verdict remembered for the process is for this file alone
+    AutoProxySetting autoProxy(false);
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    // a part 384x224 where the GPU takes at most 320x192 (as a proxy build or a loader would have judged it), remembered for the file
+    const VideoStreamInfo probe = VideoDecoder(clip, VideoDecoder::Probe()).Info();
+    NvdecAv1Caps limits;
+    limits.checked = true;
+    limits.cuda = true;
+    limits.supported = true;
+    limits.gpu = "Test GPU";
+    limits.minWidth = 16;
+    limits.minHeight = 16;
+    limits.maxWidth = 320;
+    limits.maxHeight = 192;
+    limits.maxMacroblocks = 1u << 20;
+    DecodeSupport verdict = JudgeDecode(StreamPartInfo(probe, probe.pixelFormat, 384, 224), &limits);
+    REQUIRE(verdict.block == DecodeBlock::Size);
+    verdict.part = true;
+    REQUIRE(FrameStore::RememberRefusedFile(clip, verdict));
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    REQUIRE(model.sourceDecode().block == DecodeBlock::Size);
+    REQUIRE(model.sourceDecode().part);
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
+    REQUIRE(row);
+    CHECK(row->toolTip() == QString::fromUtf8("Поток: 8 бит 420, в части — кадр 384×224; на этом компьютере не декодируется"));
+    CHECK(model.planError() == SourceDecodeText(verdict));
+    CHECK(model.planError().contains(QString::fromUtf8("в нём есть часть, где кадр в файле 384×224")));
 }

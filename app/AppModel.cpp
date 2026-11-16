@@ -873,13 +873,8 @@ void AppModel::noteSourceRefused() {
     const std::string heard = FileStamp(project_.sourceVideo) + "|" + refused->why;
     if (heard == heardRefusal_) return;
     heardRefusal_ = heard;
-    refreshPlan();  // reads the refusal before anything else: it replaces another plan error (the more basic one) and drops the plan
-    // the plan stopped before it probed the source (no project, the video not found): the verdict still holds the runs - kept, once. A plan
-    // that probed it decided itself (a file replaced on the spot by one with a software decoder is no AV1 refusal)
-    if (sourceDecode_.Ok() && sourceInfo_.codec.empty()) {
-        sourceDecode_ = *refused;
-        emit planChanged();
-    }
+    refreshPlan();  // reads the refusal before anything else: it replaces another plan error (the more basic one) and drops the plan; one
+                    // that stops before the probe keeps it too
 }
 
 // ---- comparison in one action ----------------------------------------------------------------------
@@ -1054,8 +1049,15 @@ void AppModel::refreshPlan() {
         sourceInfo_.fps = store_->FpsOf("source");
         sourceInfo_.frames = src->lastFrame + 1;
     }
+    // TASK-0076: a plan that stops before it probes the source (the video not found, the probe failing): the viewport's verdict on it
+    // still holds the runs (a plan that probed it decides itself - a file replaced by one with a software decoder is no AV1 refusal)
+    const auto keepViewportVerdict = [this] {
+        if (sourceInfo_.codec.empty() && hasProject())
+            if (const auto refused = store_->Undecodable("source")) sourceDecode_ = *refused;
+    };
     if (!hasProject() || !std::filesystem::exists(project_.sourceVideo)) {
         planError_ = hasProject() ? tr("видео не найдено") : tr("нет проекта");
+        keepViewportVerdict();
         emit planChanged();
         return;
     }
@@ -1117,6 +1119,7 @@ void AppModel::refreshPlan() {
         planError_ = SourceDecodeText(e.support);
     } catch (const std::exception& e) {
         planError_ = QString::fromUtf8(e.what());
+        keepViewportVerdict();
     }
     emit planChanged();
 }
@@ -1466,14 +1469,17 @@ AppModel::ResultInfo AppModel::resultInfo() const {
     return r;
 }
 
+QString AppModel::codecLabel(const std::string& codec) {
+    if (codec == "hevc" || codec == "hevc_nvenc") return "HEVC";
+    if (codec == "h264" || codec == "h264_nvenc") return "H.264";
+    if (codec == "av1" || codec == "av1_nvenc") return "AV1";
+    if (codec == "prores" || codec == "prores_ks") return "ProRes";
+    if (codec == "ffv1") return "FFV1";
+    return QString::fromStdString(codec).toUpper();
+}
+
 QString AppModel::formatLabel(const std::string& codec, const FrameDesc& format) {
-    QString name;
-    if (codec == "hevc" || codec == "hevc_nvenc") name = "HEVC";
-    else if (codec == "h264" || codec == "h264_nvenc") name = "H.264";
-    else if (codec == "av1" || codec == "av1_nvenc") name = "AV1";
-    else if (codec == "prores" || codec == "prores_ks") name = "ProRes";
-    else if (codec == "ffv1") name = "FFV1";
-    else if (!codec.empty()) name = QString::fromStdString(codec).toUpper();
+    const QString name = codecLabel(codec);
     const std::string_view chroma = ChromaName(format.format);
     const QString layout = tr("%1 бит %2:%3:%4").arg(format.HighBitDepth() ? format.bitDepth : 8).arg(chroma[0]).arg(chroma[1]).arg(chroma[2]);
     return name.isEmpty() ? layout : name + " " + layout;

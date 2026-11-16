@@ -1867,6 +1867,14 @@ TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: tak
         INFO(file.filename().string());
         REQUIRE(VideoDecoder(file, VideoDecoder::Probe()).Info().pixelFormat == "unknown");
     }
+    {
+        // dlssvid info: not the defaults the probe has for the layout
+        const auto info = RunAll({"info", plain.string()}, dir / "info.log");
+        INFO(info.out);
+        CHECK(info.code == 0);
+        CHECK_THAT(info.out, ContainsSubstring("samples:     not known before the first frame (the probe did not learn the pixel format)"));
+        CHECK_THAT(info.out, !ContainsSubstring("decoded as"));
+    }
     const std::string learned = "a layout the probe did not learn)";
     {
         // the stand-in aside: NVDEC decodes it from there
@@ -2100,6 +2108,112 @@ TEST_CASE("A stream whose sequence header changes (another size, another depth) 
         CHECK(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring("(after 16 frames, on a part of the stream in other parameters (yuv420p 384x224))"));
     }
+}
+
+namespace {
+// The temporal units of an IVF file, in order
+std::vector<std::string> IvfUnits(const std::filesystem::path& file, const std::filesystem::path& scratch) {
+    std::vector<std::string> units;
+    RepeatIvf(file, 1, scratch, [&](int, const std::string& u) {
+        units.push_back(u);
+        return u;
+    });
+    return units;
+}
+
+std::string SequenceHeaderOf(const std::string& unit) {
+    return std::string(Av1SequenceHeader(reinterpret_cast<const uint8_t*>(unit.data()), unit.size()));
+}
+}  // namespace
+
+TEST_CASE("Av1SequenceKeyOf on av1_nvenc's own sequence headers, read from the packets: 8 and 10 bits as written, 12 bits as rewritten",
+          "[integration][gpu][av1]") {
+    const auto dir = Dir("sequence_key");
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 8;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto eight = WriteClipIfSupported(dir / "eight.ivf", spec, &why);
+    if (!eight) SKIP("av1_nvenc does not support the clip here: " << why);
+    const std::string header8 = SequenceHeaderOf(IvfUnits(*eight, dir / "copy8.ivf")[0]);
+    REQUIRE_FALSE(header8.empty());
+    const auto k8 = Av1SequenceKeyOf(header8);
+    REQUIRE(k8);
+    CHECK(k8->profile == 0);
+    CHECK(k8->bitDepth == 8);
+    CHECK(k8->subsamplingX == 1);
+    CHECK(k8->subsamplingY == 1);
+    CHECK(k8->maxWidth == kW);
+    CHECK(k8->maxHeight == kH);
+    CHECK_FALSE(k8->mono);
+    CHECK_FALSE(k8->rgb);
+    spec.pixFmt = "p010le";  // Main 10
+    if (const auto ten = WriteClipIfSupported(dir / "ten.ivf", spec, &why)) {
+        const auto k10 = Av1SequenceKeyOf(SequenceHeaderOf(IvfUnits(*ten, dir / "copy10.ivf")[0]));
+        REQUIRE(k10);
+        CHECK(k10->bitDepth == 10);
+        CHECK(k10->maxWidth == kW);
+        CHECK(k10->maxHeight == kH);
+        CHECK(k10->subsamplingX == 1);
+        CHECK(k10->subsamplingY == 1);
+        CHECK_FALSE(*k10 == *k8);
+    } else {
+        WARN("av1_nvenc writes no 10-bit clip here: " << why);
+    }
+    const auto k12 = Av1SequenceKeyOf(SequenceHeaderOf(TwelveBitTemporalUnit(IvfUnits(*eight, dir / "copy12.ivf")[0])));
+    REQUIRE(k12);
+    CHECK(k12->profile == 2);
+    CHECK(k12->bitDepth == 12);
+    CHECK(k12->subsamplingX == 1);
+    CHECK(k12->subsamplingY == 1);
+    CHECK(k12->maxWidth == kW);
+}
+
+TEST_CASE("A repeated sequence header that differs outside what NVDEC's decoder is made for (an initial display delay) keeps the decoder: the same frames",
+          "[integration][gpu][av1][regression]") {
+    const auto dir = Dir("sequence_repeat");
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 24;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto clip = WriteClipIfSupported(dir / "clip.ivf", spec, &why);
+    if (!clip) SKIP("av1_nvenc does not support the clip here: " << why);
+    // the keyframe 8's sequence header says an initial display delay: other bytes, the same key (size, depth, chroma)
+    const auto delayed = RepeatIvf(*clip, 1, dir / "delayed.ivf", [](int i, const std::string& u) { return i == 8 ? InitialDisplayDelayTemporalUnit(u) : u; });
+    const std::vector<std::string> units = IvfUnits(delayed, dir / "copy.ivf");
+    REQUIRE(units.size() == 24);
+    const std::string first = SequenceHeaderOf(units[0]), repeat = SequenceHeaderOf(units[8]);
+    REQUIRE_FALSE(first.empty());
+    REQUIRE_FALSE(repeat.empty());
+    REQUIRE(first != repeat);
+    REQUIRE(Av1SequenceKeyOf(first));
+    REQUIRE(Av1SequenceKeyOf(repeat));
+    REQUIRE(*Av1SequenceKeyOf(first) == *Av1SequenceKeyOf(repeat));
+    VideoDecoder original(*clip);
+    const std::vector<CpuFrame> reference = DecodeAllOf(original);
+    REQUIRE(reference.size() == 24);
+    std::ostringstream text;
+    std::vector<CpuFrame> frames;
+    {
+        DecoderLog capture(text);
+        VideoDecoder dec(delayed);
+        frames = DecodeAllOf(dec);
+    }
+    REQUIRE(frames.size() == reference.size());
+    for (size_t i = 0; i < frames.size(); ++i) {
+        INFO("frame " << i);
+        CHECK(frames[i].data == reference[i].data);  // bit-identical to the clip as written
+    }
+    INFO(text.str());
+    CHECK(CountOf(text.str(), "another AV1 sequence header") == 0);  // no decoder of its own: the same one goes on
 }
 
 TEST_CASE("NVDEC refusing a frame after a few decoded ones (later-frame) is the stream's verdict: kept, marked, remembered for the file",

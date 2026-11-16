@@ -13,6 +13,7 @@ extern "C" {
 #include <iterator>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "io/NvdecFormat.h"
@@ -663,7 +664,10 @@ TEST_CASE("StreamPartWords / StreamPartOf: the part a refusal names, written and
         CHECK_FALSE(StreamPartOf(std::string("x (after 1 frames, on a part of the stream in other parameters (yuv420p ") + size + "))"));
     }
     CHECK_FALSE(StreamPartOf("x (after 1 frames, on a part of the stream in other parameters (yuv420p320x192))"));  // no space
-    CHECK_FALSE(StreamPartOf("x (on the first frame, in - a layout the probe did not learn)"));                    // no format
+    CHECK_FALSE(StreamPartOf("x (on the first frame, in - a layout the probe did not learn)"));  // the head and the tail overlapping
+    StreamPart empty;  // the words of an empty format, as StreamPartWords writes them
+    empty.learned = true;
+    CHECK_FALSE(StreamPartOf("x (on the first frame" + StreamPartWords(empty) + ")"));
     CHECK_FALSE(StreamPartOf("x (on the first frame, in yuv 420 - a layout the probe did not learn)"));            // not one word
 }
 
@@ -684,6 +688,150 @@ TEST_CASE("A layout the probe did not learn, read back from a refusal: judged be
     const DecodeSupport verdict = CheckDecodeSupport(judged);
     CHECK(verdict.block == DecodeBlock::Layout);
     CHECK_THAT(verdict.why, StartsWith("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here"));
+}
+
+namespace {
+std::string Bytes(const char* hex) {
+    std::string out;
+    for (const char* c = hex; c[0] && c[1]; c += 2) out.push_back(static_cast<char>(std::stoi(std::string(c, 2), nullptr, 16)));
+    return out;
+}
+
+// Bits of a sequence header, most significant first, ended with the trailing bits (AV1 5.3.4)
+struct HeaderBits {
+    std::string out;
+    size_t pos = 0;
+    HeaderBits& put(uint32_t v, int n) {
+        for (int i = n - 1; i >= 0; --i, ++pos) {
+            if (pos % 8 == 0) out.push_back(0);
+            if ((v >> i) & 1u) out.back() = static_cast<char>(static_cast<uint8_t>(out.back()) | (0x80u >> (pos % 8)));
+        }
+        return *this;
+    }
+    std::string done() {
+        put(1, 1);
+        while (pos % 8) put(0, 1);
+        return out;
+    }
+};
+
+// A sequence header with timing_info, decoder_model_info and operating_parameters_info (AV1 5.5): operating point 0's buffer delays as
+// given - what a repeat of the header within a coded video sequence may change (AV1 7.5); 1920x1080 4:2:0, 10-bit or 8-bit
+std::string ModelHeader(uint32_t decoderDelay, uint32_t encoderDelay, bool tenBit = true) {
+    HeaderBits b;
+    b.put(0, 3).put(0, 1).put(0, 1);  // seq_profile, still_picture, reduced_still_picture_header
+    b.put(1, 1);                      // timing_info_present_flag
+    b.put(1001, 32).put(60000, 32);   // num_units_in_display_tick, time_scale
+    b.put(1, 1).put(1, 1);            // equal_picture_interval, num_ticks_per_picture_minus_1 = 0 (uvlc: 1)
+    b.put(1, 1);                      // decoder_model_info_present_flag
+    b.put(9, 5);                      // buffer_delay_length_minus_1: 10-bit delays
+    b.put(1001, 32);                  // num_units_in_decoding_tick
+    b.put(31, 5).put(31, 5);          // buffer_removal_time_length_minus_1, frame_presentation_time_length_minus_1
+    b.put(1, 1);                      // initial_display_delay_present_flag
+    b.put(0, 5);                      // operating_points_cnt_minus_1
+    b.put(0, 12).put(8, 5).put(0, 1);  // operating_point_idc, seq_level_idx (> 7: seq_tier)
+    b.put(1, 1).put(decoderDelay, 10).put(encoderDelay, 10).put(0, 1);  // operating_parameters_info: the delays, low_delay_mode_flag
+    b.put(1, 1).put(9, 4);            // initial_display_delay_present_for_this_op, initial_display_delay_minus_1
+    b.put(10, 4).put(10, 4);          // frame_width_bits_minus_1, frame_height_bits_minus_1
+    b.put(1919, 11).put(1079, 11);    // max_frame_width_minus_1, max_frame_height_minus_1
+    b.put(0, 1);                      // frame_id_numbers_present_flag
+    b.put(0, 1).put(1, 1).put(1, 1);  // use_128x128_superblock, enable_filter_intra, enable_intra_edge_filter
+    b.put(0, 4);                      // interintra, masked, warped motion, dual filter
+    b.put(1, 1).put(1, 1).put(1, 1);  // enable_order_hint, enable_jnt_comp, enable_ref_frame_mvs
+    b.put(1, 1).put(1, 1);            // seq_choose_screen_content_tools (SELECT), seq_choose_integer_mv
+    b.put(6, 3);                      // order_hint_bits_minus_1
+    b.put(0, 1).put(1, 1).put(1, 1);  // enable_superres, enable_cdef, enable_restoration
+    b.put(tenBit ? 1 : 0, 1);         // high_bitdepth
+    b.put(0, 1);                      // mono_chrome
+    b.put(1, 1).put(1, 8).put(1, 8).put(1, 8);  // color_description_present_flag: BT.709 primaries, transfer, matrix (not the sRGB triple)
+    b.put(0, 1).put(0, 2).put(0, 1);  // color_range, chroma_sample_position, separate_uv_delta_q
+    b.put(0, 1);                      // film_grain_params_present
+    return b.done();
+}
+
+// A reduced still picture header (AV1 5.5): 64x48 8-bit 4:2:0
+std::string StillHeader() {
+    HeaderBits b;
+    b.put(0, 3).put(1, 1).put(1, 1);  // seq_profile, still_picture, reduced_still_picture_header
+    b.put(0, 5);                      // seq_level_idx[0]
+    b.put(6, 4).put(5, 4);            // frame_width_bits_minus_1, frame_height_bits_minus_1
+    b.put(63, 7).put(47, 6);          // max_frame_width_minus_1, max_frame_height_minus_1
+    b.put(0, 1).put(0, 1).put(0, 1);  // use_128x128_superblock, enable_filter_intra, enable_intra_edge_filter
+    b.put(0, 1).put(0, 1).put(0, 1);  // enable_superres, enable_cdef, enable_restoration
+    b.put(0, 1).put(0, 1).put(0, 1);  // high_bitdepth, mono_chrome, color_description_present_flag
+    b.put(0, 1).put(0, 2).put(0, 1);  // color_range, chroma_sample_position, separate_uv_delta_q
+    b.put(0, 1);                      // film_grain_params_present
+    return b.done();
+}
+
+std::string SequenceHeaderIn(const std::string& data) {
+    return std::string(Av1SequenceHeader(reinterpret_cast<const uint8_t*>(data.data()), data.size()));
+}
+}  // namespace
+
+TEST_CASE("Av1SequenceKeyOf: what NVDEC makes its decoder for - av1_nvenc's headers, a repeat with other buffer delays, a reduced still picture; a cut one is none",
+          "[unit][av1]") {
+    // av1_nvenc's own headers (from its IVF output, an RTX 40 card): 320x192 8-bit, the same in Main 10, 384x224 8-bit
+    const auto k8 = Av1SequenceKeyOf(Bytes("000000fa1e7f7e010cc020"));
+    const auto k10 = Av1SequenceKeyOf(Bytes("000000fa1e7f7e010ce020"));
+    const auto kBig = Av1SequenceKeyOf(Bytes("0000000c3dff7c02198040"));
+    REQUIRE(k8);
+    REQUIRE(k10);
+    REQUIRE(kBig);
+    CHECK(k8->profile == 0);
+    CHECK(k8->bitDepth == 8);
+    CHECK(k8->subsamplingX == 1);
+    CHECK(k8->subsamplingY == 1);
+    CHECK(k8->maxWidth == 320);
+    CHECK(k8->maxHeight == 192);
+    CHECK_FALSE(k8->mono);
+    CHECK_FALSE(k8->rgb);
+    CHECK(k10->bitDepth == 10);
+    CHECK(k10->maxWidth == 320);
+    CHECK(kBig->maxWidth == 384);
+    CHECK(kBig->maxHeight == 224);
+    CHECK_FALSE(*k8 == *k10);
+    CHECK_FALSE(*k8 == *kBig);
+    // a decoder model: two repeats differing in operating_parameters_info only - one key
+    const std::string a = ModelHeader(100, 200), b = ModelHeader(300, 400);
+    REQUIRE(a != b);
+    const auto ka = Av1SequenceKeyOf(a), kb = Av1SequenceKeyOf(b);
+    REQUIRE(ka);
+    REQUIRE(kb);
+    CHECK(*ka == *kb);
+    CHECK(ka->bitDepth == 10);
+    CHECK(ka->maxWidth == 1920);
+    CHECK(ka->maxHeight == 1080);
+    CHECK(ka->subsamplingX == 1);
+    CHECK(ka->subsamplingY == 1);
+    CHECK_FALSE(ka->rgb);
+    const auto k8bit = Av1SequenceKeyOf(ModelHeader(100, 200, false));
+    REQUIRE(k8bit);
+    CHECK_FALSE(*k8bit == *ka);  // another depth: another decoder
+    // a reduced still picture header
+    const auto still = Av1SequenceKeyOf(StillHeader());
+    REQUIRE(still);
+    CHECK(still->maxWidth == 64);
+    CHECK(still->maxHeight == 48);
+    CHECK(still->bitDepth == 8);
+    CHECK(still->subsamplingX == 1);
+    // cut short: none
+    CHECK_FALSE(Av1SequenceKeyOf(a.substr(0, 6)));
+    CHECK_FALSE(Av1SequenceKeyOf(Bytes("000000fa1e7f")));
+    CHECK_FALSE(Av1SequenceKeyOf(""));
+}
+
+TEST_CASE("Av1SequenceHeader finds the sequence header OBU in low-overhead OBUs and in an av1C record; garbage has none", "[unit][av1]") {
+    const std::string payload = Bytes("000000fa1e7f7e010cc020");
+    const std::string obu = std::string(1, '\x0A') + std::string(1, static_cast<char>(payload.size())) + payload;  // OBU_SEQUENCE_HEADER, with its size
+    const std::string delimiter("\x12\x00", 2);                                                                   // OBU_TEMPORAL_DELIMITER
+    CHECK(SequenceHeaderIn(delimiter + obu) == payload);
+    CHECK(SequenceHeaderIn(std::string("\x81\x00\x0C\x00", 4) + obu) == payload);  // av1C: marker and version, then its configOBUs
+    CHECK(SequenceHeaderIn(delimiter).empty());                                       // no sequence header
+    CHECK(SequenceHeaderIn(std::string("\xFF\xFF\xFF", 3)).empty());                 // obu_forbidden_bit
+    CHECK(SequenceHeaderIn(obu.substr(0, obu.size() - 3)).empty());                    // its size beyond the data
+    CHECK(SequenceHeaderIn("").empty());
+    CHECK(Av1SequenceHeader(nullptr, 0).empty());
 }
 
 TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit][av1]") {
