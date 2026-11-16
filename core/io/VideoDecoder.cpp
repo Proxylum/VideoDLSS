@@ -314,7 +314,7 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     sliceThreadsOnly_ = options.sliceThreadsOnly;
     if (options.hwaccel == HwAccel::Cuda) {
         std::string why;
-        hwDevice_ = CreateCudaDevice(&why);
+        hwDevice_ = hwOnly_ && FakeNvdecDeviceFails() ? nullptr : CreateCudaDevice(&why);  // (device-fails: as StartNvdec would meet it)
         // a hardware-only decoder has no software to fall back to: StartNvdec tries again and refuses with the reason
         if (!hwDevice_ && !hwOnly_) Log()->warn("CUDA hwaccel unavailable ({}), decoding in software", why);
     }
@@ -477,7 +477,7 @@ void VideoDecoder::StartNvdec() {
         hwDevice_ = device;
     }
     nvdecStarted_ = true;
-    nvdecVerified_ = support.verified;
+    nvdecStartTransient_ = support.verified || (!support.caps.checked && support.caps.cudaError);
     Log()->log(probe_ ? spdlog::level::debug : spdlog::level::info, "{}: {} decodes on NVDEC only (no software decoder in this build), {}", url_, info_.codecName,
                support.why);
 }
@@ -489,7 +489,7 @@ void VideoDecoder::CheckDecode(int err, const char* what) {
         // decoder may succeed - the refusal is transient
         // (only on the first frame: frames decoded before it, NVDEC did start - a later refusal is the stream's, a new sequence header)
         const std::string when = framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "on the first frame";
-        const bool startFailed = nvdecVerified_ && framesDecoded_ == 0;
+        const bool startFailed = nvdecStartTransient_ && framesDecoded_ == 0;
         refused_ = std::make_shared<const DecodeSupport>(RefusedDecode(info_, startFailed ? DecodeBlock::NvdecStartFailed : DecodeBlock::NvdecFailed, when));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }
@@ -530,6 +530,10 @@ bool VideoDecoder::NextFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
             continue;
         }
         CheckAv(err, "av_read_frame");
+        if (packet_->stream_index == videoStream_ && hwOnly_ && framesDecoded_ >= 3 && FakeNvdecRefusesLater()) {  // DLSSVID_FAKE_NVDEC_AV1=later-frame
+            av_packet_unref(packet_);
+            CheckDecode(AVERROR(ENOSYS), "avcodec_send_packet");
+        }
         if (packet_->stream_index == videoStream_) {
             const int sent = avcodec_send_packet(codec_, packet_);
             if (sent < 0) av_packet_unref(packet_);

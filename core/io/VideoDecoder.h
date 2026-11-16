@@ -222,7 +222,9 @@ private:
     bool nvdecStarted_ = false;  // StartNvdec ran (the GPU checked, codec_ on the device)
     bool gpuFrames_ = false;     // UsingHwAccel()
     bool nvdecFrames_ = false;   // DecodesOnNvdec()
-    bool nvdecVerified_ = false;  // StartNvdec: the driver said it takes the stream (an ENOSYS then is a start failure, not a refusal)
+    // StartNvdec: the driver said it takes the stream, or could not be asked for a CUDA error (memory) - an ENOSYS on the first frame
+    // then is a start failure, not a refusal of the stream
+    bool nvdecStartTransient_ = false;
     std::shared_ptr<const DecodeSupport> refused_;  // NVDEC refused this stream: every later NextFrame says so again
     AVBufferRef* hwDevice_ = nullptr;
     AVFrame* frame_ = nullptr;

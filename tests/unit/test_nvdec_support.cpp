@@ -255,6 +255,15 @@ TEST_CASE("JudgeDecode: the layout is judged before NVDEC is asked; an unknown l
     CHECK(blind.Ok());
     CHECK_FALSE(blind.verified);
     CHECK(blind.why == "not checked: the driver does not report NVDEC capabilities");
+    CHECK_FALSE(blind.caps.cudaError);  // an old driver: NVDEC refusing the first frame is the stream's verdict then
+    NvdecAv1Caps cudaFailed = unanswered;
+    cudaFailed.cudaError = true;
+    cudaFailed.why = "cuCtxCreate failed: CUDA_ERROR_OUT_OF_MEMORY";
+    const DecodeSupport memory = JudgeDecode(Av1Info(), &cudaFailed);
+    CHECK(memory.Ok());
+    CHECK_FALSE(memory.verified);
+    CHECK(memory.caps.cudaError);  // VideoDecoder takes NVDEC refusing the first frame then for a start failure
+    CHECK(memory.why == "not checked: cuCtxCreate failed: CUDA_ERROR_OUT_OF_MEMORY");
 }
 
 TEST_CASE("JudgeDecode: no CUDA, no NVDEC, no AV1 decoder, the size limits each refuse with the reason, in that order", "[unit][av1]") {
@@ -368,7 +377,8 @@ TEST_CASE("JudgeDecode: a stream NVDEC takes is verified and described; RefusedD
     CHECK(s.caps.gpu == "Test GPU");
     CHECK(s.why == "on 'Test GPU', AV1 10-bit 4:2:0 up to 8192x8192");
 
-    // VideoDecoder's refusals: NVDEC refusing the stream (ENOSYS), or no CUDA device to create
+    // VideoDecoder's refusals: NVDEC refusing the stream (ENOSYS, the stream's verdict) or not starting (NvdecStartFailed: ENOSYS on the
+    // first frame of a stream the driver took, or the CUDA device not created - memory, the driver; no verdict)
     const DecodeSupport failed = RefusedDecode(Av1Info(), DecodeBlock::NvdecFailed, "");
     CheckRefusal(failed, DecodeBlock::NvdecFailed);
     CHECK(failed.why == "NVDEC refused this AV1 stream and this build has no software AV1 decoder");
@@ -395,8 +405,10 @@ TEST_CASE("JudgeDecode: a stream NVDEC takes is verified and described; RefusedD
         INFO(BlockName(b));
         CHECK_FALSE(d.Transient());
     }
-    const DecodeSupport device = RefusedDecode(Av1Info(), DecodeBlock::NoCuda, "the CUDA device could not be created: Generic error in an external library");
-    CheckRefusal(device, DecodeBlock::NoCuda);
+    const DecodeSupport device =
+        RefusedDecode(Av1Info(), DecodeBlock::NvdecStartFailed, "the CUDA device could not be created: Generic error in an external library");
+    CheckRefusal(device, DecodeBlock::NvdecStartFailed);
+    CHECK(device.Transient());
     CHECK_THAT(device.why, ContainsSubstring("the CUDA device could not be created: Generic error in an external library"));
     CHECK(device.codec == "av1");
     CHECK(device.width == 320);
@@ -505,7 +517,36 @@ TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver o
         CHECK(FakeNvdecDeviceFails());
         CHECK_FALSE(FakeNvdecRefusesFrames());
     }
-    for (const char* other : {"no-cuda", "no-nvdec", "no-av1", "first-frame", "start-fails"}) {
+    {
+        // the driver could not be asked for a CUDA error (a context not created now: memory) - unchecked, and NVDEC then refuses the first
+        // frame: VideoDecoder takes that for a start failure, not a verdict (cudaError)
+        FakeNvdecEnv fake("query-fails");
+        const DecodeSupport s = CheckDecodeSupport(av1);
+        CHECK(s.Ok());
+        CHECK_FALSE(s.verified);
+        CHECK_FALSE(s.caps.checked);
+        CHECK(s.caps.cudaError);
+        CHECK(s.why == "not checked: DLSSVID_FAKE_NVDEC_AV1=query-fails");
+        CHECK(FakeNvdecRefusesFrames());
+        CHECK_FALSE(FakeNvdecDeviceFails());
+        CHECK_FALSE(FakeNvdecRefusesLater());
+    }
+    {
+        // the driver takes the stream; NVDEC refuses a frame after a few (VideoDecoder): the stream's verdict
+        FakeNvdecEnv fake("later-frame");
+        const DecodeSupport s = CheckDecodeSupport(av1);
+        CHECK(s.Ok());
+        CHECK(s.verified);
+        CHECK(FakeNvdecRefusesLater());
+        CHECK_FALSE(FakeNvdecRefusesFrames());
+        CHECK_FALSE(FakeNvdecDeviceFails());
+    }
+    for (const char* other : {"no-cuda", "no-nvdec", "no-av1", "first-frame", "start-fails", "query-fails", "device-fails"}) {
+        INFO(other);
+        FakeNvdecEnv fake(other);
+        CHECK_FALSE(FakeNvdecRefusesLater());
+    }
+    for (const char* other : {"no-cuda", "no-nvdec", "no-av1", "first-frame", "start-fails", "query-fails", "later-frame"}) {
         INFO(other);
         FakeNvdecEnv fake(other);
         CHECK_FALSE(FakeNvdecDeviceFails());

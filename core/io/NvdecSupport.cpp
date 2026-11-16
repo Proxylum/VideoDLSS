@@ -138,7 +138,12 @@ std::optional<NvdecAv1Caps> FakeCaps() {
         c.checked = false;
         c.cuda = true;
         c.gpu = "DLSSVID_FAKE_NVDEC_AV1";
-    } else if (value == "start-fails" || value == "device-fails") {  // the driver says yes, and NVDEC / the CUDA device still does not start
+    } else if (value == "query-fails") {  // no answer for a CUDA error (memory), and NVDEC refuses the first frame
+        c.checked = false;
+        c.cuda = true;
+        c.cudaError = true;
+        c.gpu = "DLSSVID_FAKE_NVDEC_AV1";
+    } else if (value == "start-fails" || value == "device-fails" || value == "later-frame") {  // the driver says yes, and NVDEC / the CUDA device still does not start
         c.cuda = true;
         c.supported = true;
         c.gpu = "DLSSVID_FAKE_NVDEC_AV1";
@@ -147,7 +152,9 @@ std::optional<NvdecAv1Caps> FakeCaps() {
         c.maxMacroblocks = 0xffffffffu;
     } else {
         std::call_once(said, [&] {
-            Log()->warn("DLSSVID_FAKE_NVDEC_AV1='{}' is not no-cuda | no-nvdec | no-av1 | first-frame | start-fails | device-fails: ignored", value);
+            Log()->warn("DLSSVID_FAKE_NVDEC_AV1='{}' is not no-cuda | no-nvdec | no-av1 | first-frame | query-fails | start-fails | device-fails | "
+                        "later-frame: ignored",
+                        value);
         });
         return std::nullopt;
     }
@@ -211,6 +218,7 @@ NvdecAv1Caps QueryLive(int bitDepth) {
     CUcontext ctx = nullptr;
     if (const CUresult r = cu->cuCtxCreate(&ctx, 0, dev); r != CUDA_SUCCESS) {
         c.why = "cuCtxCreate failed: " + CuError(cu, r);
+        c.cudaError = true;
         return c;
     }
     CUVIDDECODECAPS caps{};
@@ -223,6 +231,7 @@ NvdecAv1Caps QueryLive(int bitDepth) {
     cu->cuCtxDestroy(ctx);
     if (r != CUDA_SUCCESS) {
         c.why = "cuvidGetDecoderCaps failed: " + CuError(cu, r);
+        c.cudaError = true;
         return c;
     }
     c.checked = true;
@@ -306,10 +315,12 @@ DecodeSupport RefusedDecode(const VideoStreamInfo& info, DecodeBlock block, cons
 
 bool FakeNvdecRefusesFrames() {
     const std::string v = FakeValue();
-    return v == "first-frame" || v == "start-fails";
+    return v == "first-frame" || v == "start-fails" || v == "query-fails";
 }
 
 bool FakeNvdecDeviceFails() { return FakeValue() == "device-fails"; }
+
+bool FakeNvdecRefusesLater() { return FakeValue() == "later-frame"; }
 
 std::string DescribeDecode(const DecodeSupport& s) {
     if (!s.hardwareOnly)

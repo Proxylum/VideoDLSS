@@ -289,19 +289,20 @@ build\release\bin\dlssvid process --passthrough -i input.mp4 -o output.mkv --cod
 an `av1_nvenc` result) is always decoded by NVDEC — in the viewport, the stages, `process` and the passthrough, whatever
 `--hwaccel` says. This build decodes AV1 only as 8 or 10-bit 4:2:0, on GPUs whose NVDEC has an AV1 decoder (for example,
 GeForce RTX 30 series and newer; the driver is asked, the series is only an example). `dlssvid info` prints how a file
-decodes (`decode:` line). The sample layout is checked from the file; the driver is asked (once per process for a definite answer: CUDA, NVDEC, AV1 at that
-depth, the frame size limits)). A file this machine cannot decode is refused with the reason before the work starts —
+decodes (`decode:` line). The sample layout is checked from the file; the driver is asked (a definite answer once per process: CUDA, NVDEC, AV1 at that
+depth, the frame size limits). A file this machine cannot decode is refused with the reason before the work starts —
 `process` before its stages, a stage command before its model (`nr` reading its colour from `color_sr` from a frame past 0
 decodes no video and is not refused), the GUI instead of the plan with «Обработать», Ctrl+Enter, the preview and the stage
 runs off, the viewport cell reads «· не декодируется» (its tooltip says why), no proxy is built. A driver that cannot be
 asked leaves it to the first frame: refused then without the exact reason («NVDEC refused this AV1 stream»), and the GUI
 stops the runs as soon as its viewport met it (and remembers it until it is closed). NVDEC or its CUDA device failing to start
-(out of GPU memory, a driver error) is no verdict on the video: the viewport cell reads «· видеокарта не начала декодировать»
-until the sources are reloaded (after the task), `process` reports the failure. A scrubbing proxy built earlier still shows
+(out of GPU memory, a driver error; also a driver that could not be asked for such an error) is no verdict on the video: the
+viewport cell reads «· видеокарта не начала декодировать», and those frames come again once another frame decodes or the
+task is over; `process` reports the failure. A scrubbing proxy built earlier still shows
 such a source (one copied from another PC is used when the source kept its file times). The GUI's viewport decodes an AV1
 video on NVDEC in its own process; while a run, a preview or a stage check is going on it does not keep that decoder between
 frames. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be the one the stages
-run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame|start-fails|device-fails` stands in for the driver's answer
+run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame|query-fails|start-fails|device-fails|later-frame` stands in for the driver's answer
 (tests, reproducing a support case).
 
 Paths may contain any letters: `dlssvid` and `dlssvid-gui` run with UTF-8 as their code page. The CLI prints UTF-8,

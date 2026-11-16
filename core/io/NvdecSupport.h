@@ -39,6 +39,7 @@ struct NvdecAv1Caps {
     bool checked = false;    // a definite answer: no CUDA, or the decoder caps were read. false: the driver could not be asked
     bool cuda = false;       // a CUDA device exists
     bool nvdecMissing = false;  // ... but the driver's video decoder library (nvcuvid.dll) could not be loaded
+    bool cudaError = false;     // not checked because a CUDA call failed (a context not created now: memory) - not an old driver
     bool supported = false;  // cuvidGetDecoderCaps: bIsSupported
     std::string gpu;         // its name
     std::string why;         // what failed, when something did
@@ -77,13 +78,17 @@ NvdecAv1Caps QueryNvdecAv1Caps(int bitDepth);
 // support case), read on every call before the cache: no-cuda | no-nvdec | no-av1 - that refusal; first-frame - no answer (the stream
 // goes on unchecked) and NVDEC then refuses its first frame; start-fails - the driver takes the stream and NVDEC still does not start
 // (NvdecStartFailed, FakeNvdecRefusesFrames); device-fails - the driver takes the stream and the CUDA device is not created
-// (NvdecStartFailed, FakeNvdecDeviceFails).
+// (NvdecStartFailed, FakeNvdecDeviceFails); query-fails - the driver could not be asked for a CUDA error and NVDEC then refuses the
+// first frame (NvdecStartFailed: memory, not the stream); later-frame - NVDEC refuses after a few frames (NvdecFailed: the stream's).
 DecodeSupport CheckDecodeSupport(const VideoStreamInfo& info);
-// DLSSVID_FAKE_NVDEC_AV1=first-frame | start-fails: VideoDecoder's get_format declines CUDA for a hardware-only decoder (the refusal FFmpeg
-// reports as ENOSYS on the first frame - a GPU whose limits the driver did not tell in advance, or NVDEC failing to start).
+// DLSSVID_FAKE_NVDEC_AV1=first-frame | query-fails | start-fails: VideoDecoder's get_format declines CUDA for a hardware-only decoder (the
+// refusal FFmpeg reports as ENOSYS on the first frame - a GPU whose limits the driver did not tell in advance, or NVDEC failing to start).
 bool FakeNvdecRefusesFrames();
 // DLSSVID_FAKE_NVDEC_AV1=device-fails: VideoDecoder::StartNvdec does not get its CUDA device (out of GPU memory, as it were).
 bool FakeNvdecDeviceFails();
+// DLSSVID_FAKE_NVDEC_AV1=later-frame: VideoDecoder takes NVDEC refusing a frame after a few decoded ones (a new sequence header NVDEC
+// does not take - not reproducible with a clip NVENC writes).
+bool FakeNvdecRefusesLater();
 
 // The refusal `block` of the stream, `detail` saying what failed (VideoDecoder: no CUDA device when it is created, NVDEC refusing the
 // first frame).

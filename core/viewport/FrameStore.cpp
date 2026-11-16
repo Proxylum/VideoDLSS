@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <string_view>
 
 #include "passes/ControlMaskPass.h"
 #include "pipeline/PassVersions.h"
@@ -331,6 +332,28 @@ std::optional<DecodeSupport> FrameStore::Undecodable(const std::string& name) co
     return std::nullopt;
 }
 
+void FrameStore::RetryStartFailures(const std::string& source) {
+    double time = 0.0;
+    std::vector<std::string> needed;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        bool any = false;
+        for (auto it = startFailed_.begin(); it != startFailed_.end();) {
+            if (!source.empty() && it->first != source) {
+                ++it;
+                continue;
+            }
+            for (auto m = missing_.begin(); m != missing_.end();) m = m->source == it->first ? missing_.erase(m) : std::next(m);
+            it = startFailed_.erase(it);
+            any = true;
+        }
+        if (!any) return;
+        time = currentTime_;
+        needed = needed_;
+    }
+    SetCurrentTime(time, needed);  // the frames of the window are asked for again
+}
+
 std::optional<DecodeSupport> FrameStore::StartFailure(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (const auto it = startFailed_.find(name); it != startFailed_.end()) return it->second;
@@ -610,6 +633,7 @@ void FrameStore::LoaderMain() {
             result.loaded.push_back(std::move(l));
         }
         ReleaseNvdecAfterLoad(key.source);  // TASK-0076: a pending release, or a task running
+        if (result.decodedOriginal) RetryStartFailures(key.source);  // TASK-0076: NVDEC works again - the frames a start failure left out come again
         for (auto& l : result.loaded) Publish(std::move(l));
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -911,6 +935,7 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
                          ms(tStart, tDecoder), ms(tDecoder, tDecoded), kept.size(), ms(tc, Clock::now()));
         }
         Publish(std::move(l));
+        if (std::string_view(path) != "proxy") result.decodedOriginal = true;
     }
     cleanup.armed = false;
     if (result.aborted) ++rt.aborted;

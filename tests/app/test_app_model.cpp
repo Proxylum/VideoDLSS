@@ -7456,8 +7456,9 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     CHECK(SourceDecodeText(RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecFailed, "")) == failedText);
     CHECK(SourceDecodeText(RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecFailed, "on the first frame")) == failedText);
     const DecodeSupport start = RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecStartFailed, "on the first frame");
-    CHECK(SourceDecodeText(start) == QString::fromUtf8("Видеокарта сейчас не смогла начать декодировать этот AV1 — скорее всего, не хватило её памяти. Что "
-                                                       "сделать: дождитесь конца обработки или закройте программы, которые занимают видеокарту, и попробуйте снова."));
+    CHECK(SourceDecodeText(start) == QString::fromUtf8("Видеокарта сейчас не смогла начать декодировать этот AV1 — скорее всего, не хватило её памяти; кадры "
+                                                       "загрузятся снова, когда она освободится. Что сделать: дождитесь конца обработки или закройте программы, "
+                                                       "которые занимают видеокарту."));
     // the core's English details stay in the log; every text says what to do
     for (const DecodeSupport& s : {nc, nn, na, smaller, larger, start}) {
         CHECK(SourceDecodeText(s).contains(QString::fromUtf8("Что сделать: ")));
@@ -7650,7 +7651,7 @@ TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport bec
     QSettings().remove("view/autoProxy");
 }
 
-TEST_CASE("AppModel: a plan already stopped (an impossible encode) is not rebuilt on every frame update when the viewport meets a refusal",
+TEST_CASE("AppModel: a plan already stopped (an impossible encode) takes the viewport's refusal once, not rebuilt; the stage runs go off",
           "[app][gpu][av1]") {
     App();
     const auto d = Dir("av1_refused_plan_error");
@@ -7673,15 +7674,28 @@ TEST_CASE("AppModel: a plan already stopped (an impossible encode) is not rebuil
     model.store().WaitForCurrent();
     REQUIRE(model.store().Undecodable("source"));
     QSignalSpy planChanged(&model, &AppModel::planChanged);
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    const std::vector<QPushButton*> runs = RunAloneButtons(panel);
+    REQUIRE(runs.size() >= 4);
+    for (QPushButton* b : runs) REQUIRE(b->isEnabled());  // another plan error alone does not hold a stage run
     for (int i = 0; i < 3; ++i) {  // the viewport's poll, again and again
         model.store().Update();
         model.notifyFramesUpdated();
     }
-    CHECK(planChanged.count() == 0);
+    CHECK(planChanged.count() == 1);  // said once: no plan rebuilt on every frame update
     CHECK(model.planError() == encodeError);
+    CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);
+    panel.refresh();
+    for (QPushButton* b : RunAloneButtons(panel)) {  // the verdict holds the stage runs: they would refuse the source at once
+        CHECK_FALSE(b->isEnabled());
+        CHECK(b->toolTip() == SourceDecodeText(model.sourceDecode()));
+    }
     // a plan made for another reason (an edit) says the refusal then
     model.refreshPlan();
     CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);
+    queue.stopAll(10000);
     QSettings().remove("view/autoProxy");
 }
 
@@ -7911,6 +7925,27 @@ TEST_CASE("The main window's tooltip of a result shown by its proxy says the vid
     p.resultVideo = result;
     p.viewport.layers[0].source = "result";  // the result in the viewport
     p.Save(d / "proj.dlssvid.json");
+    {
+        // no proxy yet: the refusal, and that the result can be written again in another codec
+        FakeNvdecEnv env("no-av1");
+        const DecodeSupport expected = CheckDecodeSupport(VideoDecoder(result, VideoDecoder::Probe()).Info());
+        REQUIRE(expected.block == DecodeBlock::NoAv1);
+        MainWindow window(true);
+        window.openPath(Q(d / "proj.dlssvid.json"));
+        const QString said = "\n" + HumanSourceName("result") + ": " + SourceDecodeText(expected) + "\n" +
+                             QString::fromUtf8("Результат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».");
+        QLabel* cell = nullptr;
+        Pump(
+            [&] {
+                cell = CellLabel(window);
+                return cell && cell->toolTip().contains(said);
+            },
+            20000);
+        REQUIRE(cell);
+        INFO("label: " << cell->text().toStdString() << "; tooltip: " << cell->toolTip().toStdString());
+        CHECK(cell->toolTip().contains(said));
+        CHECK(cell->text().endsWith(SourceDecodeShort()));
+    }
     BuildProxy(result, passes, "result");  // made where NVDEC decodes AV1
     REQUIRE(ValidProxy(result, passes, "result"));
     FakeNvdecEnv env("no-av1");
@@ -7928,6 +7963,110 @@ TEST_CASE("The main window's tooltip of a result shown by its proxy says the vid
     INFO("label: " << cell->text().toStdString() << "; tooltip: " << cell->toolTip().toStdString());
     CHECK(cell->toolTip().contains(viaProxy));
     CHECK_FALSE(cell->toolTip().contains(QString::fromUtf8("обработать его нельзя")));  // the result is not what a run reads
+    CHECK_FALSE(cell->toolTip().contains(QString::fromUtf8("Результат можно записать заново")));  // it shows: nothing to advise
     CHECK_FALSE(cell->text().endsWith(SourceDecodeShort()));
+    QSettings().remove("view/autoProxy");
+}
+
+namespace {
+// The frames `from`..`to` of the source loaded or found missing - no load runs for them afterwards (a stand-in may change then)
+void SettleAny(AppModel& model, int64_t from, int64_t to) {
+    QElapsedTimer t;
+    t.start();
+    auto settled = [&] {
+        for (int64_t f = from; f <= to; ++f) {
+            const FrameStore::Status st = model.store().GetStatus(f, "source");
+            if (st == FrameStore::Status::Loading || st == FrameStore::Status::Queued) return false;
+        }
+        return true;
+    };
+    while (!settled() && t.elapsed() < 30000) {
+        model.store().Update();
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    REQUIRE(settled());
+}
+}  // namespace
+
+TEST_CASE("AppModel: frames NVDEC could not start for while a task ran come back when the task ends - no reload", "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_retry");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    QSettings().setValue("view/autoProxy", false);
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    AppModel model(true);
+    TaskQueue queue;
+    ProjectTasks tasks(model, queue);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    SettleFrames(model, 0, 6);
+    const int task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});  // the run holds the GPU's memory
+    REQUIRE(task >= 0);
+    fake.emplace("start-fails");  // NVDEC does not start meanwhile (out of memory)
+    model.setTime(0.5);
+    SettleAny(model, 6, 18);
+    CHECK(model.frameStateOf("source") == FrameState::Missing);
+    REQUIRE(model.store().StartFailure("source"));
+    CHECK(model.planError().isEmpty());  // no verdict: the plan stands
+    fake.reset();  // the loaders at rest; the memory would be there again - but nothing asks for those frames until the task ends
+    queue.cancel(task);
+    Pump([&] { return queue.finished(task); }, 20000);
+    REQUIRE(queue.finished(task));
+    Pump([&] { return model.store().GetStatus(12, "source") == FrameStore::Status::Ready; }, 20000);  // asked again, loaded
+    model.store().Update();
+    CHECK(model.frameStateOf("source") == FrameState::Ready);
+    CHECK_FALSE(model.store().StartFailure("source"));
+    queue.stopAll(10000);
+    QSettings().remove("view/autoProxy");
+}
+
+TEST_CASE("AppModel: the driver not answering for a CUDA error (query-fails) and the viewport's first frame refused - no verdict, the plan stands",
+          "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_query_fails");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    QSettings().setValue("view/autoProxy", false);
+    FakeNvdecEnv fake("query-fails");
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    SettleAny(model, 0, 6);
+    model.notifyFramesUpdated();  // the viewport's poll
+    REQUIRE(model.store().StartFailure("source"));  // the viewport met it ...
+    CHECK_FALSE(model.store().Undecodable("source"));  // ... no verdict
+    CHECK(model.sourceDecode().Ok());
+    CHECK(model.sourceDecode().caps.cudaError);
+    CHECK(model.planError().isEmpty());
+    CHECK_FALSE(model.plan().stages.empty());
+    QSettings().remove("view/autoProxy");
+}
+
+TEST_CASE("AppModel: NVDEC refusing a frame after a few decoded ones (later-frame) is the source's verdict - the plan stops", "[app][gpu][av1][regression]") {
+    App();
+    const auto d = Dir("av1_later_frame");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    QSettings().setValue("view/autoProxy", false);
+    FakeNvdecEnv fake("later-frame");
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    SettleAny(model, 0, 6);  // the driver takes the stream; the viewport's decoder walks the first frames and NVDEC refuses one after three
+    REQUIRE(model.store().Undecodable("source"));
+    model.notifyFramesUpdated();
+    INFO("planError: " << model.planError().toStdString());
+    CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);
+    CHECK(model.planError() == SourceDecodeText(model.sourceDecode()));
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    QPushButton* process = ProcessButton(panel);
+    REQUIRE(process);
+    CHECK_FALSE(process->isEnabled());
     QSettings().remove("view/autoProxy");
 }

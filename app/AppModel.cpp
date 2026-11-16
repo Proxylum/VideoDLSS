@@ -484,6 +484,7 @@ void AppModel::updateNvdecHold() {
         store_->ReleaseNvdecDecoders();
     } else if (!busy) {
         store_->SetHoldNvdec(true);
+        store_->RetryStartFailures();  // NVDEC's memory is free again: the frames a start failure left out come again
     }
     nvdecLetGo_ = busy;
 }
@@ -781,8 +782,14 @@ void AppModel::noteSourceRefused() {
     // TASK-0076: NVDEC refused the source's first frame in the viewport (the driver could not be asked before): the plan says it now -
     // «Обработать», Ctrl+Return, the preview and the stage runs stop, as for a refusal known in advance
     if (!hasProject() || !sourceDecode_.Ok() || !store_) return;
-    if (!planError_.isEmpty()) return;  // the plan already stops the runs (no video, bad parameters): nothing to rebuild on every frame
-    if (store_->Undecodable("source")) refreshPlan();  // reads the refusal, drops the whole plan (outcome, previews' plans) and says it
+    const auto refused = store_->Undecodable("source");
+    if (!refused) return;
+    if (!planError_.isEmpty()) {  // the plan already says another error and stops the runs: the verdict holds the stage runs too - once
+        sourceDecode_ = *refused;
+        emit planChanged();
+        return;
+    }
+    refreshPlan();  // reads the refusal, drops the whole plan (outcome, previews' plans) and says it
 }
 
 // ---- comparison in one action ----------------------------------------------------------------------

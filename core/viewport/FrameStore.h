@@ -97,6 +97,9 @@ public:
     // TASK-0076: NVDEC could not start for the video `name` (NvdecStartFailed: memory, the driver) - its frames met then stay missing
     // until the sources are set again; no verdict on the video
     std::optional<DecodeSupport> StartFailure(const std::string& name) const;
+    // TASK-0076: forgets the start failures of `source` (empty: of every video) and asks for their frames again - a frame of it decoded
+    // since, or nothing runs any more (AppModel)
+    void RetryStartFailures(const std::string& source = {});
     // TASK-0076: closes the videos' decoders that hold NVDEC (an AV1 source in the GUI process): a run gets that memory; a later frame of
     // the viewport opens one again. Never waits for a load in flight (the GUI thread): a busy decoder is closed by its loader after it.
     void ReleaseNvdecDecoders();
@@ -218,6 +221,9 @@ private:
     struct LoadResult {
         std::vector<Loaded> loaded;
         bool aborted = false;  // not loaded because nobody wants it any more; not missing
+        // TASK-0076: the video's own decoder published a frame (LoadVideo publishes its frames itself, `loaded` stays empty then): NVDEC
+        // works for it - its start failures are tried again. A frame from the proxy (software) says nothing of NVDEC
+        bool decodedOriginal = false;
     };
 
     void LoaderMain();
