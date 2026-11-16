@@ -263,6 +263,11 @@ std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view header) {
     return k;
 }
 
+bool Av1FrameBelowSequence(int width, int height, std::string_view sequenceHeader) {
+    const auto key = Av1SequenceKeyOf(sequenceHeader);
+    return key && width > 0 && height > 0 && (static_cast<uint32_t>(width) < key->maxWidth || static_cast<uint32_t>(height) < key->maxHeight);
+}
+
 namespace {
 
 // "420" | "422" | "444" | "other" (RGB, grey) - the VideoStreamInfo::chroma of a pixel format
@@ -825,6 +830,14 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         return false;
     }
     CheckDecode(err, "avcodec_receive_frame");
+    if (hwOnly_ && Av1FrameBelowSequence(frame_->width, frame_->height, nvdecSequence_)) {  // TASK-0076: NVDEC gave it wrong (Resized)
+        const auto key = Av1SequenceKeyOf(nvdecSequence_);
+        const std::string frame = "a frame of " + std::to_string(frame_->width) + "x" + std::to_string(frame_->height) +
+                                  (framesDecoded_ > 0 ? ", after " + std::to_string(framesDecoded_) + " frames" : ", the first one");
+        av_frame_unref(frame_);
+        refused_ = std::make_shared<const DecodeSupport>(RefusedDecode(StreamPartInfo(info_, "", key->maxWidth, key->maxHeight), DecodeBlock::Resized, frame));
+        throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
+    }
 
     const int64_t pts = frame_->best_effort_timestamp != AV_NOPTS_VALUE ? frame_->best_effort_timestamp : frame_->pts;
     int64_t index = nextIndex_;

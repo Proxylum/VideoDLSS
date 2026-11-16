@@ -7,12 +7,14 @@ namespace dlssvid {
 namespace {
 QString Tr(const char* s) { return QCoreApplication::translate("DecodeText", s); }
 
-QString LayoutText(const DecodeSupport& s) {  // «10 бит 4:4:4», «8 бит, монохромный или особый формат»
-    if (s.chroma == "420" || s.chroma == "422" || s.chroma == "444")
-        return Tr("%1 бит %2:%3:%4").arg(s.bitDepth).arg(s.chroma[0]).arg(s.chroma[1]).arg(s.chroma[2]);
-    return Tr("%1 бит, монохромный или особый формат").arg(s.bitDepth);
-}
+QString LayoutText(const DecodeSupport& s) { return DecodeLayoutText(s.bitDepth, s.chroma); }
 }  // namespace
+
+QString DecodeLayoutText(int bitDepth, const std::string& chroma) {  // «10 бит 4:4:4», «8 бит, монохромный или особый формат»
+    if (chroma == "420" || chroma == "422" || chroma == "444")
+        return Tr("%1 бит %2:%3:%4").arg(bitDepth).arg(chroma[0]).arg(chroma[1]).arg(chroma[2]);
+    return Tr("%1 бит, монохромный или особый формат").arg(bitDepth);
+}
 
 // docs/ux-guidelines.md: what happened, why, what to do - in Russian; the core's English reason goes to the log only. «не декодируется на
 // этом компьютере», not «не открыть»: the project is open, the video is listed and may even be shown from its scrubbing proxy
@@ -38,6 +40,11 @@ QString SourceDecodeText(const DecodeSupport& s) {
                       "версии программы нет. Что сделать: переустановите или обновите драйвер NVIDIA и перезапустите программу или %1.")
                 .arg(transcode);
         case DecodeBlock::NoAv1:
+            if (s.pixelFormat == "unknown")  // the depth asked about is a default, not the video's (a GPU without 8-bit AV1 has no AV1)
+                return Tr("Видео AV1 не декодируется на этом компьютере: видеокарта %1 не декодирует AV1, а другого декодера AV1 в этой версии "
+                          "программы нет. Что сделать: %2 или откройте его на компьютере с видеокартой, которая декодирует AV1 (например, RTX 30 и "
+                          "новее).")
+                    .arg(gpu, transcode);
             if (s.part)
                 return Tr("Видео AV1 не декодируется на этом компьютере: в нём есть часть AV1 %2 бит, а такой AV1 видеокарта %1 не декодирует, и "
                           "другого декодера AV1 в этой версии программы нет. Что сделать: %3 или откройте его на компьютере с видеокартой, которая "
@@ -79,6 +86,12 @@ QString SourceDecodeText(const DecodeSupport& s) {
                 .arg(small ? Tr("перекодируйте ролик в H.264 или HEVC другой программой") : Tr("перекодируйте ролик другой программой в H.264 или HEVC "
                                                                                               "либо в кадр поменьше"));
         }
+        case DecodeBlock::Resized:
+            return Tr("Видео AV1 не декодируется на этом компьютере: размер его кадров меняется внутри потока (есть кадры меньше заявленных "
+                      "%1×%2), а такие AV1 эта версия программы не декодирует. Что сделать: %3.")
+                .arg(s.width)
+                .arg(s.height)
+                .arg(transcode);
         case DecodeBlock::NvdecFailed:
             return Tr("Видео AV1 не декодируется на этом компьютере: видеокарта отказалась его декодировать, а другого декодера AV1 в этой версии "
                       "программы нет. Что сделать: обновите драйвер NVIDIA и перезапустите программу или %1.")

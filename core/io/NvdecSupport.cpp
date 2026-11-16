@@ -97,6 +97,10 @@ std::string RefusalText(const DecodeSupport& s) {
             return codec + " decodes only on NVDEC in this build - there is no software AV1 decoder - and the NVIDIA driver's video decoder is unavailable: " +
                    s.caps.why;
         case DecodeBlock::NoAv1:
+            if (s.pixelFormat == "unknown")  // asked for 8 bits: the stream's own depth is not known before the first frame
+                return "the GPU '" + s.caps.gpu + "' has no NVDEC AV1 decoder (asked for 8-bit 4:2:0 - the stream's layout is not known before the "
+                       "first frame; for example, GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder" +
+                       (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
             return "the GPU '" + s.caps.gpu + "' has no NVDEC AV1 decoder for " + Depth(s.bitDepth) +
                    " 4:2:0 (for example, GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder" +
                    (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
@@ -107,6 +111,11 @@ std::string RefusalText(const DecodeSupport& s) {
                    " macroblocks), and this build has no software AV1 decoder";
         case DecodeBlock::NvdecFailed:
             return "NVDEC refused this AV1 stream and this build has no software AV1 decoder" + (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
+        case DecodeBlock::Resized:
+            return codec + " frames smaller than the sequence's " + std::to_string(s.width) + "x" + std::to_string(s.height) +
+                   " (a frame size override or a resize within it) cannot be decoded here - FFmpeg's NVDEC takes only frames of the sequence's full "
+                   "size, and this build has no software AV1 decoder" +
+                   (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::NvdecStartFailed:
             return "NVDEC could not start decoding this AV1 stream now - out of GPU memory or a driver error; this build has no software AV1 decoder" +
                    (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");

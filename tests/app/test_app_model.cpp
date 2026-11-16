@@ -7435,9 +7435,9 @@ struct LogCapture {
     LogCapture& operator=(const LogCapture&) = delete;
 };
 
-// ProjectPanel's tooltip of the source's frame line: «Поток: 8 бит 420; » and how it decodes
+// ProjectPanel's tooltip of the source's frame line: «Поток: 8 бит 4:2:0; » and how it decodes
 QString StreamTip(const AppModel& model, const char* how) {
-    return QString::fromUtf8("Поток: %1 бит %2; ").arg(model.sourceInfo().bitDepth).arg(QString::fromStdString(model.sourceInfo().chroma)) + QString::fromUtf8(how);
+    return QString::fromUtf8("Поток: ") + DecodeLayoutText(model.sourceInfo().bitDepth, model.sourceInfo().chroma) + "; " + QString::fromUtf8(how);
 }
 }  // namespace
 
@@ -7533,6 +7533,24 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
                                                         "перекодируйте ролик другой программой в H.264 или HEVC либо в кадр поменьше."));
     limits.maxMacroblocks = 240;
     CHECK(JudgeDecode(Av1StreamInfo("yuv420p", 8), &limits).Ok());
+    // TASK-0076: no AV1 in NVDEC for a stream whose layout is not known in advance: no depth said (the 8 bits asked about are a default)
+    const DecodeSupport unknownNoAv1 = JudgeDecode(Av1StreamInfo("unknown", 8), &noAv1);
+    REQUIRE(unknownNoAv1.block == DecodeBlock::NoAv1);
+    CHECK(SourceDecodeText(unknownNoAv1) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: видеокарта NVIDIA GeForce GTX 1080 не декодирует AV1, а "
+                                                              "другого декодера AV1 в этой версии программы нет. Что сделать: ") +
+                                                transcode +
+                                                QString::fromUtf8(" или откройте его на компьютере с видеокартой, которая декодирует AV1 (например, RTX 30 и новее)."));
+    // frames smaller than the sequence's (a frame size override): VideoDecoder's Resized
+    const DecodeSupport resized = RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::Resized, "a frame of 160x96, after 3 frames");
+    CHECK(SourceDecodeText(resized) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: размер его кадров меняется внутри потока (есть кадры меньше "
+                                                         "заявленных 320×192), а такие AV1 эта версия программы не декодирует. Что сделать: ") +
+                                           transcode + ".");
+    // a layout in words: the GUI's for every refusal and the source row
+    CHECK(DecodeLayoutText(8, "420") == QString::fromUtf8("8 бит 4:2:0"));
+    CHECK(DecodeLayoutText(10, "444") == QString::fromUtf8("10 бит 4:4:4"));
+    CHECK(DecodeLayoutText(12, "422") == QString::fromUtf8("12 бит 4:2:2"));
+    CHECK(DecodeLayoutText(10, "other") == QString::fromUtf8("10 бит, монохромный или особый формат"));
+    CHECK(DecodeLayoutText(8, "") == QString::fromUtf8("8 бит, монохромный или особый формат"));
     // TASK-0076: a part of the video in other parameters (a new sequence header): the same reasons, said of that part
     DecodeSupport layoutPart = JudgeDecode(Av1StreamInfo("yuv420p12le", 12, "420"), nullptr);
     REQUIRE(layoutPart.block == DecodeBlock::Layout);
@@ -7894,6 +7912,20 @@ TEST_CASE("AppModel: the viewport's refusal when the plan stops before the sourc
         CHECK_FALSE(b->isEnabled());
         CHECK(b->toolTip() == SourceDecodeText(refused));
     }
+    // the plan's error is not the refusal: the cards and the preview say that error, not «не декодируется» (the stage runs say the verdict)
+    CHECK_FALSE(model.sourceRefusalSaid());
+    int cards = 0;
+    for (const auto& st : model.project().stages) {
+        if (!st.enabled) continue;
+        INFO(st.name);
+        ++cards;
+        CHECK(model.cardState(st.name).state == QString::fromUtf8("видео не найдено"));
+    }
+    CHECK(cards >= 1);
+    {
+        PreviewRunner runner(model, queue);
+        CHECK(runner.availability({PreviewRunner::Kind::Frame, 0}).text == QString::fromUtf8("Превью недоступно: видео не найдено"));
+    }
     // a plan made again (an edit), the video still gone: the verdict is the plan's own now - not lost to a refresh
     model.setStageEnabled("fg", true);
     model.refreshPlan();
@@ -7905,19 +7937,16 @@ TEST_CASE("AppModel: the viewport's refusal when the plan stops before the sourc
         CHECK_FALSE(b->isEnabled());
         CHECK(b->toolTip() == SourceDecodeText(refused));
     }
-    // a file there that does not probe (the plan fails on it): the verdict kept as well
+    // another file on that path (it does not probe): not the file the viewport refused - no AV1 verdict, the probe's error said
     std::ofstream(source, std::ios::binary) << "not a video";
     model.refreshPlan();
     INFO("planError: " << model.planError().toStdString());
     CHECK_FALSE(model.planError().isEmpty());
     CHECK(model.planError() != QString::fromUtf8("видео не найдено"));
-    CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);
-    CHECK(model.sourceDecode().why == refused.why);
+    CHECK_FALSE(model.planError().contains(QString::fromUtf8("Видео AV1")));
+    CHECK(model.sourceDecode().Ok());
     panel.refresh();
-    for (QPushButton* b : RunAloneButtons(panel)) {
-        CHECK_FALSE(b->isEnabled());
-        CHECK(b->toolTip() == SourceDecodeText(refused));
-    }
+    for (QPushButton* b : RunAloneButtons(panel)) CHECK_FALSE(b->toolTip().contains(QString::fromUtf8("Видео AV1")));
     queue.stopAll(10000);
 }
 
@@ -9039,7 +9068,7 @@ TEST_CASE("AppModel: a background proxy build that met a part of the stream the 
         panel.refresh();
         const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
         REQUIRE(row);
-        CHECK(row->toolTip() == QString::fromUtf8("Поток: 8 бит 420, в части — 12 бит 420; на этом компьютере не декодируется"));
+        CHECK(row->toolTip() == QString::fromUtf8("Поток: 8 бит 4:2:0, в части — 12 бит 4:2:0; на этом компьютере не декодируется"));
     }
     const auto again = FrameStore::VideoSource("source", parts);  // remembered for the file
     REQUIRE(again);
@@ -9206,7 +9235,7 @@ TEST_CASE("ProjectPanel's source row of a stream whose layout the probe did not 
     panel.refresh();
     const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
     REQUIRE(row);
-    CHECK(row->toolTip() == QString::fromUtf8("Поток: 12 бит 420; на этом компьютере не декодируется"));
+    CHECK(row->toolTip() == QString::fromUtf8("Поток: 12 бит 4:2:0; на этом компьютере не декодируется"));
     INFO("row: " << row->text().toStdString());
     CHECK(row->text().endsWith(QString::fromUtf8(" · AV1 12 бит 4:2:0")));  // the layout the refusal learned
     CHECK_FALSE(row->text().contains(QString::fromUtf8("неизвестен")));
@@ -9323,7 +9352,114 @@ TEST_CASE("ProjectPanel's source row of a video refused for the frame size of a 
     panel.refresh();
     const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
     REQUIRE(row);
-    CHECK(row->toolTip() == QString::fromUtf8("Поток: 8 бит 420, в части — кадр 384×224; на этом компьютере не декодируется"));
+    CHECK(row->toolTip() == QString::fromUtf8("Поток: 8 бит 4:2:0, в части — кадр 384×224; на этом компьютере не декодируется"));
     CHECK(model.planError() == SourceDecodeText(verdict));
     CHECK(model.planError().contains(QString::fromUtf8("в нём есть часть, где кадр в файле 384×224")));
+}
+
+TEST_CASE("ProjectPanel's source row of a video refused for its layout says the refused layout, and of a part of another layout and size says both",
+          "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_layout_row");  // its own clips: the verdicts remembered for the process are for these files alone
+    AutoProxySetting autoProxy(false);
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    const auto other = d / "other.mp4";
+    std::filesystem::copy_file(clip, other);
+    const VideoStreamInfo probe = VideoDecoder(clip, VideoDecoder::Probe()).Info();
+    NvdecAv1Caps caps;
+    caps.checked = true;
+    caps.cuda = true;
+    caps.supported = true;
+    caps.gpu = "Test GPU";
+    caps.minWidth = 16;
+    caps.minHeight = 16;
+    caps.maxWidth = 320;
+    caps.maxHeight = 192;
+    caps.maxMacroblocks = 1u << 20;
+    // the stream's own layout refused (10-bit grey, as a loader would judge a layout learned on its frame) - no gray AV1 clip can be
+    // written here (av1_nvenc writes 4:2:0 only): the verdict remembered for the file stands for it
+    DecodeSupport gray = JudgeDecode(StreamPartInfo(probe, "gray10le", 0, 0), &caps);
+    REQUIRE(gray.block == DecodeBlock::Layout);
+    REQUIRE_FALSE(gray.part);
+    REQUIRE(FrameStore::RememberRefusedFile(clip, gray));
+    {
+        AppModel model(true);
+        model.openVideo(Q(clip));
+        REQUIRE(model.hasProject());
+        REQUIRE(model.sourceDecode().block == DecodeBlock::Layout);
+        TaskQueue queue;
+        ProjectPanel panel(model, queue);
+        panel.refresh();
+        const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
+        REQUIRE(row);
+        INFO("row: " << row->text().toStdString());
+        CHECK(row->text().endsWith(QString::fromUtf8(" · AV1 10 бит, монохромный или особый формат")));
+        CHECK_FALSE(row->text().contains(QString::fromUtf8("8 бит 4:2:0")));  // not the layout the probe has
+        CHECK(row->toolTip() == QString::fromUtf8("Поток: 10 бит, монохромный или особый формат; на этом компьютере не декодируется"));
+    }
+    // a part in another layout and of another size, refused for its frame: both said
+    DecodeSupport part = JudgeDecode(StreamPartInfo(probe, "yuv420p10le", 384, 224), &caps);
+    REQUIRE(part.block == DecodeBlock::Size);
+    part.part = true;
+    REQUIRE(FrameStore::RememberRefusedFile(other, part));
+    AppModel model(true);
+    model.openVideo(Q(other));
+    REQUIRE(model.hasProject());
+    REQUIRE(model.sourceDecode().part);
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
+    REQUIRE(row);
+    CHECK(row->toolTip() == QString::fromUtf8("Поток: 8 бит 4:2:0, в части — 10 бит 4:2:0, кадр 384×224; на этом компьютере не декодируется"));
+    INFO("row: " << row->text().toStdString());
+    CHECK(row->text().endsWith(QString::fromUtf8(" · AV1 8 бит 4:2:0")));  // the stream's own layout: a part is said in the tooltip
+}
+
+TEST_CASE("AppModel: an AV1 video refused in the viewport, then another AV1 written on its path - no old verdict, the sources loaded again",
+          "[app][gpu][av1][regression]") {
+    App();
+    const auto d = Dir("av1_replaced_by_av1");
+    AutoProxySetting autoProxy(false);
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    ClipSpec spec;  // another AV1 video: another frame count
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 16;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    const auto other = WriteClipIfSupported(d / "other.mp4", spec, &why);
+    REQUIRE(other);
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    SettleFrames(model, 0, 6);
+    fake.emplace("first-frame");  // NVDEC refuses the viewport's first frame: a verdict the probe did not give
+    model.store().SetSources(model.store().Sources());
+    model.store().SetCurrentTime(model.time(), {"source"});
+    model.store().WaitForCurrent();
+    REQUIRE(model.store().Undecodable("source"));
+    SettleAny(model, 0, 6);
+    fake.reset();
+    model.store().Update();
+    model.notifyFramesUpdated();
+    REQUIRE_FALSE(model.planError().isEmpty());  // heard
+    // another AV1 video on that path (NVDEC decodes it): not the file refused
+    std::filesystem::copy_file(*other, clip, std::filesystem::copy_options::overwrite_existing);
+    REQUIRE(model.store().SourceChanged("source"));
+    model.refreshPlan();
+    INFO("planError: " << model.planError().toStdString());
+    CHECK(model.planError().isEmpty());
+    CHECK(model.sourceDecode().Ok());
+    // the sources loaded again (deferred): the new file judged on its own
+    Pump([&] { return !model.store().Undecodable("source"); }, 10000);
+    CHECK_FALSE(model.store().Undecodable("source"));
+    CHECK_FALSE(model.store().SourceChanged("source"));
+    CHECK(model.sourceInfo().frames == 16);
+    SettleFrames(model, 0, 6);
 }

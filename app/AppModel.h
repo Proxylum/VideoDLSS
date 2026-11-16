@@ -110,6 +110,8 @@ public:
     QString planError() const { return planError_; }         // why there is no plan (bad parameters, no video)
     // TASK-0076: whether this machine decodes the source (AV1 without NVDEC AV1: not) - the plan's verdict, Ok while there is none
     const DecodeSupport& sourceDecode() const { return sourceDecode_; }
+    // TASK-0076: the plan's error is the source's refusal (a card, the preview say it short); false - another error (the video not found)
+    bool sourceRefusalSaid() const;
     // TASK-0076: whether a task or a preview runs or waits (ProjectTasks, from the queue): with a check of the model's, the viewport does
     // not hold NVDEC between frames meanwhile
     void setTasksRunning(bool running);

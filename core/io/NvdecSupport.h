@@ -30,6 +30,10 @@ enum class DecodeBlock {
     NoAv1,        // the GPU's NVDEC has no AV1 decoder at the stream's depth
     Size,         // the frame is outside the sizes the GPU's NVDEC decodes
     NvdecFailed,  // NVDEC was asked and refused a frame - the first one, or a later one (why: on the first frame / after N frames)
+    // a frame smaller than its sequence's maximum (an AV1 frame size override, a resize within a sequence): FFmpeg 7.1.1's NVDEC makes its
+    // surfaces for the maximum and maps a frame by the frame's own height (nvdec.c: the chroma read from the wrong place) - width / height
+    // are the sequence's maximum, caps.why names the frame
+    Resized,
     NvdecStartFailed,  // NVDEC did not start on the first frame although the driver took the stream or could not be asked for a CUDA
                        // error (NvdecAv1Caps::cudaError), or the CUDA device could not be created (out of GPU memory, a driver error):
                        // not the stream's verdict - another decoder may succeed later

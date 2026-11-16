@@ -2216,6 +2216,21 @@ TEST_CASE("A repeated sequence header that differs outside what NVDEC's decoder 
     CHECK(CountOf(text.str(), "another AV1 sequence header") == 0);  // no decoder of its own: the same one goes on
 }
 
+TEST_CASE("dlssvid render --bench with a bench mode it does not know says that first - before any video is opened or refused", "[integration][cli][gpu][av1]") {
+    const auto dir = Dir("bench_mode");
+    REQUIRE_AV1_CLIP(clip, dir, false, 8);
+    FakeNvdecEnv fake("no-av1");  // the video would be refused here
+    const auto json = dir / "bench.json";
+    const auto r = RunAll({"render", "--warp", "-i", clip.string(), "--bench", "10", "--bench-mode", "foo", "--bench-json", json.string()}, dir / "bench.log");
+    INFO(r.out);
+    CHECK(r.code != 0);
+    CHECK_THAT(r.out, ContainsSubstring("render: --bench-mode must be all | cold | warm | random"));
+    CHECK_THAT(r.out, !ContainsSubstring(kNoAv1Reason));        // not the refusal of the video
+    CHECK_THAT(r.out, !ContainsSubstring("D3D12 device"));      // nothing set up
+    CHECK_THAT(r.out, !ContainsSubstring("decodes on NVDEC"));  // nothing decoded
+    CHECK_FALSE(std::filesystem::exists(json));
+}
+
 TEST_CASE("NVDEC refusing a frame after a few decoded ones (later-frame) is the stream's verdict: kept, marked, remembered for the file",
           "[integration][viewport][gpu][av1][regression]") {
     const auto dir = Dir("later_frame");

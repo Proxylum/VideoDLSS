@@ -862,6 +862,8 @@ void AppModel::notifyFramesUpdated() {
     emit framesUpdated();
 }
 
+bool AppModel::sourceRefusalSaid() const { return !sourceDecode_.Ok() && planError_ == SourceDecodeText(sourceDecode_); }
+
 void AppModel::noteSourceRefused() {
     // TASK-0076: NVDEC refused the source in the viewport as a verdict (not a start failure): the plan says it now -
     // «Обработать», Ctrl+Return, the preview and the stage runs stop, as for a refusal known in advance
@@ -1051,8 +1053,9 @@ void AppModel::refreshPlan() {
     }
     // TASK-0076: a plan that stops before it probes the source (the video not found, the probe failing): the viewport's verdict on it
     // still holds the runs (a plan that probed it decides itself - a file replaced by one with a software decoder is no AV1 refusal)
+    // (of the file as the viewport loaded it: one written there since - a broken copy, another video - is not that file)
     const auto keepViewportVerdict = [this] {
-        if (sourceInfo_.codec.empty() && hasProject())
+        if (sourceInfo_.codec.empty() && hasProject() && !store_->SourceChanged("source"))
             if (const auto refused = store_->Undecodable("source")) sourceDecode_ = *refused;
     };
     if (!hasProject() || !std::filesystem::exists(project_.sourceVideo)) {
@@ -1078,8 +1081,14 @@ void AppModel::refreshPlan() {
         sourceInfo_.chroma = probe.Info().chroma;
         sourceInfo_.pixelFormat = probe.Info().pixelFormat;
         sourceDecode_ = CheckDecodeSupport(probe.Info());
-        if (sourceDecode_.Ok())  // TASK-0076: the driver could not be asked and NVDEC refused the viewport's first frame
-            if (const auto refused = probe.Info().hardwareOnly ? store_->Undecodable("source") : std::nullopt) sourceDecode_ = *refused;
+        if (sourceDecode_.Ok() && probe.Info().hardwareOnly) {  // TASK-0076: the driver could not be asked and NVDEC refused the viewport's first frame
+            if (store_->SourceChanged("source"))  // another file on that path: its own sources (the store judges it again), no old verdict
+                QTimer::singleShot(0, this, [this] {
+                    if (store_ && store_->SourceChanged("source")) reloadSources();
+                });
+            else if (const auto refused = store_->Undecodable("source"))
+                sourceDecode_ = *refused;
+        }
         if (!sourceDecode_.Ok()) {  // TASK-0076: AV1 without NVDEC AV1 - «Обработать» and the stage runs stay off
             planError_ = SourceDecodeText(sourceDecode_);
             emit planChanged();
@@ -1271,7 +1280,9 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
         if (s.name == stage) d = &s;
     if (!d) {
         // TASK-0076: the source's refusal is said once, under «Что получится» - a card gets a short line, not the whole paragraph
-        st.state = !sourceDecode_.Ok() ? tr("не запустить: исходник не декодируется на этом компьютере") : planError_.isEmpty() ? tr("—") : planError_;
+        st.state = sourceRefusalSaid()   ? tr("не запустить: исходник не декодируется на этом компьютере")
+                   : planError_.isEmpty() ? tr("—")
+                                          : planError_;
         return st;
     }
     const std::string primary = d->outputs.empty() ? stage : d->outputs.back();

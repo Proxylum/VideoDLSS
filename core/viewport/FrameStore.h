@@ -57,6 +57,8 @@ struct ViewportSource {
     // frames come from the proxy when there is one, else they are missing
     std::optional<DecodeSupport> undecodable;
     bool hardwareOnly = false;  // TASK-0076: the video decodes on NVDEC only (VideoStreamInfo::hardwareOnly)
+    uintmax_t fileSize = 0;     // TASK-0076: the video file as it was loaded (SourceChanged)
+    std::filesystem::file_time_type fileTime{};
     bool HasFrame(int64_t f) const { return f >= firstFrame && (lastFrame < 0 || f <= lastFrame); }
 };
 
@@ -95,6 +97,9 @@ public:
     // frame in a loader as a verdict (a later frame, a part of the stream in other parameters or a layout the probe did not learn that the
     // GPU does not take, the first frame when the driver could not be asked); nullopt: it decodes
     std::optional<DecodeSupport> Undecodable(const std::string& name) const;
+    // TASK-0076: the video `name` was written again since it was loaded (another size or time) - its verdicts are the old file's. A file
+    // gone, a pass folder or no such source: false
+    bool SourceChanged(const std::string& name) const;
     // TASK-0076: NVDEC could not start for the video `name` (NvdecStartFailed: memory, the driver) - no verdict on the video; its frames
     // met then are missing until RetryStartFailures (a frame of it decoded by its own decoder, a jump or a step, the end of a task) or
     // SetSources

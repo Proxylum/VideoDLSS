@@ -97,7 +97,7 @@ NvdecAv1Caps GoodCaps() {
     return c;
 }
 
-const char* const kAllBlocks[] = {"None", "Layout", "NoCuda", "NoNvdec", "NoAv1", "Size", "NvdecFailed", "NvdecStartFailed"};
+const char* const kAllBlocks[] = {"None", "Layout", "NoCuda", "NoNvdec", "NoAv1", "Size", "NvdecFailed", "Resized", "NvdecStartFailed"};
 
 std::string BlockName(DecodeBlock b) {
     const int i = static_cast<int>(b);
@@ -232,6 +232,10 @@ TEST_CASE("JudgeDecode: the layout is judged before NVDEC is asked; an unknown l
         CheckRefusal(JudgeDecode(Av1Info("unknown"), &noCuda), DecodeBlock::NoCuda);
         CheckRefusal(JudgeDecode(Av1Info("unknown"), &noNvdec), DecodeBlock::NoNvdec);
         CheckRefusal(JudgeDecode(Av1Info("unknown"), &noAv1), DecodeBlock::NoAv1);
+        // the depth asked about is the probe's default, not the stream's: said so
+        CHECK(JudgeDecode(Av1Info("unknown"), &noAv1).why ==
+              "the GPU 'Test GPU' has no NVDEC AV1 decoder (asked for 8-bit 4:2:0 - the stream's layout is not known before the first frame; for "
+              "example, GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder");
         const DecodeSupport s = JudgeDecode(Av1Info("unknown"), &good);
         CHECK(s.Ok());
         CHECK_FALSE(s.verified);
@@ -832,6 +836,30 @@ TEST_CASE("Av1SequenceHeader finds the sequence header OBU in low-overhead OBUs 
     CHECK(SequenceHeaderIn(obu.substr(0, obu.size() - 3)).empty());                    // its size beyond the data
     CHECK(SequenceHeaderIn("").empty());
     CHECK(Av1SequenceHeader(nullptr, 0).empty());
+}
+
+TEST_CASE("Av1FrameBelowSequence: a frame smaller than its sequence header's maximum (a frame size override, a resize within it); the Resized refusal",
+          "[unit][av1]") {
+    const std::string header = Bytes("000000fa1e7f7e010cc020");  // av1_nvenc's: at most 320x192
+    REQUIRE(Av1SequenceKeyOf(header));
+    CHECK(Av1FrameBelowSequence(319, 192, header));  // narrower
+    CHECK(Av1FrameBelowSequence(320, 191, header));  // lower
+    CHECK(Av1FrameBelowSequence(160, 96, header));
+    CHECK_FALSE(Av1FrameBelowSequence(320, 192, header));  // the sequence's own size
+    CHECK_FALSE(Av1FrameBelowSequence(640, 480, header));  // not below (another sequence's frame: FollowSequenceHeader's)
+    CHECK_FALSE(Av1FrameBelowSequence(0, 0, header));      // no size
+    CHECK_FALSE(Av1FrameBelowSequence(0, 100, header));
+    CHECK_FALSE(Av1FrameBelowSequence(100, 0, header));
+    CHECK_FALSE(Av1FrameBelowSequence(160, 96, ""));                     // no header
+    CHECK_FALSE(Av1FrameBelowSequence(160, 96, Bytes("000000fa1e7f")));  // one that does not parse
+    // the refusal VideoDecoder makes of it: the sequence's size, the frame named
+    const DecodeSupport s = RefusedDecode(StreamPartInfo(Av1Info(), "", 640, 480), DecodeBlock::Resized, "a frame of 320x240, after 5 frames");
+    CheckRefusal(s, DecodeBlock::Resized);
+    CHECK_FALSE(s.Transient());
+    CHECK(s.width == 640);
+    CHECK(s.height == 480);
+    CHECK(s.why == "AV1 frames smaller than the sequence's 640x480 (a frame size override or a resize within it) cannot be decoded here - FFmpeg's "
+                   "NVDEC takes only frames of the sequence's full size, and this build has no software AV1 decoder (a frame of 320x240, after 5 frames)");
 }
 
 TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit][av1]") {

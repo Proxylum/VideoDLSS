@@ -19,6 +19,7 @@
 
 #include "AppModel.h"
 #include "ControlMaskText.h"
+#include "DecodeText.h"
 #include "SceneCutsView.h"
 #include "SourceNames.h"
 #include "PresetMenu.h"
@@ -368,14 +369,16 @@ void ProjectPanel::refresh() {
                             .arg(QString::number(src.fps, 'g', 5))
                             .arg(src.frames)
                             .arg(QString::number(src.fps > 0 ? src.frames / src.fps : 0.0, 'f', 1));
-        // TASK-0076: a layout the probe did not learn is not shown as the defaults it has - the one a refusal learned, else «not known»
+        // TASK-0076: a layout the probe did not learn is not shown as the defaults it has - the one a refusal learned, else «not known»;
+        // a layout refused (gray, 12-bit ...) in the refusal's words, not as the layout a decoder would fall back to
         const DecodeSupport& decode = model_.sourceDecode();
         const bool unknown = src.pixelFormat == "unknown";
         const bool learned = unknown && !decode.Ok() && !decode.part && !decode.pixelFormat.empty() && decode.pixelFormat != "unknown";
+        const bool refusedLayout = learned || (!decode.Ok() && !decode.part && decode.block == DecodeBlock::Layout);
         if (!src.codec.empty())
-            frame += " · " + (!unknown  ? AppModel::formatLabel(src.codec, src.layout.width ? src.layout : src.decoded)  // «HEVC 10 бит 4:4:4»
-                              : learned ? AppModel::formatLabel(src.codec, DecodedFrameDescFor(decode.pixelFormat))
-                                        : AppModel::codecLabel(src.codec) + tr(", формат заранее неизвестен"));
+            frame += " · " + (refusedLayout ? AppModel::codecLabel(src.codec) + " " + DecodeLayoutText(decode.bitDepth, decode.chroma)
+                              : unknown     ? AppModel::codecLabel(src.codec) + tr(", формат заранее неизвестен")
+                                            : AppModel::formatLabel(src.codec, src.layout.width ? src.layout : src.decoded));  // «HEVC 10 бит 4:4:4»
         // TASK-0072: a phone video stored landscape, shown turned - as in a player
         if (!src.orientation.Identity())
             frame += src.orientation.rotate ? tr(" · повёрнут на %1°").arg(src.orientation.rotate) + (src.orientation.hflip ? tr(" и отражён") : QString())
@@ -386,13 +389,17 @@ void ProjectPanel::refresh() {
         sourceFrame_->setText(frame);
         // TASK-0076: the same reading in the tooltip (a refusal learned the layout, or it is not known in advance); a refusal of a part
         // names that part
-        const auto layoutOf = [this](int depth, const std::string& chroma) { return tr("%1 бит %2").arg(depth).arg(QString::fromStdString(chroma)); };
-        QString stream = learned   ? layoutOf(decode.bitDepth, decode.chroma)
-                         : unknown ? tr("формат заранее неизвестен (его узнаёт декодер на первом кадре)")
-                                   : layoutOf(src.bitDepth, src.chroma);
-        if (!decode.Ok() && decode.part)
-            stream += decode.pixelFormat != src.pixelFormat ? tr(", в части — %1").arg(layoutOf(decode.bitDepth, decode.chroma))
-                                                            : tr(", в части — кадр %1×%2").arg(decode.width).arg(decode.height);
+        QString stream = refusedLayout ? DecodeLayoutText(decode.bitDepth, decode.chroma)
+                         : unknown     ? tr("формат заранее неизвестен (его узнаёт декодер на первом кадре)")
+                                       : DecodeLayoutText(src.bitDepth, src.chroma);
+        if (!decode.Ok() && decode.part) {  // what the part was refused for: its frame (Size), else its layout
+            const bool otherLayout = decode.pixelFormat != src.pixelFormat && !unknown;
+            if (decode.block == DecodeBlock::Size)
+                stream += otherLayout ? tr(", в части — %1, кадр %2×%3").arg(DecodeLayoutText(decode.bitDepth, decode.chroma)).arg(decode.width).arg(decode.height)
+                                      : tr(", в части — кадр %1×%2").arg(decode.width).arg(decode.height);
+            else
+                stream += tr(", в части — %1").arg(DecodeLayoutText(decode.bitDepth, decode.chroma));
+        }
         QString tip = src.codec.empty() ? QString()
                       : !decode.Ok()    ? tr("Поток: %1; на этом компьютере не декодируется").arg(stream)
                       : unknown         ? tr("Поток: %1").arg(stream)

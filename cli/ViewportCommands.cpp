@@ -245,6 +245,8 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
     ApplyOverrides(st, a);
 
     if (a.proxy != "auto" && a.proxy != "off" && a.proxy != "build") Throw("render: --proxy must be auto | off | build");
+    if (a.bench > 0 && a.benchMode != "all" && a.benchMode != "cold" && a.benchMode != "warm" && a.benchMode != "random")
+        Throw("render: --bench-mode must be all | cold | warm | random");
     if (a.proxy == "build") BuildMissingProxies(project, {"source", "result"}, false);
     const bool useProxies = a.proxy != "off";
     D3D12Device device({a.warp, false});
@@ -306,8 +308,6 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
             store.SetSources(project.Sources(useProxies));
         }
         const int64_t n = store.FrameCount() > 0 ? std::min<int64_t>(a.bench, store.FrameCount()) : a.bench;
-        if (a.benchMode != "all" && a.benchMode != "cold" && a.benchMode != "warm" && a.benchMode != "random")
-            Throw("render: --bench-mode must be all | cold | warm | random");
         const double rate = store.BaseFps().ToDouble();
         // one jump: SetCurrentTime -> the exact frames of every needed source on the GPU -> the composite done (the
         // latency the viewport sees; TexturesAt by time, so sources of other rates show their own frame)

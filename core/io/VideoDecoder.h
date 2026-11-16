@@ -98,6 +98,9 @@ struct Av1SequenceKey {
     bool operator==(const Av1SequenceKey&) const = default;
 };
 std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view sequenceHeader);
+// TASK-0076: a decoded frame smaller than the maximum its sequence header declares (an AV1 frame size override, a resize within the
+// sequence) - FFmpeg 7.1.1's NVDEC gives such a frame with the chroma read from the wrong place. false: the header does not parse
+bool Av1FrameBelowSequence(int width, int height, std::string_view sequenceHeader);
 
 // Keyframes of a video stream from its packets (demux only, no decoding; TASK-0040): the longest run of frames from
 // a keyframe to the next one or to the end - what a seek into the stream may have to decode.
@@ -257,9 +260,10 @@ private:
     // then is a start failure, not a refusal of the stream
     bool nvdecStartTransient_ = false;
     std::shared_ptr<const DecodeSupport> refused_;  // NVDEC refused this stream: every later NextFrame says so again
-    // TASK-0076: the sequence header (its OBU's payload) codec_ decodes under - the stream's av1C, then the last one fed. Another one opens
-    // codec_ again: FFmpeg 7.1.1's av1dec keeps the NVDEC decoder of the first through a new sequence header NVDEC takes too (its size and
-    // depth those of the first)
+    // TASK-0076: the sequence header (its OBU's payload) codec_ decodes under - the stream's av1C, then the last one fed. One in other
+    // parameters (another Av1SequenceKeyOf; a header that does not parse - other bytes) opens codec_ again: FFmpeg 7.1.1's av1dec keeps the
+    // NVDEC decoder of the first through a new sequence header NVDEC takes too (its size and depth those of the first). One with the same
+    // key (a repeat that differs in operating_parameters_info only, a video like it joined) goes on with codec_
     std::string nvdecSequence_;
     int64_t instanceFrames_ = 0;  // frames from this codec_ (a start failure is its first frame's)
     AVBufferRef* hwDevice_ = nullptr;

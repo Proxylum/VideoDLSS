@@ -260,6 +260,11 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.color = ColorInfoFromStream(info);
         s.hasColor = true;
         s.hardwareOnly = info.hardwareOnly;
+        {
+            std::error_code e1, e2;
+            s.fileSize = std::filesystem::file_size(file, e1);
+            s.fileTime = std::filesystem::last_write_time(file, e2);
+        }
         if (info.hardwareOnly) {
             std::lock_guard<std::mutex> lock(refusedFilesMutex);
             if (const auto it = refusedFiles.find(RefusedKey(file)); it != refusedFiles.end()) {  // met before (TASK-0076)
@@ -355,6 +360,24 @@ std::optional<DecodeSupport> FrameStore::Undecodable(const std::string& name) co
         if (s.name == name && s.undecodable) return s.undecodable;
     if (const auto it = refusedInLoad_.find(name); it != refusedInLoad_.end()) return it->second;
     return std::nullopt;
+}
+
+bool FrameStore::SourceChanged(const std::string& name) const {
+    std::filesystem::path path;
+    uintmax_t size = 0;
+    std::filesystem::file_time_type time{};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = std::find_if(sources_.begin(), sources_.end(), [&](const ViewportSource& s) { return s.name == name && s.isVideo; });
+        if (it == sources_.end()) return false;
+        path = it->path;
+        size = it->fileSize;
+        time = it->fileTime;
+    }
+    std::error_code e1, e2;
+    const auto nowSize = std::filesystem::file_size(path, e1);
+    const auto nowTime = std::filesystem::last_write_time(path, e2);
+    return !e1 && !e2 && (nowSize != size || nowTime != time);
 }
 
 void FrameStore::RetryStartFailures(const std::string& source) {
