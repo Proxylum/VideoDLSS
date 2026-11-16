@@ -7533,6 +7533,44 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
                                                         "перекодируйте ролик другой программой в H.264 или HEVC либо в кадр поменьше."));
     limits.maxMacroblocks = 240;
     CHECK(JudgeDecode(Av1StreamInfo("yuv420p", 8), &limits).Ok());
+    // TASK-0076: a part of the video in other parameters (a new sequence header): the same reasons, said of that part
+    DecodeSupport layoutPart = JudgeDecode(Av1StreamInfo("yuv420p12le", 12, "420"), nullptr);
+    REQUIRE(layoutPart.block == DecodeBlock::Layout);
+    layoutPart.part = true;
+    CHECK(SourceDecodeText(layoutPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть в формате 12 бит 4:2:0, а такой AV1 эта "
+                                                            "версия программы не декодирует — AV1 декодирует только видеокарта, и только 8 и 10 бит 4:2:0. "
+                                                            "Что сделать: ") +
+                                          transcode + ".");
+    DecodeSupport av1Part = na;
+    av1Part.part = true;
+    CHECK(SourceDecodeText(av1Part) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть AV1 10 бит, а такой AV1 видеокарта NVIDIA "
+                                                         "GeForce GTX 1080 не декодирует, и другого декодера AV1 в этой версии программы нет. Что сделать: ") +
+                                       transcode +
+                                       QString::fromUtf8(" или откройте его на компьютере с видеокартой, которая декодирует AV1 10 бит (например, RTX 30 и новее)."));
+    DecodeSupport smallerPart = smaller;
+    smallerPart.part = true;
+    CHECK(SourceDecodeText(smallerPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть, где кадр в файле 320×192 меньше, чем "
+                                                             "декодирует видеокарта NVIDIA GeForce RTX 4090 (от 400×128 до 8192×8192), а другого декодера AV1 в "
+                                                             "этой версии программы нет. Что сделать: ") +
+                                           transcode + ".");
+    DecodeSupport largerPart = larger;
+    largerPart.part = true;
+    CHECK(SourceDecodeText(largerPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть, где кадр в файле 320×192 больше, чем "
+                                                            "декодирует видеокарта NVIDIA GeForce RTX 4090 (от 64×64 до 256×4096), а другого декодера AV1 в этой "
+                                                            "версии программы нет. Что сделать: перекодируйте ролик другой программой в H.264 или HEVC либо в "
+                                                            "кадр поменьше."));
+    DecodeSupport mixedPart = mixed;
+    mixedPart.part = true;
+    CHECK(SourceDecodeText(mixedPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть, где кадр в файле 320×192 вне пределов, "
+                                                           "которые декодирует видеокарта NVIDIA GeForce RTX 4090 (от 64×200 до 256×4096), а другого декодера "
+                                                           "AV1 в этой версии программы нет. Что сделать: ") +
+                                         transcode + ".");
+    DecodeSupport blocksPart = blocks;
+    blocksPart.part = true;
+    CHECK(SourceDecodeText(blocksPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть, где кадр в файле 320×192 слишком велик "
+                                                            "для видеокарты NVIDIA GeForce RTX 4090 — она берёт не больше 239 блоков 16×16, а другого декодера AV1 "
+                                                            "в этой версии программы нет. Что сделать: перекодируйте ролик другой программой в H.264 или HEVC "
+                                                            "либо в кадр поменьше."));
     const QString failedText = QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: видеокарта отказалась его декодировать, а другого декодера AV1 в этой версии программы "
                                                  "нет. Что сделать: обновите драйвер NVIDIA и перезапустите программу или ") +
                                transcode + ".";
@@ -8962,6 +9000,16 @@ TEST_CASE("AppModel: a background proxy build that met a part of the stream the 
     CHECK(text == SourceDecodeText(*refused));
     CHECK(text.contains(QString::fromUtf8("12 бит")));
     CHECK_FALSE(text.contains(QString::fromUtf8("обновите драйвер")));  // not «the GPU refused it»
+    CHECK(model.sourceDecode().part);
+    CHECK(text.contains(QString::fromUtf8("в нём есть часть в формате 12 бит 4:2:0")));
+    {
+        TaskQueue queue;
+        ProjectPanel panel(model, queue);
+        panel.refresh();
+        const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
+        REQUIRE(row);
+        CHECK(row->toolTip() == QString::fromUtf8("Поток: 8 бит 420, в части — 12 бит 420; на этом компьютере не декодируется"));
+    }
     const auto again = FrameStore::VideoSource("source", parts);  // remembered for the file
     REQUIRE(again);
     REQUIRE(again->undecodable);
@@ -9067,4 +9115,136 @@ TEST_CASE("The main window's tooltip of an AV1 result not decodable here while t
     INFO("label: " << cell->text().toStdString() << "; tooltip: " << cell->toolTip().toStdString());
     CHECK(cell->toolTip().contains(reason));
     CHECK_FALSE(cell->toolTip().contains(advice));
+}
+
+TEST_CASE("ProjectPanel's source row of a stream whose layout the probe did not learn: known at the first frame; then the layout NVDEC refused, named",
+          "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_unknown_layout_row");
+    AutoProxySetting autoProxy(false);
+    {
+        D3D12Device dev;
+        if (dev.IsWarp() || !dev.IsNvidia() || !VideoEncoder::EncoderAvailable("av1_nvenc")) SKIP("no NVIDIA GPU with av1_nvenc");
+    }
+    ClipSpec spec;
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 16;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto a = WriteClipIfSupported(d / "a.ivf", spec, &why);
+    if (!a) SKIP(why);
+    // no sequence header before frame 160: the probe meets none (TestClips: the stream of the decoder's test of the same)
+    const auto plain = RepeatIvf(*a, 13, d / "unknown.ivf", [](int i, const std::string& u) { return i < 160 ? WithoutSequenceHeaders(u) : u; });
+    const auto twelve =
+        RepeatIvf(*a, 13, d / "unknown12.ivf", [](int i, const std::string& u) { return i < 160 ? WithoutSequenceHeaders(u) : TwelveBitTemporalUnit(u); });
+    {
+        AppModel model(true);
+        model.openVideo(Q(plain));
+        REQUIRE(model.hasProject());
+        REQUIRE(model.sourceInfo().pixelFormat == "unknown");
+        REQUIRE(model.sourceDecode().Ok());
+        TaskQueue queue;
+        ProjectPanel panel(model, queue);
+        panel.refresh();
+        CHECK(panel.findChild<QLabel*>("sourceFrame")->toolTip() == QString::fromUtf8("Поток: формат станет известен на первом кадре"));  // not the defaults
+        SettleAny(model, 0, 6);
+    }
+    AppModel model(true);
+    model.openVideo(Q(twelve));
+    REQUIRE(model.hasProject());
+    REQUIRE(model.sourceInfo().pixelFormat == "unknown");
+    model.setTime(170.0 / 24.0);  // the keyframe 168 has the (12-bit) sequence header: NVDEC meets the layout there
+    Pump(
+        [&] {
+            model.store().Update();
+            model.notifyFramesUpdated();
+            return model.sourceDecode().block == DecodeBlock::Layout;
+        },
+        20000);
+    REQUIRE(model.sourceDecode().block == DecodeBlock::Layout);
+    CHECK_FALSE(model.sourceDecode().part);  // the stream's own layout, learned late - not a part in other parameters
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    CHECK(panel.findChild<QLabel*>("sourceFrame")->toolTip() == QString::fromUtf8("Поток: 12 бит 420; на этом компьютере не декодируется"));
+    SettleAny(model, 164, 176);
+}
+
+TEST_CASE("A task queued while the background proxy build runs leaves the build alone - a proxy is no NVDEC decoder of the viewport", "[app][proxy]") {
+    App();
+    const auto d = Dir("proxy_task_queued");
+    AutoProxySetting autoProxy(true);
+    ClipSpec spec;
+    spec.frames = 240;
+    spec.width = 320;
+    spec.height = 192;
+    spec.gop = 240;  // one keyframe: a proxy is needed
+    const auto clip = WriteClip(d / "clip.mkv", spec);
+    Project::Create(clip, d / "passes").Save(d / "proj.dlssvid.json");
+    AppModel model(true);
+    TaskQueue queue;
+    ProjectTasks tasks(model, queue);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    REQUIRE(model.hasProject());
+    REQUIRE(model.proxyBuilding());
+    QSignalSpy queued(&queue, &TaskQueue::taskQueued);
+    const int task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});  // a run of the project (Main lane), as «Запустить отдельно»
+    REQUIRE(task >= 0);
+    REQUIRE(queued.count() == 1);
+    CHECK(model.proxyBuilding());  // right after taskQueued
+    Pump([] { return false; }, 50);
+    CHECK(model.proxyBuilding());
+    queue.cancel(task);
+    Pump([&] { return queue.finished(task); }, 20000);
+    model.cancelProxies();
+    CHECK_FALSE(model.proxyBuilding());
+}
+
+TEST_CASE("AppModel playing does not ask NVDEC again on each tick for a video it could not start for - the frames played are asked for anyway",
+          "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_play_no_retry");
+    AutoProxySetting autoProxy(false);
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    ClipSpec plain;
+    plain.frames = 24;
+    plain.width = 320;
+    plain.height = 192;
+    const auto ffv1 = WriteClip(d / "result.mkv", plain);
+    Project p = Project::Create(clip, d / "passes");
+    p.resultVideo = ffv1;
+    p.viewport.mode = ViewMode::Grid;  // the result first: the base of the playback (it decodes), the AV1 source beside it
+    p.viewport.gridSources = {"result", "source", "result", "source"};
+    p.Save(d / "proj.dlssvid.json");
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    fake.emplace("start-fails");
+    AppModel model(true);
+    model.openProject(Q(d / "proj.dlssvid.json"));
+    REQUIRE(model.hasProject());
+    SettleAny(model, 0, 6);
+    REQUIRE(model.store().StartFailure("source"));
+    int64_t now = 0;
+    model.setPlaybackClock([&] { return now; });
+    model.setPlaying(true);
+    int advanced = 0;
+    double last = model.time();
+    for (int i = 0; i < 400 && advanced < 6; ++i) {
+        now += 20'000'000;
+        model.playbackTick();
+        if (model.time() > last + 1e-9) {  // a tick that showed the next frame: its new time asks for frames - not the failures again
+            ++advanced;
+            last = model.time();
+            CHECK(model.store().StartFailure("source"));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));  // the loaders at work: the next frames come or fail
+    }
+    model.setPlaying(false);
+    CHECK(advanced >= 3);
+    const int64_t at = static_cast<int64_t>(std::llround(model.time() * 24.0));  // the window of the frame shown (6 frames on either side)
+    SettleAny(model, std::max<int64_t>(0, at - 6), std::min<int64_t>(23, at + 6));
+    fake.reset();
 }

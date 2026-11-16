@@ -662,6 +662,37 @@ bool Eventually(const std::function<bool()>& done, int timeoutMs = 5000) {
     return true;
 }
 
+// The process's log into `out` for one scope ("<level> <message>", every level)
+struct DecoderLog {
+    std::shared_ptr<spdlog::sinks::ostream_sink_mt> sink;
+    spdlog::level::level_enum level;
+    explicit DecoderLog(std::ostringstream& out) : sink(std::make_shared<spdlog::sinks::ostream_sink_mt>(out)), level(Log()->level()) {
+        sink->set_pattern("%l %v");
+        Log()->set_level(spdlog::level::debug);
+        Log()->sinks().push_back(sink);
+    }
+    ~DecoderLog() {
+        auto& sinks = Log()->sinks();
+        sinks.erase(std::remove(sinks.begin(), sinks.end(), sink), sinks.end());
+        Log()->set_level(level);
+    }
+    DecoderLog(const DecoderLog&) = delete;
+    DecoderLog& operator=(const DecoderLog&) = delete;
+};
+
+size_t CountOf(const std::string& text, const std::string& what) {
+    size_t n = 0;
+    for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) ++n;
+    return n;
+}
+
+std::vector<CpuFrame> DecodeAllOf(VideoDecoder& dec) {
+    std::vector<CpuFrame> out;
+    CpuFrame f;
+    while (dec.NextFrame(f)) out.push_back(f);
+    return out;
+}
+
 struct Av1Store {
     D3D12Device dev{D3D12Device::Options{true, false}};
     std::unique_ptr<FrameStore> store;
@@ -1697,6 +1728,8 @@ TEST_CASE("A part of the stream NVDEC does not take (12-bit after 8-bit) is refu
         REQUIRE(refused);
         CHECK(frames >= 8);
         CHECK(refused->support.block == DecodeBlock::Layout);
+        CHECK(refused->support.part);  // the verdict is on a part of the stream
+        CHECK(refused->support.bitDepth == 12);  // that part's
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring(layout));
         CHECK_THAT(refused->support.why, ContainsSubstring(" (after "));
@@ -1712,6 +1745,7 @@ TEST_CASE("A part of the stream NVDEC does not take (12-bit after 8-bit) is refu
         const auto refused = RefusalOfNextFrame(dec);
         REQUIRE(refused);
         CHECK(refused->support.block == DecodeBlock::Layout);
+        CHECK(refused->support.part);
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring(layout));
         CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(on the first frame, " + part));
@@ -1873,6 +1907,7 @@ TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: tak
         const auto refused = RefusalOfNextFrame(dec);
         REQUIRE(refused);
         CHECK(refused->support.block == DecodeBlock::Layout);
+        CHECK_FALSE(refused->support.part);  // the stream's own layout, learned late
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here"));
         CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(on the first frame, in yuv420p12le - " + learned));
@@ -1971,6 +2006,99 @@ TEST_CASE("dlssvid render and render --bench: NVDEC refusing or not starting on 
         CHECK(pg.code == 0);
         CHECK(std::filesystem::exists(image));
         CHECK_THAT(pg.out, ContainsSubstring(emptyWords));
+    }
+}
+
+TEST_CASE("A stream whose sequence header changes (another size, another depth) decodes on NVDEC from end to end - each part on a decoder of its own",
+          "[integration][gpu][av1][regression]") {
+    const auto dir = Dir("sequence_change");
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");
+    ClipSpec first;
+    first.width = kW;
+    first.height = kH;
+    first.frames = 16;
+    first.gop = 8;
+    first.codec = "av1_nvenc";
+    std::string why;
+    const auto a = WriteClipIfSupported(dir / "a.ivf", first, &why);
+    if (!a) SKIP("av1_nvenc does not support the clip here: " << why);
+    ClipSpec bigger = first;
+    bigger.width = 384;
+    bigger.height = 224;
+    const auto b = WriteClipIfSupported(dir / "b.ivf", bigger, &why);
+    REQUIRE(b);
+    struct Joined {
+        std::filesystem::path file, second;
+        uint32_t width, height;
+        uint8_t depth;
+    };
+    const Joined sizes{ConcatIvf(*a, *b, dir / "sizes.ivf"), *b, 384, 224, 8};
+    std::vector<Joined> joined;  // the depth first: a failure of the size's decode ends the case
+    ClipSpec ten = first;  // 8-bit, then Main 10 (p010 in) of the same size
+    ten.pixFmt = "p010le";
+    if (const auto c = WriteClipIfSupported(dir / "c.ivf", ten, &why)) joined.push_back({ConcatIvf(*a, *c, dir / "depths.ivf"), *c, kW, kH, 10});
+    else WARN("av1_nvenc writes no 10-bit clip here: " << why);
+    joined.push_back(sizes);
+    for (const Joined& j : joined) {
+        INFO(j.file.filename().string());
+        VideoDecoder alone(j.second);
+        const std::vector<CpuFrame> reference = DecodeAllOf(alone);  // the second part decoded as a video of its own
+        REQUIRE(reference.size() == 16);
+        std::ostringstream text;
+        std::vector<CpuFrame> frames;
+        {
+            DecoderLog capture(text);
+            VideoDecoder dec(j.file);  // one decoder from frame 0 through the change
+            frames = DecodeAllOf(dec);
+        }
+        REQUIRE(frames.size() == 32);
+        for (size_t i = 0; i < frames.size(); ++i) {
+            INFO("frame " << i);
+            const bool second = i >= 16;
+            CHECK(frames[i].index == static_cast<int64_t>(i));
+            CHECK(frames[i].desc.width == (second ? j.width : kW));
+            CHECK(frames[i].desc.height == (second ? j.height : kH));
+            CHECK(frames[i].desc.bitDepth == (second ? j.depth : 8));
+            if (second) CHECK(frames[i].data == reference[i - 16].data);  // the same pixels as the part alone
+        }
+        // said once, at info: another sequence header after the frames of the first
+        const std::string log = text.str();
+        INFO(log);
+        CHECK(CountOf(log, "info " + j.file.string() + ": another AV1 sequence header after 16 frames - its own NVDEC decoder") == 1);
+        CHECK(CountOf(log, "another AV1 sequence header") == 1);
+        // one decoder seeking into the second part, back into the first, forward again: each frame of its part
+        VideoDecoder seeker(j.file);
+        for (const int64_t target : {20, 5, 28, 10, 17}) {
+            INFO("seek to " << target);
+            REQUIRE(seeker.SeekToFrame(target));
+            CpuFrame f;
+            REQUIRE(seeker.NextFrame(f));
+            CHECK(f.index == target);
+            CHECK(f.desc.width == (target >= 16 ? j.width : kW));
+            CHECK(f.desc.bitDepth == (target >= 16 ? j.depth : 8));
+            CHECK(f.data == frames[static_cast<size_t>(target)].data);
+        }
+    }
+    {
+        // a stream of one sequence: nothing of the kind
+        std::ostringstream text;
+        DecoderLog capture(text);
+        VideoDecoder dec(*a);
+        CHECK(DecodeAllOf(dec).size() == 16);
+        CHECK(CountOf(text.str(), "another AV1 sequence header") == 0);
+    }
+    {
+        // NVDEC not starting for the second part's decoder (the stand-in comes after the first part's frames): that decoder's first frame
+        // - a start failure, not a refusal of the stream, though the first part's decoder had decoded 16 frames
+        VideoDecoder dec(sizes.file);
+        CpuFrame f;
+        for (int i = 0; i < 16; ++i) REQUIRE(dec.NextFrame(f));
+        FakeNvdecEnv fake("start-fails");
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::NvdecStartFailed);
+        CHECK(refused->support.Transient());
+        CHECK_THAT(refused->support.why, ContainsSubstring("(after 16 frames, on a part of the stream in other parameters (yuv420p 384x224))"));
     }
 }
 

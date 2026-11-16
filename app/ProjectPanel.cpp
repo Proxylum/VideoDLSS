@@ -376,9 +376,21 @@ void ProjectPanel::refresh() {
         const auto [shownW, shownH] = src.sar.DisplaySize(src.width, src.height);
         if (!src.sar.Square()) frame += tr(" · пиксель %1, показ %2×%3").arg(QString::fromStdString(src.sar.Token())).arg(shownW).arg(shownH);
         sourceFrame_->setText(frame);
-        QString tip = src.codec.empty()                ? QString()
-                      : !model_.sourceDecode().Ok()    ? tr("Поток: %1 бит %2; на этом компьютере не декодируется").arg(src.bitDepth).arg(QString::fromStdString(src.chroma))  // TASK-0076
-                                                       : tr("Поток: %1 бит %2; декодируется как %3").arg(src.bitDepth).arg(QString::fromStdString(src.chroma)).arg(QString::fromStdString(src.decoded.Name()));
+        // TASK-0076: a layout the probe did not learn is not shown as the defaults it has (the refusal of it names the one learned); a
+        // refusal of a part names that part
+        const DecodeSupport& decode = model_.sourceDecode();
+        const auto layoutOf = [this](int depth, const std::string& chroma) { return tr("%1 бит %2").arg(depth).arg(QString::fromStdString(chroma)); };
+        const bool unknown = src.pixelFormat == "unknown";
+        QString stream = unknown ? tr("формат станет известен на первом кадре") : layoutOf(src.bitDepth, src.chroma);
+        if (!decode.Ok() && decode.part)
+            stream += decode.pixelFormat != src.pixelFormat ? tr(", в части — %1").arg(layoutOf(decode.bitDepth, decode.chroma))
+                                                            : tr(", в части — кадр %1×%2").arg(decode.width).arg(decode.height);
+        else if (!decode.Ok() && unknown && !decode.pixelFormat.empty() && decode.pixelFormat != "unknown")
+            stream = layoutOf(decode.bitDepth, decode.chroma);
+        QString tip = src.codec.empty() ? QString()
+                      : !decode.Ok()    ? tr("Поток: %1; на этом компьютере не декодируется").arg(stream)
+                      : unknown         ? tr("Поток: %1").arg(stream)
+                                        : tr("Поток: %1; декодируется как %2").arg(stream, QString::fromStdString(src.decoded.Name()));
         if (!src.orientation.Identity()) {
             const QString how = src.orientation.rotate ? (src.orientation.hflip ? tr("повёрнутым и отражённым") : tr("повёрнутым")) : tr("отражённым");
             const QString by = src.orientationFrom == "rotate tag" ? tr("по тегу rotate") : tr("по матрице дисплея");

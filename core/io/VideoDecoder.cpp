@@ -17,6 +17,7 @@ extern "C" {
 #include <charconv>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -48,6 +49,10 @@ AVPixelFormat GetHwFormat(AVCodecContext* ctx, const AVPixelFormat* formats) {
 AVBufferRef* CreateCudaDevice(std::string* why) {
     // Primary CUDA context: device pointers are then usable from cudart, TensorRT and the
     // Optical Flow API in this process without context juggling.
+    // TASK-0076: one thread at a time - FFmpeg's cuda_context_init reads the primary context's state, sets its flags and retains it
+    // without a lock, and the flags cannot be set on a context another thread has just started (two viewport loaders of two AV1 videos)
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
 #ifdef DLSSVID_WITH_CUDA
     // FFmpeg retains the primary context and insists on CU_CTX_SCHED_BLOCKING_SYNC; a stage that used the CUDA
     // runtime before this decoder (TensorRT depth, OFA) has already created it with the default scheduling, and
@@ -112,6 +117,45 @@ std::optional<NativeLayout> NativeLayoutFor(AVPixelFormat fmt, int streamDepth) 
     return NativeLayout{FrameDesc{0, 0, PixelFormatFor(chroma, bitDepth), static_cast<uint8_t>(bitDepth)}, shiftRight, semi};
 }
 
+// TASK-0076: the payload of the (last) sequence header OBU in `data` - AV1's low-overhead format, as MP4 / MKV / WebM / IVF carry it, or
+// an av1C record (its configOBUs after the 4-byte header). Empty: none, or the data does not read as OBUs
+std::string_view Av1SequenceHeader(const uint8_t* data, size_t size) {
+    if (!data) return {};
+    if (size >= 4 && data[0] == 0x81) {  // av1C: marker 1, version 1 (an OBU header's top bit is 0)
+        data += 4;
+        size -= 4;
+    }
+    std::string_view found;
+    size_t pos = 0;
+    while (pos < size) {
+        const uint8_t h = data[pos];
+        if (h & 0x80) return {};  // obu_forbidden_bit
+        const int type = (h >> 3) & 0x0F;
+        const bool extension = (h >> 2) & 1, hasSize = (h >> 1) & 1;
+        size_t p = pos + 1 + (extension ? 1 : 0);
+        if (p > size) return {};
+        uint64_t length = 0;
+        if (hasSize) {  // leb128
+            bool ended = false;
+            for (int i = 0; i < 8 && p < size; ++i) {
+                const uint8_t b = data[p++];
+                length |= static_cast<uint64_t>(b & 0x7F) << (7 * i);
+                if (!(b & 0x80)) {
+                    ended = true;
+                    break;
+                }
+            }
+            if (!ended) return {};
+        } else {
+            length = size - p;  // the last OBU
+        }
+        if (length > size - p) return {};
+        if (type == 1) found = std::string_view(reinterpret_cast<const char*>(data + p), static_cast<size_t>(length));  // OBU_SEQUENCE_HEADER
+        pos = p + static_cast<size_t>(length);
+    }
+    return found;
+}
+
 // "420" | "422" | "444" | "other" (RGB, grey) - the VideoStreamInfo::chroma of a pixel format
 std::string ChromaOf(const AVPixFmtDescriptor* d) {
     return (d->flags & AV_PIX_FMT_FLAG_RGB) || d->nb_components < 3 ? "other"
@@ -134,6 +178,44 @@ VideoStreamInfo StreamPartInfo(const VideoStreamInfo& info, const std::string& p
     if (codedWidth > 0) part.codedWidth = codedWidth;
     if (codedHeight > 0) part.codedHeight = codedHeight;
     return part;
+}
+
+std::string StreamPartWords(const StreamPart& part) {
+    if (part.learned) return ", in " + part.pixelFormat + " - a layout the probe did not learn";
+    return ", on a part of the stream in other parameters (" + part.pixelFormat + " " + std::to_string(part.codedWidth) + "x" + std::to_string(part.codedHeight) +
+           ")";
+}
+
+std::optional<StreamPart> StreamPartOf(const std::string& why) {
+    static const std::string partHead = ", on a part of the stream in other parameters (";
+    static const std::string learnedTail = " - a layout the probe did not learn";
+    const size_t partAt = why.rfind(partHead);
+    const size_t learnedAt = why.rfind(learnedTail);
+    if (partAt != std::string::npos && (learnedAt == std::string::npos || partAt > learnedAt)) {
+        const size_t from = partAt + partHead.size();
+        const size_t space = why.find(' ', from), close = why.find(')', from);
+        if (space == std::string::npos || close == std::string::npos || space > close) return std::nullopt;
+        const std::string size = why.substr(space + 1, close - space - 1);
+        const size_t x = size.find('x');
+        if (x == std::string::npos) return std::nullopt;
+        StreamPart part;
+        part.pixelFormat = why.substr(from, space - from);
+        const auto parse = [](const std::string& s, uint32_t& out) {
+            return !s.empty() && std::from_chars(s.data(), s.data() + s.size(), out).ptr == s.data() + s.size();
+        };
+        if (!parse(size.substr(0, x), part.codedWidth) || !parse(size.substr(x + 1), part.codedHeight)) return std::nullopt;
+        return part;
+    }
+    if (learnedAt != std::string::npos) {
+        const size_t in = why.rfind(", in ", learnedAt);
+        if (in == std::string::npos) return std::nullopt;
+        StreamPart part;
+        part.learned = true;
+        part.pixelFormat = why.substr(in + 5, learnedAt - in - 5);
+        if (part.pixelFormat.empty() || part.pixelFormat.find(' ') != std::string::npos) return std::nullopt;
+        return part;
+    }
+    return std::nullopt;
 }
 
 FrameDesc DecodedFrameDescFor(const std::string& pixelFormat) {
@@ -343,6 +425,7 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     gpuFrames_ = hwDevice_ != nullptr;
     indexRate_ = options.indexRate;
     codec_ = OpenCodec(hwDevice_);
+    if (hwOnly_) nvdecSequence_.assign(Av1SequenceHeader(vs->codecpar->extradata, static_cast<size_t>(std::max(vs->codecpar->extradata_size, 0))));
 
     frame_ = av_frame_alloc();
     swFrame_ = av_frame_alloc();
@@ -493,11 +576,32 @@ void VideoDecoder::StartNvdec() {
         avcodec_free_context(&codec_);
         codec_ = reopened;
         hwDevice_ = device;
+        instanceFrames_ = 0;
     }
     nvdecStarted_ = true;
     nvdecStartTransient_ = support.verified || (!support.caps.checked && support.caps.cudaError);
     Log()->log(probe_ ? spdlog::level::debug : spdlog::level::info, "{}: {} decodes on NVDEC only (no software decoder in this build), {}", url_, info_.codecName,
                support.why);
+}
+
+void VideoDecoder::FollowSequenceHeader() {
+    const std::string_view sequence = Av1SequenceHeader(packet_->data, static_cast<size_t>(std::max(packet_->size, 0)));
+    if (sequence.empty()) return;
+    if (!nvdecSequence_.empty() && sequence != nvdecSequence_ && hwDevice_) {
+        // a new coded video sequence (a recording whose size or depth changes, two videos joined): av1dec would decode it on the NVDEC
+        // decoder made for the last one (av1dec.c get_pixel_format: the CUDA format is still offered - no new decoder; nvdec.c makes its
+        // decoder and surfaces for the size it starts with) - a decoder of its own, on the same device, as one that started there. The
+        // last one has given every frame of the packets it got: av1dec returns a temporal unit's frame as it decodes it
+        // (said when this decoder has decoded under the last one: an av1C that differs from the first packet's changes nothing seen)
+        const bool news = !probe_ && instanceFrames_ > 0;
+        AVCodecContext* reopened = OpenCodec(hwDevice_);
+        avcodec_free_context(&codec_);
+        codec_ = reopened;
+        instanceFrames_ = 0;
+        Log()->log(news ? spdlog::level::info : spdlog::level::debug, "{}: another AV1 sequence header after {} frames - its own NVDEC decoder", url_,
+                   framesDecoded_);
+    }
+    nvdecSequence_.assign(sequence);
 }
 
 void VideoDecoder::CheckDecode(int err, const char* what) {
@@ -518,21 +622,23 @@ void VideoDecoder::CheckDecode(int err, const char* what) {
         std::string when = framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "on the first frame";
         bool transient = nvdecStartTransient_;
         if (otherPart || learnedNow) {  // the part judged against the GPU as the probe was: refused - that verdict with its reason; taken - as for the probe
-            if (otherPart)
-                when += ", on a part of the stream in other parameters (" + std::string(swFmt ? swFmt : "?") + " " + std::to_string(codec_->width) + "x" +
-                        std::to_string(codec_->height) + ")";
-            else
-                when += ", in " + std::string(swFmt) + " - a layout the probe did not learn";
+            StreamPart part;
+            part.pixelFormat = swFmt ? swFmt : "?";
+            part.codedWidth = static_cast<uint32_t>(std::max(codec_->width, 0));
+            part.codedHeight = static_cast<uint32_t>(std::max(codec_->height, 0));
+            part.learned = !otherPart;
+            when += StreamPartWords(part);
             DecodeSupport judged = CheckDecodeSupport(StreamPartInfo(info_, swFmt ? swFmt : "", codec_->width > 0 ? static_cast<uint32_t>(codec_->width) : 0,
                                                                      codec_->height > 0 ? static_cast<uint32_t>(codec_->height) : 0));
             if (!judged.Ok()) {
                 judged.why += " (" + when + ")";
+                judged.part = otherPart;
                 refused_ = std::make_shared<const DecodeSupport>(std::move(judged));
                 throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
             }
             transient = judged.verified || (!judged.caps.checked && judged.caps.cudaError);
         }
-        const bool startFailed = transient && framesDecoded_ == 0;
+        const bool startFailed = transient && instanceFrames_ == 0;  // this decoder's first frame (one opened for a new sequence too)
         refused_ = std::make_shared<const DecodeSupport>(RefusedDecode(info_, startFailed ? DecodeBlock::NvdecStartFailed : DecodeBlock::NvdecFailed, when));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }
@@ -578,6 +684,14 @@ bool VideoDecoder::NextFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
             CheckDecode(AVERROR(ENOSYS), "avcodec_send_packet");
         }
         if (packet_->stream_index == videoStream_) {
+            if (hwOnly_) {
+                try {
+                    FollowSequenceHeader();
+                } catch (...) {
+                    av_packet_unref(packet_);
+                    throw;
+                }
+            }
             const int sent = avcodec_send_packet(codec_, packet_);
             if (sent < 0) av_packet_unref(packet_);
             CheckDecode(sent, "avcodec_send_packet");
@@ -603,6 +717,7 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     nextIndex_ = index + 1;
     decodedSinceSeek_ = true;
     ++framesDecoded_;
+    ++instanceFrames_;
     if (!checkedFrameMatrix_) {  // an orientation in the bitstream (SEI) other than the container's: the container's is applied
         checkedFrameMatrix_ = true;
         if (const AVFrameSideData* sd = av_frame_get_side_data(frame_, AV_FRAME_DATA_DISPLAYMATRIX); sd && sd->size >= 9 * sizeof(int32_t)) {

@@ -5,6 +5,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -73,6 +74,17 @@ struct VideoStreamInfo {
 // the probe did not learn: the part's pixel format (its depth and chroma from FFmpeg's descriptor) and coded size. A format FFmpeg does not
 // know (or "") and a size of 0 keep the probe's. CheckDecodeSupport of it judges the part as the probe was judged.
 VideoStreamInfo StreamPartInfo(const VideoStreamInfo& info, const std::string& pixelFormat, uint32_t codedWidth, uint32_t codedHeight);
+
+// TASK-0076: the part a refusal is about, as its why ends: «, on a part of the stream in other parameters (<fmt> <w>x<h>)» (a new
+// sequence header) or «, in <fmt> - a layout the probe did not learn». VideoDecoder writes it; the GUI reads it back from another
+// process's line (the proxy build) to judge the part as the decoder did.
+struct StreamPart {
+    std::string pixelFormat;  // "?" when the decoder did not say
+    uint32_t codedWidth = 0, codedHeight = 0;  // 0 for a learned layout (the probe's size)
+    bool learned = false;     // the layout the probe did not learn, not a part in other parameters
+};
+std::string StreamPartWords(const StreamPart& part);
+std::optional<StreamPart> StreamPartOf(const std::string& why);  // the last such words in `why`; nullopt: none
 
 // Keyframes of a video stream from its packets (demux only, no decoding; TASK-0040): the longest run of frames from
 // a keyframe to the next one or to the end - what a seek into the stream may have to decode.
@@ -213,6 +225,7 @@ private:
     AVCodecContext* OpenCodec(AVBufferRef* device) const;  // a codec context for the video stream: on `device`, else software threads
     void StartNvdec();  // a hardware-only decoder before its first packet: check the GPU, create the device, reopen codec_ on it
     void CheckDecode(int err, const char* what);  // CheckAv, with ENOSYS of a hardware-only decoder as the refusal it is (kept: refused_)
+    void FollowSequenceHeader();  // TASK-0076: packet_ starts another coded video sequence - codec_ opened again on NVDEC for it
     bool ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu);
     int64_t IndexFromPts(int64_t pts) const;
     bool DiscardFrames(int64_t upTo);  // decode and drop frames until nextIndex_ == upTo
@@ -231,6 +244,11 @@ private:
     // then is a start failure, not a refusal of the stream
     bool nvdecStartTransient_ = false;
     std::shared_ptr<const DecodeSupport> refused_;  // NVDEC refused this stream: every later NextFrame says so again
+    // TASK-0076: the sequence header (its OBU's payload) codec_ decodes under - the stream's av1C, then the last one fed. Another one opens
+    // codec_ again: FFmpeg 7.1.1's av1dec keeps the NVDEC decoder of the first through a new sequence header NVDEC takes too (its size and
+    // depth those of the first)
+    std::string nvdecSequence_;
+    int64_t instanceFrames_ = 0;  // frames from this codec_ (a start failure is its first frame's)
     AVBufferRef* hwDevice_ = nullptr;
     AVFrame* frame_ = nullptr;
     AVFrame* swFrame_ = nullptr;

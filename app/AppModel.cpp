@@ -586,19 +586,16 @@ void AppModel::startProxies() {
                         continue;
                     }
                     const QString reason = l.mid(head.size());
-                    // a part NVDEC does not take, or the layout the probe did not learn (VideoDecoder::CheckDecode's words): judged here
-                    // as the decoder did - its own block and reason (a layout, a size: not «the GPU refused it, update the driver»)
-                    static const QRegularExpression partWords(R"(, on a part of the stream in other parameters \((\S+) (\d+)x(\d+)\)\)$)");
-                    static const QRegularExpression learnedWords(R"(, in (\S+) - a layout the probe did not learn\)$)");
+                    // a part NVDEC does not take, or the layout the probe did not learn (VideoDecoder::CheckDecode's words, StreamPartWords):
+                    // judged here as the decoder did - its own block and reason (a layout, a size: not «the GPU refused it, update the driver»)
                     std::optional<DecodeSupport> judged;
-                    if (const auto m = partWords.match(reason); m.hasMatch())
-                        judged = CheckDecodeSupport(StreamPartInfo(probe.Info(), m.captured(1).toStdString(), m.captured(2).toUInt(), m.captured(3).toUInt()));
-                    else if (const auto m2 = learnedWords.match(reason); m2.hasMatch())
-                        judged = CheckDecodeSupport(StreamPartInfo(probe.Info(), m2.captured(1).toStdString(), 0, 0));
+                    const std::optional<StreamPart> part = StreamPartOf(reason.toStdString());
+                    if (part) judged = CheckDecodeSupport(StreamPartInfo(probe.Info(), part->pixelFormat, part->codedWidth, part->codedHeight));
                     DecodeSupport verdict;
                     if (judged && !judged->Ok() && !judged->Transient()) {
                         verdict = std::move(*judged);
                         verdict.why = "the proxy build: " + reason.toStdString();
+                        verdict.part = !part->learned;
                     } else {  // «NVDEC refused this AV1 stream ... (<when>)»: its detail, said as the proxy build's
                         std::string detail = reason.toStdString();
                         const std::string refusedWords = RefusedDecode(probe.Info(), DecodeBlock::NvdecFailed, "").why;
@@ -1077,6 +1074,7 @@ void AppModel::refreshPlan() {
         sourceInfo_.sarFrom = probe.Info().sarFrom;
         sourceInfo_.bitDepth = probe.Info().bitDepth;
         sourceInfo_.chroma = probe.Info().chroma;
+        sourceInfo_.pixelFormat = probe.Info().pixelFormat;
         sourceDecode_ = CheckDecodeSupport(probe.Info());
         if (sourceDecode_.Ok())  // TASK-0076: the driver could not be asked and NVDEC refused the viewport's first frame
             if (const auto refused = probe.Info().hardwareOnly ? store_->Undecodable("source") : std::nullopt) sourceDecode_ = *refused;
