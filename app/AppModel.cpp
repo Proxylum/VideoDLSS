@@ -531,13 +531,20 @@ void AppModel::startProxies() {
         }
         if (!ready.isEmpty()) emit message(tr("Прокси для перемотки готов: %1").arg(ready.join(", ")));
         // TASK-0076: NVDEC refused the video or did not start in the proxy process (its lines: «<name>: no proxy …») - said, not silent
-        QStringList refused;
-        for (const char* name : {"source", "result"})
+        QStringList refused, notNow;
+        for (const char* name : {"source", "result"}) {
             // «no proxy, the video cannot be decoded here» / «no proxy now, NVDEC did not start» - not «no proxy needed» (a short GOP)
-            if (out.contains(QString("%1: no proxy,").arg(name)) || out.contains(QString("%1: no proxy now").arg(name))) refused << HumanSourceName(name);
+            if (out.contains(QString("%1: no proxy,").arg(name))) refused << HumanSourceName(name);
+            if (out.contains(QString("%1: no proxy now").arg(name))) notNow << HumanSourceName(name);
+        }
+        for (const QString& line : out.split('\n'))  // the reasons themselves, whole (not the tail of the output)
+            if (line.contains(": no proxy,") || line.contains(": no proxy now")) Log()->warn("viewport proxy: {}", line.trimmed().toStdString());
         if (!refused.isEmpty())
-            emit message(tr("Прокси для перемотки не построен (%1): видеокарта не декодировала видео — подробности в логе").arg(refused.join(", ")));
-        if (!refused.isEmpty()) Log()->warn("viewport proxy: {}", out.right(600).toStdString());
+            emit message(tr("Прокси для перемотки не построен (%1): видео на этом компьютере не декодируется — подробности в логе").arg(refused.join(", ")));
+        else if (!notNow.isEmpty())
+            emit message(tr("Прокси для перемотки сейчас не построен (%1): видеокарта не начала декодировать — постройте его позже (Вид → Построить прокси "
+                            "для перемотки)")
+                             .arg(notNow.join(", ")));
         emit proxiesChanged();
     });
     Log()->info("viewport proxy: building {} in the background", names.join(", ").toStdString());
@@ -790,7 +797,7 @@ void AppModel::notifyFramesUpdated() {
 }
 
 void AppModel::noteSourceRefused() {
-    // TASK-0076: NVDEC refused the source's first frame in the viewport (the driver could not be asked before): the plan says it now -
+    // TASK-0076: NVDEC refused the source in the viewport as a verdict (not a start failure): the plan says it now -
     // «Обработать», Ctrl+Return, the preview and the stage runs stop, as for a refusal known in advance
     if (!hasProject() || !sourceDecode_.Ok() || !store_) return;
     const auto refused = store_->Undecodable("source");
@@ -996,7 +1003,7 @@ void AppModel::refreshPlan() {
         sourceInfo_.chroma = probe.Info().chroma;
         sourceDecode_ = CheckDecodeSupport(probe.Info());
         if (sourceDecode_.Ok())  // TASK-0076: the driver could not be asked and NVDEC refused the viewport's first frame
-            if (const auto refused = store_->Undecodable("source")) sourceDecode_ = *refused;
+            if (const auto refused = probe.Info().hardwareOnly ? store_->Undecodable("source") : std::nullopt) sourceDecode_ = *refused;
         if (!sourceDecode_.Ok()) {  // TASK-0076: AV1 without NVDEC AV1 - «Обработать» and the stage runs stay off
             planError_ = SourceDecodeText(sourceDecode_);
             emit planChanged();

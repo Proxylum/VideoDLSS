@@ -2,6 +2,7 @@
 // frame navigation, playback over computed frames and the task queue.
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <QAction>
 #include <QApplication>
@@ -44,6 +45,8 @@
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#include <spdlog/sinks/ostream_sink.h>
+#include <sstream>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -83,6 +86,7 @@
 #include "TestClips.h"
 #include "io/ResultFile.h"
 #include "io/VideoDecoder.h"
+#include "util/Log.h"
 #include "util/Sha256.h"
 #include "util/Subprocess.h"
 #include "pipeline/PassVersions.h"
@@ -7395,6 +7399,42 @@ void SettleAny(AppModel& model, int64_t from, int64_t to) {
     REQUIRE(settled());
 }
 
+// NVDEC not starting on the first frame (DLSSVID_FAKE_NVDEC_AV1=start-fails): the end of the reason
+const char* const kStartFailedWhy = "this build has no software AV1 decoder (on the first frame)";
+
+// view/autoProxy for one case: the value before comes back at its end - also after a failed REQUIRE or a SKIP (the cases share the
+// process's QSettings)
+struct AutoProxySetting {
+    bool had = false;
+    QVariant before;
+    explicit AutoProxySetting(bool on) : had(QSettings().contains("view/autoProxy")), before(QSettings().value("view/autoProxy")) { set(on); }
+    void set(bool on) { QSettings().setValue("view/autoProxy", on); }
+    ~AutoProxySetting() {
+        if (had) QSettings().setValue("view/autoProxy", before);
+        else QSettings().remove("view/autoProxy");
+    }
+    AutoProxySetting(const AutoProxySetting&) = delete;
+    AutoProxySetting& operator=(const AutoProxySetting&) = delete;
+};
+
+// The process's log into `out` for one scope ("<level> <message>", every level)
+struct LogCapture {
+    std::shared_ptr<spdlog::sinks::ostream_sink_mt> sink;
+    spdlog::level::level_enum level;
+    explicit LogCapture(std::ostringstream& out) : sink(std::make_shared<spdlog::sinks::ostream_sink_mt>(out)), level(Log()->level()) {
+        sink->set_pattern("%l %v");
+        Log()->set_level(spdlog::level::debug);
+        Log()->sinks().push_back(sink);
+    }
+    ~LogCapture() {
+        auto& sinks = Log()->sinks();
+        sinks.erase(std::remove(sinks.begin(), sinks.end(), sink), sinks.end());
+        Log()->set_level(level);
+    }
+    LogCapture(const LogCapture&) = delete;
+    LogCapture& operator=(const LogCapture&) = delete;
+};
+
 // ProjectPanel's tooltip of the source's frame line: «Поток: 8 бит 420; » and how it decodes
 QString StreamTip(const AppModel& model, const char* how) {
     return QString::fromUtf8("Поток: %1 бит %2; ").arg(model.sourceInfo().bitDepth).arg(QString::fromStdString(model.sourceInfo().chroma)) + QString::fromUtf8(how);
@@ -7474,6 +7514,17 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     CHECK(SourceDecodeText(larger) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: кадр 320×192 больше, чем декодирует видеокарта NVIDIA GeForce RTX 4090 (от 64×64 "
                                                         "до 256×4096). Что сделать: перекодируйте ролик другой программой в H.264 или HEVC либо в кадр "
                                                         "поменьше."));
+    // the sides fit, only the count of 16x16 blocks is over (NVDEC counts (w >> 4) * (h >> 4): 320x192 is 20 x 12 = 240)
+    limits.maxWidth = 8192;
+    limits.maxHeight = 8192;
+    limits.maxMacroblocks = 239;
+    const DecodeSupport blocks = JudgeDecode(Av1StreamInfo("yuv420p", 8), &limits);
+    REQUIRE(blocks.block == DecodeBlock::Size);
+    CHECK(SourceDecodeText(blocks) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: кадр 320×192 слишком велик для видеокарты NVIDIA GeForce RTX 4090 — "
+                                                        "она берёт не больше 239 блоков 16×16. Что сделать: перекодируйте ролик другой программой в H.264 или "
+                                                        "HEVC либо в кадр поменьше."));
+    limits.maxMacroblocks = 240;
+    CHECK(JudgeDecode(Av1StreamInfo("yuv420p", 8), &limits).Ok());
     const QString failedText = QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: видеокарта отказалась его декодировать, а другого декодера AV1 в этой версии программы "
                                                  "нет. Что сделать: обновите драйвер NVIDIA и перезапустите программу или ") +
                                transcode + ".";
@@ -7502,7 +7553,7 @@ TEST_CASE("AppModel opens an AV1 video as any other; without NVDEC AV1 the plan 
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
 
-    QSettings().setValue("view/autoProxy", false);  // no background build decoding on the GPU here
+    AutoProxySetting autoProxy(false);  // no background build decoding on the GPU here
     {
         AppModel model(true);
         model.openVideo(Q(clip));
@@ -7545,7 +7596,7 @@ TEST_CASE("AppModel opens an AV1 video as any other; without NVDEC AV1 the plan 
     }
 
     FakeNvdecEnv fake("no-av1");  // a GPU without AV1 in its NVDEC (GTX 10 / 16, RTX 20)
-    QSettings().setValue("view/autoProxy", true);  // a proxy would be built for this source - if it could be decoded
+    autoProxy.set(true);  // a proxy would be built for this source - if it could be decoded
     {
         AppModel model(true);
         model.openVideo(Q(clip));
@@ -7613,7 +7664,6 @@ TEST_CASE("AppModel opens an AV1 video as any other; without NVDEC AV1 the plan 
         CHECK(model.planError() == SourceDecodeText(expected));
         queue.stopAll(10000);
     }
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport becomes the plan's verdict; Process and Ctrl+Return stay off",
@@ -7623,7 +7673,7 @@ TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport bec
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     const DecodeSupport refused = RefusedDecode(VideoDecoder(clip, VideoDecoder::Probe()).Info(), DecodeBlock::NvdecFailed, "on the first frame");
     {
         // as the window sees it: the driver says nothing in advance (the plan passes), the viewport's first frame is refused
@@ -7684,7 +7734,6 @@ TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport bec
     CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);
     CHECK(model.planError() == SourceDecodeText(refused));
     queue.stopAll(10000);
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("AppModel: the viewport's refusal replaces another plan error (an impossible encode): the plan says it, once; the cards and the stage runs go off",
@@ -7694,7 +7743,7 @@ TEST_CASE("AppModel: the viewport's refusal replaces another plan error (an impo
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     const DecodeSupport refused = RefusedDecode(VideoDecoder(clip, VideoDecoder::Probe()).Info(), DecodeBlock::NvdecFailed, "on the first frame");
     std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
     AppModel model(true);
@@ -7744,7 +7793,6 @@ TEST_CASE("AppModel: the viewport's refusal replaces another plan error (an impo
     model.refreshPlan();
     CHECK(model.planError() == SourceDecodeText(refused));
     queue.stopAll(10000);
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("AppModel: the viewport's refusal when the plan stops before the source (the video gone): the verdict is kept, said once; the stage runs go off",
@@ -7754,7 +7802,7 @@ TEST_CASE("AppModel: the viewport's refusal when the plan stops before the sourc
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     const auto source = d / "source.mp4";  // moved away below
     std::filesystem::copy_file(clip, source);
     const DecodeSupport refused = RefusedDecode(VideoDecoder(source, VideoDecoder::Probe()).Info(), DecodeBlock::NvdecFailed, "on the first frame");
@@ -7794,7 +7842,6 @@ TEST_CASE("AppModel: the viewport's refusal when the plan stops before the sourc
         CHECK(b->toolTip() == SourceDecodeText(refused));
     }
     queue.stopAll(10000);
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("While a task or a preview runs the viewport does not hold NVDEC between frames, after them it does again; neither stops the proxy build",
@@ -7809,7 +7856,7 @@ TEST_CASE("While a task or a preview runs the viewport does not hold NVDEC betwe
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", true);  // the background proxy build of the AV1 source starts with the project
+    AutoProxySetting autoProxy(true);  // the background proxy build of the AV1 source starts with the project
     AppModel model(true);
     TaskQueue queue;
     ProjectTasks tasks(model, queue);
@@ -7824,7 +7871,7 @@ TEST_CASE("While a task or a preview runs the viewport does not hold NVDEC betwe
     REQUIRE(previewOn);
     CHECK(model.proxyBuilding());
     model.cancelProxies();  // the frames below come from NVDEC, not from a proxy
-    QSettings().setValue("view/autoProxy", false);
+    autoProxy.set(false);
     // while the preview runs, the viewport shows frames and lets NVDEC go after each
     SettleFrames(model, 0, 6);
     CHECK(model.frameStateOf("source") == FrameState::Ready);
@@ -7864,7 +7911,7 @@ TEST_CASE("A stage check holds NVDEC away from the viewport while it runs; one t
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", true);
+    AutoProxySetting autoProxy(true);
     AppModel model(false);  // the GPU's own adapter: a check (DLSS-G here) is offered only there
     model.openVideo(Q(clip));
     REQUIRE(model.hasProject());
@@ -7874,7 +7921,6 @@ TEST_CASE("A stage check holds NVDEC away from the viewport while it runs; one t
     model.refreshPlan();
     if (!model.availability("fg").checkable) {
         model.cancelProxies();
-        QSettings().remove("view/autoProxy");
         SKIP("DLSS-G cannot be checked here: " << model.availability("fg").text.toStdString());
     }
     // a check starts (its program a short process of our own: what it says is not the point): the proxy build goes on
@@ -7883,7 +7929,7 @@ TEST_CASE("A stage check holds NVDEC away from the viewport while it runs; one t
     REQUIRE(model.checkRunning());
     CHECK(model.proxyBuilding());
     model.cancelProxies();  // the frames below come from NVDEC, not from a proxy
-    QSettings().setValue("view/autoProxy", false);
+    autoProxy.set(false);
     CHECK(ContextBecomes(false));  // the viewport's decoder let go for the check
     // cancelled (a task came): the viewport holds NVDEC between frames again
     model.cancelCheck();
@@ -7918,7 +7964,7 @@ TEST_CASE("The main window's cell says a video cannot be decoded here, and its t
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     for (const char* fake : {"no-av1", "first-frame"}) {
         INFO(fake);
         FakeNvdecEnv env(fake);
@@ -7983,7 +8029,6 @@ TEST_CASE("The main window's cell says a video cannot be decoded here, and its t
     CHECK(cell->toolTip().contains(viaProxy));
     CHECK_FALSE(cell->toolTip().contains(QString::fromUtf8("Видео AV1 не декодируется на этом компьютере:")));  // not the refusal: it shows
     CHECK_FALSE(cell->text().endsWith(SourceDecodeShort()));
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("AppModel: NVDEC failing to start although the driver takes the source is no verdict - the plan stands, Process stays on", "[app][gpu][av1]") {
@@ -7992,7 +8037,7 @@ TEST_CASE("AppModel: NVDEC failing to start although the driver takes the source
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     FakeNvdecEnv fake("start-fails");  // the driver says yes; NVDEC does not start (out of memory, say)
     AppModel model(true);
     model.openVideo(Q(clip));
@@ -8015,7 +8060,6 @@ TEST_CASE("AppModel: NVDEC failing to start although the driver takes the source
     QPushButton* process = ProcessButton(panel);
     REQUIRE(process);
     CHECK(process->isEnabled());
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("The main window's tooltip of an AV1 result not decodable here: the reason, the codec advice while the source decodes; through a proxy, nothing of processing",
@@ -8025,7 +8069,7 @@ TEST_CASE("The main window's tooltip of an AV1 result not decodable here: the re
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     const auto result = d / "clip_result.mp4";
     std::filesystem::copy_file(clip, result, std::filesystem::copy_options::overwrite_existing);
     const auto passes = d / "passes";
@@ -8090,7 +8134,6 @@ TEST_CASE("The main window's tooltip of an AV1 result not decodable here: the re
     CHECK_FALSE(cell->toolTip().contains(QString::fromUtf8("обработать его нельзя")));  // the result is not what a run reads
     CHECK_FALSE(cell->toolTip().contains(advice));                                       // it shows: nothing to advise
     CHECK_FALSE(cell->text().endsWith(SourceDecodeShort()));
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("AppModel: frames NVDEC could not start for while a task ran come back when the task ends - no reload", "[app][gpu][av1]") {
@@ -8099,7 +8142,7 @@ TEST_CASE("AppModel: frames NVDEC could not start for while a task ran come back
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
     AppModel model(true);
     TaskQueue queue;
@@ -8124,7 +8167,6 @@ TEST_CASE("AppModel: frames NVDEC could not start for while a task ran come back
     CHECK(model.frameStateOf("source") == FrameState::Ready);
     CHECK_FALSE(model.store().StartFailure("source"));
     queue.stopAll(10000);
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("AppModel: the driver not answering for a CUDA error (query-fails) and the viewport's first frame refused - no verdict, the plan stands",
@@ -8134,7 +8176,7 @@ TEST_CASE("AppModel: the driver not answering for a CUDA error (query-fails) and
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     FakeNvdecEnv fake("query-fails");
     AppModel model(true);
     model.openVideo(Q(clip));
@@ -8147,7 +8189,6 @@ TEST_CASE("AppModel: the driver not answering for a CUDA error (query-fails) and
     CHECK(model.sourceDecode().caps.cudaError);
     CHECK(model.planError().isEmpty());
     CHECK_FALSE(model.plan().stages.empty());
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("AppModel: NVDEC refusing a frame after a few decoded ones (later-frame) is the source's verdict - the plan stops", "[app][gpu][av1][regression]") {
@@ -8156,7 +8197,7 @@ TEST_CASE("AppModel: NVDEC refusing a frame after a few decoded ones (later-fram
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     FakeNvdecEnv fake("later-frame");
     AppModel model(true);
     model.openVideo(Q(clip));
@@ -8173,7 +8214,6 @@ TEST_CASE("AppModel: NVDEC refusing a frame after a few decoded ones (later-fram
     QPushButton* process = ProcessButton(panel);
     REQUIRE(process);
     CHECK_FALSE(process->isEnabled());
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("AppModel: a new request of frames tries NVDEC again after a start failure - no task, no new frame, no reload needed", "[app][gpu][av1]") {
@@ -8182,7 +8222,7 @@ TEST_CASE("AppModel: a new request of frames tries NVDEC again after a start fai
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
     fake.emplace("start-fails");
     AppModel model(true);
@@ -8202,7 +8242,6 @@ TEST_CASE("AppModel: a new request of frames tries NVDEC again after a start fai
         20000);
     CHECK(model.frameStateOf("source") == FrameState::Ready);
     CHECK_FALSE(model.store().StartFailure("source"));
-    QSettings().remove("view/autoProxy");
 }
 
 namespace {
@@ -8261,7 +8300,7 @@ TEST_CASE("The main window's menu item that builds the scrubbing proxies says in
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     const auto result = d / "clip_result.mp4";
     std::filesystem::copy_file(clip, result, std::filesystem::copy_options::overwrite_existing);
     ClipSpec plain;
@@ -8301,7 +8340,6 @@ TEST_CASE("The main window's menu item that builds the scrubbing proxies says in
     CHECK(shownAfterBuild(sourceProxied) == QStringList{resultWhy});  // the source shows by its proxy: nothing to say of it
     CHECK(shownAfterBuild(allProxied).isEmpty());                     // both show by their proxies
     CHECK(shownAfterBuild(plainOnly).isEmpty());                      // a source that decodes: the build starts, no box
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("The main window's menu item that removes the scrubbing proxies asks first, naming every video shown only by its proxy here: No keeps them, Yes removes them",
@@ -8311,7 +8349,7 @@ TEST_CASE("The main window's menu item that removes the scrubbing proxies asks f
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    AutoProxySetting autoProxy(false);
     const auto result = d / "clip_result.mp4";
     std::filesystem::copy_file(clip, result, std::filesystem::copy_options::overwrite_existing);
     ClipSpec plain;
@@ -8336,7 +8374,10 @@ TEST_CASE("The main window's menu item that removes the scrubbing proxies asks f
     REQUIRE(ValidProxy(ffv1, plainPasses, "source"));
     BoxAnswerer boxes;
     auto question = [](const QString& names) {
-        return names + QString::fromUtf8(": на этом компьютере не декодируется и показывается только по прокси, а заново здесь не построится. Удалить прокси?");
+        return names + (names.contains(", ") ? QString::fromUtf8(": на этом компьютере не декодируются и показываются только по прокси, а заново здесь не "
+                                                                  "построятся. Удалить прокси?")
+                                             : QString::fromUtf8(": на этом компьютере не декодируется и показывается только по прокси, а заново здесь не "
+                                                                  "построится. Удалить прокси?"));
     };
     auto remove = [&](const std::filesystem::path& file, QMessageBox::StandardButton answer) {
         boxes.clear();
@@ -8367,7 +8408,6 @@ TEST_CASE("The main window's menu item that removes the scrubbing proxies asks f
     // every video decodes here: no question, the proxies go
     CHECK(remove(plainOnly, QMessageBox::No).isEmpty());
     CHECK_FALSE(ValidProxy(ffv1, plainPasses, "source"));
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("RecentPreviews: an AV1 project's thumbnail and size line - the source's frame, the AV1 result's frame (regression TASK-0076)",
@@ -8417,10 +8457,11 @@ TEST_CASE("RecentPreviews: an AV1 project's thumbnail and size line - the source
     CHECK_FALSE(previews.get(Q(clip))->image.isNull());
 }
 
-TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so for the source and the result; a video that needs no proxy says nothing of the kind",
+TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not now (a start failure) or not here (a verdict), the reasons whole in the log; no proxy needed says nothing",
           "[app][gpu][av1][proxy]") {
     App();
     const auto d = Dir("av1_proxy_process");
+    AutoProxySetting autoProxy(true);
     {
         D3D12Device dev;
         if (dev.IsWarp() || !dev.IsNvidia() || !VideoEncoder::EncoderAvailable("av1_nvenc")) SKIP("no NVIDIA GPU with av1_nvenc");
@@ -8437,17 +8478,29 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so for th
     const auto result = d / "clip_result.mp4";
     std::filesystem::copy_file(*clip, result, std::filesystem::copy_options::overwrite_existing);
     const auto [file, passes] = ProxyProject(d, *clip, result, "av1");
-    QSettings().setValue("view/autoProxy", true);
-    const QString notBuilt = QString::fromUtf8("Прокси для перемотки не построен (");
+    const QString names = HumanSourceName("source") + ", " + HumanSourceName("result");
+    const QString notHere = QString::fromUtf8("Прокси для перемотки не построен (");
+    const QString notNow = QString::fromUtf8("Прокси для перемотки сейчас не построен (");
     auto messagesOf = [](const QSignalSpy& spy) {
         QStringList out;
         for (const auto& args : spy) out << args.at(0).toString();
+        return out;
+    };
+    auto linesOf = [](const std::string& log, const std::string& start) {  // the log's lines that begin so (the level and the message)
+        std::vector<std::string> out;
+        std::istringstream in(log);
+        for (std::string line; std::getline(in, line);) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();  // spdlog ends a line with CR LF here
+            if (line.rfind(start, 0) == 0) out.push_back(line);
+        }
         return out;
     };
     {
         // NVDEC does not start in the proxy process (it inherits the stand-in): no verdict - the viewport keeps both videos, the build is asked
         std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
         fake.emplace("start-fails");
+        std::ostringstream text;
+        LogCapture capture(text);
         AppModel model(true);
         QSignalSpy messages(&model, &AppModel::message);
         model.openProject(Q(file));
@@ -8457,13 +8510,60 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so for th
         REQUIRE_FALSE(model.proxyBuilding());
         const QStringList said = messagesOf(messages);
         INFO(said.join(" | ").toStdString());
-        CHECK(said.contains(notBuilt + HumanSourceName("source") + ", " + HumanSourceName("result") +
-                            QString::fromUtf8("): видеокарта не декодировала видео — подробности в логе")));
+        CHECK(said.contains(notNow + names +
+                            QString::fromUtf8("): видеокарта не начала декодировать — постройте его позже (Вид → Построить прокси для перемотки)")));
+        for (const QString& m : said) CHECK_FALSE(m.startsWith(notHere));  // not a verdict
         CHECK_FALSE(ValidProxy(*clip, passes, "source"));
         CHECK_FALSE(ValidProxy(result, passes, "result"));
         SettleAny(model, 0, 6);
+        const std::string log = text.str();
+        INFO(log);
+        for (const char* name : {"source", "result"}) {  // the process's reason, whole: the line as it wrote it
+            const auto lines = linesOf(log, std::string("warning viewport proxy: ") + name + ": no proxy now, NVDEC did not start (run it again later): ");
+            REQUIRE(lines.size() == 1);
+            CHECK_THAT(lines[0], Catch::Matchers::EndsWith(kStartFailedWhy));
+        }
     }
-    // a video that decodes and needs no proxy (keyframes at most 8 frames apart): the process says «source: no proxy needed» - no refusal
+    // a verdict in the proxy process alone (the stand-in set while the viewport rests, after its sources were made): before the build
+    // (no-av1: the process asks the driver) and on a frame of it (later-frame: NVDEC refuses after a few frames)
+    for (const char* value : {"no-av1", "later-frame"}) {
+        INFO(value);
+        RemoveProxy(passes, "source");
+        RemoveProxy(passes, "result");
+        autoProxy.set(false);
+        std::optional<FakeNvdecEnv> fake;  // outlives the model
+        std::ostringstream text;
+        LogCapture capture(text);
+        AppModel model(true);
+        QSignalSpy messages(&model, &AppModel::message);
+        model.openProject(Q(file));
+        REQUIRE(model.hasProject());
+        SettleFrames(model, 0, 6);  // the loaders at rest
+        fake.emplace(value);
+        autoProxy.set(true);
+        model.startProxies();
+        REQUIRE(model.proxyBuilding());
+        Pump([&] { return !model.proxyBuilding(); }, 60000);
+        REQUIRE_FALSE(model.proxyBuilding());
+        const QStringList said = messagesOf(messages);
+        INFO(said.join(" | ").toStdString());
+        CHECK(said.contains(notHere + names + QString::fromUtf8("): видео на этом компьютере не декодируется — подробности в логе")));
+        for (const QString& m : said) CHECK_FALSE(m.startsWith(notNow));
+        CHECK_FALSE(ValidProxy(*clip, passes, "source"));
+        const std::string log = text.str();
+        INFO(log);
+        // no-av1: the process's reason is the driver's answer as this process gets it too
+        const std::string noAv1 = CheckDecodeSupport(VideoDecoder(*clip, VideoDecoder::Probe()).Info()).why;
+        for (const char* name : {"source", "result"}) {
+            const std::string start = std::string("warning viewport proxy: ") + name + ": no proxy, the video cannot be decoded here: ";
+            const auto lines = linesOf(log, start);
+            REQUIRE(lines.size() == 1);
+            if (std::string(value) == "no-av1") CHECK(lines[0] == start + noAv1);
+            else CHECK_THAT(lines[0], Catch::Matchers::EndsWith(" frames)"));  // «... (after N frames)»: the reason to its end
+        }
+        fake.reset();  // the loaders at rest still: nothing asked for frames
+    }
+    // a video that decodes and needs no proxy (keyframes at most 8 frames apart): the process says «source: no proxy needed» - nothing of it
     ClipSpec plain;
     plain.frames = 8;
     plain.width = 48;
@@ -8478,6 +8578,62 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so for th
     REQUIRE_FALSE(model.proxyBuilding());
     const QStringList said = messagesOf(messages);
     INFO(said.join(" | ").toStdString());
-    for (const QString& m : said) CHECK_FALSE(m.startsWith(notBuilt));
-    QSettings().remove("view/autoProxy");
+    for (const QString& m : said) {
+        CHECK_FALSE(m.startsWith(notHere));
+        CHECK_FALSE(m.startsWith(notNow));
+    }
+}
+
+TEST_CASE("AppModel: the viewport's refusal of an AV1 source is no verdict on a file written in its place in another codec - the plan made again runs",
+          "[app][gpu][av1][regression]") {
+    App();
+    const auto d = Dir("av1_replaced_in_place");
+    AutoProxySetting autoProxy(false);
+    {
+        D3D12Device dev;
+        if (dev.IsWarp() || !dev.IsNvidia() || !VideoEncoder::EncoderAvailable("av1_nvenc")) SKIP("no NVIDIA GPU with av1_nvenc");
+    }
+    ClipSpec spec;
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 24;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto written = WriteClipIfSupported(d / "clip.mkv", spec, &why);  // MKV: FFV1 can take its place under the same name
+    if (!written) SKIP(why);
+    const std::filesystem::path clip = *written;
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    SettleFrames(model, 0, 6);
+    REQUIRE(model.planError().isEmpty());
+    fake.emplace("later-frame");
+    model.store().SetSources(model.store().Sources());  // the decoders open again under the stand-in
+    model.setTime(20.0 / 24.0);  // a walk from the keyframe 16: a few frames, then NVDEC refuses - the stream's verdict
+    Pump(
+        [&] {
+            model.store().Update();
+            model.notifyFramesUpdated();
+            return model.sourceDecode().block == DecodeBlock::NvdecFailed;
+        },
+        20000);
+    REQUIRE(model.sourceDecode().block == DecodeBlock::NvdecFailed);
+    REQUIRE_FALSE(model.planError().isEmpty());
+    SettleAny(model, 14, 23);  // the window of frame 20 (6 frames on either side): no load runs, the refused decoder is closed, the file free
+    fake.reset();
+    // the file written again in its place - FFV1 (a codec with a software decoder), the same name; the sources not set again
+    ClipSpec plain;
+    plain.width = 320;
+    plain.height = 192;
+    plain.frames = 24;
+    std::filesystem::copy_file(WriteClip(d / "plain.mkv", plain), clip, std::filesystem::copy_options::overwrite_existing);
+    REQUIRE(model.store().Undecodable("source"));  // the viewport still holds its refusal of the AV1 stream
+    model.refreshPlan();
+    INFO("planError: " << model.planError().toStdString());
+    CHECK(model.planError().isEmpty());  // not «Видео AV1 не декодируется»: the file is no AV1 any more
+    CHECK(model.sourceDecode().Ok());
+    CHECK_FALSE(model.sourceDecode().hardwareOnly);
+    CHECK(model.sourceInfo().codec == "ffv1");
 }

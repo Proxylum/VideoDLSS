@@ -92,14 +92,15 @@ public:
     const std::vector<ViewportSource>& Sources() const { return sources_; }
     const ViewportSource* FindSource(const std::string& name) const;
     // TASK-0076: why the video `name` cannot be decoded here - the probe's verdict (ViewportSource::undecodable), or NVDEC refusing a
-    // frame in a loader as a verdict (the first frame with a driver that could not be asked, a later frame); nullopt: it decodes
+    // frame in a loader as a verdict (the first frame when the probe did not learn the layout, a later frame or a part of the stream in
+    // other parameters); nullopt: it decodes
     std::optional<DecodeSupport> Undecodable(const std::string& name) const;
     // TASK-0076: NVDEC could not start for the video `name` (NvdecStartFailed: memory, the driver) - no verdict on the video; its frames
     // met then are missing until RetryStartFailures (a frame of it decoded by its own decoder, the next request of frames, the end of a
     // task) or SetSources
     std::optional<DecodeSupport> StartFailure(const std::string& name) const;
     // TASK-0076: forgets the start failures of `source` (empty: of every video) and asks for their frames again - a frame of it decoded
-    // since, or nothing runs any more (AppModel)
+    // by its own decoder since, a new request of frames (AppModel::requestFrames: a scrub, a step), nothing running any more
     void RetryStartFailures(const std::string& source = {});
     // TASK-0076: closes the videos' decoders that hold NVDEC (an AV1 source in the GUI process): a run gets that memory; a later frame of
     // the viewport opens one again. Never waits for a load in flight (the GUI thread): a busy decoder is closed by its loader after it.

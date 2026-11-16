@@ -41,6 +41,14 @@ QString SourceDecodeText(const DecodeSupport& s) {
                 .arg(transcode);
         case DecodeBlock::Size: {
             const bool small = s.width < s.caps.minWidth || s.height < s.caps.minHeight;
+            const bool sidesFit = !small && s.width <= s.caps.maxWidth && s.height <= s.caps.maxHeight;
+            if (sidesFit)  // the macroblock count alone (NVDEC: (w >> 4) * (h >> 4))
+                return Tr("Видео AV1 не декодируется на этом компьютере: кадр %1×%2 слишком велик для видеокарты %3 — она берёт не больше %4 блоков "
+                          "16×16. Что сделать: перекодируйте ролик другой программой в H.264 или HEVC либо в кадр поменьше.")
+                    .arg(s.width)
+                    .arg(s.height)
+                    .arg(gpu)
+                    .arg(s.caps.maxMacroblocks);
             return Tr("Видео AV1 не декодируется на этом компьютере: кадр %1×%2 %3, чем декодирует видеокарта %4 (от %5×%6 до %7×%8). Что сделать: %9.")
                 .arg(s.width)
                 .arg(s.height)

@@ -39,7 +39,7 @@ int kHardwareOnly = 1;
 
 AVPixelFormat GetHwFormat(AVCodecContext* ctx, const AVPixelFormat* formats) {
     const bool hardwareOnly = ctx->opaque == &kHardwareOnly;
-    if (hardwareOnly && FakeNvdecRefusesFrames()) return AV_PIX_FMT_NONE;  // DLSSVID_FAKE_NVDEC_AV1=first-frame (tests)
+    if (hardwareOnly && FakeNvdecRefusesFrames()) return AV_PIX_FMT_NONE;  // DLSSVID_FAKE_NVDEC_AV1=first-frame | query-fails | start-fails (tests)
     const AVPixelFormat f = PickNvdecFormat(formats, hardwareOnly);
     if (f != AV_PIX_FMT_CUDA && !hardwareOnly) Log()->warn("NVDEC pixel format not offered by decoder, falling back to software");
     return f;
@@ -488,8 +488,17 @@ void VideoDecoder::CheckDecode(int err, const char* what) {
         // decoder must not be fed again). The driver having said it takes the stream, NVDEC did not start (memory, the driver): a new
         // decoder may succeed - the refusal is transient
         // (only on the first frame: frames decoded before it, NVDEC did start - a later refusal is the stream's, a new sequence header)
-        const std::string when = framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "on the first frame";
-        const bool startFailed = nvdecStartTransient_ && framesDecoded_ == 0;
+        // («on the first frame» is this decoder's first: one that started with a seek may meet a later part of the stream. av1dec has
+        // parsed its sequence header by now: other parameters than the probe's - a part NVDEC does not take, the stream's verdict)
+        const char* swFmt = codec_->sw_pix_fmt != AV_PIX_FMT_NONE ? av_get_pix_fmt_name(codec_->sw_pix_fmt) : nullptr;
+        const bool otherPart = (swFmt && info_.pixelFormat != "unknown" && info_.pixelFormat != swFmt) ||
+                               (codec_->width > 0 && static_cast<uint32_t>(codec_->width) != info_.codedWidth) ||
+                               (codec_->height > 0 && static_cast<uint32_t>(codec_->height) != info_.codedHeight);
+        std::string when = framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "on the first frame";
+        if (otherPart)
+            when += ", on a part of the stream in other parameters (" + std::string(swFmt ? swFmt : "?") + " " + std::to_string(codec_->width) + "x" +
+                    std::to_string(codec_->height) + ")";
+        const bool startFailed = nvdecStartTransient_ && framesDecoded_ == 0 && !otherPart;
         refused_ = std::make_shared<const DecodeSupport>(RefusedDecode(info_, startFailed ? DecodeBlock::NvdecStartFailed : DecodeBlock::NvdecFailed, when));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }

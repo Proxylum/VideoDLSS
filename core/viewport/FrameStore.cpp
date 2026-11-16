@@ -201,7 +201,7 @@ std::vector<ViewportSource> FrameStore::DiscoverPassVersions(const std::filesyst
 }
 
 namespace {
-// TASK-0076: NVDEC's refusal of a file met by a loader (the driver could not be asked before) - a verdict on the stream on this
+// TASK-0076: NVDEC's refusal of a file met by a loader as a verdict (the layout unknown to the probe, a later frame or part) - on the stream on this
 // machine: kept for the process, so a new set of sources does not forget it (the plan would let a run start until a frame refuses again)
 // (keyed by the path and checked against the file's size and time: a result written again on the same path is another stream)
 struct RefusedFile {
@@ -613,6 +613,7 @@ void FrameStore::LoaderMain() {
             if (prefetch) ++prefetchActive_;
         }
         LoadResult result;
+        std::optional<DecodeSupport> startFailure;  // TASK-0076: recorded after the missing frame is published (below)
         try {
             result = LoadOne(key);
         } catch (const DecodeUnavailable& e) {  // TASK-0076: NVDEC refused the video - its later frames open no decoder
@@ -632,7 +633,7 @@ void FrameStore::LoaderMain() {
                         if (!e1 && !e2) refusedFiles[s->path.string()] = std::move(r);
                     }
                 } else {
-                    startFailed_[key.source] = e.support;
+                    startFailure = e.support;
                 }
                 if (const auto it = runtimes_.find(key.source); it != runtimes_.end()) refused = it->second.get();
             }
@@ -659,6 +660,10 @@ void FrameStore::LoaderMain() {
         ReleaseNvdecAfterLoad(key.source);  // TASK-0076: a pending release, or a task running
         if (result.decodedOriginal) RetryStartFailures(key.source);  // TASK-0076: NVDEC works again - the frames a start failure left out come again
         for (auto& l : result.loaded) Publish(std::move(l));
+        if (startFailure) {  // after the publish: a retry (another loader, a scrub) now finds both the mark and the missing frame
+            std::lock_guard<std::mutex> lock(mutex_);
+            startFailed_[key.source] = *startFailure;
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             inFlight_.erase(key);

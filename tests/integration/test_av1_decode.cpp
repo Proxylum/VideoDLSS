@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <optional>
 #include <string>
@@ -456,12 +457,16 @@ TEST_CASE("dlssvid process --passthrough, render, upscale and info take an AV1 s
     CHECK(inf.code == 0);
     CHECK_THAT(inf.out, ContainsSubstring("decode:      NVDEC only (av1: no software AV1 decoder in this build), on '"));
     CHECK_THAT(inf.out, ContainsSubstring("AV1 8-bit 4:2:0 up to "));
-    // a video with a software decoder says so
+}
+
+TEST_CASE("dlssvid info says how a video with a software decoder decodes - no GPU needed", "[integration][cli][av1]") {
+    const auto dir = Dir("info_software");
     ClipSpec plain;
     plain.frames = 2;
     plain.width = 48;
     plain.height = 32;
     const auto ffv1 = RunAll({"info", WriteClip(dir / "ffv1.mkv", plain).string()}, dir / "info_ffv1.log");
+    INFO(ffv1.out);
     CHECK(ffv1.code == 0);
     CHECK_THAT(ffv1.out, ContainsSubstring("decode:      software (ffv1); NVDEC does not decode this codec"));
 }
@@ -647,6 +652,61 @@ std::optional<DecodeUnavailable> RefusalOfNextFrame(VideoDecoder& dec) {
 }
 
 // A FrameStore of one video source on the WARP adapter, and what the viewport would show of frame `f`
+// `done` becomes true within `timeoutMs` (polled)
+bool Eventually(const std::function<bool()>& done, int timeoutMs = 5000) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (!done()) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return true;
+}
+
+// An IVF file of two AV1 streams one after the other - `a`, then `b` (other parameters: a part of the stream av1dec meets later), b's
+// timestamps going on from a's. av1_nvenc writes the sequence header into every keyframe of an IVF file: b's starts b's part.
+std::filesystem::path ConcatIvf(const std::filesystem::path& a, const std::filesystem::path& b, const std::filesystem::path& out) {
+    auto u16 = [](const std::string& s, size_t at) { return static_cast<uint32_t>(static_cast<uint8_t>(s[at])) | static_cast<uint32_t>(static_cast<uint8_t>(s[at + 1])) << 8; };
+    auto u32 = [&](const std::string& s, size_t at) { return u16(s, at) | u16(s, at + 2) << 16; };
+    auto u64 = [&](const std::string& s, size_t at) { return static_cast<uint64_t>(u32(s, at)) | static_cast<uint64_t>(u32(s, at + 4)) << 32; };
+    auto put = [](std::string& s, size_t at, uint64_t v, int bytes) {
+        for (int i = 0; i < bytes; ++i) s[at + i] = static_cast<char>((v >> (8 * i)) & 0xff);
+    };
+    struct Frame {
+        uint64_t pts;
+        std::string data;
+    };
+    auto frames = [&](const std::string& f) {
+        REQUIRE(f.size() >= 32);
+        REQUIRE(f.compare(0, 4, "DKIF") == 0);
+        std::vector<Frame> out;
+        for (size_t at = u16(f, 6); at + 12 <= f.size();) {
+            const uint32_t size = u32(f, at);
+            REQUIRE(at + 12 + size <= f.size());
+            out.push_back({u64(f, at + 4), f.substr(at + 12, size)});
+            at += 12 + size;
+        }
+        return out;
+    };
+    const std::string fa = Read(a), fb = Read(b);
+    REQUIRE(fa.compare(16, 8, fb, 16, 8) == 0);  // the same time base
+    const std::vector<Frame> ka = frames(fa), kb = frames(fb);
+    REQUIRE(ka.size() >= 2);
+    REQUIRE_FALSE(kb.empty());
+    const uint64_t step = ka[1].pts - ka[0].pts;
+    std::string ivf = fa.substr(0, u16(fa, 6));
+    put(ivf, 24, ka.size() + kb.size(), 4);
+    auto append = [&](uint64_t pts, const std::string& data) {
+        std::string head(12, '\0');
+        put(head, 0, data.size(), 4);
+        put(head, 4, pts, 8);
+        ivf += head + data;
+    };
+    for (const Frame& f : ka) append(f.pts, f.data);
+    for (const Frame& f : kb) append(ka.back().pts + step + (f.pts - kb.front().pts), f.data);
+    std::ofstream(out, std::ios::binary) << ivf;
+    return out;
+}
+
 struct Av1Store {
     D3D12Device dev{D3D12Device::Options{true, false}};
     std::unique_ptr<FrameStore> store;
@@ -1079,7 +1139,8 @@ TEST_CASE("FrameStore lets the CUDA device go: a decoder NVDEC refused is closed
         s.store->SetSources(Project::Create(clip, dir / "none").Sources());
         s.store->SetHoldNvdec(false);
         REQUIRE(s.Settle(4) == FrameStore::Status::Ready);  // frames 3, 4, 5: each load closed its decoder after it
-        CHECK(s.store->Stats("source").decodedFrames == 0);  // the stats count the decoders open: none is
+        // a loader closes its decoder after it published the frame: the count settles a moment after the frame shows
+        CHECK(Eventually([&] { return s.store->Stats("source").decodedFrames == 0; }));  // the stats count the decoders open: none is
         CHECK(ContextBecomes(false));
         REQUIRE(s.Settle(9) == FrameStore::Status::Ready);
         CHECK(ContextBecomes(false));
@@ -1579,6 +1640,64 @@ TEST_CASE("NVDEC takes an AV1 stream after a stage's CUDA runtime made the prima
     CHECK(code == 0);
     CHECK_THAT(out, ContainsSubstring("All tests passed"));
     CHECK_THAT(out, !ContainsSubstring("incompatible flags"));
+}
+
+TEST_CASE("NVDEC refusing a part of the stream in other parameters than the probe's is the stream's verdict - also as a decoder's first frame after a seek",
+          "[integration][gpu][av1][regression]") {
+    const auto dir = Dir("other_part");
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");
+    // two streams one after the other in one IVF file: the probe sees the first part's 320x192, av1dec meets 384x224 at frame 16
+    ClipSpec first;
+    first.width = kW;
+    first.height = kH;
+    first.frames = 16;
+    first.gop = 8;
+    first.codec = "av1_nvenc";
+    ClipSpec second = first;
+    second.width = 384;
+    second.height = 224;
+    second.frames = 16;
+    std::string why;
+    const auto a = WriteClipIfSupported(dir / "a.ivf", first, &why);
+    if (!a) SKIP("av1_nvenc does not support the clip here: " << why);
+    const auto b = WriteClipIfSupported(dir / "b.ivf", second, &why);
+    if (!b) SKIP("av1_nvenc does not support the clip here: " << why);
+    const auto parts = ConcatIvf(*a, *b, dir / "parts.ivf");
+    const VideoStreamInfo info = VideoDecoder(parts, VideoDecoder::Probe()).Info();
+    REQUIRE(info.codedWidth == kW);
+    REQUIRE(info.codedHeight == kH);
+    // NVDEC decodes both parts (the stand-in aside): the second part's frames are there
+    {
+        VideoDecoder dec(parts);
+        REQUIRE(dec.SeekToKeyframeBefore(20));
+        CpuFrame f;
+        REQUIRE(dec.NextFrame(f));
+        CHECK(f.desc.width == 384);
+        CHECK(f.desc.height == 224);
+    }
+    // a decoder whose first frame is in the first part: NVDEC not starting is a start failure - no verdict
+    {
+        FakeNvdecEnv fake("start-fails");
+        VideoDecoder dec(parts);
+        REQUIRE(dec.SeekToKeyframeBefore(10));
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::NvdecStartFailed);
+        CHECK(refused->support.Transient());
+        CHECK_THAT(refused->support.why, !ContainsSubstring("other parameters"));
+    }
+    // a decoder whose first frame is in the second part (a seek): av1dec has parsed its sequence header - other parameters than the
+    // probe's, a part NVDEC does not take: the stream's verdict, whatever the driver said of the first part
+    {
+        FakeNvdecEnv fake("start-fails");
+        VideoDecoder dec(parts);
+        REQUIRE(dec.SeekToKeyframeBefore(20));
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::NvdecFailed);
+        CHECK_FALSE(refused->support.Transient());
+        CHECK_THAT(refused->support.why, ContainsSubstring("(on the first frame, on a part of the stream in other parameters (yuv420p 384x224))"));
+    }
 }
 
 TEST_CASE("NVDEC refusing a frame after a few decoded ones (later-frame) is the stream's verdict: kept, marked, remembered for the file",

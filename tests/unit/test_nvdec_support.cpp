@@ -294,7 +294,7 @@ TEST_CASE("JudgeDecode: no CUDA, no NVDEC, no AV1 decoder, the size limits each 
     noNvdec.why = "nvcuvid.dll could not be loaded (missing, or a driver too old for FFmpeg's NVDEC)";
     const DecodeSupport nn = JudgeDecode(Av1Info(), &noNvdec);
     CheckRefusal(nn, DecodeBlock::NoNvdec);
-    CHECK(nn.why == "AV1 decodes only on NVDEC in this build - there is no software AV1 decoder - and the NVIDIA driver's video decoder is missing: "
+    CHECK(nn.why == "AV1 decodes only on NVDEC in this build - there is no software AV1 decoder - and the NVIDIA driver's video decoder is unavailable: "
                     "nvcuvid.dll could not be loaded (missing, or a driver too old for FFmpeg's NVDEC)");
     // CUDA and NVDEC but no AV1 in it: the GPU and the depth named
     NvdecAv1Caps noAv1 = GoodCaps();
@@ -354,12 +354,18 @@ TEST_CASE("JudgeDecode: no CUDA, no NVDEC, no AV1 decoder, the size limits each 
                                                 std::to_string(c.maxH) + ", at most " + std::to_string(c.maxMb) + " macroblocks"));
         }
     }
-    // a partial macroblock counts as a whole one: 330x200 is 21 x 13 = 273
+    // macroblocks counted as FFmpeg's nvdec_test_capabilities does - (w >> 4) * (h >> 4), a partial one not counted: 330x200 is
+    // 20 x 12 = 240 (rounded up it would be 21 x 13 = 273, and a GPU taking 240 refused although FFmpeg decodes it)
     NvdecAv1Caps mb = GoodCaps();
-    mb.maxMacroblocks = 273;
+    mb.maxMacroblocks = 240;
     CHECK(JudgeDecode(Av1Info("yuv420p", 8, 330, 200), &mb).Ok());
-    mb.maxMacroblocks = 272;
+    mb.maxMacroblocks = 239;
     CheckRefusal(JudgeDecode(Av1Info("yuv420p", 8, 330, 200), &mb), DecodeBlock::Size);
+    // a whole block more on a side counts: 336x200 is 21 x 12 = 252
+    mb.maxMacroblocks = 251;
+    CheckRefusal(JudgeDecode(Av1Info("yuv420p", 8, 336, 200), &mb), DecodeBlock::Size);
+    mb.maxMacroblocks = 252;
+    CHECK(JudgeDecode(Av1Info("yuv420p", 8, 336, 200), &mb).Ok());
     // the stored frame is what is judged, not the frame as shown (a turned phone video)
     VideoStreamInfo turned = Av1Info();
     turned.width = 192;
@@ -484,7 +490,7 @@ TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver o
         const DecodeSupport s = CheckDecodeSupport(av1);
         CheckRefusal(s, DecodeBlock::NoNvdec);
         CHECK(s.caps.gpu == "DLSSVID_FAKE_NVDEC_AV1");
-        CHECK(s.why == "AV1 decodes only on NVDEC in this build - there is no software AV1 decoder - and the NVIDIA driver's video decoder is missing: "
+        CHECK(s.why == "AV1 decodes only on NVDEC in this build - there is no software AV1 decoder - and the NVIDIA driver's video decoder is unavailable: "
                        "DLSSVID_FAKE_NVDEC_AV1=no-nvdec");
         CheckRefusal(CheckDecodeSupport(Av1Info("unknown")), DecodeBlock::NoNvdec);
         CHECK_FALSE(FakeNvdecRefusesFrames());

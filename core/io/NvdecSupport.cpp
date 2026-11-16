@@ -86,7 +86,7 @@ std::string RefusalText(const DecodeSupport& s) {
         case DecodeBlock::NoCuda:
             return codec + " decodes only on an NVIDIA GPU (NVDEC) in this build - there is no software AV1 decoder - and CUDA is unavailable: " + s.caps.why;
         case DecodeBlock::NoNvdec:
-            return codec + " decodes only on NVDEC in this build - there is no software AV1 decoder - and the NVIDIA driver's video decoder is missing: " +
+            return codec + " decodes only on NVDEC in this build - there is no software AV1 decoder - and the NVIDIA driver's video decoder is unavailable: " +
                    s.caps.why;
         case DecodeBlock::NoAv1:
             return "the GPU '" + s.caps.gpu + "' has no NVDEC AV1 decoder for " + Depth(s.bitDepth) +
@@ -281,7 +281,7 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
         s.why = "on '" + caps->gpu + "', the sample layout is not known before the first frame";
         return s;
     }
-    const uint64_t macroblocks = static_cast<uint64_t>((info.codedWidth + 15) / 16) * ((info.codedHeight + 15) / 16);
+    const uint64_t macroblocks = static_cast<uint64_t>(info.codedWidth >> 4) * (info.codedHeight >> 4);  // as FFmpeg's nvdec_test_capabilities
     if (info.codedWidth < caps->minWidth || info.codedHeight < caps->minHeight || info.codedWidth > caps->maxWidth || info.codedHeight > caps->maxHeight ||
         macroblocks > caps->maxMacroblocks)
         return Refuse(s, DecodeBlock::Size);

@@ -177,7 +177,7 @@ std::filesystem::path BuildProxy(const std::filesystem::path& video, const std::
     std::vector<std::pair<int64_t, CpuFrame>> samples;  // frames checked against the proxy afterwards
     CpuFrame f, last;
     int64_t expected = 0;
-    const auto next = [&] {  // TASK-0076: NVDEC refusing the first frame (the driver could not be asked) leaves no part file
+    const auto next = [&] {  // TASK-0076: NVDEC refusing a frame (a verdict, or a start failure) leaves no part file
         try {
             return dec.NextFrame(f);
         } catch (const DecodeUnavailable&) {
