@@ -492,6 +492,15 @@ void AppModel::updateNvdecHold() {
     nvdecLetGo_ = busy;
 }
 
+// TASK-0076: a file as it is now - its path, size and time (a file written again on the same path is another)
+std::string AppModel::FileStamp(const std::filesystem::path& file) {
+    std::error_code e1, e2;
+    const auto size = std::filesystem::file_size(file, e1);
+    const auto time = std::filesystem::last_write_time(file, e2);
+    return file.string() + "|" + (e1 ? std::string("?") : std::to_string(size)) + "|" +
+           (e2 ? std::string("?") : std::to_string(time.time_since_epoch().count()));
+}
+
 void AppModel::startProxies() {
     if (!hasProject() || project_.passesRoot.empty() || !std::filesystem::exists(project_.sourceVideo)) return;
     if (!QSettings().value("view/autoProxy", true).toBool()) return;
@@ -502,6 +511,7 @@ void AppModel::startProxies() {
         if (video.empty() || !std::filesystem::exists(video) || ValidProxy(video, project_.passesRoot, name)) continue;
         if (isReleased(video)) continue;  // being replaced (TASK-0070)
         if (store_ && store_->Undecodable(name)) continue;  // TASK-0076: nothing here decodes it
+        if (proxyRefused_.count(FileStamp(video))) continue;  // TASK-0076: the proxy process found it undecodable - not again for the same file
         names << name;
     }
     if (names.isEmpty()) return;
@@ -539,12 +549,19 @@ void AppModel::startProxies() {
         }
         for (const QString& line : out.split('\n'))  // the reasons themselves, whole (not the tail of the output)
             if (line.contains(": no proxy,") || line.contains(": no proxy now")) Log()->warn("viewport proxy: {}", line.trimmed().toStdString());
+        QStringList said;
         if (!refused.isEmpty())
-            emit message(tr("Прокси для перемотки не построен (%1): видео на этом компьютере не декодируется — подробности в логе").arg(refused.join(", ")));
-        else if (!notNow.isEmpty())
-            emit message(tr("Прокси для перемотки сейчас не построен (%1): видеокарта не начала декодировать — постройте его позже (Вид → Построить прокси "
-                            "для перемотки)")
-                             .arg(notNow.join(", ")));
+            said << tr("Прокси для перемотки не построен (%1): видео на этом компьютере не декодируется (подробности в логе) — перекодируйте его в H.264 "
+                       "или HEVC другой программой")
+                        .arg(refused.join(", "));
+        if (!notNow.isEmpty())
+            said << tr("Прокси для перемотки сейчас не построен (%1): видеокарта не начала декодировать — постройте его позже (Вид → Построить прокси "
+                       "для перемотки)")
+                        .arg(notNow.join(", "));
+        if (!said.isEmpty()) emit message(said.join("; "));
+        for (const char* name : {"source", "result"})  // a verdict on the file: the background build does not try it again (while it is the same file)
+            if (out.contains(QString("%1: no proxy,").arg(name)))
+                proxyRefused_.insert(FileStamp(std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo));
         emit proxiesChanged();
     });
     Log()->info("viewport proxy: building {} in the background", names.join(", ").toStdString());
@@ -802,11 +819,18 @@ void AppModel::noteSourceRefused() {
     if (!hasProject() || !sourceDecode_.Ok() || !store_) return;
     const auto refused = store_->Undecodable("source");
     if (!refused) return;
+    // once per refusal: a plan that decided otherwise after hearing it (the file replaced by one in another codec) is not made again on
+    // every frame update; another refusal (a new one, another file) is heard
+    const std::string heard = project_.sourceVideo.string() + "|" + refused->why;
+    if (heard == heardRefusal_) return;
+    heardRefusal_ = heard;
     refreshPlan();  // reads the refusal before anything else: it replaces another plan error (the more basic one) and drops the plan
-    if (sourceDecode_.Ok()) {  // the plan stopped before the source (no project file...): the verdict still holds the runs - and is kept, once
+    // the plan stopped before it probed the source (no project, the video not found): the verdict still holds the runs - kept, once. A plan
+    // that probed it decided itself (a file replaced on the spot by one with a software decoder is no AV1 refusal)
+    if (sourceDecode_.Ok() && sourceInfo_.codec.empty()) {
         sourceDecode_ = *refused;
         emit planChanged();
-    }  // reads the refusal, drops the whole plan (outcome, previews' plans) and says it
+    }
 }
 
 // ---- comparison in one action ----------------------------------------------------------------------

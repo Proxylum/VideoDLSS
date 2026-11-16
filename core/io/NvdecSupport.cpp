@@ -281,7 +281,9 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
         s.why = "on '" + caps->gpu + "', the sample layout is not known before the first frame";
         return s;
     }
-    const uint64_t macroblocks = static_cast<uint64_t>(info.codedWidth >> 4) * (info.codedHeight >> 4);  // as FFmpeg's nvdec_test_capabilities
+    // as FFmpeg 7.1.1's nvdec_test_capabilities (libavcodec/nvdec.c): the coded area / 256, rounded down - neither looser (a promise
+    // FFmpeg then breaks on the first frame) nor stricter (a refusal FFmpeg would not make)
+    const uint64_t macroblocks = static_cast<uint64_t>(info.codedWidth) * info.codedHeight / 256;
     if (info.codedWidth < caps->minWidth || info.codedHeight < caps->minHeight || info.codedWidth > caps->maxWidth || info.codedHeight > caps->maxHeight ||
         macroblocks > caps->maxMacroblocks)
         return Refuse(s, DecodeBlock::Size);

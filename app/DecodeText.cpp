@@ -42,7 +42,7 @@ QString SourceDecodeText(const DecodeSupport& s) {
         case DecodeBlock::Size: {
             const bool small = s.width < s.caps.minWidth || s.height < s.caps.minHeight;
             const bool sidesFit = !small && s.width <= s.caps.maxWidth && s.height <= s.caps.maxHeight;
-            if (sidesFit)  // the macroblock count alone (NVDEC: (w >> 4) * (h >> 4))
+            if (sidesFit)  // the macroblock count alone (FFmpeg's test: w * h / 256)
                 return Tr("Видео AV1 не декодируется на этом компьютере: кадр %1×%2 слишком велик для видеокарты %3 — она берёт не больше %4 блоков "
                           "16×16. Что сделать: перекодируйте ролик другой программой в H.264 или HEVC либо в кадр поменьше.")
                     .arg(s.width)

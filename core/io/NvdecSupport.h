@@ -102,7 +102,8 @@ DecodeSupport RefusedDecode(const VideoStreamInfo& info, DecodeBlock block, cons
 // «..., not checked: <why>»), «unavailable - <why>».
 std::string DescribeDecode(const DecodeSupport& support);
 
-// The refusal of a stream that cannot be decoded here (CheckDecodeSupport, or NVDEC refusing the first frame).
+// The refusal of a stream that cannot be decoded here: CheckDecodeSupport (RequireDecodable, StartNvdec, process), the CUDA device not
+// created, or NVDEC refusing a frame (the first or a later one; why says which, and a part of the stream in other parameters).
 class DecodeUnavailable : public Error {
 public:
     DecodeUnavailable(DecodeSupport s, const std::string& message) : Error(message), support(std::move(s)) {}

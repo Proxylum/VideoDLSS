@@ -394,7 +394,8 @@ QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std:
             const ViewportSource* src = model_.store().FindSource(name);
             const bool proxied = src && !src->proxy.empty();
             s += "\n" + HumanSourceName(name) + ": " +
-                 (!proxied && name == "result" && model_.sourceDecode().Ok() ? SourceDecodeText(*d) + "\n" +
+                 (!proxied && name == "result" && model_.sourceDecode().Ok() && d->block != DecodeBlock::NoCuda && d->block != DecodeBlock::NoNvdec
+                      ? SourceDecodeText(*d) + "\n" +
                                                      tr("Результат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».")
                   : !proxied            ? SourceDecodeText(*d)
                   : name == "source"    ? tr("показан по прокси перемотки; само видео на этом компьютере не декодируется, обработать его нельзя")

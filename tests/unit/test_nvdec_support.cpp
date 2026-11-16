@@ -354,18 +354,19 @@ TEST_CASE("JudgeDecode: no CUDA, no NVDEC, no AV1 decoder, the size limits each 
                                                 std::to_string(c.maxH) + ", at most " + std::to_string(c.maxMb) + " macroblocks"));
         }
     }
-    // macroblocks counted as FFmpeg's nvdec_test_capabilities does - (w >> 4) * (h >> 4), a partial one not counted: 330x200 is
-    // 20 x 12 = 240 (rounded up it would be 21 x 13 = 273, and a GPU taking 240 refused although FFmpeg decodes it)
+    // macroblocks as FFmpeg 7.1.1's nvdec_test_capabilities counts them (libavcodec/nvdec.c): the coded area / 256, rounded down.
+    // 330x200 is 66000 / 256 = 257 - a count by whole blocks (20 x 12 = 240) would let through a frame FFmpeg refuses on the first
+    // frame, one rounded up per side (21 x 13 = 273) would refuse one FFmpeg decodes
     NvdecAv1Caps mb = GoodCaps();
-    mb.maxMacroblocks = 240;
+    mb.maxMacroblocks = 257;
     CHECK(JudgeDecode(Av1Info("yuv420p", 8, 330, 200), &mb).Ok());
-    mb.maxMacroblocks = 239;
+    mb.maxMacroblocks = 256;
     CheckRefusal(JudgeDecode(Av1Info("yuv420p", 8, 330, 200), &mb), DecodeBlock::Size);
-    // a whole block more on a side counts: 336x200 is 21 x 12 = 252
-    mb.maxMacroblocks = 251;
-    CheckRefusal(JudgeDecode(Av1Info("yuv420p", 8, 336, 200), &mb), DecodeBlock::Size);
-    mb.maxMacroblocks = 252;
+    // 336x200 is 67200 / 256 = 262.5: rounded down
+    mb.maxMacroblocks = 262;
     CHECK(JudgeDecode(Av1Info("yuv420p", 8, 336, 200), &mb).Ok());
+    mb.maxMacroblocks = 261;
+    CheckRefusal(JudgeDecode(Av1Info("yuv420p", 8, 336, 200), &mb), DecodeBlock::Size);
     // the stored frame is what is judged, not the frame as shown (a turned phone video)
     VideoStreamInfo turned = Av1Info();
     turned.width = 192;

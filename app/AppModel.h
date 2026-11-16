@@ -113,8 +113,8 @@ public:
     // TASK-0076: whether a task or a preview runs or waits (ProjectTasks, from the queue): with a check of the model's, the viewport does
     // not hold NVDEC between frames meanwhile
     void setTasksRunning(bool running);
-    // TASK-0076: a refusal the viewport met on the source (NVDEC refusing its first frame with no answer from the driver before, or a later
-    // frame) becomes the plan's verdict
+    // TASK-0076: a refusal the viewport met on the source as a verdict (the probe did not learn the layout and NVDEC refused the first
+    // frame, NVDEC refused a later frame or a part of the stream in other parameters) becomes the plan's verdict
     void noteSourceRefused();
     // a stage the run would refuse although the plan exists (depth does not fit the GPU, TASK-0039): «Обработать» waits
     QString planBlocker() const;
@@ -392,6 +392,9 @@ private:
     QString planError_;
     DecodeSupport sourceDecode_;
     bool tasksRunning_ = false, nvdecLetGo_ = false;  // TASK-0076: setTasksRunning, updateNvdecHold
+    std::string heardRefusal_;  // TASK-0076: the source's refusal noteSourceRefused acted on last (its file and why)
+    std::set<std::string> proxyRefused_;  // TASK-0076: FileStamp of the videos the proxy process found undecodable here
+    static std::string FileStamp(const std::filesystem::path& file);
     void updateNvdecHold();
     std::set<std::string> force_;
     std::map<std::string, int> history_;  // pass -> previous versions on disk
