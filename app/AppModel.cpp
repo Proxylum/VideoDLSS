@@ -467,7 +467,10 @@ void AppModel::releaseResult(const std::filesystem::path& file) {
     emit stateChanged();
 }
 
-void AppModel::requestFrames() { store_->SetCurrentTime(state().time, neededSources()); }
+void AppModel::requestFrames() {
+    store_->RetryStartFailures();  // TASK-0076: NVDEC did not start for a video (memory) - its frames are tried again on every new request
+    store_->SetCurrentTime(state().time, neededSources());
+}
 
 void AppModel::setTasksRunning(bool running) {
     tasksRunning_ = running;

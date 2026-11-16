@@ -125,6 +125,7 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     connect(viewport_, &ViewportWindow::zoomChanged, this, [this](float z) { zoomLabel_->setText(QString("%1 %").arg(static_cast<int>(std::lround(z * 100)))); });
     connect(&model_, &AppModel::stateChanged, this, &MainWindow::updateCellLabels);
     connect(&model_, &AppModel::timeChanged, this, [this](double) { updateCellLabels(); });
+    connect(&model_, &AppModel::planChanged, this, [this] { updateCellLabels(); });  // TASK-0076: the tooltips follow the source's verdict
     connect(&model_, &AppModel::framesUpdated, this, &MainWindow::updateCellLabels);  // «загрузка…» -> the frame
     connect(&model_, &AppModel::sourcesChanged, this, &MainWindow::updateCellLabels);
     connect(&model_, &AppModel::nrPreviewChanged, this, &MainWindow::updateCellLabels);  // PR-10
@@ -242,6 +243,8 @@ void MainWindow::buildMenus() {
         model_.startProxies();
         QSettings().setValue("view/autoProxy", was);
         QSettings().setValue("view/proxyMaxGiB", before);
+        if (model_.store().Undecodable("source"))  // TASK-0076: startProxies skips it - said, not silent
+            statusBar()->showMessage(tr("Прокси исходника не строится: видео не декодируется на этом компьютере (причина — в подсказке ячейки)"), 8000);
     });
     view->addAction(tr("Удалить прокси для перемотки"), this, [this] {
         model_.cancelProxies();
@@ -374,7 +377,7 @@ QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std:
             const ViewportSource* src = model_.store().FindSource(name);
             const bool proxied = src && !src->proxy.empty();
             s += "\n" + HumanSourceName(name) + ": " +
-                 (!proxied && name == "result" ? SourceDecodeText(*d) + "\n" +
+                 (!proxied && name == "result" && model_.sourceDecode().Ok() ? SourceDecodeText(*d) + "\n" +
                                                      tr("Результат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».")
                   : !proxied            ? SourceDecodeText(*d)
                   : name == "source"    ? tr("показан по прокси перемотки; само видео на этом компьютере не декодируется, обработать его нельзя")

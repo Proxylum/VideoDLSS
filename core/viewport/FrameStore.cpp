@@ -333,25 +333,20 @@ std::optional<DecodeSupport> FrameStore::Undecodable(const std::string& name) co
 }
 
 void FrameStore::RetryStartFailures(const std::string& source) {
-    double time = 0.0;
-    std::vector<std::string> needed;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        bool any = false;
-        for (auto it = startFailed_.begin(); it != startFailed_.end();) {
-            if (!source.empty() && it->first != source) {
-                ++it;
-                continue;
-            }
-            for (auto m = missing_.begin(); m != missing_.end();) m = m->source == it->first ? missing_.erase(m) : std::next(m);
-            it = startFailed_.erase(it);
-            any = true;
+    std::lock_guard<std::mutex> lock(mutex_);  // one critical section: the time and the sources of now, not a copy a newer jump replaced
+    bool any = false;
+    for (auto it = startFailed_.begin(); it != startFailed_.end();) {
+        if (!source.empty() && it->first != source) {
+            ++it;
+            continue;
         }
-        if (!any) return;
-        time = currentTime_;
-        needed = needed_;
+        const std::string name = it->first;
+        for (auto m = missing_.begin(); m != missing_.end();) m = m->source == name ? missing_.erase(m) : std::next(m);
+        loaded_.erase(std::remove_if(loaded_.begin(), loaded_.end(), [&](const Loaded& l) { return l.missing && l.key.source == name; }), loaded_.end());
+        it = startFailed_.erase(it);
+        any = true;
     }
-    SetCurrentTime(time, needed);  // the frames of the window are asked for again
+    if (any) RequeueLocked();  // the frames of the window are asked for again
 }
 
 std::optional<DecodeSupport> FrameStore::StartFailure(const std::string& name) const {
@@ -463,6 +458,10 @@ void FrameStore::SetCurrentTime(double time, const std::vector<std::string>& nee
     std::lock_guard<std::mutex> lock(mutex_);
     currentTime_ = std::max(0.0, time);
     needed_ = neededSources;
+    RequeueLocked();
+}
+
+void FrameStore::RequeueLocked() {
     // Rebuild the queue: every source's current frame first, then prefetch outwards (forward first). Loads in
     // flight stay marked so they are not requested a second time.
     queue_.clear();
@@ -620,7 +619,11 @@ void FrameStore::LoaderMain() {
                 std::lock_guard<std::mutex> guard(refused->mutex);
                 refused->decoder.reset();
             }
-            Log()->log(SaidOnce(e.what()) ? spdlog::level::warn : spdlog::level::debug, "'{}' cannot be decoded here: {}", key.source, e.what());
+            const auto level = SaidOnce(e.what()) ? spdlog::level::warn : spdlog::level::debug;
+            if (e.support.Transient())
+                Log()->log(level, "'{}': NVDEC did not start now (its frames are asked for again later): {}", key.source, e.what());
+            else
+                Log()->log(level, "'{}' cannot be decoded here: {}", key.source, e.what());
             Loaded l;
             l.key = key;
             l.missing = true;

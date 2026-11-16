@@ -1274,14 +1274,16 @@ TEST_CASE("BuildProxy and dlssvid proxy: NVDEC refusing the first frame leaves n
 }
 
 TEST_CASE("SaysUnsupported: only NVENC's words for a missing encoder skip a GPU test; anything else fails it", "[integration][av1]") {
-    for (const char* skip : {"[av1_nvenc @ 0000] No capable devices found", "[h264_nvenc @ 01] No CUDA capable devices found", "[av1_nvenc @ 02] Codec not supported",
-                             "[hevc_nvenc @ 03] 10 bit encode not supported", "open av1_nvenc (yuv420p) failed: Function not implemented\nCODEC NOT SUPPORTED"}) {
+    for (const char* skip : {"[av1_nvenc @ 02] Codec not supported", "[hevc_nvenc @ 03] 10 bit encode not supported",
+                             "open av1_nvenc (yuv420p) failed: Function not implemented\nCODEC NOT SUPPORTED"}) {
         INFO(skip);
         CHECK(SaysUnsupported(skip));
     }
     for (const char* fail : {"InitializeEncoder failed: unsupported param (12): Gop Length should be greater than number of B frames + 1",
                              "test clip pixel format unknown to FFmpeg: yuv420x", "open av1_nvenc (yuv420p) failed: Invalid argument",
-                             "open av1_nvenc (yuv420p) failed: Function not implemented", "Provided device doesn't support required NVENC features", ""}) {
+                             "open av1_nvenc (yuv420p) failed: Function not implemented", "Provided device doesn't support required NVENC features",
+                             // NVENC says it for a session not opened now too (memory, a busy GPU): a transient failure must not skip the AV1 set
+                             "[av1_nvenc @ 0000] No capable devices found", "[h264_nvenc @ 01] No CUDA capable devices found", ""}) {
         INFO(fail);
         CHECK_FALSE(SaysUnsupported(fail));
     }
@@ -1363,6 +1365,42 @@ TEST_CASE("FrameStore: the CUDA device not created is no verdict - StartFailure 
     CHECK_FALSE(s.store->Undecodable("source"));
     CHECK_FALSE(s.store->StartFailure("source"));  // a frame decoded: the failure is over
     CHECK(s.Settle(3) == FrameStore::Status::Ready);  // the frame it left missing comes again
+}
+
+TEST_CASE("FrameStore::RetryStartFailures before the next Update: the missing marks the failed loads left go too, the frames load again",
+          "[integration][viewport][gpu][av1]") {
+    const auto dir = Dir("store_retry_unpublished");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    Av1Store s(0, 1);
+    std::optional<FakeNvdecEnv> fake;  // changed only while the loaders are at rest
+    fake.emplace("start-fails");
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(5, {"source"});
+    // no Update: the loads' missing marks wait for it in the store (a frame reads Missing once its load is over) - as when a new
+    // request of frames (AppModel::requestFrames, render's second try) comes between a loader's refusal and the next paint
+    const std::vector<int64_t> window{4, 5, 6};  // the current frame and the neighbours every source prefetches
+    auto all = [&](FrameStore::Status want) {
+        for (const int64_t n : window)
+            if (s.store->GetStatus(n, "source") != want) return false;
+        return true;
+    };
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (!all(FrameStore::Status::Missing) && std::chrono::steady_clock::now() < deadline) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    REQUIRE(all(FrameStore::Status::Missing));  // every load of the window refused, none running
+    REQUIRE(s.store->StartFailure("source"));
+    fake.reset();  // the memory came back
+    s.store->RetryStartFailures();
+    CHECK_FALSE(s.store->StartFailure("source"));
+    const auto again = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (!all(FrameStore::Status::Ready) && std::chrono::steady_clock::now() < again) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        s.store->Update();
+    }
+    for (const int64_t n : window) {
+        INFO("frame " << n);
+        CHECK(s.store->GetStatus(n, "source") == FrameStore::Status::Ready);  // a stale missing mark would make the retried load drop itself
+    }
+    CHECK_FALSE(s.store->Undecodable("source"));
 }
 
 TEST_CASE("FrameStore opens the original's decoder again quietly: the log says open once, not at every reopen while a task runs",
@@ -1485,4 +1523,42 @@ TEST_CASE("NVDEC refusing a frame after a few decoded ones (later-frame) is the 
     REQUIRE(again);
     REQUIRE(again->undecodable);
     CHECK(again->undecodable->block == DecodeBlock::NvdecFailed);
+}
+
+TEST_CASE("NVDEC not starting now (start-fails, device-fails): render tries once more and says why; the log and dlssvid proxy say it is not a verdict",
+          "[integration][cli][gpu][av1][proxy]") {
+    const auto dir = Dir("start_fails_cli");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    struct Case {
+        const char* fake;
+        std::string reason;
+    };
+    const Case cases[] = {{"start-fails", kStartFailedReason}, {"device-fails", kDeviceFailedReason}};
+    for (const Case& c : cases) {
+        INFO(c.fake);
+        FakeNvdecEnv fake(c.fake);  // the children inherit it
+        const auto png = dir / (std::string(c.fake) + ".png");
+        const auto rd = RunAll({"render", "--warp", "-i", clip.string(), "--frame", "2", "-o", png.string()}, dir / (std::string(c.fake) + "_render.log"));
+        {
+            INFO(rd.out);
+            CHECK(rd.code != 0);
+            CHECK_THAT(rd.out, ContainsSubstring("render: 'source': " + c.reason));  // the start failure's reason
+            CHECK_THAT(rd.out, !ContainsSubstring("has none of the requested sources"));
+            // the loader's log: a start failure is no verdict
+            CHECK_THAT(rd.out, ContainsSubstring("'source': NVDEC did not start now (its frames are asked for again later): "));  // the path as render made it absolute
+            CHECK_THAT(rd.out, !ContainsSubstring("cannot be decoded here"));
+            CHECK_FALSE(std::filesystem::exists(png));
+        }
+        const auto passes = dir / (std::string(c.fake) + "_passes");
+        const auto px = RunAll({"proxy", "-i", clip.string(), "--passes", passes.string(), "--sources", "source", "--force"},
+                               dir / (std::string(c.fake) + "_proxy.log"));
+        {
+            INFO(px.out);
+            CHECK(px.code == 0);  // the other videos and the render go on
+            CHECK_THAT(px.out, ContainsSubstring("source: no proxy now, NVDEC did not start (run it again later): " + c.reason));
+            CHECK_THAT(px.out, !ContainsSubstring("the video cannot be decoded here"));
+            CHECK_FALSE(ValidProxy(clip, passes, "source"));
+            CHECK_FALSE(std::filesystem::exists(ProxyDir(passes) / "source.building.mkv"));
+        }
+    }
 }

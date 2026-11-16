@@ -207,7 +207,9 @@ void BuildMissingProxies(const Project& project, const std::vector<std::string>&
         try {
             path = BuildProxy(video, project.passesRoot, name, o);
         } catch (const DecodeUnavailable& e) {  // TASK-0076: NVDEC refused its first frame - the other proxy and the render go on
-            std::printf("%s: no proxy, the video cannot be decoded here: %s\n", name.c_str(), e.support.why.c_str());
+            std::printf(e.support.Transient() ? "%s: no proxy now, NVDEC did not start (run it again later): %s\n"
+                                              : "%s: no proxy, the video cannot be decoded here: %s\n",
+                        name.c_str(), e.support.why.c_str());
             continue;
         }
         std::printf("%s: proxy %s (%.1f MB) in %.1f s\n", name.c_str(), path.string().c_str(), static_cast<double>(std::filesystem::file_size(path)) / 1e6,
@@ -363,12 +365,21 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
         Throw("render: time " + std::to_string(st.time) + " s is outside 0.." + std::to_string(store.Duration()) + " s (" + std::to_string(store.FrameCount()) +
               " frames at the base rate)");
     const auto t0 = std::chrono::steady_clock::now();
-    const PassImage img = renderAt(st.time);
+    PassImage img = renderAt(st.time);
     bool any = false;
     for (const auto& n : needed) any = any || store.StatusAt(st.time, n) == FrameStore::Status::Ready;
+    bool startFailed = false;
+    for (const auto& n : needed) startFailed = startFailed || store.StartFailure(n).has_value();
+    if (!any && startFailed) {  // TASK-0076: NVDEC did not start (memory, the driver): once more
+        store.RetryStartFailures();
+        img = renderAt(st.time);
+        for (const auto& n : needed) any = any || store.StatusAt(st.time, n) == FrameStore::Status::Ready;
+    }
     if (!any) {
-        for (const auto& n : needed)  // TASK-0076: a video this machine cannot decode says why
-            if (const auto d = store.Undecodable(n)) Throw("render: '" + n + "': " + d->why);  // the probe's verdict or NVDEC refusing the first frame
+        for (const auto& n : needed) {  // TASK-0076: a video this machine cannot decode says why
+            if (const auto d = store.Undecodable(n)) Throw("render: '" + n + "': " + d->why);  // the probe's verdict or NVDEC refusing a frame
+            if (const auto f = store.StartFailure(n)) Throw("render: '" + n + "': " + f->why);  // NVDEC did not start now
+        }
         Throw("render: " + FormatTimecode(st.time) + " has none of the requested sources");
     }
     if (!a.output.empty()) {

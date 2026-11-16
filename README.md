@@ -297,8 +297,8 @@ runs off, the viewport cell reads «· не декодируется» (its tool
 asked leaves it to the first frame: refused then without the exact reason («NVDEC refused this AV1 stream»), and the GUI
 stops the runs as soon as its viewport met it (and remembers it until it is closed). NVDEC or its CUDA device failing to start
 (out of GPU memory, a driver error; also a driver that could not be asked for such an error) is no verdict on the video: the
-viewport cell reads «· видеокарта не начала декодировать», and those frames come again once another frame decodes or the
-task is over; `process` reports the failure. A scrubbing proxy built earlier still shows
+viewport cell reads «· видеокарта не начала декодировать», and those frames are asked for again on the next scrub or step,
+when a frame of that video decodes, and when the task is over; `process` and `render` report the failure. A scrubbing proxy built earlier still shows
 such a source (one copied from another PC is used when the source kept its file times). The GUI's viewport decodes an AV1
 video on NVDEC in its own process; while a run, a preview or a stage check is going on it does not keep that decoder between
 frames. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be the one the stages

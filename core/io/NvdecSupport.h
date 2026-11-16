@@ -30,13 +30,15 @@ enum class DecodeBlock {
     NoAv1,        // the GPU's NVDEC has no AV1 decoder at the stream's depth
     Size,         // the frame is outside the sizes the GPU's NVDEC decodes
     NvdecFailed,  // NVDEC was asked and refused a frame - the first one, or a later one (why: on the first frame / after N frames)
-    NvdecStartFailed,  // NVDEC did not start on the first frame although the driver took the stream, or the CUDA device could not be
-                       // created (out of GPU memory, a driver error): not the stream's verdict - another decoder may succeed later
+    NvdecStartFailed,  // NVDEC did not start on the first frame although the driver took the stream or could not be asked for a CUDA
+                       // error (NvdecAv1Caps::cudaError), or the CUDA device could not be created (out of GPU memory, a driver error):
+                       // not the stream's verdict - another decoder may succeed later
 };
 
 // What the driver says of AV1 decoding on CUDA device 0 (FFmpeg's NVDEC takes that one), at one bit depth, 4:2:0.
 struct NvdecAv1Caps {
-    bool checked = false;    // a definite answer: no CUDA, or the decoder caps were read. false: the driver could not be asked
+    bool checked = false;    // a definite answer: no CUDA, or the decoder caps were read. false: the driver could not be asked (an old
+                             // driver without cuvidGetDecoderCaps, or a CUDA error: cudaError) - not cached
     bool cuda = false;       // a CUDA device exists
     bool nvdecMissing = false;  // ... but the driver's video decoder library (nvcuvid.dll) could not be loaded
     bool cudaError = false;     // not checked because a CUDA call failed (a context not created now: memory) - not an old driver

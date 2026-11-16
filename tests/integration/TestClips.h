@@ -91,8 +91,9 @@ public:
 private:
     std::string text_;
 };
-// NVENC saying this machine lacks the encoder: «No capable devices found», «No CUDA capable devices found», «Codec not supported», «10 bit
-// encode not supported» (libavcodec/nvenc.c). Nothing else: «unsupported param», an invalid spec, a test's own error are failures.
+// NVENC saying this GPU lacks the encoder or its depth: «Codec not supported», «10 bit encode not supported» (libavcodec/nvenc.c).
+// Nothing else: «No capable devices found» (also a session not opened now), «unsupported param», an invalid spec, a test's own
+// error are failures.
 bool SaysUnsupported(const std::string& text);
 // WriteClip; nullopt (`why` says what the encoder said) when the encoder refuses the spec as not supported here (a GPU tests skip). Any
 // other failure throws: a test fails on it rather than skipping (a broken spec or a regression is not «unsupported»).

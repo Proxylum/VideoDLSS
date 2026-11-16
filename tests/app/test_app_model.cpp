@@ -26,6 +26,7 @@
 #include <QPointer>
 #include <QSignalSpy>
 #include <QSlider>
+#include <QStatusBar>
 #include <QTest>
 #include <QToolButton>
 #include <QPalette>
@@ -7451,14 +7452,14 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
                                                         "до 256×4096). Что сделать: перекодируйте ролик другой программой в H.264 или HEVC либо в кадр "
                                                         "поменьше."));
     const QString failedText = QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: видеокарта отказалась его декодировать, а другого декодера AV1 в этой версии программы "
-                                                 "нет. Что сделать: обновите драйвер NVIDIA или ") +
+                                                 "нет. Что сделать: обновите драйвер NVIDIA и перезапустите программу или ") +
                                transcode + ".";
     CHECK(SourceDecodeText(RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecFailed, "")) == failedText);
     CHECK(SourceDecodeText(RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecFailed, "on the first frame")) == failedText);
     const DecodeSupport start = RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecStartFailed, "on the first frame");
     CHECK(SourceDecodeText(start) == QString::fromUtf8("Видеокарта сейчас не смогла начать декодировать этот AV1 — скорее всего, не хватило её памяти; кадры "
-                                                       "загрузятся снова, когда она освободится. Что сделать: дождитесь конца обработки или закройте программы, "
-                                                       "которые занимают видеокарту."));
+                                                       "загрузятся снова при следующей перемотке или после конца обработки. Что сделать: дождитесь конца "
+                                                       "обработки или закройте программы, которые занимают видеокарту."));
     // the core's English details stay in the log; every text says what to do
     for (const DecodeSupport& s : {nc, nn, na, smaller, larger, start}) {
         CHECK(SourceDecodeText(s).contains(QString::fromUtf8("Что сделать: ")));
@@ -7793,6 +7794,15 @@ TEST_CASE("A stage check holds NVDEC away from the viewport while it runs; one t
     model.setTime(0.5);
     SettleFrames(model, 6, 18);
     CHECK(ContextBecomes(true));
+    // a check that ends by itself (its program exits at once: ping refuses the arguments): let go while it ran, given back at its end
+    model.setCheckProgramForTests("ping");
+    model.checkStage("fg");
+    REQUIRE(model.checkRunning());
+    Pump([&] { return !model.checkRunning(); }, 30000);
+    REQUIRE_FALSE(model.checkRunning());
+    model.reloadSources();
+    SettleFrames(model, 6, 18);
+    CHECK(ContextBecomes(true));
     // a check whose program does not start: let go and given back
     model.setCheckProgramForTests(Q(d / "no_such_dlssvid.exe"));
     model.checkStage("fg");
@@ -7911,7 +7921,8 @@ TEST_CASE("AppModel: NVDEC failing to start although the driver takes the source
     QSettings().remove("view/autoProxy");
 }
 
-TEST_CASE("The main window's tooltip of a result shown by its proxy says the video is not decoded here, nothing of processing", "[app][gpu][av1]") {
+TEST_CASE("The main window's tooltip of an AV1 result not decodable here: the reason, the codec advice while the source decodes; through a proxy, nothing of processing",
+          "[app][gpu][av1]") {
     App();
     const auto d = Dir("av1_result_cell");
     std::string why;
@@ -7921,36 +7932,53 @@ TEST_CASE("The main window's tooltip of a result shown by its proxy says the vid
     const auto result = d / "clip_result.mp4";
     std::filesystem::copy_file(clip, result, std::filesystem::copy_options::overwrite_existing);
     const auto passes = d / "passes";
-    Project p = Project::Create(clip, passes);
-    p.resultVideo = result;
-    p.viewport.layers[0].source = "result";  // the result in the viewport
-    p.Save(d / "proj.dlssvid.json");
-    {
-        // no proxy yet: the refusal, and that the result can be written again in another codec
+    // a project whose result is shown: of an FFV1 source (decodes everywhere), and of the AV1 source itself
+    ClipSpec plain;
+    plain.frames = 24;
+    plain.width = 48;
+    plain.height = 32;
+    const auto ffv1 = WriteClip(d / "source_ffv1.mkv", plain);
+    auto project = [&](const std::filesystem::path& source, const char* file) {
+        Project p = Project::Create(source, passes);
+        p.resultVideo = result;
+        p.viewport.layers[0].source = "result";
+        p.Save(d / file);
+        return d / file;
+    };
+    const auto ofFfv1 = project(ffv1, "ffv1.dlssvid.json");
+    const auto ofAv1 = project(clip, "av1.dlssvid.json");
+    const QString advice =
+        QString::fromUtf8("Результат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».");
+    for (const bool sourceDecodes : {true, false}) {
+        INFO((sourceDecodes ? "FFV1 source" : "AV1 source"));
         FakeNvdecEnv env("no-av1");
         const DecodeSupport expected = CheckDecodeSupport(VideoDecoder(result, VideoDecoder::Probe()).Info());
         REQUIRE(expected.block == DecodeBlock::NoAv1);
         MainWindow window(true);
-        window.openPath(Q(d / "proj.dlssvid.json"));
-        const QString said = "\n" + HumanSourceName("result") + ": " + SourceDecodeText(expected) + "\n" +
-                             QString::fromUtf8("Результат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».");
+        window.openPath(Q(sourceDecodes ? ofFfv1 : ofAv1));
+        const QString reason = "\n" + HumanSourceName("result") + ": " + SourceDecodeText(expected);
         QLabel* cell = nullptr;
+        // the labels made at the open come before the plan's verdict on the source: wait for the tooltip the verdict gives (the next update)
         Pump(
             [&] {
                 cell = CellLabel(window);
-                return cell && cell->toolTip().contains(said);
+                return cell && cell->toolTip().contains(reason) && cell->text().endsWith(SourceDecodeShort()) &&
+                       cell->toolTip().contains(advice) == sourceDecodes;
             },
             20000);
         REQUIRE(cell);
         INFO("label: " << cell->text().toStdString() << "; tooltip: " << cell->toolTip().toStdString());
-        CHECK(cell->toolTip().contains(said));
+        CHECK(cell->toolTip().contains(reason));
         CHECK(cell->text().endsWith(SourceDecodeShort()));
+        if (sourceDecodes) CHECK(cell->toolTip().contains(reason + "\n" + advice));  // a run can write it again in another codec
+        else CHECK_FALSE(cell->toolTip().contains(advice));                          // no run starts on this source: no advice to run one
     }
-    BuildProxy(result, passes, "result");  // made where NVDEC decodes AV1
+    // a proxy made where NVDEC decodes AV1: the frames show, the tooltip says what that means
+    BuildProxy(result, passes, "result");
     REQUIRE(ValidProxy(result, passes, "result"));
     FakeNvdecEnv env("no-av1");
     MainWindow window(true);
-    window.openPath(Q(d / "proj.dlssvid.json"));
+    window.openPath(Q(ofFfv1));
     const QString viaProxy = "\n" + HumanSourceName("result") + QString::fromUtf8(": показан по прокси перемотки; само видео на этом компьютере не декодируется");
     QLabel* cell = nullptr;
     Pump(
@@ -7963,7 +7991,7 @@ TEST_CASE("The main window's tooltip of a result shown by its proxy says the vid
     INFO("label: " << cell->text().toStdString() << "; tooltip: " << cell->toolTip().toStdString());
     CHECK(cell->toolTip().contains(viaProxy));
     CHECK_FALSE(cell->toolTip().contains(QString::fromUtf8("обработать его нельзя")));  // the result is not what a run reads
-    CHECK_FALSE(cell->toolTip().contains(QString::fromUtf8("Результат можно записать заново")));  // it shows: nothing to advise
+    CHECK_FALSE(cell->toolTip().contains(advice));                                       // it shows: nothing to advise
     CHECK_FALSE(cell->text().endsWith(SourceDecodeShort()));
     QSettings().remove("view/autoProxy");
 }
@@ -8068,5 +8096,69 @@ TEST_CASE("AppModel: NVDEC refusing a frame after a few decoded ones (later-fram
     QPushButton* process = ProcessButton(panel);
     REQUIRE(process);
     CHECK_FALSE(process->isEnabled());
+    QSettings().remove("view/autoProxy");
+}
+
+TEST_CASE("AppModel: a new request of frames tries NVDEC again after a start failure - no task, no new frame, no reload needed", "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_request_retry");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    QSettings().setValue("view/autoProxy", false);
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    fake.emplace("start-fails");
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    SettleAny(model, 0, 6);  // the window of time 0: every frame refused - and the loaders at rest
+    CHECK(model.frameStateOf("source") == FrameState::Missing);
+    REQUIRE(model.store().StartFailure("source"));
+    fake.reset();  // the memory came back
+    // the same frames asked for again (a step within frame 0: no new frame - a load of a new one would retry by itself)
+    model.setTime(0.001);
+    Pump(
+        [&] {
+            model.store().Update();
+            return model.store().GetStatus(0, "source") == FrameStore::Status::Ready;
+        },
+        20000);
+    CHECK(model.frameStateOf("source") == FrameState::Ready);
+    CHECK_FALSE(model.store().StartFailure("source"));
+    QSettings().remove("view/autoProxy");
+}
+
+TEST_CASE("The main window's menu item that builds the scrubbing proxies says why it builds none for a source not decodable here", "[app][gpu][av1][proxy]") {
+    App();
+    const auto d = Dir("av1_proxy_menu");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    QSettings().setValue("view/autoProxy", false);
+    const QString said = QString::fromUtf8("Прокси исходника не строится: видео не декодируется на этом компьютере (причина — в подсказке ячейки)");
+    auto buildProxies = [](MainWindow& window) {
+        for (QAction* a : window.findChildren<QAction*>())
+            if (a->text() == QString::fromUtf8("Построить прокси для перемотки")) {
+                a->trigger();
+                return true;
+            }
+        return false;
+    };
+    {
+        FakeNvdecEnv env("no-av1");
+        MainWindow window(true);
+        window.openPath(Q(clip));
+        REQUIRE(buildProxies(window));
+        CHECK(window.statusBar()->currentMessage() == said);
+    }
+    // a source that decodes: the build starts, nothing of the kind is said
+    ClipSpec plain;
+    plain.frames = 4;
+    plain.width = 48;
+    plain.height = 32;
+    MainWindow window(true);
+    window.openPath(Q(WriteClip(d / "plain.mkv", plain)));
+    REQUIRE(buildProxies(window));
+    CHECK(window.statusBar()->currentMessage() != said);
     QSettings().remove("view/autoProxy");
 }
