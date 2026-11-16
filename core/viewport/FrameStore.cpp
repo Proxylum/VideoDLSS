@@ -397,7 +397,7 @@ void FrameStore::RetryStartFailures(const std::string& source) {
     if (any) RequeueLocked();  // the frames of the window are asked for again
 }
 
-bool FrameStore::RememberRefusedFile(const std::filesystem::path& file, const DecodeSupport& support) {
+bool FrameStore::RememberRefusedFile(const std::filesystem::path& file, const DecodeSupport& support, bool keep) {
     const std::string key = RefusedKey(file);
     std::lock_guard<std::mutex> files(refusedFilesMutex);
     RefusedFile r;
@@ -406,6 +406,7 @@ bool FrameStore::RememberRefusedFile(const std::filesystem::path& file, const De
     r.time = std::filesystem::last_write_time(file, e2);
     r.support = support;
     if (e1 || e2) return false;
+    if (const auto it = refusedFiles.find(key); keep && it != refusedFiles.end() && it->second.size == r.size && it->second.time == r.time) return true;
     refusedFiles[key] = std::move(r);
     return true;
 }

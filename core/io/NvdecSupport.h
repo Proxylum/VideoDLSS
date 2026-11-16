@@ -29,6 +29,9 @@ enum class DecodeBlock {
     NoNvdec,      // CUDA is there, the driver's video decoder (nvcuvid.dll) is not
     NoAv1,        // the GPU's NVDEC has no AV1 decoder at the stream's depth
     Size,         // the frame is outside the sizes the GPU's NVDEC decodes
+    // an odd frame height: NVDEC's surfaces are even and FFmpeg 7.1.1's nvdec.c maps the chroma by the frame's own height - a chroma
+    // row off (the Video Codec SDK aligns that offset by 2)
+    OddHeight,
     NvdecFailed,  // NVDEC was asked and refused a frame - the first one, or a later one (why: on the first frame / after N frames)
     // a frame smaller than its sequence's maximum (an AV1 frame size override, a resize within a sequence): FFmpeg 7.1.1's NVDEC makes its
     // surfaces for the maximum and maps a frame by the frame's own height (nvdec.c: the chroma read from the wrong place) - width / height

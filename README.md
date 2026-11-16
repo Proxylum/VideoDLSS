@@ -303,8 +303,9 @@ fails after the work started. A part of the video in other parameters (a new seq
 against the GPU as the file was: a part it does not take is refused with that reason (the GUI says it is a part of the video);
 a part it takes gets an NVDEC decoder of its own (FFmpeg 7.1.1 would go on with the first part's, made for its size and depth),
 and NVDEC refusing it is judged as for the file (on that decoder's first frame, a start failure as below). Frames smaller than
-their sequence's declared maximum (a frame size override, a resize within one sequence) are refused: FFmpeg 7.1.1's NVDEC gives
-them with the colours read from the wrong place. A driver too old for
+their sequence's declared maximum (a frame size override, a resize within one sequence) and frames of an odd height are refused:
+FFmpeg 7.1.1's NVDEC gives them with the colours read from the wrong place. A gray (monochrome) AV1 is refused also when the probe
+did not learn its layout or it starts in a later part. A driver too old for
 FFmpeg's NVDEC is reported as the driver's video decoder being unavailable («nvcuvid.dll could not be loaded»; the GUI says to
 reinstall or update the driver). NVDEC or its CUDA device failing to start
 (out of GPU memory, a driver error; also a driver that could not be asked for such an error) is no verdict on the video: the

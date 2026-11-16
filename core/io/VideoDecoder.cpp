@@ -14,6 +14,7 @@ extern "C" {
 
 #include <algorithm>
 #include <cctype>
+#include <system_error>
 #include <charconv>
 #include <cmath>
 #include <limits>
@@ -261,6 +262,47 @@ std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view header) {
     }
     if (!ok) return std::nullopt;
     return k;
+}
+
+DecodeSupport VerdictFromWhy(const VideoStreamInfo& probe, const std::string& why, const std::string& where) {
+    if (const auto part = StreamPartOf(why)) {
+        DecodeSupport judged = CheckDecodeSupport(StreamPartInfo(probe, part->pixelFormat, part->codedWidth, part->codedHeight));
+        if (!judged.Ok() && !judged.Transient()) {
+            judged.why = where + ": " + why;
+            judged.part = !part->learned;
+            return judged;
+        }
+    }
+    // the words RefusalText writes for a block (and a size): `why` is them, or them with « (<detail>)»
+    const auto detailOf = [&](const std::string& words) -> std::optional<std::string> {
+        if (why == words) return std::string();
+        if (why.size() > words.size() + 3 && why.rfind(words + " (", 0) == 0 && why.back() == ')')
+            return why.substr(words.size() + 2, why.size() - words.size() - 3);
+        return std::nullopt;
+    };
+    const auto withWhere = [&](const std::string& detail) { return detail.empty() ? where : where + ": " + detail; };
+    for (size_t at = why.find('x'); at != std::string::npos; at = why.find('x', at + 1)) {  // the first «<W>x<H>» names the size
+        size_t from = at;
+        while (from > 0 && std::isdigit(static_cast<unsigned char>(why[from - 1]))) --from;
+        size_t to = at + 1;
+        while (to < why.size() && std::isdigit(static_cast<unsigned char>(why[to]))) ++to;
+        uint32_t w = 0, h = 0;
+        if (from == at || to == at + 1 || std::from_chars(why.data() + from, why.data() + at, w).ec != std::errc() ||
+            std::from_chars(why.data() + at + 1, why.data() + to, h).ec != std::errc())
+            continue;
+        const VideoStreamInfo sized = StreamPartInfo(probe, "", w, h);
+        for (const DecodeBlock block : {DecodeBlock::Resized, DecodeBlock::OddHeight})
+            if (const auto detail = detailOf(RefusedDecode(sized, block, "").why)) {
+                DecodeSupport s = RefusedDecode(sized, block, withWhere(*detail));
+                // an odd height where the probe's is even: a part (as VideoDecoder::ReceiveFrame marks it)
+                s.part = block == DecodeBlock::OddHeight && probe.codedHeight % 2 == 0 && probe.codedHeight > 0;
+                return s;
+            }
+        break;
+    }
+    if (const auto detail = detailOf(RefusedDecode(probe, DecodeBlock::NvdecFailed, "").why))
+        return RefusedDecode(probe, DecodeBlock::NvdecFailed, withWhere(*detail));
+    return RefusedDecode(probe, DecodeBlock::NvdecFailed, where + ": " + why);
 }
 
 bool Av1FrameBelowSequence(int width, int height, std::string_view sequenceHeader) {
@@ -830,12 +872,24 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         return false;
     }
     CheckDecode(err, "avcodec_receive_frame");
-    if (hwOnly_ && Av1FrameBelowSequence(frame_->width, frame_->height, nvdecSequence_)) {  // TASK-0076: NVDEC gave it wrong (Resized)
+    // TASK-0076: the frame's own size is codec_'s (av1dec sets it from each frame header); the CUDA frame NVDEC hands out has the size of
+    // its surface (even, the sequence's): a 191-row frame comes as 192 rows
+    const int frameW = codec_->width, frameH = codec_->height;
+    if (hwOnly_ && Av1FrameBelowSequence(frameW, frameH, nvdecSequence_)) {  // NVDEC gives it wrong (Resized)
         const auto key = Av1SequenceKeyOf(nvdecSequence_);
-        const std::string frame = "a frame of " + std::to_string(frame_->width) + "x" + std::to_string(frame_->height) +
+        const std::string frame = "a frame of " + std::to_string(frameW) + "x" + std::to_string(frameH) +
                                   (framesDecoded_ > 0 ? ", after " + std::to_string(framesDecoded_) + " frames" : ", the first one");
         av_frame_unref(frame_);
         refused_ = std::make_shared<const DecodeSupport>(RefusedDecode(StreamPartInfo(info_, "", key->maxWidth, key->maxHeight), DecodeBlock::Resized, frame));
+        throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
+    }
+    if (hwOnly_ && frameH % 2 == 1) {  // TASK-0076: a part, or a size the probe did not know (OddHeight: the chroma a row off)
+        const std::string frame = framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "the first frame";
+        const uint32_t w = static_cast<uint32_t>(frameW), h = static_cast<uint32_t>(frameH);
+        av_frame_unref(frame_);
+        DecodeSupport s = RefusedDecode(StreamPartInfo(info_, "", w, h), DecodeBlock::OddHeight, frame);
+        s.part = info_.codedHeight % 2 == 0 && info_.codedHeight > 0;  // the probe's height was even: a part in other parameters
+        refused_ = std::make_shared<const DecodeSupport>(std::move(s));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }
 

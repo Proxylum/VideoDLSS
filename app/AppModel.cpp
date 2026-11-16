@@ -399,6 +399,7 @@ bool AppModel::removeControlMask(QString* error) {
 
 void AppModel::reloadSources() {
     store_->SetSources(viewportSources(controlMaskBusy_));
+    heardRefusal_.clear();  // TASK-0076: the new sources' refusals are heard (the file may have been written again)
     if (!controlMaskBusy_) controlMask_ = ReadControlMaskState(project_.passesRoot);  // while importing it stays «Importing»
     scrubStartNs_ = -1;
     resultAudio_ = false;
@@ -585,26 +586,11 @@ void AppModel::startProxies() {
                         heardVerdict = true;
                         continue;
                     }
-                    const QString reason = l.mid(head.size());
-                    // a part NVDEC does not take, or the layout the probe did not learn (VideoDecoder::CheckDecode's words, StreamPartWords):
-                    // judged here as the decoder did - its own block and reason (a layout, a size: not «the GPU refused it, update the driver»)
-                    std::optional<DecodeSupport> judged;
-                    const std::optional<StreamPart> part = StreamPartOf(reason.toStdString());
-                    if (part) judged = CheckDecodeSupport(StreamPartInfo(probe.Info(), part->pixelFormat, part->codedWidth, part->codedHeight));
-                    DecodeSupport verdict;
-                    if (judged && !judged->Ok() && !judged->Transient()) {
-                        verdict = std::move(*judged);
-                        verdict.why = "the proxy build: " + reason.toStdString();
-                        verdict.part = !part->learned;
-                    } else {  // «NVDEC refused this AV1 stream ... (<when>)»: its detail, said as the proxy build's
-                        std::string detail = reason.toStdString();
-                        const std::string refusedWords = RefusedDecode(probe.Info(), DecodeBlock::NvdecFailed, "").why;
-                        if (detail.rfind(refusedWords + " (", 0) == 0 && detail.back() == ')')
-                            detail = detail.substr(refusedWords.size() + 2, detail.size() - refusedWords.size() - 3);
-                        verdict = RefusedDecode(probe.Info(), DecodeBlock::NvdecFailed, "the proxy build: " + detail);
-                    }
+                    // the process's verdict with its own block (a part, a learned layout, frames smaller than the sequence, an odd height:
+                    // their own reasons, not «the GPU refused it, update the driver»); one this process's loader met on the same file stays
+                    const DecodeSupport verdict = VerdictFromWhy(probe.Info(), l.mid(head.size()).toStdString(), "the proxy build");
                     // not remembered (the file not readable now): the sources are not set again - they would start the same build again
-                    if (FrameStore::RememberRefusedFile(video, verdict)) heardVerdict = true;
+                    if (FrameStore::RememberRefusedFile(video, verdict, true)) heardVerdict = true;
                 } catch (const std::exception& e) {
                     Log()->debug("viewport proxy: {} not probed: {}", video.string(), e.what());
                 }
@@ -870,8 +856,14 @@ void AppModel::noteSourceRefused() {
     if (!hasProject() || !sourceDecode_.Ok() || !store_) return;
     const auto refused = store_->Undecodable("source");
     if (!refused) return;
-    // once per refusal: a plan that decided otherwise after hearing it (the file replaced by one in another codec) is not made again on
-    // every frame update; another refusal (a new one, another file) is heard
+    // another file on that path now (written over, still being written): not its verdict - the plan probes the file there and sets the
+    // sources again, once per refusal (refreshPlan marks it: reloadedFor_), not on every frame update
+    if (store_->SourceChanged("source")) {
+        if (project_.sourceVideo.string() + "|" + refused->why != reloadedFor_) refreshPlan();
+        return;
+    }
+    // once per refusal of the file as it is: a plan made with it is not made again on every frame update; the file written again since
+    // (refreshPlan forgets), the sources set again, another refusal - heard
     const std::string heard = FileStamp(project_.sourceVideo) + "|" + refused->why;
     if (heard == heardRefusal_) return;
     heardRefusal_ = heard;
@@ -1051,6 +1043,19 @@ void AppModel::refreshPlan() {
         sourceInfo_.fps = store_->FpsOf("source");
         sourceInfo_.frames = src->lastFrame + 1;
     }
+    // TASK-0076: the store's verdict is the file's as it loaded it: one written there since (another AV1, a broken copy, another codec) gets
+    // its sources set again, whatever its probe says - once per verdict, so a file still being written is not set again on every plan
+    if (hasProject())
+        if (const auto refused = store_->Undecodable("source"); refused && store_->SourceChanged("source")) {
+            const std::string key = project_.sourceVideo.string() + "|" + refused->why;
+            heardRefusal_.clear();  // the file as it comes back (the same bytes again) is heard anew
+            if (key != reloadedFor_) {
+                reloadedFor_ = key;
+                QTimer::singleShot(0, this, [this] {
+                    if (store_ && store_->SourceChanged("source") && store_->Undecodable("source")) reloadSources();
+                });
+            }
+        }
     // TASK-0076: a plan that stops before it probes the source (the video not found, the probe failing): the viewport's verdict on it
     // still holds the runs (a plan that probed it decides itself - a file replaced by one with a software decoder is no AV1 refusal)
     // (of the file as the viewport loaded it: one written there since - a broken copy, another video - is not that file)
@@ -1081,14 +1086,10 @@ void AppModel::refreshPlan() {
         sourceInfo_.chroma = probe.Info().chroma;
         sourceInfo_.pixelFormat = probe.Info().pixelFormat;
         sourceDecode_ = CheckDecodeSupport(probe.Info());
-        if (sourceDecode_.Ok() && probe.Info().hardwareOnly) {  // TASK-0076: the driver could not be asked and NVDEC refused the viewport's first frame
-            if (store_->SourceChanged("source"))  // another file on that path: its own sources (the store judges it again), no old verdict
-                QTimer::singleShot(0, this, [this] {
-                    if (store_ && store_->SourceChanged("source")) reloadSources();
-                });
-            else if (const auto refused = store_->Undecodable("source"))
-                sourceDecode_ = *refused;
-        }
+        // TASK-0076: NVDEC refused the viewport's frames (the driver could not be asked, a part, frames of another size) - for this file
+        // as loaded (another one on that path: set again above, no old verdict)
+        if (sourceDecode_.Ok() && probe.Info().hardwareOnly && !store_->SourceChanged("source"))
+            if (const auto refused = store_->Undecodable("source")) sourceDecode_ = *refused;
         if (!sourceDecode_.Ok()) {  // TASK-0076: AV1 without NVDEC AV1 - «Обработать» and the stage runs stay off
             planError_ = SourceDecodeText(sourceDecode_);
             emit planChanged();

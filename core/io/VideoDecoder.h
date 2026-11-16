@@ -102,6 +102,13 @@ std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view sequenceHeader);
 // sequence) - FFmpeg 7.1.1's NVDEC gives such a frame with the chroma read from the wrong place. false: the header does not parse
 bool Av1FrameBelowSequence(int width, int height, std::string_view sequenceHeader);
 
+struct DecodeSupport;
+// TASK-0076: the verdict another process met on this stream (the proxy build's «the video cannot be decoded here: <why>»), read back
+// with its own block: a part or a layout the probe did not learn (StreamPartOf - judged again here), frames smaller than the sequence
+// (Resized), an odd frame height (OddHeight) - RefusalText's words for that size -, else NVDEC refusing the stream (NvdecFailed). The why
+// says `where` it was met
+DecodeSupport VerdictFromWhy(const VideoStreamInfo& probe, const std::string& why, const std::string& where);
+
 // Keyframes of a video stream from its packets (demux only, no decoding; TASK-0040): the longest run of frames from
 // a keyframe to the next one or to the end - what a seek into the stream may have to decode.
 struct KeyframeScan {

@@ -2401,3 +2401,144 @@ TEST_CASE("NVDEC not starting now (start-fails, device-fails): render tries once
         }
     }
 }
+
+TEST_CASE("An AV1 stream of an odd frame height is refused before any frame; a part of one after an even part is refused when NVDEC meets it",
+          "[integration][gpu][av1][regression]") {
+    const auto dir = Dir("odd_height");
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 16;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto a = WriteClipIfSupported(dir / "a.ivf", spec, &why);
+    if (!a) SKIP("av1_nvenc does not support the clip here: " << why);
+    const auto b = WriteClipIfSupported(dir / "b.ivf", spec, &why);
+    REQUIRE(b);
+    // av1_nvenc's 320x192 said as 320x191 (the sequence header's maximum, the IVF header): the frames' headers stay valid - a stream NVDEC
+    // decodes, the chroma of its frames a row off in FFmpeg 7.1.1
+    const auto shorter = [](int, const std::string& u) { return ShorterFrameTemporalUnit(u, 1); };
+    const auto odd = RepeatIvf(*a, 1, dir / "odd.ivf", shorter);
+    SetIvfFrameSize(odd, static_cast<uint16_t>(kW), static_cast<uint16_t>(kH - 1));
+    const VideoStreamInfo info = VideoDecoder(odd, VideoDecoder::Probe()).Info();
+    REQUIRE(info.hardwareOnly);
+    REQUIRE(info.codedHeight == kH - 1);
+    REQUIRE(info.pixelFormat == "yuv420p");
+    const std::string oddWords = "AV1 320x191 has an odd frame height - FFmpeg's NVDEC reads the chroma of such a frame a row off";
+    {
+        const DecodeSupport s = CheckDecodeSupport(info);
+        CHECK(s.block == DecodeBlock::OddHeight);
+        CHECK_FALSE(s.caps.checked);  // the GPU not asked
+        CHECK_THAT(s.why, StartsWith(oddWords));
+    }
+    {
+        // the whole stream: refused before its first frame, no CUDA device made for it
+        VideoDecoder dec(odd);
+        std::optional<DecodeUnavailable> refused;
+        try {
+            dec.RequireDecodable();
+        } catch (const DecodeUnavailable& e) {
+            refused = e;
+        }
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::OddHeight);
+        CHECK(refused->support.width == kW);
+        CHECK(refused->support.height == kH - 1);
+        CHECK_FALSE(refused->support.part);
+        CHECK_FALSE(refused->support.Transient());
+        CHECK_THAT(refused->support.why, StartsWith(oddWords));
+        const auto first = RefusalOfNextFrame(dec);  // the first frame asked for: the same
+        REQUIRE(first);
+        CHECK(first->support.block == DecodeBlock::OddHeight);
+        CHECK_FALSE(dec.HoldsCudaDevice());
+    }
+    {
+        const auto source = FrameStore::VideoSource("source", odd);
+        REQUIRE(source);
+        REQUIRE(source->undecodable);
+        CHECK(source->undecodable->block == DecodeBlock::OddHeight);
+    }
+    // 192 rows, then a part of 191 (its own sequence header, its own NVDEC decoder): the probe sees the first part - refused when NVDEC
+    // gives the part's first frame, as a part
+    const auto parts = ConcatIvf(*a, *b, dir / "parts.ivf", [](const std::string& u) { return ShorterFrameTemporalUnit(u, 1); });
+    const VideoStreamInfo partsInfo = VideoDecoder(parts, VideoDecoder::Probe()).Info();
+    REQUIRE(partsInfo.codedHeight == kH);
+    REQUIRE(CheckDecodeSupport(partsInfo).Ok());
+    {
+        VideoDecoder dec(parts);
+        CpuFrame f;
+        int frames = 0;
+        std::optional<DecodeUnavailable> refused;
+        try {
+            while (dec.NextFrame(f)) {
+                INFO("frame " << frames << ": " << f.desc.width << "x" << f.desc.height);
+                ++frames;
+            }
+            FAIL("the part of an odd height decoded: " << frames << " frames");
+        } catch (const DecodeUnavailable& e) {
+            refused = e;
+        }
+        REQUIRE(refused);
+        CHECK(frames == 16);  // the even part whole
+        CHECK(refused->support.block == DecodeBlock::OddHeight);
+        CHECK(refused->support.part);  // the probe's height was even
+        CHECK(refused->support.height == kH - 1);
+        CHECK_FALSE(refused->support.Transient());
+        CHECK_THAT(refused->support.why, StartsWith(oddWords));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(after 16 frames)"));
+        CHECK(RefusalOfNextFrame(dec));  // kept
+    }
+    {
+        // a decoder whose first frame is in that part (a seek): the same verdict on its first frame
+        VideoDecoder dec(parts);
+        REQUIRE(dec.SeekToKeyframeBefore(20));
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::OddHeight);
+        CHECK(refused->support.part);
+        CHECK(refused->support.height == kH - 1);
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(the first frame)"));
+    }
+}
+
+TEST_CASE("FrameStore::RememberRefusedFile with keep: a verdict remembered for the very file stays; a file written again since takes the new one",
+          "[integration][viewport][gpu][av1]") {
+    const auto dir = Dir("refused_keep");
+    REQUIRE_AV1_CLIP(clip, dir, false, 12);
+    const VideoStreamInfo info = VideoDecoder(clip, VideoDecoder::Probe()).Info();
+    const DecodeSupport loader = RefusedDecode(info, DecodeBlock::NvdecFailed, "on the first frame");    // a loader's own, more exact
+    const DecodeSupport proxy = RefusedDecode(info, DecodeBlock::NvdecFailed, "the proxy build: after 3 frames");  // another process's
+    auto remembered = [&] {
+        const auto s = FrameStore::VideoSource("source", clip);
+        REQUIRE(s);
+        return s->undecodable ? s->undecodable->why : std::string();
+    };
+    // nothing remembered yet: keep remembers it as any other
+    CHECK(FrameStore::RememberRefusedFile(clip, loader, true));
+    CHECK(remembered() == loader.why);
+    // the same file as it was: kept - and said remembered
+    CHECK(FrameStore::RememberRefusedFile(clip, proxy, true));
+    CHECK(remembered() == loader.why);
+    // without keep: the new verdict
+    CHECK(FrameStore::RememberRefusedFile(clip, proxy));
+    CHECK(remembered() == proxy.why);
+    CHECK(FrameStore::RememberRefusedFile(clip, loader));
+    // the file written again (another time) after the verdict: keep does not keep the old one - the new verdict is the file's
+    std::filesystem::last_write_time(clip, std::filesystem::last_write_time(clip) + std::chrono::seconds(2));
+    CHECK(FrameStore::RememberRefusedFile(clip, proxy, true));
+    CHECK(remembered() == proxy.why);
+    // another size, the same time: the same
+    CHECK(FrameStore::RememberRefusedFile(clip, loader));
+    const auto time = std::filesystem::last_write_time(clip);
+    {
+        std::ofstream grow(clip, std::ios::binary | std::ios::app);  // an MP4 'free' box of 16 bytes: the file still a valid MP4
+        grow << std::string("\0\0\0\x10" "free", 8) << std::string(8, '\0');
+    }
+    std::filesystem::last_write_time(clip, time);
+    CHECK(FrameStore::RememberRefusedFile(clip, proxy, true));
+    CHECK(remembered() == proxy.why);
+    // no file: nothing remembered, keep or not
+    CHECK_FALSE(FrameStore::RememberRefusedFile(dir / "none.mp4", proxy, true));
+}

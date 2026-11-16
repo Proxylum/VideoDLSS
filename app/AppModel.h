@@ -397,7 +397,8 @@ private:
     bool tasksRunning_ = false, nvdecLetGo_ = false;  // TASK-0076: setTasksRunning, updateNvdecHold
     double retriedAt_ = -1.0;                // TASK-0076: requestFrames tried start failures again at this time ...
     std::vector<std::string> retriedFor_;    // ... for these sources
-    std::string heardRefusal_;  // TASK-0076: the source's refusal noteSourceRefused acted on last (its file and why)
+    std::string heardRefusal_;  // TASK-0076: the source's refusal noteSourceRefused acted on last (FileStamp|why; reloadSources, a file written over forget)
+    std::string reloadedFor_;   // TASK-0076: refreshPlan set the sources again for this refusal of a file written over (path|why) - once
     static std::string FileStamp(const std::filesystem::path& file);  // TASK-0076: path|size|time
     void updateNvdecHold();
     std::set<std::string> force_;

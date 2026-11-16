@@ -31,6 +31,7 @@ void LoaderLog(const char* format, ...);  // the loader's messages at debug leve
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/pixdesc.h>
 }
 
 #include <cstdlib>
@@ -70,6 +71,11 @@ bool HardwareOnlyDecoder(const AVCodec* codec) {
 }
 
 AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly) {
+    if (hardwareOnly) {
+        const AVPixelFormat* last = formats;
+        while (*last != AV_PIX_FMT_NONE && *(last + 1) != AV_PIX_FMT_NONE) ++last;
+        if (!Av1NvdecLayout(*last)) return AV_PIX_FMT_NONE;  // gray, 4:4:4, 12-bit: refused with that layout's reason
+    }
     for (const AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p)
         if (*p == AV_PIX_FMT_CUDA) return *p;
     // no CUDA on offer: a decoder with a software path goes on with FFmpeg's cascade from the first format (as before); a hardware-only
@@ -109,6 +115,11 @@ std::string RefusalText(const DecodeSupport& s) {
                    "' decodes (" + std::to_string(s.caps.minWidth) + "x" + std::to_string(s.caps.minHeight) + " to " + std::to_string(s.caps.maxWidth) + "x" +
                    std::to_string(s.caps.maxHeight) + ", at most " + std::to_string(s.caps.maxMacroblocks) +
                    " macroblocks), and this build has no software AV1 decoder";
+        case DecodeBlock::OddHeight:
+            return codec + " " + std::to_string(s.width) + "x" + std::to_string(s.height) +
+                   " has an odd frame height - FFmpeg's NVDEC reads the chroma of such a frame a row off (its surfaces are even), and this build "
+                   "has no software AV1 decoder" +
+                   (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::NvdecFailed:
             return "NVDEC refused this AV1 stream and this build has no software AV1 decoder" + (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::Resized:
@@ -287,7 +298,8 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
         return s;
     }
     const bool unknown = info.pixelFormat == "unknown";  // the probe did not learn it: NVDEC decides on the first frame (CUDA is asked)
-    if (!unknown && info.pixelFormat != "yuv420p" && info.pixelFormat != "yuv420p10le") return Refuse(s, DecodeBlock::Layout);
+    if (!unknown && !Av1NvdecLayout(av_get_pix_fmt(info.pixelFormat.c_str()))) return Refuse(s, DecodeBlock::Layout);
+    if (info.codedHeight % 2 == 1) return Refuse(s, DecodeBlock::OddHeight);  // known without the GPU, as the layout
     if (!caps || !caps->checked) {  // the driver could not be asked: go on blind, as FFmpeg does
         s.why = "not checked" + (caps && !caps->why.empty() ? ": " + caps->why : std::string());
         return s;

@@ -114,5 +114,11 @@ std::string WithoutSequenceHeaders(const std::string& unit);
 // a temporal unit whose sequence headers (av1_nvenc's: no timing info, no initial display delay) say an initial display delay - other
 // bytes, the same decoder (size, depth, chroma)
 std::string InitialDisplayDelayTemporalUnit(const std::string& unit);
+// a temporal unit whose sequence headers say a frame `rows` rows shorter (max_frame_height_minus_1 less by it, in the same bits): an odd
+// height made of av1_nvenc's even one - the frames' headers (no frame size override in them) stay valid while the 8-row block rows
+// (MiRows) stay the same
+std::string ShorterFrameTemporalUnit(const std::string& unit, int rows);
+// the frame size an IVF file's header says (what the demuxer reports before any frame)
+void SetIvfFrameSize(const std::filesystem::path& ivf, uint16_t width, uint16_t height);
 
 }  // namespace dlssvid::test

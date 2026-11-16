@@ -479,13 +479,15 @@ std::string Leb128(uint64_t v) {
     return out;
 }
 
-// The payload of an 8-bit 4:2:0 sequence header (profile 0, AV1 spec 5.5) said as 12-bit 4:2:0 (profile 2) - the same up to its
-// color_config. The frames after it are no 12-bit pictures, but av1dec asks for the pixel format (yuv420p12, which FFmpeg offers to no
-// NVDEC) before it decodes any of them: a part of the stream NVDEC does not take, as one written so would be.
-std::string TwelveBitSequenceHeader(const std::string& payload) {
+// Where a sequence header says its frame size (AV1 spec 5.5.1): the bit of max_frame_width_minus_1 and the two fields' widths
+struct SequenceFrameSize {
+    size_t at = 0;
+    int widthBits = 0, heightBits = 0;
+};
+SequenceFrameSize FrameSizeOf(const std::string& payload) {
     BitReader b{payload};
-    Need(b.f(3) == 0, __LINE__);  // seq_profile: the 8-bit 4:2:0 profile
-    b.f(1);                // still_picture
+    b.f(3);  // seq_profile
+    b.f(1);  // still_picture
     Need(b.f(1) == 0, __LINE__);  // reduced_still_picture_header: a video
     bool decoderModel = false;
     int bufferDelayBits = 0;
@@ -514,8 +516,17 @@ std::string TwelveBitSequenceHeader(const std::string& payload) {
         if (initialDisplayDelay && b.f(1)) b.f(4);
     }
     const int widthBits = static_cast<int>(b.f(4)) + 1, heightBits = static_cast<int>(b.f(4)) + 1;
-    b.f(widthBits);
-    b.f(heightBits);
+    return {b.pos, widthBits, heightBits};
+}
+
+// The payload of an 8-bit 4:2:0 sequence header (profile 0, AV1 spec 5.5) said as 12-bit 4:2:0 (profile 2) - the same up to its
+// color_config. The frames after it are no 12-bit pictures, but av1dec asks for the pixel format (yuv420p12, which FFmpeg offers to no
+// NVDEC) before it decodes any of them: a part of the stream NVDEC does not take, as one written so would be.
+std::string TwelveBitSequenceHeader(const std::string& payload) {
+    BitReader b{payload};
+    Need(b.f(3) == 0, __LINE__);  // seq_profile: the 8-bit 4:2:0 profile
+    const SequenceFrameSize size = FrameSizeOf(payload);
+    b.pos = size.at + static_cast<size_t>(size.widthBits + size.heightBits);
     if (b.f(1)) {  // frame_id_numbers_present_flag
         b.f(4);
         b.f(3);
@@ -572,8 +583,8 @@ std::string TwelveBitSequenceHeader(const std::string& payload) {
     return w.out;
 }
 
-// A temporal unit (IVF frame) with its sequence header OBUs said as 12-bit (TwelveBitSequenceHeader); the other OBUs as they are
-std::string TwelveBitTemporalUnit(const std::string& unit) {
+// A temporal unit (IVF frame) with its sequence header OBUs (OBU_SEQUENCE_HEADER) written by `header`; the other OBUs as they are
+std::string WithSequenceHeadersWritten(const std::string& unit, const std::function<std::string(const std::string&)>& header) {
     std::string out;
     for (size_t at = 0; at < unit.size();) {
         const uint8_t head = static_cast<uint8_t>(unit[at]);
@@ -592,12 +603,15 @@ std::string TwelveBitTemporalUnit(const std::string& unit) {
             }
         }
         const std::string payload = unit.substr(at + headSize + sizeBytes, static_cast<size_t>(size));
-        const std::string written = type == 1 ? TwelveBitSequenceHeader(payload) : payload;  // OBU_SEQUENCE_HEADER
+        const std::string written = type == 1 ? header(payload) : payload;
         out += unit.substr(at, headSize) + Leb128(written.size()) + written;
         at += headSize + sizeBytes + static_cast<size_t>(size);
     }
     return out;
 }
+
+// A temporal unit (IVF frame) with its sequence header OBUs said as 12-bit (TwelveBitSequenceHeader); the other OBUs as they are
+std::string TwelveBitTemporalUnit(const std::string& unit) { return WithSequenceHeadersWritten(unit, TwelveBitSequenceHeader); }
 
 // A sequence header of av1_nvenc's (no timing info, no decoder model, no initial display delay) with an initial display delay of 10
 // frames for every operating point (AV1 5.5: initial_display_delay_present_flag and _minus_1) - everything else as it was: a header with
@@ -645,30 +659,41 @@ std::string InitialDisplayDelaySequenceHeader(const std::string& payload) {
     return w.out;
 }
 
-std::string InitialDisplayDelayTemporalUnit(const std::string& unit) {
-    std::string out;
-    for (size_t at = 0; at < unit.size();) {
-        const uint8_t head = static_cast<uint8_t>(unit[at]);
-        const int type = (head >> 3) & 15;
-        Need((head & 2), __LINE__);  // obu_has_size_field
-        const size_t headSize = (head & 4) ? 2 : 1;
-        uint64_t size = 0;
-        size_t sizeBytes = 0;
-        for (;; ++sizeBytes) {
-            Need(at + headSize + sizeBytes < unit.size(), __LINE__);
-            const uint8_t byte = static_cast<uint8_t>(unit[at + headSize + sizeBytes]);
-            size |= static_cast<uint64_t>(byte & 0x7f) << (7 * sizeBytes);
-            if (!(byte & 0x80)) {
-                ++sizeBytes;
-                break;
-            }
-        }
-        const std::string payload = unit.substr(at + headSize + sizeBytes, static_cast<size_t>(size));
-        const std::string written = type == 1 ? InitialDisplayDelaySequenceHeader(payload) : payload;  // OBU_SEQUENCE_HEADER
-        out += unit.substr(at, headSize) + Leb128(written.size()) + written;
-        at += headSize + sizeBytes + static_cast<size_t>(size);
+std::string InitialDisplayDelayTemporalUnit(const std::string& unit) { return WithSequenceHeadersWritten(unit, InitialDisplayDelaySequenceHeader); }
+
+// A sequence header whose max_frame_height_minus_1 is `rows` less (in the same bits): everything else as it was
+std::string ShorterFrameSequenceHeader(const std::string& payload, int rows) {
+    const SequenceFrameSize size = FrameSizeOf(payload);
+    const size_t at = size.at + static_cast<size_t>(size.widthBits);
+    BitReader b{payload};
+    b.pos = at;
+    const uint32_t height = b.f(size.heightBits);  // max_frame_height_minus_1
+    Need(rows > 0 && height >= static_cast<uint32_t>(rows), __LINE__);
+    const uint32_t shorter = height - static_cast<uint32_t>(rows);
+    std::string out = payload;
+    for (int i = 0; i < size.heightBits; ++i) {
+        const size_t bit = at + static_cast<size_t>(i);
+        const auto mask = static_cast<uint8_t>(0x80u >> (bit % 8));
+        const bool one = (shorter >> (size.heightBits - 1 - i)) & 1u;
+        const auto byte = static_cast<uint8_t>(out[bit / 8]);
+        out[bit / 8] = static_cast<char>(one ? byte | mask : byte & static_cast<uint8_t>(~mask));
     }
     return out;
+}
+
+std::string ShorterFrameTemporalUnit(const std::string& unit, int rows) {
+    return WithSequenceHeadersWritten(unit, [rows](const std::string& payload) { return ShorterFrameSequenceHeader(payload, rows); });
+}
+
+void SetIvfFrameSize(const std::filesystem::path& ivf, uint16_t width, uint16_t height) {
+    std::string f = ReadAll(ivf);
+    Need(f.size() >= 32, __LINE__);
+    Need(f.compare(0, 4, "DKIF") == 0, __LINE__);
+    f[12] = static_cast<char>(width & 0xff);
+    f[13] = static_cast<char>(width >> 8);
+    f[14] = static_cast<char>(height & 0xff);
+    f[15] = static_cast<char>(height >> 8);
+    std::ofstream(ivf, std::ios::binary | std::ios::trunc) << f;
 }
 
 // The temporal unit without its sequence header OBUs (the frames after it need one met before)

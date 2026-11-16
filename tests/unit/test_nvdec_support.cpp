@@ -7,6 +7,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavutil/pixdesc.h>
 }
 
 #include <cstdlib>
@@ -97,7 +98,7 @@ NvdecAv1Caps GoodCaps() {
     return c;
 }
 
-const char* const kAllBlocks[] = {"None", "Layout", "NoCuda", "NoNvdec", "NoAv1", "Size", "NvdecFailed", "Resized", "NvdecStartFailed"};
+const char* const kAllBlocks[] = {"None", "Layout", "NoCuda", "NoNvdec", "NoAv1", "Size", "OddHeight", "NvdecFailed", "Resized", "NvdecStartFailed"};
 
 std::string BlockName(DecodeBlock b) {
     const int i = static_cast<int>(b);
@@ -449,6 +450,30 @@ TEST_CASE("PickNvdecFormat: CUDA when offered; else a hardware-only decoder choo
     const AVPixelFormat software[] = {AV_PIX_FMT_YUV420P10LE, AV_PIX_FMT_NONE};
     CHECK(PickNvdecFormat(software, true) == AV_PIX_FMT_NONE);
     CHECK(PickNvdecFormat(software, false) == AV_PIX_FMT_YUV420P10LE);
+    // TASK-0076: CUDA offered for a layout this build leaves out (FFmpeg offers it for gray AV1; the list's last is the software format, as
+    // ff_get_format reads it): a hardware-only decoder chooses nothing - the refusal names the layout; a decoder with a software path takes
+    // CUDA as before
+    for (const AVPixelFormat sw : {AV_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY10LE, AV_PIX_FMT_YUV444P, AV_PIX_FMT_YUV420P12LE}) {
+        INFO(av_get_pix_fmt_name(sw));
+        const AVPixelFormat list[] = {AV_PIX_FMT_D3D11, AV_PIX_FMT_CUDA, sw, AV_PIX_FMT_NONE};
+        CHECK(PickNvdecFormat(list, true) == AV_PIX_FMT_NONE);
+        CHECK(PickNvdecFormat(list, false) == AV_PIX_FMT_CUDA);
+        CHECK_FALSE(Av1NvdecLayout(sw));
+    }
+    for (const AVPixelFormat sw : {AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10LE}) {
+        INFO(av_get_pix_fmt_name(sw));
+        const AVPixelFormat list[] = {AV_PIX_FMT_D3D11, AV_PIX_FMT_CUDA, sw, AV_PIX_FMT_NONE};
+        CHECK(PickNvdecFormat(list, true) == AV_PIX_FMT_CUDA);
+        CHECK(PickNvdecFormat(list, false) == AV_PIX_FMT_CUDA);
+        CHECK(Av1NvdecLayout(sw));
+    }
+    // the software format is the last one, whatever comes first: a 4:2:0 hardware format in front does not make gray decodable
+    const AVPixelFormat grayAfter420[] = {AV_PIX_FMT_YUV420P, AV_PIX_FMT_CUDA, AV_PIX_FMT_GRAY8, AV_PIX_FMT_NONE};
+    CHECK(PickNvdecFormat(grayAfter420, true) == AV_PIX_FMT_NONE);
+    const AVPixelFormat onlyCuda[] = {AV_PIX_FMT_CUDA, AV_PIX_FMT_NONE};  // no software format: nothing to judge the layout by
+    CHECK(PickNvdecFormat(onlyCuda, true) == AV_PIX_FMT_NONE);
+    const AVPixelFormat empty[] = {AV_PIX_FMT_NONE};
+    CHECK(PickNvdecFormat(empty, true) == AV_PIX_FMT_NONE);
 }
 
 TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver on every call, also after the driver was asked", "[unit][av1][gpu]") {
@@ -480,7 +505,15 @@ TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver o
         // not consulted where the driver would not be: software decoders, layouts refused first; an unknown layout is refused by it
         CHECK(CheckDecodeSupport(H264Info()).Ok());
         CHECK(CheckDecodeSupport(H264Info()).why == "software (h264)");
-        CHECK(CheckDecodeSupport(Av1Info("yuv444p")).block == DecodeBlock::Layout);
+        // the layout and an odd height are judged before the driver (here: its stand-in) is asked - no caps read, none said
+        for (const VideoStreamInfo& early : {Av1Info("yuv444p"), Av1Info("yuv420p12le", 12), Av1Info("yuv420p", 8, 320, 191)}) {
+            INFO(early.pixelFormat << " " << early.codedWidth << "x" << early.codedHeight);
+            const DecodeSupport e = CheckDecodeSupport(early);
+            CHECK(e.block == (early.codedHeight == 191 ? DecodeBlock::OddHeight : DecodeBlock::Layout));
+            CHECK_FALSE(e.caps.checked);
+            CHECK(e.caps.why.empty());
+            CHECK(e.caps.gpu.empty());
+        }
         CheckRefusal(CheckDecodeSupport(Av1Info("unknown")), DecodeBlock::NoAv1);
         CHECK_FALSE(FakeNvdecRefusesFrames());
     }
@@ -692,6 +725,146 @@ TEST_CASE("A layout the probe did not learn, read back from a refusal: judged be
     const DecodeSupport verdict = CheckDecodeSupport(judged);
     CHECK(verdict.block == DecodeBlock::Layout);
     CHECK_THAT(verdict.why, StartsWith("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here"));
+    // the driver not asked at all: under a stand-in that would refuse AV1 the layout is still the verdict, with no caps read or said
+    FakeNvdecEnv fake("no-av1");
+    for (const char* pix : {"yuv420p12le", "yuv444p"}) {
+        INFO(pix);
+        const DecodeSupport layout = CheckDecodeSupport(StreamPartInfo(info, pix, 0, 0));
+        CHECK(layout.block == DecodeBlock::Layout);
+        CHECK(layout.pixelFormat == pix);
+        CHECK_FALSE(layout.caps.checked);
+        CHECK(layout.caps.why.empty());
+        CHECK(layout.caps.gpu.empty());
+    }
+}
+
+TEST_CASE("JudgeDecode: an odd frame height is refused before NVDEC is asked, after the layout - FFmpeg's NVDEC reads its chroma a row off",
+          "[unit][av1]") {
+    const NvdecAv1Caps good = GoodCaps();
+    NvdecAv1Caps noCuda = GoodCaps();
+    noCuda.cuda = false;
+    noCuda.supported = false;
+    noCuda.why = "nvcuda.dll could not be loaded (no NVIDIA driver)";
+    const std::string odd = "AV1 320x191 has an odd frame height - FFmpeg's NVDEC reads the chroma of such a frame a row off (its surfaces are even), "
+                            "and this build has no software AV1 decoder";
+    // whatever the driver says - not asked, yes, no CUDA at all: the height decides first (known without the GPU)
+    for (const NvdecAv1Caps* caps : {static_cast<const NvdecAv1Caps*>(nullptr), &good, static_cast<const NvdecAv1Caps*>(&noCuda)}) {
+        INFO((caps ? caps->why : std::string("no caps")));
+        const DecodeSupport s = JudgeDecode(Av1Info("yuv420p", 8, 320, 191), caps);
+        CheckRefusal(s, DecodeBlock::OddHeight);
+        CHECK_THAT(s.why, StartsWith(odd));
+        if (!caps || caps->why.empty()) CHECK(s.why == odd);  // (caps given with a reason of their own: RefusalText appends it, as for NoAv1)
+        CHECK(s.width == 320);
+        CHECK(s.height == 191);
+        CHECK_FALSE(s.part);
+        CHECK_FALSE(s.Transient());
+        CHECK(s.caps.checked == (caps && caps->checked));  // nothing read for it: the caps are the ones given, if any
+    }
+    CHECK_FALSE(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), nullptr).caps.checked);
+    // 10-bit, and a layout the probe did not learn: the same
+    CHECK(JudgeDecode(Av1Info("yuv420p10le", 10, 1920, 1081), &good).block == DecodeBlock::OddHeight);
+    CHECK(JudgeDecode(Av1Info("unknown", 8, 320, 191), &good).block == DecodeBlock::OddHeight);
+    // the layout first: a 4:4:4 stream of an odd height is refused for its layout
+    CHECK(JudgeDecode(Av1Info("yuv444p", 8, 320, 191), &good).block == DecodeBlock::Layout);
+    // an even height decodes; an odd width is no such case (the chroma plane starts after the luma rows)
+    CHECK(JudgeDecode(Av1Info("yuv420p", 8, 320, 190), &good).Ok());
+    CHECK(JudgeDecode(Av1Info("yuv420p", 8, 321, 192), &good).Ok());
+    CHECK(JudgeDecode(Av1Info("yuv420p", 8, 320, 0), nullptr).Ok());  // a height not known: nothing to judge
+    // a decoder with a software path decodes any height
+    VideoStreamInfo h264 = H264Info();
+    h264.height = h264.codedHeight = 191;
+    CHECK(JudgeDecode(h264, &good).Ok());
+    // VideoDecoder's run-time refusal names when; RefusalText says it
+    const DecodeSupport later = RefusedDecode(Av1Info("yuv420p", 8, 320, 191), DecodeBlock::OddHeight, "after 16 frames");
+    CheckRefusal(later, DecodeBlock::OddHeight);
+    CHECK(later.why == odd + " (after 16 frames)");
+    CHECK_FALSE(later.Transient());
+    CHECK(RefusedDecode(Av1Info("yuv420p", 8, 320, 191), DecodeBlock::OddHeight, "").why == odd);
+    CHECK(BlockName(DecodeBlock::OddHeight) == "OddHeight");
+}
+
+TEST_CASE("VerdictFromWhy reads another process's refusal back with its own block: a part, a learned layout, smaller frames, an odd height; else NVDEC's refusal",
+          "[unit][av1]") {
+    const VideoStreamInfo probe = Av1Info();  // 320x192 8-bit 4:2:0
+    // a part of the stream in other parameters (12-bit): the part's verdict - its layout, judged without the GPU, said where it was met
+    StreamPart twelve;
+    twelve.pixelFormat = "yuv420p12le";
+    twelve.codedWidth = 320;
+    twelve.codedHeight = 192;
+    const std::string layoutWords = JudgeDecode(Av1Info("yuv420p12le", 12), nullptr).why;
+    const std::string partWhy = layoutWords + " (after 16 frames" + StreamPartWords(twelve) + ")";
+    const DecodeSupport part = VerdictFromWhy(probe, partWhy, "the proxy build");
+    CheckRefusal(part, DecodeBlock::Layout);
+    CHECK(part.part);
+    CHECK(part.bitDepth == 12);
+    CHECK(part.pixelFormat == "yuv420p12le");
+    CHECK_FALSE(part.caps.checked);
+    CHECK(part.why == "the proxy build: " + partWhy);
+    // the layout the probe did not learn, met at the first frame: the stream's own layout - no part
+    VideoStreamInfo unknown = probe;
+    unknown.pixelFormat = "unknown";
+    StreamPart learned;
+    learned.pixelFormat = "yuv420p12le";
+    learned.learned = true;
+    const std::string learnedWhy = layoutWords + " (on the first frame" + StreamPartWords(learned) + ")";
+    const DecodeSupport layout = VerdictFromWhy(unknown, learnedWhy, "the proxy build");
+    CheckRefusal(layout, DecodeBlock::Layout);
+    CHECK_FALSE(layout.part);
+    CHECK(layout.bitDepth == 12);
+    CHECK(layout.why == "the proxy build: " + learnedWhy);
+    // frames smaller than the sequence's (Resized), with and without VideoDecoder's detail: the sequence's size named, the detail kept
+    const VideoStreamInfo big = StreamPartInfo(probe, "", 640, 480);
+    const std::string resizedWords = RefusedDecode(big, DecodeBlock::Resized, "").why;
+    for (const std::string& detail : {std::string("a frame of 320x240, after 5 frames"), std::string()}) {
+        INFO("detail: " << detail);
+        const DecodeSupport resized = VerdictFromWhy(probe, RefusedDecode(big, DecodeBlock::Resized, detail).why, "the proxy build");
+        CheckRefusal(resized, DecodeBlock::Resized);
+        CHECK(resized.width == 640);
+        CHECK(resized.height == 480);
+        CHECK_FALSE(resized.part);  // a size of the sequence, not a part judged apart
+        CHECK_FALSE(resized.Transient());
+        CHECK(resized.why == resizedWords + (detail.empty() ? " (the proxy build)" : " (the proxy build: " + detail + ")"));
+    }
+    // an odd frame height (VideoDecoder's run-time refusal): its size
+    const VideoStreamInfo oddSize = StreamPartInfo(probe, "", 320, 191);
+    const std::string oddWords = RefusedDecode(oddSize, DecodeBlock::OddHeight, "").why;
+    for (const std::string& detail : {std::string("after 16 frames"), std::string("the first frame"), std::string()}) {
+        INFO("detail: " << detail);
+        const DecodeSupport odd = VerdictFromWhy(probe, RefusedDecode(oddSize, DecodeBlock::OddHeight, detail).why, "the proxy build");
+        CheckRefusal(odd, DecodeBlock::OddHeight);
+        CHECK(odd.width == 320);
+        CHECK(odd.height == 191);
+        CHECK(odd.part);  // the probe's height is even: a part of the stream (as VideoDecoder::ReceiveFrame marks it)
+        CHECK(odd.why == oddWords + (detail.empty() ? " (the proxy build)" : " (the proxy build: " + detail + ")"));
+    }
+    // the probe's own height odd (the stream as a whole) or not known: the stream's verdict, no part
+    for (const uint32_t probeHeight : {191u, 0u}) {
+        INFO("probe height " << probeHeight);
+        VideoStreamInfo other = probe;
+        other.height = other.codedHeight = probeHeight;
+        const DecodeSupport whole = VerdictFromWhy(other, RefusedDecode(oddSize, DecodeBlock::OddHeight, "after 16 frames").why, "the proxy build");
+        CHECK(whole.block == DecodeBlock::OddHeight);
+        CHECK(whole.height == 191);
+        CHECK_FALSE(whole.part);
+    }
+    // NVDEC refusing the stream: its detail said as the place's
+    const std::string failedWords = RefusedDecode(probe, DecodeBlock::NvdecFailed, "").why;
+    const DecodeSupport failed = VerdictFromWhy(probe, RefusedDecode(probe, DecodeBlock::NvdecFailed, "after 7 frames").why, "the proxy build");
+    CheckRefusal(failed, DecodeBlock::NvdecFailed);
+    CHECK(failed.width == 320);
+    CHECK(failed.height == 192);
+    CHECK(failed.why == failedWords + " (the proxy build: after 7 frames)");
+    CHECK(VerdictFromWhy(probe, failedWords, "the proxy build").why == failedWords + " (the proxy build)");
+    CHECK(VerdictFromWhy(probe, failedWords, "elsewhere").why == failedWords + " (elsewhere)");
+    // any other text: NVDEC's refusal with the text whole - also one naming a size that is no refusal's
+    for (const std::string text : {std::string("something else entirely"), std::string("the proxy failed at 320x191 for its own reasons"),
+                                   std::string("AV1 640x480 (the frame as stored) is outside what NVDEC decodes")}) {
+        INFO(text);
+        const DecodeSupport other = VerdictFromWhy(probe, text, "the proxy build");
+        CheckRefusal(other, DecodeBlock::NvdecFailed);
+        CHECK(other.why == failedWords + " (the proxy build: " + text + ")");
+        CHECK(other.height == 192);
+    }
 }
 
 namespace {
