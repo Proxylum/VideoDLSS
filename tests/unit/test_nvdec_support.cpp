@@ -381,11 +381,13 @@ TEST_CASE("JudgeDecode: a stream NVDEC takes is verified and described; RefusedD
     const DecodeSupport start = RefusedDecode(Av1Info(), DecodeBlock::NvdecStartFailed, "on the first frame");
     CheckRefusal(start, DecodeBlock::NvdecStartFailed);
     CHECK(start.Transient());
-    CHECK(start.why == "NVDEC could not start decoding this AV1 stream although the driver takes it - out of GPU memory or a driver error (FFmpeg's "
-                       "message is in its output); this build has no software AV1 decoder (on the first frame)");
+    CHECK(start.why == "NVDEC could not start decoding this AV1 stream now - out of GPU memory or a driver error; this build has no software AV1 "
+                       "decoder (on the first frame)");
     CHECK(RefusedDecode(Av1Info(), DecodeBlock::NvdecStartFailed, "").why ==
-          "NVDEC could not start decoding this AV1 stream although the driver takes it - out of GPU memory or a driver error (FFmpeg's message is "
-          "in its output); this build has no software AV1 decoder");
+          "NVDEC could not start decoding this AV1 stream now - out of GPU memory or a driver error; this build has no software AV1 decoder");
+    CHECK(RefusedDecode(Av1Info(), DecodeBlock::NvdecStartFailed, "the CUDA device could not be created: x").why ==
+          "NVDEC could not start decoding this AV1 stream now - out of GPU memory or a driver error; this build has no software AV1 decoder (the "
+          "CUDA device could not be created: x)");
     for (const DecodeBlock b : {DecodeBlock::None, DecodeBlock::Layout, DecodeBlock::NoCuda, DecodeBlock::NoNvdec, DecodeBlock::NoAv1, DecodeBlock::Size,
                                 DecodeBlock::NvdecFailed}) {
         DecodeSupport d;
@@ -490,15 +492,33 @@ TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver o
         CHECK(s.why == "on 'DLSSVID_FAKE_NVDEC_AV1', AV1 8-bit 4:2:0 up to 65535x65535");
         CHECK(CheckDecodeSupport(Av1Info("yuv420p", 8, 8192, 4320)).verified);
         CHECK(FakeNvdecRefusesFrames());
+        CHECK_FALSE(FakeNvdecDeviceFails());
         CHECK(CheckDecodeSupport(Av1Info("yuv444p")).block == DecodeBlock::Layout);
+    }
+    {
+        // the driver says yes - and the CUDA device is not created (VideoDecoder::StartNvdec): no frame is ever asked of NVDEC
+        FakeNvdecEnv fake("device-fails");
+        const DecodeSupport s = CheckDecodeSupport(av1);
+        CHECK(s.Ok());
+        CHECK(s.verified);
+        CHECK(s.why == "on 'DLSSVID_FAKE_NVDEC_AV1', AV1 8-bit 4:2:0 up to 65535x65535");
+        CHECK(FakeNvdecDeviceFails());
+        CHECK_FALSE(FakeNvdecRefusesFrames());
+    }
+    for (const char* other : {"no-cuda", "no-nvdec", "no-av1", "first-frame", "start-fails"}) {
+        INFO(other);
+        FakeNvdecEnv fake(other);
+        CHECK_FALSE(FakeNvdecDeviceFails());
     }
     {
         FakeNvdecEnv fake("bogus");  // not understood: ignored, the driver answers
         CHECK(CheckDecodeSupport(av1).block == real.block);
         CHECK_FALSE(FakeNvdecRefusesFrames());
+        CHECK_FALSE(FakeNvdecDeviceFails());
     }
     CHECK(CheckDecodeSupport(av1).block == real.block);  // gone with its scope
     CHECK_FALSE(FakeNvdecRefusesFrames());
+    CHECK_FALSE(FakeNvdecDeviceFails());
 }
 
 TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit][av1]") {

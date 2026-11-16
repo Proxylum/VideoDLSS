@@ -98,8 +98,7 @@ std::string RefusalText(const DecodeSupport& s) {
         case DecodeBlock::NvdecFailed:
             return "NVDEC refused this AV1 stream and this build has no software AV1 decoder" + (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::NvdecStartFailed:
-            return "NVDEC could not start decoding this AV1 stream although the driver takes it - out of GPU memory or a driver error (FFmpeg's message "
-                   "is in its output); this build has no software AV1 decoder" +
+            return "NVDEC could not start decoding this AV1 stream now - out of GPU memory or a driver error; this build has no software AV1 decoder" +
                    (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::None: break;
     }
@@ -139,7 +138,7 @@ std::optional<NvdecAv1Caps> FakeCaps() {
         c.checked = false;
         c.cuda = true;
         c.gpu = "DLSSVID_FAKE_NVDEC_AV1";
-    } else if (value == "start-fails") {  // the driver says yes, and NVDEC still does not start (out of GPU memory, a driver error)
+    } else if (value == "start-fails" || value == "device-fails") {  // the driver says yes, and NVDEC / the CUDA device still does not start
         c.cuda = true;
         c.supported = true;
         c.gpu = "DLSSVID_FAKE_NVDEC_AV1";
@@ -148,7 +147,7 @@ std::optional<NvdecAv1Caps> FakeCaps() {
         c.maxMacroblocks = 0xffffffffu;
     } else {
         std::call_once(said, [&] {
-            Log()->warn("DLSSVID_FAKE_NVDEC_AV1='{}' is not no-cuda | no-nvdec | no-av1 | first-frame | start-fails: ignored", value);
+            Log()->warn("DLSSVID_FAKE_NVDEC_AV1='{}' is not no-cuda | no-nvdec | no-av1 | first-frame | start-fails | device-fails: ignored", value);
         });
         return std::nullopt;
     }
@@ -309,6 +308,8 @@ bool FakeNvdecRefusesFrames() {
     const std::string v = FakeValue();
     return v == "first-frame" || v == "start-fails";
 }
+
+bool FakeNvdecDeviceFails() { return FakeValue() == "device-fails"; }
 
 std::string DescribeDecode(const DecodeSupport& s) {
     if (!s.hardwareOnly)

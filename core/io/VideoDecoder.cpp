@@ -459,10 +459,10 @@ void VideoDecoder::StartNvdec() {
     const DecodeSupport support = CheckDecodeSupport(info_);
     if (!support.Ok()) throw DecodeUnavailable(support, url_ + ": " + support.why);
     if (!hwDevice_) {
-        std::string why;
-        AVBufferRef* device = CreateCudaDevice(&why);
-        if (!device) {
-            const DecodeSupport s = RefusedDecode(info_, DecodeBlock::NoCuda, "the CUDA device could not be created: " + why);
+        std::string why = "DLSSVID_FAKE_NVDEC_AV1=device-fails";
+        AVBufferRef* device = FakeNvdecDeviceFails() ? nullptr : CreateCudaDevice(&why);
+        if (!device) {  // CUDA was found (CheckDecodeSupport): a device that is not created now is no verdict (memory, the driver)
+            const DecodeSupport s = RefusedDecode(info_, DecodeBlock::NvdecStartFailed, "the CUDA device could not be created: " + why);
             throw DecodeUnavailable(s, url_ + ": " + s.why);
         }
         AVCodecContext* reopened = nullptr;
@@ -487,8 +487,10 @@ void VideoDecoder::CheckDecode(int err, const char* what) {
     if (hwOnly_ && err == AVERROR(ENOSYS)) {  // av1dec without a working hwaccel: every frame header would fail the same way - kept (this
         // decoder must not be fed again). The driver having said it takes the stream, NVDEC did not start (memory, the driver): a new
         // decoder may succeed - the refusal is transient
+        // (only on the first frame: frames decoded before it, NVDEC did start - a later refusal is the stream's, a new sequence header)
         const std::string when = framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "on the first frame";
-        refused_ = std::make_shared<const DecodeSupport>(RefusedDecode(info_, nvdecVerified_ ? DecodeBlock::NvdecStartFailed : DecodeBlock::NvdecFailed, when));
+        const bool startFailed = nvdecVerified_ && framesDecoded_ == 0;
+        refused_ = std::make_shared<const DecodeSupport>(RefusedDecode(info_, startFailed ? DecodeBlock::NvdecStartFailed : DecodeBlock::NvdecFailed, when));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }
     CheckAv(err, what);

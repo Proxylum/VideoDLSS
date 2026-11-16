@@ -1,5 +1,6 @@
 #include "ProjectTasks.h"
 
+#include <QTimer>
 #include <system_error>
 
 #include "AppModel.h"
@@ -15,21 +16,24 @@ bool SamePath(const std::filesystem::path& a, const std::filesystem::path& b) {
 }
 }  // namespace
 
+void ProjectTasks::syncTasksRunning() { model_.setTasksRunning(tasks_.busy() || tasks_.mainBusy() || tasks_.previewBusy()); }
+
 ProjectTasks::ProjectTasks(AppModel& model, TaskQueue& tasks, QObject* parent) : QObject(parent), model_(model), tasks_(tasks) {
     // at the queueing, not at the start: a task waits in the queue while another project is opened
     connect(&tasks_, &TaskQueue::taskQueued, this, [this](int id) {
         model_.cancelCheck();  // TASK-0071: a check's NGX feature does not share the GPU with a run (nothing is stored of it)
-        model_.releaseNvdec();  // TASK-0076: nor the viewport's NVDEC decoders of an AV1 video (opened again by a later frame)
+        syncTasksRunning();     // TASK-0076: nor the viewport's NVDEC decoders of an AV1 video (opened again by a later frame)
         const Project& p = model_.project();
         origins_[id] = {model_.generation(), p.passesRoot, QString::fromStdWString(p.sourceVideo.filename().wstring()), p.resultVideo};
     });
     connect(&tasks_, &TaskQueue::previewStarted, this, [this](int) {  // the NR preview, as a task
         model_.cancelCheck();
-        model_.releaseNvdec();  // TASK-0076
+        syncTasksRunning();  // TASK-0076
     });
-    // TASK-0076: the viewport may hold NVDEC between frames again once no task, preview or check runs
-    connect(&tasks_, &TaskQueue::taskFinished, this, [this](int, bool) { model_.endNvdecUse(); });
-    connect(&tasks_, &TaskQueue::previewFinished, this, [this](int, bool) { model_.endNvdecUse(); });
+    // TASK-0076: the viewport may hold NVDEC between frames again once nothing runs. TaskQueue updates its state before it emits these;
+    // the deferred call keeps that independent of the order (a slot connected before this one could start another task)
+    connect(&tasks_, &TaskQueue::taskFinished, this, [this](int, bool) { QTimer::singleShot(0, this, [this] { syncTasksRunning(); }); });
+    connect(&tasks_, &TaskQueue::previewFinished, this, [this](int, bool) { QTimer::singleShot(0, this, [this] { syncTasksRunning(); }); });
     // TASK-0070: the run encodes the new result next to the old one, to be renamed over it: the viewer lets the old file go. By the file,
     // not the project: a project opened again since, or another one with the same result file, shows that file too.
     connect(&tasks_, &TaskQueue::taskProgress, this, [this](int id, const TaskQueue::Progress& progress) {

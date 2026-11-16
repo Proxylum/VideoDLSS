@@ -30,8 +30,8 @@ enum class DecodeBlock {
     NoAv1,        // the GPU's NVDEC has no AV1 decoder at the stream's depth
     Size,         // the frame is outside the sizes the GPU's NVDEC decodes
     NvdecFailed,  // NVDEC was asked and refused a frame - the first one, or a later one (why: on the first frame / after N frames)
-    NvdecStartFailed,  // the driver said it takes the stream, and NVDEC still did not start (out of GPU memory, a driver error):
-                       // not the stream's verdict - another decoder may succeed later
+    NvdecStartFailed,  // NVDEC did not start on the first frame although the driver took the stream, or the CUDA device could not be
+                       // created (out of GPU memory, a driver error): not the stream's verdict - another decoder may succeed later
 };
 
 // What the driver says of AV1 decoding on CUDA device 0 (FFmpeg's NVDEC takes that one), at one bit depth, 4:2:0.
@@ -76,18 +76,22 @@ NvdecAv1Caps QueryNvdecAv1Caps(int bitDepth);
 // JudgeDecode with the driver asked when the stream needs NVDEC. DLSSVID_FAKE_NVDEC_AV1 stands in for the driver's answer (tests, a
 // support case), read on every call before the cache: no-cuda | no-nvdec | no-av1 - that refusal; first-frame - no answer (the stream
 // goes on unchecked) and NVDEC then refuses its first frame; start-fails - the driver takes the stream and NVDEC still does not start
-// (NvdecStartFailed, FakeNvdecRefusesFrames).
+// (NvdecStartFailed, FakeNvdecRefusesFrames); device-fails - the driver takes the stream and the CUDA device is not created
+// (NvdecStartFailed, FakeNvdecDeviceFails).
 DecodeSupport CheckDecodeSupport(const VideoStreamInfo& info);
 // DLSSVID_FAKE_NVDEC_AV1=first-frame | start-fails: VideoDecoder's get_format declines CUDA for a hardware-only decoder (the refusal FFmpeg
 // reports as ENOSYS on the first frame - a GPU whose limits the driver did not tell in advance, or NVDEC failing to start).
 bool FakeNvdecRefusesFrames();
+// DLSSVID_FAKE_NVDEC_AV1=device-fails: VideoDecoder::StartNvdec does not get its CUDA device (out of GPU memory, as it were).
+bool FakeNvdecDeviceFails();
 
 // The refusal `block` of the stream, `detail` saying what failed (VideoDecoder: no CUDA device when it is created, NVDEC refusing the
 // first frame).
 DecodeSupport RefusedDecode(const VideoStreamInfo& info, DecodeBlock block, const std::string& detail);
 
 // One line for `dlssvid info`: «software (h264); NVDEC with --hwaccel cuda when the GPU decodes this layout», «software (prores); NVDEC
-// does not decode this codec», «NVDEC only (av1: ...): NVDEC on '<gpu>', ...», «unavailable - ...».
+// does not decode this codec», «NVDEC only (av1: no software AV1 decoder in this build), on '<gpu>', AV1 8-bit 4:2:0 up to WxH» (or
+// «..., not checked: <why>»), «unavailable - <why>».
 std::string DescribeDecode(const DecodeSupport& support);
 
 // The refusal of a stream that cannot be decoded here (CheckDecodeSupport, or NVDEC refusing the first frame).

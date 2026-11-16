@@ -200,6 +200,11 @@ std::vector<ViewportSource> FrameStore::DiscoverPassVersions(const std::filesyst
 }
 
 namespace {
+// TASK-0076: NVDEC's refusal of a file met by a loader (the driver could not be asked before) - a verdict on the stream on this
+// machine: kept for the process, so a new set of sources does not forget it (the plan would let a run start until a frame refuses again)
+std::mutex refusedFilesMutex;
+std::map<std::string, DecodeSupport> refusedFiles;
+
 // TASK-0076: a video that cannot be decoded here is said once per process at warning level - the GUI sets its sources again on many
 // occasions (a preview, a mask, the result let go), each would say it again
 bool SaidOnce(const std::string& what) {
@@ -232,7 +237,11 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.color = ColorInfoFromStream(info);
         s.hasColor = true;
         s.hardwareOnly = info.hardwareOnly;
-        if (info.hardwareOnly)  // TASK-0076: asked once here (the answer is cached), not by a decoder on every frame
+        if (info.hardwareOnly) {
+            std::lock_guard<std::mutex> lock(refusedFilesMutex);
+            if (const auto it = refusedFiles.find(file.string()); it != refusedFiles.end()) s.undecodable = it->second;  // met before (TASK-0076)
+        }
+        if (info.hardwareOnly && !s.undecodable)  // TASK-0076: asked once here (the answer is cached), not by a decoder on every frame
             if (DecodeSupport d = CheckDecodeSupport(info); !d.Ok()) {
                 Log()->log(SaidOnce(file.string()) ? spdlog::level::warn : spdlog::level::debug, "video {} ('{}') cannot be decoded here: {}",
                            file.string(), name, d.why);
@@ -271,6 +280,7 @@ void FrameStore::SetSources(std::vector<ViewportSource> sources) {
     sources_ = std::move(sources);
     runtimes_.clear();
     refusedInLoad_.clear();
+    startFailed_.clear();
     for (const auto& s : sources_) runtimes_[s.name] = std::make_unique<SourceRuntime>();
     loaded_.clear();
     kept_.clear();
@@ -318,6 +328,12 @@ std::optional<DecodeSupport> FrameStore::Undecodable(const std::string& name) co
     for (const auto& s : sources_)
         if (s.name == name && s.undecodable) return s.undecodable;
     if (const auto it = refusedInLoad_.find(name); it != refusedInLoad_.end()) return it->second;
+    return std::nullopt;
+}
+
+std::optional<DecodeSupport> FrameStore::StartFailure(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (const auto it = startFailed_.find(name); it != startFailed_.end()) return it->second;
     return std::nullopt;
 }
 
@@ -566,7 +582,15 @@ void FrameStore::LoaderMain() {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 // a start failure (memory, the driver) is no verdict on the video: the next frame tries a new decoder
-                if (!e.support.Transient()) refusedInLoad_.emplace(key.source, e.support);
+                if (!e.support.Transient()) {
+                    refusedInLoad_.emplace(key.source, e.support);
+                    if (const ViewportSource* s = FindSource(key.source)) {
+                        std::lock_guard<std::mutex> files(refusedFilesMutex);
+                        refusedFiles.emplace(s->path.string(), e.support);
+                    }
+                } else {
+                    startFailed_[key.source] = e.support;
+                }
                 if (const auto it = runtimes_.find(key.source); it != runtimes_.end()) refused = it->second.get();
             }
             if (refused) {  // the refused decoder still holds the CUDA device: let it go now (SetSources waits for this load: still valid)
@@ -761,7 +785,10 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
     ColorInfo color = src.color;
     auto openOriginal = [&] {
         if (!rt.decoder) {
-            rt.decoder = std::make_unique<VideoDecoder>(src.path);
+            VideoDecoder::Options o;
+            o.probe = rt.openedOnce;  // TASK-0076: reopened (a task runs: NVDEC is let go after every frame) - not news in the log
+            rt.decoder = std::make_unique<VideoDecoder>(src.path, o);
+            rt.openedOnce = true;
             rt.color = ColorInfoFromStream(rt.decoder->Info());
         }
         if (!src.hasColor) color = rt.color;

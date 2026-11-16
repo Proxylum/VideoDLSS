@@ -30,6 +30,10 @@
 #include "viewport/Project.h"
 #include "viewport/ViewportProxy.h"
 #include "viewport/ViewportRenderer.h"
+#include "util/Log.h"
+
+#include <spdlog/sinks/ostream_sink.h>
+#include <sstream>
 
 #ifdef DLSSVID_WITH_CUDA
 #include <cuda.h>
@@ -163,7 +167,7 @@ TEST_CASE("An AV1 clip decodes on NVDEC with the default options: no device befo
             CHECK(info.bitDepth == (tenBit ? 10 : 8));
             CHECK(info.decoded == (tenBit ? FrameDesc{kW, kH, PixelFormat::Yuv420p16, 10} : FrameDesc{kW, kH, PixelFormat::Yuv420p, 8}));
             // an open that only reads Info() touches no GPU: the device comes with the first frame
-            CHECK_FALSE(dec.DecodesOnNvdec());
+            CHECK_FALSE(dec.HoldsCudaDevice());
             CHECK_FALSE(dec.UsingHwAccel());
             std::vector<CpuFrame> frames;
             CpuFrame f;
@@ -187,7 +191,8 @@ TEST_CASE("An AV1 clip decodes on NVDEC with the default options: no device befo
             // frames bit for bit
             VideoDecoder hw(clip, VideoDecoder::Options{HwAccel::Cuda});
             CHECK(hw.UsingHwAccel());
-            CHECK_FALSE(hw.DecodesOnNvdec());
+            CHECK(hw.HoldsCudaDevice());        // the device at the open ...
+            CHECK_FALSE(hw.DecodesOnNvdec());  // ... no frame from it yet
             CpuFrame cpu;
             GpuFrame gpu;
             size_t n = 0;
@@ -261,7 +266,7 @@ TEST_CASE("AV1 on NVDEC seeks like a sequential decode: SeekToFrame both ways an
             // SeekToFrame decodes up to the target
             {
                 VideoDecoder dec(clip);
-                CHECK_FALSE(dec.DecodesOnNvdec());
+                CHECK_FALSE(dec.HoldsCudaDevice());
                 REQUIRE(dec.SeekToFrame(60));
                 CHECK(dec.DecodesOnNvdec());
                 CpuFrame f;
@@ -294,7 +299,7 @@ TEST_CASE("AV1 on NVDEC seeks like a sequential decode: SeekToFrame both ways an
                 for (const int64_t k : {45, 10, 62}) {
                     INFO("keyframe before " << k);
                     REQUIRE(dec.SeekToKeyframeBefore(k));
-                    if (k == 45) CHECK_FALSE(dec.DecodesOnNvdec());
+                    if (k == 45) CHECK_FALSE(dec.HoldsCudaDevice());
                     CpuFrame f;
                     REQUIRE(dec.NextFrame(f));
                     CHECK(f.index <= k);
@@ -559,7 +564,7 @@ TEST_CASE("VideoDecoder and FrameStore::VideoSource refuse an AV1 stream NVDEC c
                     CHECK_THAT(std::string(e.what()), ContainsSubstring(std::string("DLSSVID_FAKE_NVDEC_AV1=") + fake));
                 }
                 CHECK(refused);
-                if (hw == HwAccel::None) CHECK_FALSE(dec.DecodesOnNvdec());  // refused before the device was made
+                if (hw == HwAccel::None) CHECK_FALSE(dec.HoldsCudaDevice());  // refused before the device was made
             }
             const auto source = FrameStore::VideoSource("source", clip);
             REQUIRE(source);  // listed, with its size and duration
@@ -664,7 +669,8 @@ TEST_CASE("NVDEC refusing the first frame (DLSSVID_FAKE_NVDEC_AV1=first-frame) i
     CHECK(first->support.block == DecodeBlock::NvdecFailed);
     CHECK(first->support.why == kFirstFrameReason);
     CHECK(std::string(first->what()) == clip.string() + ": " + kFirstFrameReason);
-    CHECK_FALSE(dec.DecodesOnNvdec());
+    CHECK(dec.HoldsCudaDevice());        // the device was made ...
+    CHECK_FALSE(dec.DecodesOnNvdec());  // ... and no frame came from it
     // the stand-in gone: what refuses now is the decoder's memory of the refusal - not FFmpeg's next error («Missing Sequence Header»)
     fake.reset();
     for (int i = 0; i < 3; ++i) {
@@ -704,11 +710,11 @@ TEST_CASE("RequireDecodable refuses before any frame a stream NVDEC cannot decod
             CHECK(e.support.block == DecodeBlock::NoAv1);
             CHECK_THAT(std::string(e.what()), ContainsSubstring(clip.string() + ": " + kNoAv1Reason));
         }
-        CHECK_FALSE(dec.DecodesOnNvdec());
+        CHECK_FALSE(dec.HoldsCudaDevice());
         const auto refused = RefusalOfNextFrame(dec);  // the same at the first frame
         REQUIRE(refused);
         CHECK(refused->support.block == DecodeBlock::NoAv1);
-        CHECK_FALSE(dec.DecodesOnNvdec());
+        CHECK_FALSE(dec.HoldsCudaDevice());
     }
     // the GPU's answer again: the decoder the refusal left behind decodes from the first frame, as a new one would
     CHECK_NOTHROW(dec.RequireDecodable());
@@ -747,16 +753,28 @@ TEST_CASE("FrameStore: NVDEC refusing a video in a loader marks it undecodable u
             CHECK(s.store->Undecodable("source"));
         }
         CHECK(s.store->Stats("source").decodedFrames == 0);
-        // set again (a reload): the refusal is forgotten, the next load asks NVDEC again - and is refused again
+        // set again with the source as it was found before the refusal: the store's own mark goes, a load is refused again
         s.store->SetSources({*found});
         CHECK_FALSE(s.store->Undecodable("source"));
-        CHECK(s.Load(5) == FrameStore::Status::Missing);
+        CHECK(s.Settle(5) == FrameStore::Status::Missing);  // the loaders at rest: the stand-in goes while none reads it
         CHECK(s.store->Undecodable("source"));
     }
-    // the stand-in gone and the sources set again: the frames show
+    // the stand-in gone: the process remembers the file NVDEC refused - a new source of it is undecodable at once, no decoder opens
+    const auto again = FrameStore::VideoSource("source", clip);
+    REQUIRE(again);
+    REQUIRE(again->undecodable);
+    CHECK(again->undecodable->block == DecodeBlock::NvdecFailed);
+    CHECK(again->undecodable->why == kFirstFrameReason);
     s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    CHECK(s.store->Undecodable("source"));
+    CHECK(s.Settle(7) == FrameStore::Status::Missing);
+    CHECK(s.store->Stats("source").decodedFrames == 0);
+    // the memory is the file's: a copy of the same stream decodes
+    const auto copy = dir / "copy.mp4";
+    std::filesystem::copy_file(clip, copy);
+    s.store->SetSources(Project::Create(copy, dir / "none").Sources());
     CHECK_FALSE(s.store->Undecodable("source"));
-    REQUIRE(s.Load(7) == FrameStore::Status::Ready);
+    REQUIRE(s.Settle(7) == FrameStore::Status::Ready);
     s.CheckTexels(7, ref[7], ci);
 }
 
@@ -795,15 +813,15 @@ TEST_CASE("FrameStore::ReleaseNvdecDecoders closes a video's decoder on NVDEC; t
     const std::vector<CpuFrame> ref = DecodeSequential(clip);
     REQUIRE(ref.size() == 24);
     const ColorInfo ci = ColorInfoFromStream(VideoDecoder(clip, VideoDecoder::Probe()).Info());
-    Av1Store s(0);  // no prefetch: no load runs after the current frame's
+    Av1Store s(0, 1);
     s.store->SetSources(Project::Create(clip, dir / "none").Sources());  // no proxy: the original's decoder on NVDEC
-    REQUIRE(s.Load(2) == FrameStore::Status::Ready);
+    REQUIRE(s.Settle(2) == FrameStore::Status::Ready);  // and its neighbours: the store at rest, no load competes with the release
     CHECK(s.store->Stats("source").decodedFrames > 0);
     s.store->ReleaseNvdecDecoders();
     CHECK(s.store->Stats("source").decodedFrames == 0);  // the stats count the decoders open: none is
     for (const int64_t f : {3, 20}) {
         INFO("frame " << f << " after the release");
-        REQUIRE(s.Load(f) == FrameStore::Status::Ready);
+        REQUIRE(s.Settle(f) == FrameStore::Status::Ready);
         s.CheckTexels(f, ref[static_cast<size_t>(f)], ci);
     }
     CHECK(s.store->Stats("source").decodedFrames > 0);
@@ -972,9 +990,11 @@ TEST_CASE("FrameStore lets the CUDA device go: a decoder NVDEC refused is closed
     CHECK(ContextBecomes(false));  // av1_nvenc wrote the clip in a context of its own
     {
         // NVDEC refuses the first frame: the loader closes the refused decoder - its CUDA device - at once
+        const auto refusedCopy = dir / "refused.mp4";  // the process remembers a file NVDEC refused: the blocks below use the clip
+        std::filesystem::copy_file(clip, refusedCopy);
         FakeNvdecEnv fake("first-frame");
         Av1Store s(0, 1);
-        const auto found = FrameStore::VideoSource("source", clip);
+        const auto found = FrameStore::VideoSource("source", refusedCopy);
         REQUIRE(found);
         s.store->SetSources({*found});
         REQUIRE(s.Settle(3) == FrameStore::Status::Missing);
@@ -1097,8 +1117,8 @@ TEST_CASE("dlssvid nr without NVDEC AV1: refused when its colour comes from the 
 
 namespace {
 const std::string kStartFailedReason =
-    "NVDEC could not start decoding this AV1 stream although the driver takes it - out of GPU memory or a driver error (FFmpeg's message is in "
-    "its output); this build has no software AV1 decoder (on the first frame)";
+    "NVDEC could not start decoding this AV1 stream now - out of GPU memory or a driver error; this build has no software AV1 decoder (on the first "
+    "frame)";
 }  // namespace
 
 TEST_CASE("NVDEC failing to start although the driver takes the stream (start-fails) is a transient refusal the decoder keeps", "[integration][gpu][av1]") {
@@ -1139,15 +1159,24 @@ TEST_CASE("FrameStore: NVDEC failing to start is no verdict on the video - not m
         FakeNvdecEnv fake("start-fails");
         s.store->SetSources(Project::Create(clip, dir / "none").Sources());
         CHECK_FALSE(s.store->FindSource("source")->undecodable);  // the driver takes it
-        CHECK(s.Load(3) == FrameStore::Status::Missing);
+        CHECK_FALSE(s.store->StartFailure("source"));
+        CHECK(s.Settle(3) == FrameStore::Status::Missing);
         CHECK_FALSE(s.store->Undecodable("source"));
-        CHECK(s.Load(4) == FrameStore::Status::Missing);  // a new decoder, refused again
+        const auto failed = s.store->StartFailure("source");
+        REQUIRE(failed);
+        CHECK(failed->block == DecodeBlock::NvdecStartFailed);
+        CHECK(failed->why == kStartFailedReason);
+        CHECK(s.Settle(14) == FrameStore::Status::Missing);  // a new decoder, refused again (and the loaders at rest)
         CHECK_FALSE(s.store->Undecodable("source"));
     }
     // NVDEC starts again (the memory came back): the next frame decodes - no reload of the sources
-    REQUIRE(s.Load(10) == FrameStore::Status::Ready);
+    REQUIRE(s.Settle(10) == FrameStore::Status::Ready);
     s.CheckTexels(10, ref[10], ci);
     CHECK_FALSE(s.store->Undecodable("source"));
+    CHECK(s.store->StartFailure("source"));  // said until the sources are set again: no verdict, nothing remembered for the file
+    CHECK_FALSE(FrameStore::VideoSource("source", clip)->undecodable);
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    CHECK_FALSE(s.store->StartFailure("source"));
 }
 
 TEST_CASE("FrameStore::ReleaseNvdecDecoders does not wait for a load in flight: its loader closes that decoder after the load",
@@ -1249,4 +1278,96 @@ TEST_CASE("SaysUnsupported: only NVENC's words for a missing encoder skip a GPU 
     ClipSpec bad;
     bad.pixFmt = "yuv420x";
     CHECK_THROWS(WriteClipIfSupported(Dir("says_unsupported") / "bad.mkv", bad));
+}
+
+namespace {
+const std::string kDeviceFailedReason =
+    "NVDEC could not start decoding this AV1 stream now - out of GPU memory or a driver error; this build has no software AV1 decoder (the CUDA "
+    "device could not be created: DLSSVID_FAKE_NVDEC_AV1=device-fails)";
+}  // namespace
+
+TEST_CASE("The CUDA device not created for a stream the driver takes (device-fails) is a transient refusal; the decoder is left as it was",
+          "[integration][gpu][av1]") {
+    const auto dir = Dir("device_fails");
+    REQUIRE_AV1_CLIP(clip, dir, false, 8);
+    const std::vector<CpuFrame> ref = DecodeSequential(clip);
+    REQUIRE(ref.size() == 8);
+    std::optional<FakeNvdecEnv> fake;
+    fake.emplace("device-fails");
+    VideoDecoder dec(clip);
+    CHECK_NOTHROW(dec.RequireDecodable());  // the driver takes the stream
+    for (int i = 0; i < 2; ++i) {
+        INFO("attempt " << i);
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::NvdecStartFailed);
+        CHECK(refused->support.Transient());
+        CHECK(refused->support.why == kDeviceFailedReason);
+        CHECK(std::string(refused->what()) == clip.string() + ": " + kDeviceFailedReason);
+        CHECK_FALSE(dec.HoldsCudaDevice());
+    }
+    // the device comes now: the same decoder decodes from the first frame (StartNvdec changed nothing when it failed)
+    fake.reset();
+    CpuFrame f;
+    for (size_t i = 0; i < ref.size(); ++i) {
+        REQUIRE(dec.NextFrame(f));
+        CHECK(f.index == static_cast<int64_t>(i));
+        CHECK(f.data == ref[i].data);
+    }
+    CHECK(dec.HoldsCudaDevice());
+}
+
+TEST_CASE("FrameStore: the CUDA device not created is no verdict - StartFailure says it, the next frame tries again", "[integration][viewport][gpu][av1]") {
+    const auto dir = Dir("store_device_fails");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    const std::vector<CpuFrame> ref = DecodeSequential(clip);
+    REQUIRE(ref.size() == 24);
+    const ColorInfo ci = ColorInfoFromStream(VideoDecoder(clip, VideoDecoder::Probe()).Info());
+    Av1Store s(0, 1);
+    {
+        FakeNvdecEnv fake("device-fails");
+        s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+        CHECK_FALSE(s.store->FindSource("source")->undecodable);
+        CHECK(s.Settle(3) == FrameStore::Status::Missing);  // the loaders at rest before the stand-in goes
+        CHECK_FALSE(s.store->Undecodable("source"));
+        const auto failed = s.store->StartFailure("source");
+        REQUIRE(failed);
+        CHECK(failed->block == DecodeBlock::NvdecStartFailed);
+        CHECK(failed->why == kDeviceFailedReason);
+    }
+    CHECK_FALSE(FrameStore::VideoSource("source", clip)->undecodable);  // nothing remembered for the file
+    REQUIRE(s.Settle(12) == FrameStore::Status::Ready);
+    s.CheckTexels(12, ref[12], ci);
+    CHECK_FALSE(s.store->Undecodable("source"));
+}
+
+TEST_CASE("FrameStore opens the original's decoder again quietly: the log says open once, not at every reopen while a task runs",
+          "[integration][viewport][gpu][av1]") {
+    const auto dir = Dir("reopen_log");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    std::ostringstream text;
+    auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(text);
+    sink->set_pattern("%l %v");
+    const auto level = Log()->level();
+    {
+        Av1Store s(0, 1);
+        s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+        // the sink and the level changed while no loader runs (nothing was asked of the store yet)
+        Log()->set_level(spdlog::level::debug);
+        Log()->sinks().push_back(sink);
+        s.store->SetHoldNvdec(false);  // a task runs: every load closes the decoder after it - each frame reopens it
+        for (const int64_t f : {2, 9, 16}) REQUIRE(s.Settle(f) == FrameStore::Status::Ready);
+        Log()->sinks().pop_back();  // the loaders at rest
+        Log()->set_level(level);
+    }
+    const std::string log = text.str();
+    const std::string opened = "open " + clip.string() + ": ";
+    auto count = [&](const std::string& what) {
+        size_t n = 0;
+        for (size_t at = log.find(what); at != std::string::npos; at = log.find(what, at + 1)) ++n;
+        return n;
+    };
+    INFO(log);
+    CHECK(count("info " + opened) == 1);   // the first open is news
+    CHECK(count("debug " + opened) >= 2);  // the reopens are not
 }

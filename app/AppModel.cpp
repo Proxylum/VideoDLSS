@@ -469,23 +469,23 @@ void AppModel::releaseResult(const std::filesystem::path& file) {
 
 void AppModel::requestFrames() { store_->SetCurrentTime(state().time, neededSources()); }
 
-void AppModel::releaseNvdec() {
-    ++nvdecUsers_;  // a task, a preview or a check: until its end the viewport closes NVDEC after every frame
-    if (store_) {
-        store_->SetHoldNvdec(false);
-        store_->ReleaseNvdecDecoders();
-    }
-    // the background proxy build of an NVDEC-only video decodes on NVDEC in its own process: stopped (started again at the next reload)
-    for (const char* name : {"source", "result"})
-        if (const ViewportSource* s = store_ ? store_->FindSource(name) : nullptr; s && s->hardwareOnly && proxyBuilding()) {
-            cancelProxies();
-            break;
-        }
+void AppModel::setTasksRunning(bool running) {
+    tasksRunning_ = running;
+    updateNvdecHold();
 }
 
-void AppModel::endNvdecUse() {
-    if (nvdecUsers_ > 0) --nvdecUsers_;
-    if (nvdecUsers_ == 0 && store_) store_->SetHoldNvdec(true);
+void AppModel::updateNvdecHold() {
+    // TASK-0076: while a task, a preview or a check runs, the viewport does not hold NVDEC between frames (its memory is theirs); from
+    // what runs, not counted - a check that did not start or a task cancelled in the queue leaves nothing behind
+    const bool busy = tasksRunning_ || checkProcess_ != nullptr;
+    if (!store_) return;
+    if (busy && !nvdecLetGo_) {
+        store_->SetHoldNvdec(false);
+        store_->ReleaseNvdecDecoders();
+    } else if (!busy) {
+        store_->SetHoldNvdec(true);
+    }
+    nvdecLetGo_ = busy;
 }
 
 void AppModel::startProxies() {
@@ -781,6 +781,7 @@ void AppModel::noteSourceRefused() {
     // TASK-0076: NVDEC refused the source's first frame in the viewport (the driver could not be asked before): the plan says it now -
     // «Обработать», Ctrl+Return, the preview and the stage runs stop, as for a refusal known in advance
     if (!hasProject() || !sourceDecode_.Ok() || !store_) return;
+    if (!planError_.isEmpty()) return;  // the plan already stops the runs (no video, bad parameters): nothing to rebuild on every frame
     if (store_->Undecodable("source")) refreshPlan();  // reads the refusal, drops the whole plan (outcome, previews' plans) and says it
 }
 
@@ -2096,7 +2097,6 @@ void AppModel::checkStage(const std::string& stage) {
     if (checkProcess_ || !hasProject()) return;
     const StageAvailability a = availability(stage);
     if (!a.checkable) return;
-    releaseNvdec();  // TASK-0076: the check's NGX feature gets the memory of the viewport's NVDEC decoders
     // a folder of its own: a cancelled check that ends late removes only its files
     const QString dir = QDir(QDir::tempPath()).filePath(QString("dlssvid-check-%1-%2").arg(QCoreApplication::applicationPid()).arg(++checkSerial_));
     QDir().mkpath(dir);
@@ -2116,6 +2116,7 @@ void AppModel::checkStage(const std::string& stage) {
     checkingStage_ = stage;
     const std::string key = checkKey(stage);
     checkProcess_ = new QProcess(this);
+    updateNvdecHold();  // TASK-0076: the check's NGX feature gets the memory of the viewport's NVDEC decoders
     checkProcess_->setProcessChannelMode(QProcess::MergedChannels);
     QProcess* proc = checkProcess_;
     QTimer::singleShot(120000, proc, [proc] {  // NGX that does not answer: the check ends as failed
@@ -2128,6 +2129,7 @@ void AppModel::checkStage(const std::string& stage) {
         QDir(dir).removeRecursively();
         if (checkProcess_ != proc) return;
         checkProcess_ = nullptr;
+        updateNvdecHold();
         checkingStage_.clear();
         StageCheck c;
         c.when = QTime::currentTime().toString("HH:mm");
@@ -2139,7 +2141,6 @@ void AppModel::checkStage(const std::string& stage) {
     connect(proc, &QProcess::finished, this, [this, proc, stage, key, json, dir](int code, QProcess::ExitStatus status) {
         const QString out = QString::fromUtf8(proc->readAll());
         proc->deleteLater();
-        endNvdecUse();  // TASK-0076: the check's releaseNvdec ends
         const QByteArray report = [&] {
             QFile f(json);
             return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
@@ -2147,6 +2148,7 @@ void AppModel::checkStage(const std::string& stage) {
         QDir(dir).removeRecursively();  // the settings file and the report
         if (checkProcess_ != proc) return;  // cancelled: another project
         checkProcess_ = nullptr;
+        updateNvdecHold();
         checkingStage_.clear();
         StageCheck c;
         c.when = QTime::currentTime().toString("HH:mm");
@@ -2180,6 +2182,7 @@ void AppModel::cancelCheck() {
     if (!checkProcess_) return;
     QProcess* p = checkProcess_;
     checkProcess_ = nullptr;
+    updateNvdecHold();
     checkingStage_.clear();
     p->kill();  // its finished slot sees another process (or none) and returns; deleteLater there
     emit availabilityChanged();

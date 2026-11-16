@@ -94,6 +94,9 @@ public:
     // TASK-0076: why the video `name` cannot be decoded here - the probe's verdict (ViewportSource::undecodable) or NVDEC refusing its
     // first frame in a loader; nullopt: it decodes (or is no video)
     std::optional<DecodeSupport> Undecodable(const std::string& name) const;
+    // TASK-0076: NVDEC could not start for the video `name` (NvdecStartFailed: memory, the driver) - its frames met then stay missing
+    // until the sources are set again; no verdict on the video
+    std::optional<DecodeSupport> StartFailure(const std::string& name) const;
     // TASK-0076: closes the videos' decoders that hold NVDEC (an AV1 source in the GUI process): a run gets that memory; a later frame of
     // the viewport opens one again. Never waits for a load in flight (the GUI thread): a busy decoder is closed by its loader after it.
     void ReleaseNvdecDecoders();
@@ -209,6 +212,7 @@ private:
         std::array<ProxySlot, 4> proxies;
         std::atomic<int64_t> aborted{0}, proxyLoads{0};
         std::atomic<bool> releasePending{false};  // TASK-0076: ReleaseNvdecDecoders found it busy - the loader closes it after the load
+        bool openedOnce = false;  // TASK-0076: the original's decoder was opened before (a reopen logs at debug level)
     };
     void ReleaseNvdecAfterLoad(const std::string& source);  // TASK-0076: a pending release, or every load while SetHoldNvdec(false)
     struct LoadResult {
@@ -244,6 +248,7 @@ private:
     Options options_;
     std::vector<ViewportSource> sources_;
     std::map<std::string, DecodeSupport> refusedInLoad_;  // TASK-0076: NVDEC refused a video in a loader (under mutex_; SetSources forgets)
+    std::map<std::string, DecodeSupport> startFailed_;    // TASK-0076: NVDEC did not start for a video (under mutex_; SetSources forgets)
     std::atomic<bool> holdNvdec_{true};                   // TASK-0076: SetHoldNvdec
     std::map<std::string, std::unique_ptr<SourceRuntime>> runtimes_;
     uint32_t imageW_ = 0, imageH_ = 0;

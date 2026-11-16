@@ -367,8 +367,10 @@ void MainWindow::selectSource(int hotkey) {
 // TASK-0076: the tooltip of a cell showing a video this machine cannot decode says why and what to do
 QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std::string>& sources) {
     QString s = tech;
-    for (const auto& name : sources)
-        if (const auto d = model_.store().Undecodable(name)) {
+    for (const auto& name : sources) {
+        const auto d = model_.store().Undecodable(name);
+        if (const auto f = model_.store().StartFailure(name); f && !d) s += "\n" + HumanSourceName(name) + ": " + SourceDecodeText(*f);  // not now
+        if (d) {
             const ViewportSource* src = model_.store().FindSource(name);
             const bool proxied = src && !src->proxy.empty();
             s += "\n" + HumanSourceName(name) + ": " +
@@ -376,6 +378,7 @@ QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std:
                   : name == "source"    ? tr("показан по прокси перемотки; само видео на этом компьютере не декодируется, обработать его нельзя")
                                         : tr("показан по прокси перемотки; само видео на этом компьютере не декодируется"));
         }
+    }
     return s;
 }
 
@@ -424,7 +427,11 @@ QString MainWindow::cellLabel(const QString& title, const std::string& source, b
     switch (model_.frameStateOf(source)) {
         case FrameState::Loading:
         case FrameState::Stale: s += tr(" · загрузка…"); break;  // stale: the previous frame stays on screen meanwhile
-        case FrameState::Missing: s += model_.store().Undecodable(source) ? SourceDecodeShort() : tr(" · нет кадра"); break;  // TASK-0076
+        case FrameState::Missing:  // TASK-0076: not decodable here; NVDEC did not start now (memory: a task runs)
+            s += model_.store().Undecodable(source)    ? SourceDecodeShort()
+                 : model_.store().StartFailure(source) ? tr(" · видеокарта не начала декодировать")
+                                                       : tr(" · нет кадра");
+            break;
         default: break;
     }
     return s;

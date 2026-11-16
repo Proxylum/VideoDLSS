@@ -7456,7 +7456,7 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     CHECK(SourceDecodeText(RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecFailed, "")) == failedText);
     CHECK(SourceDecodeText(RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecFailed, "on the first frame")) == failedText);
     const DecodeSupport start = RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecStartFailed, "on the first frame");
-    CHECK(SourceDecodeText(start) == QString::fromUtf8("Видеокарта не смогла начать декодировать этот AV1, хотя умеет, — скорее всего, не хватило её памяти. Что "
+    CHECK(SourceDecodeText(start) == QString::fromUtf8("Видеокарта сейчас не смогла начать декодировать этот AV1 — скорее всего, не хватило её памяти. Что "
                                                        "сделать: дождитесь конца обработки или закройте программы, которые занимают видеокарту, и попробуйте снова."));
     // the core's English details stay in the log; every text says what to do
     for (const DecodeSupport& s : {nc, nn, na, smaller, larger, start}) {
@@ -7602,17 +7602,21 @@ TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport bec
         CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);
         CHECK(model.planError() == SourceDecodeText(refused));
     }
-    // the same, step by step: a plan made while the GPU still decoded, then the viewport's decoder refused
+    // the same, step by step: a plan made while the GPU still decoded, then the viewport's decoder refused. Another file: the process
+    // remembers the one refused above (FrameStore). The stand-in outlives the model: its loaders never read the environment as it changes
+    const auto clip2 = d / "clip2.mp4";
+    std::filesystem::copy_file(clip, clip2);
+    std::optional<FakeNvdecEnv> fake;
     AppModel model(true);
-    model.openVideo(Q(clip));
+    model.openVideo(Q(clip2));
     model.setForce("upscale", true);  // a mark above NR: the preview plans without it (planNoForce_)
     model.refreshPlan();
-    model.store().WaitForCurrent();
+    SettleFrames(model, 0, 6);  // the loaders at rest before the stand-in comes
     REQUIRE(model.sourceDecode().Ok());
     REQUIRE(model.planError().isEmpty());
     REQUIRE_FALSE(model.outcome().stages.empty());
     REQUIRE_FALSE(model.previewPlan().stages.empty());
-    FakeNvdecEnv fake("first-frame");
+    fake.emplace("first-frame");
     model.store().SetSources(model.store().Sources());  // the decoders open again (a reload of the sources)
     model.store().SetCurrentTime(model.time(), {"source"});
     model.store().WaitForCurrent();
@@ -7646,7 +7650,42 @@ TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport bec
     QSettings().remove("view/autoProxy");
 }
 
-TEST_CASE("A task and a preview: the viewport lets NVDEC go for their whole run - each frame closes its decoder - and holds it again after; the AV1 proxy build stops",
+TEST_CASE("AppModel: a plan already stopped (an impossible encode) is not rebuilt on every frame update when the viewport meets a refusal",
+          "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_refused_plan_error");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    QSettings().setValue("view/autoProxy", false);
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    SettleFrames(model, 0, 6);
+    model.setEncode("h264_nvenc", {}, OutputFormatRequest{10, "auto"});  // H.264 NVENC is 8-bit only: a plan error
+    model.refreshPlan();
+    const QString encodeError = model.planError();
+    REQUIRE(encodeError.contains("8-bit only"));
+    REQUIRE(model.sourceDecode().Ok());
+    fake.emplace("first-frame");
+    model.store().SetSources(model.store().Sources());
+    model.store().SetCurrentTime(model.time(), {"source"});
+    model.store().WaitForCurrent();
+    REQUIRE(model.store().Undecodable("source"));
+    QSignalSpy planChanged(&model, &AppModel::planChanged);
+    for (int i = 0; i < 3; ++i) {  // the viewport's poll, again and again
+        model.store().Update();
+        model.notifyFramesUpdated();
+    }
+    CHECK(planChanged.count() == 0);
+    CHECK(model.planError() == encodeError);
+    // a plan made for another reason (an edit) says the refusal then
+    model.refreshPlan();
+    CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);
+    QSettings().remove("view/autoProxy");
+}
+
+TEST_CASE("While a task or a preview runs the viewport does not hold NVDEC between frames, after them it does again; neither stops the proxy build",
           "[app][gpu][av1]") {
     App();
     const auto before = PrimaryContextActive();
@@ -7654,7 +7693,7 @@ TEST_CASE("A task and a preview: the viewport lets NVDEC go for their whole run 
     // the primary context goes inactive when its last holder closes - checkable only where nothing else holds it (the CUDA runtime keeps
     // it to the process's end): ctest runs each case in a process of its own
     if (*before) SKIP("the primary CUDA context is held by an earlier case in this process: run this case alone");
-    const auto d = Dir("av1_release");
+    const auto d = Dir("av1_hold");
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
@@ -7664,47 +7703,91 @@ TEST_CASE("A task and a preview: the viewport lets NVDEC go for their whole run 
     ProjectTasks tasks(model, queue);
     model.openVideo(Q(clip));
     REQUIRE(model.hasProject());
-    REQUIRE(model.proxyBuilding());  // `dlssvid proxy` decodes the AV1 source on NVDEC in a process of its own
-    QSettings().setValue("view/autoProxy", false);
-
-    // a task queued (the run, a stage alone): NVDEC let go - the viewport's decoder and the proxy build
-    const int task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});
-    REQUIRE(task >= 0);
-    CHECK_FALSE(model.proxyBuilding());
-    CHECK(ContextBecomes(false));
-    // while it runs, the viewport still shows frames - each load closes its decoder after it
-    SettleFrames(model, 0, 6);
-    CHECK(ContextBecomes(false));
-    model.setTime(0.5);
-    SettleFrames(model, 6, 18);
-    CHECK(model.frameStateOf("source") == FrameState::Ready);
-    CHECK(ContextBecomes(false));
-    // the task ends: the viewport holds NVDEC between frames again
-    queue.cancel(task);
-    Pump([&] { return queue.finished(task); }, 20000);
-    REQUIRE(queue.finished(task));
-    model.setTime(0.8);  // frames not loaded yet
-    SettleFrames(model, 19, 23);
-    CHECK(ContextBecomes(true));
-
-    // the NR preview, a task of its own lane: the same from its start to its end
-    bool started = false;
-    QObject::connect(&queue, &TaskQueue::previewStarted, &queue, [&](int) { started = true; });
+    REQUIRE(model.proxyBuilding());
+    // a preview starts (at once, from an idle queue): the proxy build goes on - it is not the viewport's NVDEC
+    bool previewOn = false;
+    QObject::connect(&queue, &TaskQueue::previewStarted, &queue, [&](int) { previewOn = true; });
     const int preview = queue.enqueue("p", "ping", {"-n", "30", "127.0.0.1"}, {}, TaskQueue::Lane::Preview);
     REQUIRE(preview >= 0);
-    Pump([&] { return started; }, 20000);
-    REQUIRE(started);
+    REQUIRE(previewOn);
+    CHECK(model.proxyBuilding());
+    model.cancelProxies();  // the frames below come from NVDEC, not from a proxy
+    QSettings().setValue("view/autoProxy", false);
+    // while the preview runs, the viewport shows frames and lets NVDEC go after each
+    SettleFrames(model, 0, 6);
+    CHECK(model.frameStateOf("source") == FrameState::Ready);
     CHECK(ContextBecomes(false));
-    model.reloadSources();  // the frames load again while the preview runs
-    SettleFrames(model, 13, 23);
-    CHECK(ContextBecomes(false));
+    // the preview ends (its end is asked of the queue on the next turn of the event loop): the viewport holds NVDEC between frames again
     queue.cancel(preview);
     Pump([&] { return queue.finished(preview); }, 20000);
     REQUIRE(queue.finished(preview));
-    model.reloadSources();
+    Pump([] { return false; }, 100);
+    model.setTime(0.5);
+    SettleFrames(model, 6, 18);
+    CHECK(ContextBecomes(true));
+    // a task queued (the run, a stage alone): NVDEC let go at once, and after every frame while it runs
+    const int task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});
+    REQUIRE(task >= 0);
+    CHECK(ContextBecomes(false));
+    model.setTime(0.8);
+    SettleFrames(model, 19, 23);
+    CHECK(ContextBecomes(false));
+    queue.cancel(task);
+    Pump([&] { return queue.finished(task); }, 20000);
+    REQUIRE(queue.finished(task));
+    Pump([] { return false; }, 100);
+    model.reloadSources();  // the frames load again
     SettleFrames(model, 13, 23);
     CHECK(ContextBecomes(true));
     queue.stopAll(10000);
+}
+
+TEST_CASE("A stage check holds NVDEC away from the viewport while it runs; one that is cancelled or does not start gives it back; the proxy build goes on",
+          "[app][gpu][av1]") {
+    App();
+    const auto before = PrimaryContextActive();
+    if (!before) SKIP("no CUDA driver here");
+    if (*before) SKIP("the primary CUDA context is held by an earlier case in this process: run this case alone");
+    const auto d = Dir("av1_check_hold");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    QSettings().setValue("view/autoProxy", true);
+    AppModel model(false);  // the GPU's own adapter: a check (DLSS-G here) is offered only there
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    REQUIRE(model.proxyBuilding());
+    model.setStageEnabled("fg", true);
+    model.setStageParam("fg", "backend", "dlssg");
+    model.refreshPlan();
+    if (!model.availability("fg").checkable) {
+        model.cancelProxies();
+        QSettings().remove("view/autoProxy");
+        SKIP("DLSS-G cannot be checked here: " << model.availability("fg").text.toStdString());
+    }
+    // a check starts (its program a short process of our own: what it says is not the point): the proxy build goes on
+    model.setCheckProgramForTests("ping");
+    model.checkStage("fg");
+    REQUIRE(model.checkRunning());
+    CHECK(model.proxyBuilding());
+    model.cancelProxies();  // the frames below come from NVDEC, not from a proxy
+    QSettings().setValue("view/autoProxy", false);
+    CHECK(ContextBecomes(false));  // the viewport's decoder let go for the check
+    // cancelled (a task came): the viewport holds NVDEC between frames again
+    model.cancelCheck();
+    REQUIRE_FALSE(model.checkRunning());
+    model.setTime(0.5);
+    SettleFrames(model, 6, 18);
+    CHECK(ContextBecomes(true));
+    // a check whose program does not start: let go and given back
+    model.setCheckProgramForTests(Q(d / "no_such_dlssvid.exe"));
+    model.checkStage("fg");
+    Pump([&] { return !model.checkRunning(); }, 30000);
+    REQUIRE_FALSE(model.checkRunning());
+    model.reloadSources();
+    SettleFrames(model, 6, 18);
+    CHECK(ContextBecomes(true));
+    model.setCheckProgramForTests({});
 }
 
 TEST_CASE("The main window's cell says a video cannot be decoded here, and its tooltip says why: refused in advance, on the first frame, or shown by its proxy",
@@ -7735,6 +7818,29 @@ TEST_CASE("The main window's cell says a video cannot be decoded here, and its t
         CHECK(cell->text().endsWith(SourceDecodeShort()));
         CHECK_FALSE(cell->text().contains(QString::fromUtf8("нет кадра")));
         CHECK(cell->toolTip().contains("\n" + HumanSourceName("source") + ": " + SourceDecodeText(expected)));
+    }
+    {
+        // NVDEC does not start now (the CUDA device: memory, say): no verdict - the cell says so, the tooltip says what to do
+        const auto copy = d / "device.mp4";  // the process remembers the file refused above
+        std::filesystem::copy_file(clip, copy);
+        FakeNvdecEnv env("device-fails");
+        const DecodeSupport expected =
+            RefusedDecode(VideoDecoder(copy, VideoDecoder::Probe()).Info(), DecodeBlock::NvdecStartFailed, "the CUDA device could not be created: x");
+        MainWindow window(true);
+        window.openPath(Q(copy));
+        const QString shortText = QString::fromUtf8(" · видеокарта не начала декодировать");
+        QLabel* cell = nullptr;
+        Pump(
+            [&] {
+                cell = CellLabel(window);
+                return cell && cell->text().endsWith(shortText);
+            },
+            20000);
+        REQUIRE(cell);
+        INFO("label: " << cell->text().toStdString() << "; tooltip: " << cell->toolTip().toStdString());
+        CHECK(cell->text().endsWith(shortText));
+        CHECK(cell->toolTip().contains("\n" + HumanSourceName("source") + ": " + SourceDecodeText(expected)));
+        CHECK_FALSE(cell->toolTip().contains(QString::fromUtf8("Видео AV1 не декодируется на этом компьютере")));  // not a verdict
     }
     // a proxy made where NVDEC decodes AV1 (the project's passes next to the video): the frames show, the tooltip says what that means
     BuildProxy(clip, d / "clip_passes", "source");
@@ -7773,7 +7879,11 @@ TEST_CASE("AppModel: NVDEC failing to start although the driver takes the source
     model.store().WaitForCurrent();
     model.store().Update();
     model.notifyFramesUpdated();  // the viewport's poll
-    CHECK_FALSE(model.store().Undecodable("source"));
+    const auto failed = model.store().StartFailure("source");  // the viewport did meet it ...
+    REQUIRE(failed);
+    CHECK(failed->block == DecodeBlock::NvdecStartFailed);
+    CHECK(model.frameStateOf("source") == FrameState::Missing);
+    CHECK_FALSE(model.store().Undecodable("source"));  // ... and it is no verdict
     CHECK(model.sourceDecode().Ok());
     CHECK(model.sourceDecode().verified);
     CHECK(model.planError().isEmpty());
