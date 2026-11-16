@@ -468,8 +468,16 @@ void AppModel::releaseResult(const std::filesystem::path& file) {
 }
 
 void AppModel::requestFrames() {
-    store_->RetryStartFailures();  // TASK-0076: NVDEC did not start for a video (memory) - its frames are tried again on every new request
-    store_->SetCurrentTime(state().time, neededSources());
+    // TASK-0076: NVDEC did not start for a video (memory) - its frames are tried again on a jump or a step (not playback: its new frames
+    // are tried anyway) and when other sources are shown; not on a pan, a zoom, the wipe or an inspector edit, which call here on every
+    // mouse move (each try opens the file and a CUDA context again)
+    const std::vector<std::string> needed = neededSources();
+    if ((!inPlayTick_ && std::abs(state().time - retriedAt_) > 1e-9) || needed != retriedFor_) {
+        retriedAt_ = state().time;
+        retriedFor_ = needed;
+        store_->RetryStartFailures();
+    }
+    store_->SetCurrentTime(state().time, needed);
 }
 
 void AppModel::setTasksRunning(bool running) {
@@ -577,14 +585,29 @@ void AppModel::startProxies() {
                         heardVerdict = true;
                         continue;
                     }
-                    // «NVDEC refused this AV1 stream ... (<when>)»: its detail, said as the proxy build's
-                    std::string detail = l.mid(head.size()).toStdString();
-                    const std::string refusedWords = RefusedDecode(probe.Info(), DecodeBlock::NvdecFailed, "").why;
-                    if (detail.rfind(refusedWords + " (", 0) == 0 && detail.back() == ')')
-                        detail = detail.substr(refusedWords.size() + 2, detail.size() - refusedWords.size() - 3);
+                    const QString reason = l.mid(head.size());
+                    // a part NVDEC does not take, or the layout the probe did not learn (VideoDecoder::CheckDecode's words): judged here
+                    // as the decoder did - its own block and reason (a layout, a size: not «the GPU refused it, update the driver»)
+                    static const QRegularExpression partWords(R"(, on a part of the stream in other parameters \((\S+) (\d+)x(\d+)\)\)$)");
+                    static const QRegularExpression learnedWords(R"(, in (\S+) - a layout the probe did not learn\)$)");
+                    std::optional<DecodeSupport> judged;
+                    if (const auto m = partWords.match(reason); m.hasMatch())
+                        judged = CheckDecodeSupport(StreamPartInfo(probe.Info(), m.captured(1).toStdString(), m.captured(2).toUInt(), m.captured(3).toUInt()));
+                    else if (const auto m2 = learnedWords.match(reason); m2.hasMatch())
+                        judged = CheckDecodeSupport(StreamPartInfo(probe.Info(), m2.captured(1).toStdString(), 0, 0));
+                    DecodeSupport verdict;
+                    if (judged && !judged->Ok() && !judged->Transient()) {
+                        verdict = std::move(*judged);
+                        verdict.why = "the proxy build: " + reason.toStdString();
+                    } else {  // «NVDEC refused this AV1 stream ... (<when>)»: its detail, said as the proxy build's
+                        std::string detail = reason.toStdString();
+                        const std::string refusedWords = RefusedDecode(probe.Info(), DecodeBlock::NvdecFailed, "").why;
+                        if (detail.rfind(refusedWords + " (", 0) == 0 && detail.back() == ')')
+                            detail = detail.substr(refusedWords.size() + 2, detail.size() - refusedWords.size() - 3);
+                        verdict = RefusedDecode(probe.Info(), DecodeBlock::NvdecFailed, "the proxy build: " + detail);
+                    }
                     // not remembered (the file not readable now): the sources are not set again - they would start the same build again
-                    if (FrameStore::RememberRefusedFile(video, RefusedDecode(probe.Info(), DecodeBlock::NvdecFailed, "the proxy build: " + detail)))
-                        heardVerdict = true;
+                    if (FrameStore::RememberRefusedFile(video, verdict)) heardVerdict = true;
                 } catch (const std::exception& e) {
                     Log()->debug("viewport proxy: {} not probed: {}", video.string(), e.what());
                 }

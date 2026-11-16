@@ -394,7 +394,8 @@ QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std:
             const ViewportSource* src = model_.store().FindSource(name);
             const bool proxied = src && !src->proxy.empty();
             s += "\n" + HumanSourceName(name) + ": " +
-                 (!proxied && name == "result" && model_.sourceDecode().Ok() && d->block != DecodeBlock::NoCuda && d->block != DecodeBlock::NoNvdec
+                 (!proxied && name == "result" && model_.sourceDecode().Ok() && !model_.sourceInfo().codec.empty() && d->block != DecodeBlock::NoCuda &&
+                          d->block != DecodeBlock::NoNvdec
                       ? SourceDecodeText(*d) + "\n" +
                                                      tr("Результат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».")
                   : !proxied            ? SourceDecodeText(*d)

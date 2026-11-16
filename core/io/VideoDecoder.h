@@ -69,6 +69,11 @@ struct VideoStreamInfo {
     bool nvdecCodec = false;  // NVDEC decodes this codec at all (HasNvdecHwaccel): HwAccel::Cuda can take it
 };
 
+// TASK-0076: `info` as a part of the stream decodes - a part in other parameters than the probe's (a new sequence header) or the layout
+// the probe did not learn: the part's pixel format (its depth and chroma from FFmpeg's descriptor) and coded size. A format FFmpeg does not
+// know (or "") and a size of 0 keep the probe's. CheckDecodeSupport of it judges the part as the probe was judged.
+VideoStreamInfo StreamPartInfo(const VideoStreamInfo& info, const std::string& pixelFormat, uint32_t codedWidth, uint32_t codedHeight);
+
 // Keyframes of a video stream from its packets (demux only, no decoding; TASK-0040): the longest run of frames from
 // a keyframe to the next one or to the end - what a seek into the stream may have to decode.
 struct KeyframeScan {

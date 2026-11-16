@@ -93,9 +93,10 @@ std::string RefusalText(const DecodeSupport& s) {
                    " 4:2:0 (for example, GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder" +
                    (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::Size:
-            return codec + " " + std::to_string(s.width) + "x" + std::to_string(s.height) + " is outside what NVDEC of '" + s.caps.gpu + "' decodes (" +
-                   std::to_string(s.caps.minWidth) + "x" + std::to_string(s.caps.minHeight) + " to " + std::to_string(s.caps.maxWidth) + "x" +
-                   std::to_string(s.caps.maxHeight) + ", at most " + std::to_string(s.caps.maxMacroblocks) + " macroblocks)";
+            return codec + " " + std::to_string(s.width) + "x" + std::to_string(s.height) + " (the frame as stored) is outside what NVDEC of '" + s.caps.gpu +
+                   "' decodes (" + std::to_string(s.caps.minWidth) + "x" + std::to_string(s.caps.minHeight) + " to " + std::to_string(s.caps.maxWidth) + "x" +
+                   std::to_string(s.caps.maxHeight) + ", at most " + std::to_string(s.caps.maxMacroblocks) +
+                   " macroblocks), and this build has no software AV1 decoder";
         case DecodeBlock::NvdecFailed:
             return "NVDEC refused this AV1 stream and this build has no software AV1 decoder" + (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::NvdecStartFailed:

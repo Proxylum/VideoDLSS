@@ -99,4 +99,17 @@ bool SaysUnsupported(const std::string& text);
 // other failure throws: a test fails on it rather than skipping (a broken spec or a regression is not «unsupported»).
 std::optional<std::filesystem::path> WriteClipIfSupported(const std::filesystem::path& path, const ClipSpec& spec, std::string* why = nullptr);
 
+// TASK-0076: AV1 streams NVENC does not write, made of ones it does (an IVF file holds a temporal unit per frame):
+// `a` then `b` one after the other in one IVF file (b's timestamps going on from a's); `partB` may write b's units anew
+std::filesystem::path ConcatIvf(const std::filesystem::path& a, const std::filesystem::path& b, const std::filesystem::path& out,
+                                const std::function<std::string(const std::string&)>& partB = {});
+// an IVF file `copies` times one after the other, the timestamps going on; `each(index, unit)` writes each unit anew
+std::filesystem::path RepeatIvf(const std::filesystem::path& src, int copies, const std::filesystem::path& out,
+                                const std::function<std::string(int, const std::string&)>& each);
+// a temporal unit whose sequence headers (8-bit 4:2:0, profile 0) say 12-bit 4:2:0 (profile 2): av1dec asks for yuv420p12 - which
+// FFmpeg offers to no NVDEC - before it decodes the frames after it
+std::string TwelveBitTemporalUnit(const std::string& unit);
+// a temporal unit without its sequence header OBUs
+std::string WithoutSequenceHeaders(const std::string& unit);
+
 }  // namespace dlssvid::test

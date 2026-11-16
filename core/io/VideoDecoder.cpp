@@ -123,6 +123,19 @@ std::string ChromaOf(const AVPixFmtDescriptor* d) {
 
 }  // namespace
 
+VideoStreamInfo StreamPartInfo(const VideoStreamInfo& info, const std::string& pixelFormat, uint32_t codedWidth, uint32_t codedHeight) {
+    VideoStreamInfo part = info;
+    const AVPixelFormat fmt = pixelFormat.empty() ? AV_PIX_FMT_NONE : av_get_pix_fmt(pixelFormat.c_str());
+    if (const AVPixFmtDescriptor* d = fmt != AV_PIX_FMT_NONE ? av_pix_fmt_desc_get(fmt) : nullptr) {
+        part.pixelFormat = pixelFormat;
+        part.bitDepth = d->comp[0].depth;
+        part.chroma = ChromaOf(d);
+    }
+    if (codedWidth > 0) part.codedWidth = codedWidth;
+    if (codedHeight > 0) part.codedHeight = codedHeight;
+    return part;
+}
+
 FrameDesc DecodedFrameDescFor(const std::string& pixelFormat) {
     const AVPixelFormat fmt = av_get_pix_fmt(pixelFormat.c_str());
     if (fmt != AV_PIX_FMT_NONE) {
@@ -499,22 +512,19 @@ void VideoDecoder::CheckDecode(int err, const char* what) {
         const bool otherPart = (swFmt && info_.pixelFormat != "unknown" && info_.pixelFormat != swFmt) ||
                                (codec_->width > 0 && static_cast<uint32_t>(codec_->width) != info_.codedWidth) ||
                                (codec_->height > 0 && static_cast<uint32_t>(codec_->height) != info_.codedHeight);
+        // the layout the probe did not learn is known now (av1dec parsed the sequence header before it asked for a format): judged as a
+        // probe's would be - its own reason, or (the driver taking it) NVDEC not starting
+        const bool learnedNow = swFmt && info_.pixelFormat == "unknown";
         std::string when = framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "on the first frame";
         bool transient = nvdecStartTransient_;
-        if (otherPart) {  // the part judged against the GPU as the probe was: refused - that verdict with its reason; taken - as for the probe
-            const std::string part = std::string(swFmt ? swFmt : "?") + " " + std::to_string(codec_->width) + "x" + std::to_string(codec_->height);
-            when += ", on a part of the stream in other parameters (" + part + ")";
-            VideoStreamInfo other = info_;
-            if (swFmt) {
-                other.pixelFormat = swFmt;
-                if (const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(codec_->sw_pix_fmt)) {
-                    other.bitDepth = d->comp[0].depth;
-                    other.chroma = ChromaOf(d);
-                }
-            }
-            if (codec_->width > 0) other.codedWidth = static_cast<uint32_t>(codec_->width);
-            if (codec_->height > 0) other.codedHeight = static_cast<uint32_t>(codec_->height);
-            DecodeSupport judged = CheckDecodeSupport(other);
+        if (otherPart || learnedNow) {  // the part judged against the GPU as the probe was: refused - that verdict with its reason; taken - as for the probe
+            if (otherPart)
+                when += ", on a part of the stream in other parameters (" + std::string(swFmt ? swFmt : "?") + " " + std::to_string(codec_->width) + "x" +
+                        std::to_string(codec_->height) + ")";
+            else
+                when += ", in " + std::string(swFmt) + " - a layout the probe did not learn";
+            DecodeSupport judged = CheckDecodeSupport(StreamPartInfo(info_, swFmt ? swFmt : "", codec_->width > 0 ? static_cast<uint32_t>(codec_->width) : 0,
+                                                                     codec_->height > 0 ? static_cast<uint32_t>(codec_->height) : 0));
             if (!judged.Ok()) {
                 judged.why += " (" + when + ")";
                 refused_ = std::make_shared<const DecodeSupport>(std::move(judged));

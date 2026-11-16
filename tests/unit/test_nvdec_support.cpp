@@ -349,6 +349,8 @@ TEST_CASE("JudgeDecode: no CUDA, no NVDEC, no AV1 decoder, the size limits each 
         } else {
             CheckRefusal(s, DecodeBlock::Size);
             CHECK_THAT(s.why, ContainsSubstring("320x192"));
+            CHECK_THAT(s.why, ContainsSubstring("320x192 (the frame as stored)"));  // a turned video is shown the other way round
+            CHECK_THAT(s.why, ContainsSubstring("no software AV1 decoder"));
             CHECK_THAT(s.why, ContainsSubstring("'NVIDIA GeForce RTX 4090'"));
             CHECK_THAT(s.why, ContainsSubstring(std::to_string(c.minW) + "x" + std::to_string(c.minH) + " to " + std::to_string(c.maxW) + "x" +
                                                 std::to_string(c.maxH) + ", at most " + std::to_string(c.maxMb) + " macroblocks"));
@@ -576,6 +578,45 @@ TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver o
     CHECK(CheckDecodeSupport(av1).block == real.block);  // gone with its scope
     CHECK_FALSE(FakeNvdecRefusesFrames());
     CHECK_FALSE(FakeNvdecDeviceFails());
+}
+
+TEST_CASE("StreamPartInfo: a part of the stream as it decodes - the pixel format's depth and chroma from FFmpeg, the size; an unknown format or size keeps the probe's",
+          "[unit][av1]") {
+    const VideoStreamInfo probe = Av1Info();  // 320x192 yuv420p, 8-bit 4:2:0
+    {
+        const VideoStreamInfo part = StreamPartInfo(probe, "yuv420p12le", 384, 224);
+        CHECK(part.pixelFormat == "yuv420p12le");
+        CHECK(part.bitDepth == 12);
+        CHECK(part.chroma == "420");
+        CHECK(part.codedWidth == 384);
+        CHECK(part.codedHeight == 224);
+        CHECK(part.width == probe.width);  // the shown size is the probe's
+        CHECK(part.codecName == "av1");
+        CHECK(part.hardwareOnly);
+    }
+    CHECK(StreamPartInfo(probe, "yuv444p10le", 0, 0).chroma == "444");
+    CHECK(StreamPartInfo(probe, "yuv444p10le", 0, 0).bitDepth == 10);
+    CHECK(StreamPartInfo(probe, "yuv422p", 0, 0).chroma == "422");
+    CHECK(StreamPartInfo(probe, "gray", 0, 0).chroma == "other");
+    CHECK(StreamPartInfo(probe, "gbrp", 0, 0).chroma == "other");  // RGB
+    for (const char* unknown : {"", "?", "not-a-format"}) {
+        INFO("'" << unknown << "'");
+        const VideoStreamInfo part = StreamPartInfo(probe, unknown, 0, 0);
+        CHECK(part.pixelFormat == "yuv420p");
+        CHECK(part.bitDepth == 8);
+        CHECK(part.chroma == "420");
+        CHECK(part.codedWidth == 320);
+        CHECK(part.codedHeight == 192);
+    }
+    // one side known: that one taken
+    CHECK(StreamPartInfo(probe, "", 640, 0).codedWidth == 640);
+    CHECK(StreamPartInfo(probe, "", 640, 0).codedHeight == 192);
+    CHECK(StreamPartInfo(probe, "", 0, 360).codedWidth == 320);
+    CHECK(StreamPartInfo(probe, "", 0, 360).codedHeight == 360);
+    // judged as the probe is: the part's layout refused, the probe's taken
+    NvdecAv1Caps good = GoodCaps();
+    CHECK(JudgeDecode(StreamPartInfo(probe, "yuv420p12le", 0, 0), &good).block == DecodeBlock::Layout);
+    CHECK(JudgeDecode(StreamPartInfo(probe, "yuv420p10le", 0, 0), &good).Ok());
 }
 
 TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit][av1]") {

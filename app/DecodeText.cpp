@@ -39,17 +39,29 @@ QString SourceDecodeText(const DecodeSupport& s) {
                 .arg(gpu)
                 .arg(s.bitDepth)
                 .arg(transcode);
-        case DecodeBlock::Size: {
+        case DecodeBlock::Size: {  // «кадр в файле»: the stored frame - a turned video is shown the other way round
             const bool small = s.width < s.caps.minWidth || s.height < s.caps.minHeight;
-            const bool sidesFit = !small && s.width <= s.caps.maxWidth && s.height <= s.caps.maxHeight;
-            if (sidesFit)  // the macroblock count alone (FFmpeg's test: w * h / 256)
-                return Tr("Видео AV1 не декодируется на этом компьютере: кадр %1×%2 слишком велик для видеокарты %3 — она берёт не больше %4 блоков "
-                          "16×16. Что сделать: перекодируйте ролик другой программой в H.264 или HEVC либо в кадр поменьше.")
+            const bool large = s.width > s.caps.maxWidth || s.height > s.caps.maxHeight;
+            if (!small && !large)  // the macroblock count alone (FFmpeg's test: w * h / 256)
+                return Tr("Видео AV1 не декодируется на этом компьютере: кадр в файле %1×%2 слишком велик для видеокарты %3 — она берёт не больше %4 "
+                          "блоков 16×16, а другого декодера AV1 в этой версии программы нет. Что сделать: перекодируйте ролик другой программой в "
+                          "H.264 или HEVC либо в кадр поменьше.")
                     .arg(s.width)
                     .arg(s.height)
                     .arg(gpu)
                     .arg(s.caps.maxMacroblocks);
-            return Tr("Видео AV1 не декодируется на этом компьютере: кадр %1×%2 %3, чем декодирует видеокарта %4 (от %5×%6 до %7×%8). Что сделать: %9.")
+            if (small && large)  // one side below the minimum, the other above the maximum
+                return Tr("Видео AV1 не декодируется на этом компьютере: кадр в файле %1×%2 вне пределов, которые декодирует видеокарта %3 (от %4×%5 до "
+                          "%6×%7), а другого декодера AV1 в этой версии программы нет. Что сделать: перекодируйте ролик в H.264 или HEVC другой программой.")
+                    .arg(s.width)
+                    .arg(s.height)
+                    .arg(gpu)
+                    .arg(s.caps.minWidth)
+                    .arg(s.caps.minHeight)
+                    .arg(s.caps.maxWidth)
+                    .arg(s.caps.maxHeight);
+            return Tr("Видео AV1 не декодируется на этом компьютере: кадр в файле %1×%2 %3, чем декодирует видеокарта %4 (от %5×%6 до %7×%8), а другого "
+                      "декодера AV1 в этой версии программы нет. Что сделать: %9.")
                 .arg(s.width)
                 .arg(s.height)
                 .arg(small ? Tr("меньше") : Tr("больше"))

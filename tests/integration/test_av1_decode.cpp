@@ -662,212 +662,6 @@ bool Eventually(const std::function<bool()>& done, int timeoutMs = 5000) {
     return true;
 }
 
-// An IVF file of two AV1 streams one after the other - `a`, then `b` (other parameters: a part of the stream av1dec meets later), b's
-// timestamps going on from a's. av1_nvenc writes the sequence header into every keyframe of an IVF file: b's starts b's part.
-std::filesystem::path ConcatIvf(const std::filesystem::path& a, const std::filesystem::path& b, const std::filesystem::path& out,
-                                const std::function<std::string(const std::string&)>& partB = {}) {
-    auto u16 = [](const std::string& s, size_t at) { return static_cast<uint32_t>(static_cast<uint8_t>(s[at])) | static_cast<uint32_t>(static_cast<uint8_t>(s[at + 1])) << 8; };
-    auto u32 = [&](const std::string& s, size_t at) { return u16(s, at) | u16(s, at + 2) << 16; };
-    auto u64 = [&](const std::string& s, size_t at) { return static_cast<uint64_t>(u32(s, at)) | static_cast<uint64_t>(u32(s, at + 4)) << 32; };
-    auto put = [](std::string& s, size_t at, uint64_t v, int bytes) {
-        for (int i = 0; i < bytes; ++i) s[at + i] = static_cast<char>((v >> (8 * i)) & 0xff);
-    };
-    struct Frame {
-        uint64_t pts;
-        std::string data;
-    };
-    auto frames = [&](const std::string& f) {
-        REQUIRE(f.size() >= 32);
-        REQUIRE(f.compare(0, 4, "DKIF") == 0);
-        std::vector<Frame> out;
-        for (size_t at = u16(f, 6); at + 12 <= f.size();) {
-            const uint32_t size = u32(f, at);
-            REQUIRE(at + 12 + size <= f.size());
-            out.push_back({u64(f, at + 4), f.substr(at + 12, size)});
-            at += 12 + size;
-        }
-        return out;
-    };
-    const std::string fa = Read(a), fb = Read(b);
-    REQUIRE(fa.compare(16, 8, fb, 16, 8) == 0);  // the same time base
-    const std::vector<Frame> ka = frames(fa), kb = frames(fb);
-    REQUIRE(ka.size() >= 2);
-    REQUIRE_FALSE(kb.empty());
-    const uint64_t step = ka[1].pts - ka[0].pts;
-    std::string ivf = fa.substr(0, u16(fa, 6));
-    put(ivf, 24, ka.size() + kb.size(), 4);
-    auto append = [&](uint64_t pts, const std::string& data) {
-        std::string head(12, '\0');
-        put(head, 0, data.size(), 4);
-        put(head, 4, pts, 8);
-        ivf += head + data;
-    };
-    for (const Frame& f : ka) append(f.pts, f.data);
-    for (const Frame& f : kb) append(ka.back().pts + step + (f.pts - kb.front().pts), partB ? partB(f.data) : f.data);
-    std::ofstream(out, std::ios::binary) << ivf;
-    return out;
-}
-
-// Bits of an AV1 bitstream, most significant first (AV1 spec 4.10: f(n), uvlc())
-struct BitReader {
-    const std::string& s;
-    size_t pos = 0;  // in bits
-    uint32_t f(int n) {
-        uint32_t v = 0;
-        for (int i = 0; i < n; ++i, ++pos) {
-            REQUIRE(pos / 8 < s.size());
-            v = v << 1 | ((static_cast<uint8_t>(s[pos / 8]) >> (7 - pos % 8)) & 1u);
-        }
-        return v;
-    }
-    uint32_t uvlc() {
-        int zeros = 0;
-        while (!f(1)) ++zeros;
-        return zeros >= 32 ? UINT32_MAX : f(zeros) + ((1u << zeros) - 1);
-    }
-};
-struct BitWriter {
-    std::string out;
-    size_t pos = 0;
-    void put(uint32_t v, int n) {
-        for (int i = n - 1; i >= 0; --i, ++pos) {
-            if (pos % 8 == 0) out.push_back(0);
-            if ((v >> i) & 1u) out.back() = static_cast<char>(static_cast<uint8_t>(out.back()) | (0x80u >> (pos % 8)));
-        }
-    }
-};
-
-std::string Leb128(uint64_t v) {
-    std::string out;
-    do {
-        uint8_t byte = v & 0x7f;
-        v >>= 7;
-        if (v) byte |= 0x80;
-        out.push_back(static_cast<char>(byte));
-    } while (v);
-    return out;
-}
-
-// The payload of an 8-bit 4:2:0 sequence header (profile 0, AV1 spec 5.5) said as 12-bit 4:2:0 (profile 2) - the same up to its
-// color_config. The frames after it are no 12-bit pictures, but av1dec asks for the pixel format (yuv420p12, which FFmpeg offers to no
-// NVDEC) before it decodes any of them: a part of the stream NVDEC does not take, as one written so would be.
-std::string TwelveBitSequenceHeader(const std::string& payload) {
-    BitReader b{payload};
-    REQUIRE(b.f(3) == 0);  // seq_profile: the 8-bit 4:2:0 profile
-    b.f(1);                // still_picture
-    REQUIRE(b.f(1) == 0);  // reduced_still_picture_header: a video
-    bool decoderModel = false;
-    int bufferDelayBits = 0;
-    if (b.f(1)) {  // timing_info_present_flag
-        b.f(32);
-        b.f(32);
-        if (b.f(1)) b.uvlc();  // equal_picture_interval: num_ticks_per_picture_minus_1
-        decoderModel = b.f(1);
-        if (decoderModel) {
-            bufferDelayBits = static_cast<int>(b.f(5)) + 1;
-            b.f(32);
-            b.f(5);
-            b.f(5);
-        }
-    }
-    const bool initialDisplayDelay = b.f(1);
-    const int operatingPoints = static_cast<int>(b.f(5)) + 1;
-    for (int i = 0; i < operatingPoints; ++i) {
-        b.f(12);                      // operating_point_idc
-        if (b.f(5) > 7) b.f(1);       // seq_level_idx, seq_tier
-        if (decoderModel && b.f(1)) {  // decoder_model_present_for_this_op
-            b.f(bufferDelayBits);
-            b.f(bufferDelayBits);
-            b.f(1);
-        }
-        if (initialDisplayDelay && b.f(1)) b.f(4);
-    }
-    const int widthBits = static_cast<int>(b.f(4)) + 1, heightBits = static_cast<int>(b.f(4)) + 1;
-    b.f(widthBits);
-    b.f(heightBits);
-    if (b.f(1)) {  // frame_id_numbers_present_flag
-        b.f(4);
-        b.f(3);
-    }
-    for (int i = 0; i < 7; ++i) b.f(1);  // 128x128 superblocks, filter intra, intra edge, interintra, masked, warped motion, dual filter
-    const bool orderHint = b.f(1);
-    if (orderHint) {
-        b.f(1);
-        b.f(1);
-    }
-    const uint32_t screenContent = b.f(1) ? 2 : b.f(1);  // seq_choose_screen_content_tools: SELECT, else seq_force_screen_content_tools
-    if (screenContent > 0 && !b.f(1)) b.f(1);           // seq_choose_integer_mv, else seq_force_integer_mv
-    if (orderHint) b.f(3);
-    b.f(1);  // enable_superres
-    b.f(1);  // enable_cdef
-    b.f(1);  // enable_restoration
-    const size_t colorConfig = b.pos;
-    REQUIRE(b.f(1) == 0);  // high_bitdepth: an 8-bit stream
-    REQUIRE(b.f(1) == 0);  // mono_chrome
-    const uint32_t description = b.f(1);
-    uint32_t primaries = 2, transfer = 2, matrix = 2;
-    if (description) {
-        primaries = b.f(8);
-        transfer = b.f(8);
-        matrix = b.f(8);
-    }
-    REQUIRE_FALSE((primaries == 1 && transfer == 13 && matrix == 0));  // not the sRGB 4:4:4 shorthand
-    const uint32_t range = b.f(1);
-    const uint32_t samplePosition = b.f(2);
-    const uint32_t separateUv = b.f(1);
-    const uint32_t filmGrain = b.f(1);
-    BitWriter w;
-    w.put(2, 3);  // seq_profile 2
-    BitReader copy{payload};
-    copy.pos = 3;
-    while (copy.pos < colorConfig) w.put(copy.f(1), 1);
-    w.put(1, 1);  // high_bitdepth
-    w.put(1, 1);  // twelve_bit
-    w.put(0, 1);  // mono_chrome
-    w.put(description, 1);
-    if (description) {
-        w.put(primaries, 8);
-        w.put(transfer, 8);
-        w.put(matrix, 8);
-    }
-    w.put(range, 1);
-    w.put(1, 1);  // subsampling_x
-    w.put(1, 1);  // subsampling_y: 4:2:0
-    w.put(samplePosition, 2);
-    w.put(separateUv, 1);
-    w.put(filmGrain, 1);
-    w.put(1, 1);  // trailing bits
-    while (w.pos % 8) w.put(0, 1);
-    return w.out;
-}
-
-// A temporal unit (IVF frame) with its sequence header OBUs said as 12-bit (TwelveBitSequenceHeader); the other OBUs as they are
-std::string TwelveBitTemporalUnit(const std::string& unit) {
-    std::string out;
-    for (size_t at = 0; at < unit.size();) {
-        const uint8_t head = static_cast<uint8_t>(unit[at]);
-        const int type = (head >> 3) & 15;
-        REQUIRE((head & 2));  // obu_has_size_field
-        const size_t headSize = (head & 4) ? 2 : 1;
-        uint64_t size = 0;
-        size_t sizeBytes = 0;
-        for (;; ++sizeBytes) {
-            REQUIRE(at + headSize + sizeBytes < unit.size());
-            const uint8_t byte = static_cast<uint8_t>(unit[at + headSize + sizeBytes]);
-            size |= static_cast<uint64_t>(byte & 0x7f) << (7 * sizeBytes);
-            if (!(byte & 0x80)) {
-                ++sizeBytes;
-                break;
-            }
-        }
-        const std::string payload = unit.substr(at + headSize + sizeBytes, static_cast<size_t>(size));
-        const std::string written = type == 1 ? TwelveBitSequenceHeader(payload) : payload;  // OBU_SEQUENCE_HEADER
-        out += unit.substr(at, headSize) + Leb128(written.size()) + written;
-        at += headSize + sizeBytes + static_cast<size_t>(size);
-    }
-    return out;
-}
-
 struct Av1Store {
     D3D12Device dev{D3D12Device::Options{true, false}};
     std::unique_ptr<FrameStore> store;
@@ -1713,6 +1507,9 @@ TEST_CASE("FrameStore opens the original's decoder again quietly: the log says o
     INFO(log);
     CHECK(count("info " + opened) == 1);   // the first open is news
     CHECK(count("debug " + opened) >= 2);  // the reopens are not
+    const std::string onNvdec = clip.string() + ": av1 decodes on NVDEC only";  // VideoDecoder::StartNvdec, at each decoder's start
+    CHECK(count("info " + onNvdec) == 1);
+    CHECK(count("debug " + onNvdec) >= 2);
 }
 
 TEST_CASE("The driver not answering for a CUDA error (query-fails), NVDEC refusing the first frame then is a start failure, not a verdict",
@@ -2011,6 +1808,170 @@ TEST_CASE("FrameStore keeps a software decoder open while a task runs and throug
     CHECK(s.store->Stats("source").decodedFrames == decoded);  // not on NVDEC: kept
     REQUIRE(s.Settle(22) == FrameStore::Status::Ready);
     CHECK(s.store->Stats("source").decodedFrames > decoded);  // and it went on
+}
+
+TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: taken - NVDEC not starting is a start failure; 12-bit - the layout's verdict",
+          "[integration][gpu][av1][regression]") {
+    const auto dir = Dir("unknown_layout");
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 16;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto a = WriteClipIfSupported(dir / "a.ivf", spec, &why);
+    if (!a) SKIP("av1_nvenc does not support the clip here: " << why);
+    // 13 copies (208 frames, a keyframe every 8) with no sequence header before frame 160: the probe (some 5 s of the stream) meets
+    // none - the layout stays unknown; av1dec learns it at the keyframe a seek lands on (168), before it asks for a pixel format
+    constexpr int kFirstHeader = 160;
+    const auto plain = RepeatIvf(*a, 13, dir / "unknown.ivf", [](int i, const std::string& u) { return i < kFirstHeader ? WithoutSequenceHeaders(u) : u; });
+    const auto twelve = RepeatIvf(*a, 13, dir / "unknown12.ivf",
+                                  [](int i, const std::string& u) { return i < kFirstHeader ? WithoutSequenceHeaders(u) : TwelveBitTemporalUnit(u); });
+    for (const auto& file : {plain, twelve}) {
+        INFO(file.filename().string());
+        REQUIRE(VideoDecoder(file, VideoDecoder::Probe()).Info().pixelFormat == "unknown");
+    }
+    const std::string learned = "a layout the probe did not learn)";
+    {
+        // the stand-in aside: NVDEC decodes it from there
+        VideoDecoder dec(plain);
+        REQUIRE(dec.SeekToKeyframeBefore(170));
+        CpuFrame f;
+        REQUIRE(dec.NextFrame(f));
+        CHECK(f.desc.width == kW);
+    }
+    {
+        // 8-bit 4:2:0, which the driver takes: NVDEC not starting (the stand-in) is a start failure
+        FakeNvdecEnv fake("start-fails");
+        VideoDecoder dec(plain);
+        REQUIRE(dec.SeekToKeyframeBefore(170));
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::NvdecStartFailed);
+        CHECK(refused->support.Transient());
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(on the first frame, in yuv420p - " + learned));
+    }
+    {
+        // the driver not answering (first-frame): no word of it taking the stream - NVDEC's refusal stands as the stream's verdict
+        FakeNvdecEnv fake("first-frame");
+        VideoDecoder dec(plain);
+        REQUIRE(dec.SeekToKeyframeBefore(170));
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::NvdecFailed);
+        CHECK_FALSE(refused->support.Transient());
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(on the first frame, in yuv420p - " + learned));
+    }
+    // 12-bit: a layout the GPU does not take - its own verdict, whatever the stand-in
+    for (const char* value : {static_cast<const char*>(nullptr), "start-fails"}) {
+        INFO((value ? value : "no stand-in"));
+        FakeNvdecEnv fake(value);
+        VideoDecoder dec(twelve);
+        REQUIRE(dec.SeekToKeyframeBefore(170));
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::Layout);
+        CHECK_FALSE(refused->support.Transient());
+        CHECK_THAT(refused->support.why, ContainsSubstring("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here"));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(on the first frame, in yuv420p12le - " + learned));
+    }
+}
+
+TEST_CASE("dlssvid proxy --check and --force keep a proxy built earlier for a video this machine cannot decode: shown from it, not rebuilt",
+          "[integration][cli][gpu][av1][proxy]") {
+    const auto dir = Dir("proxy_kept");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    const auto passes = dir / "passes";
+    BuildProxy(clip, passes, "source");  // where NVDEC decodes AV1
+    REQUIRE(ValidProxy(clip, passes, "source"));
+    const std::string proxy = ValidProxy(std::filesystem::absolute(clip), std::filesystem::absolute(passes), "source")->string();  // as the CLI says it
+    const auto builtAt = std::filesystem::last_write_time(proxy);
+    auto stays = [&] {
+        CHECK(ValidProxy(clip, passes, "source"));
+        CHECK(std::filesystem::last_write_time(proxy) == builtAt);
+    };
+    {
+        // the driver's answer (no-av1): --check names the proxy that shows it, --force keeps it
+        FakeNvdecEnv fake("no-av1");
+        const std::string reason = CheckDecodeSupport(VideoDecoder(clip, VideoDecoder::Probe()).Info()).why;
+        const auto check = RunAll({"proxy", "--check", "-i", clip.string(), "--passes", passes.string()}, dir / "check.log");
+        INFO(check.out);
+        CHECK(check.code == 0);
+        CHECK_THAT(check.out, ContainsSubstring("source   " + clip.filename().string() + ": cannot be decoded here, shown from its proxy " + proxy + ": " + reason));
+        CHECK_THAT(check.out, !ContainsSubstring("no proxy"));
+        const auto force = RunAll({"proxy", "--force", "-i", clip.string(), "--passes", passes.string(), "--sources", "source"}, dir / "force_no_av1.log");
+        INFO(force.out);
+        CHECK(force.code == 0);
+        CHECK_THAT(force.out,
+                   ContainsSubstring("source: proxy not rebuilt, the video cannot be decoded here (the proxy built earlier stays: " + proxy + "): " + reason));
+        CHECK_THAT(force.out, !ContainsSubstring("source: no proxy"));
+        stays();
+    }
+    // NVDEC refusing (first-frame) or not starting (start-fails) on the rebuild's first frame: the proxy built earlier stays
+    for (const auto& [value, words] : {std::pair<const char*, const char*>{"first-frame", "the video cannot be decoded here"},
+                                       std::pair<const char*, const char*>{"start-fails", "NVDEC did not start (run it again later)"}}) {
+        INFO(value);
+        FakeNvdecEnv fake(value);
+        const auto force = RunAll({"proxy", "--force", "-i", clip.string(), "--passes", passes.string(), "--sources", "source"},
+                                  dir / (std::string("force_") + value + ".log"));
+        INFO(force.out);
+        CHECK(force.code == 0);
+        CHECK_THAT(force.out, ContainsSubstring(std::string("source: proxy not rebuilt, ") + words + " (the proxy built earlier stays: " + proxy + "): "));
+        CHECK_THAT(force.out, ContainsSubstring("(on the first frame)"));
+        CHECK_THAT(force.out, !ContainsSubstring("source: no proxy"));
+        stays();
+    }
+}
+
+TEST_CASE("dlssvid render and render --bench: NVDEC refusing or not starting on the first frame is said before timing; beside a shown source a refused one is shown empty and said",
+          "[integration][cli][gpu][av1]") {
+    const auto dir = Dir("render_shown");
+    REQUIRE_AV1_CLIP(clip, dir, false, 12);
+    ClipSpec plain;
+    plain.frames = 12;
+    plain.width = kW;
+    plain.height = kH;
+    const auto ffv1 = WriteClip(dir / "result.mkv", plain);
+    const auto passes = dir / "passes";
+    for (const auto& [value, words] : {std::pair<const char*, const char*>{"first-frame", "NVDEC refused this AV1 stream"},
+                                       std::pair<const char*, const char*>{"start-fails", "NVDEC could not start decoding this AV1 stream now"}}) {
+        INFO(value);
+        FakeNvdecEnv fake(value);
+        const auto json = dir / (std::string(value) + ".json");
+        const auto rd = RunAll({"render", "--warp", "-i", clip.string(), "--passes", passes.string(), "--bench", "4", "--bench-json", json.string()},
+                               dir / (std::string("bench_") + value + ".log"));
+        INFO(rd.out);
+        CHECK(rd.code != 0);
+        CHECK_THAT(rd.out, ContainsSubstring(std::string("render: 'source': ") + words));
+        CHECK_FALSE(std::filesystem::exists(json));  // nothing timed
+    }
+    // a grid with the result (FFV1 decodes): measured / rendered - the source's cells empty, and said
+    FakeNvdecEnv fake("first-frame");
+    const std::string emptyWords = "render: 'source': NVDEC refused this AV1 stream and this build has no software AV1 decoder (on the first frame) - shown empty";
+    const std::vector<std::string> grid{"--mode", "grid", "--sources", "source,result,source,result"};
+    std::vector<std::string> bench{"render", "--warp", "-i", clip.string(), "--passes", passes.string(), "--result", ffv1.string()};
+    bench.insert(bench.end(), grid.begin(), grid.end());
+    std::vector<std::string> png = bench;
+    const auto json = dir / "grid.json";
+    for (const auto& a : {std::string("--bench"), std::string("4"), std::string("--bench-json"), json.string()}) bench.push_back(a);
+    const auto gd = RunAll(bench, dir / "bench_grid.log");
+    {
+        INFO(gd.out);
+        CHECK(gd.code == 0);
+        CHECK(std::filesystem::exists(json));
+        CHECK_THAT(gd.out, ContainsSubstring(emptyWords));
+    }
+    const auto image = dir / "grid.png";
+    for (const auto& a : {std::string("--frame"), std::string("2"), std::string("-o"), image.string()}) png.push_back(a);
+    const auto pg = RunAll(png, dir / "render_grid.log");
+    {
+        INFO(pg.out);
+        CHECK(pg.code == 0);
+        CHECK(std::filesystem::exists(image));
+        CHECK_THAT(pg.out, ContainsSubstring(emptyWords));
+    }
 }
 
 TEST_CASE("NVDEC refusing a frame after a few decoded ones (later-frame) is the stream's verdict: kept, marked, remembered for the file",

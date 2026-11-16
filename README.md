@@ -293,18 +293,19 @@ decodes (`decode:` line). The sample layout is checked from the file; the driver
 depth, the frame size limits). A file this machine cannot decode is refused with the reason before the work starts —
 `process` before its stages, a stage command before its model (`nr` reading its colour from `color_sr` from a frame past 0
 decodes no video and is not refused), the GUI instead of the plan with «Обработать», Ctrl+Enter, the preview and the stage
-runs off, the viewport cell reads «· не декодируется» (its tooltip says why), no proxy is built (`proxy --check` says so),
-`render --bench` names the reason instead of timing empty frames. A file whose sample layout
-the probe did not learn is left to the first frame: refused then without the exact reason («NVDEC refused this AV1 stream»),
-and the GUI stops the runs as soon as its viewport or the background proxy build met it (and remembers it while the file is the
-same, until it is closed); so is NVDEC refusing a later frame - `process` then fails after the work started. A part of the
-video in other parameters (a new sequence header: size, bit depth) is checked against the GPU as the file was: a part it does
-not take is refused with that reason; NVDEC refusing a part it takes is judged as for the file (on a decoder's first frame, a
-start failure as below). A driver too old for FFmpeg's NVDEC reads as
+runs off, the viewport cell reads «· не декодируется» (its tooltip says why), no proxy is built (`proxy --check` says so and
+names a proxy built earlier, which stays in use), `render` and `render --bench` name the reason instead of showing or timing empty
+frames. A file whose sample layout the probe did not learn is checked on its first frame, once the decoder has learned it, as
+above (a layout, a size, NVDEC not starting); only when the driver could not be asked is it refused without the exact reason
+(«NVDEC refused this AV1 stream»). The GUI stops the runs as soon as its viewport or the background proxy build met such a
+refusal (and remembers it while the file is the same, until it is closed); so is NVDEC refusing a later frame - `process` then
+fails after the work started. A part of the video in other parameters (a new sequence header: size, bit depth) is checked
+against the GPU as the file was: a part it does not take is refused with that reason; NVDEC refusing a part it takes is judged
+as for the file (on a decoder's first frame, a start failure as below). A driver too old for FFmpeg's NVDEC reads as
 «no NVDEC» (reinstall or update the driver). NVDEC or its CUDA device failing to start
 (out of GPU memory, a driver error; also a driver that could not be asked for such an error) is no verdict on the video: the
-viewport cell reads «· видеокарта не начала декодировать», and those frames are asked for again on the next scrub or step,
-when a frame of that video decodes, and when the task is over; `process` and `render` report the failure. A scrubbing proxy built earlier still shows
+viewport cell reads «· видеокарта не начала декодировать», and those frames are asked for again on the next jump or step, when
+other sources are shown, when a frame of that video decodes, and when the task is over (not on a pan, a zoom or the wipe); `process` and `render` report the failure. A scrubbing proxy built earlier still shows
 such a source (one copied from another PC is used when the source kept its file times). The GUI's viewport decodes an AV1
 video on NVDEC in its own process; while a run, a preview or a stage check is going on it does not keep that decoder between
 frames. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be the one the stages
