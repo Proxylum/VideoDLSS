@@ -215,10 +215,10 @@ NvdecAv1Caps QueryLive(int bitDepth) {
     if (cuvid_load_functions(&cv, nullptr) < 0) {  // the driver has no video decoder library: NVDEC is not there
         c.checked = true;
         c.nvdecMissing = true;
-        c.why = "nvcuvid.dll could not be loaded";
+        c.why = "nvcuvid.dll could not be loaded (missing, or a driver too old for FFmpeg's NVDEC)";
         return c;
     }
-    if (!cv->cuvidGetDecoderCaps) {  // an old driver: decide on the first frame
+    if (!cv->cuvidGetDecoderCaps) {  // a guard: not reached with ffnvcodec's loader (it requires cuvidGetDecodeStatus, newer than this)
         c.why = "the driver does not report NVDEC capabilities";
         return c;
     }

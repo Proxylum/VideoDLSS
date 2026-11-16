@@ -293,9 +293,11 @@ decodes (`decode:` line). The sample layout is checked from the file; the driver
 depth, the frame size limits). A file this machine cannot decode is refused with the reason before the work starts —
 `process` before its stages, a stage command before its model (`nr` reading its colour from `color_sr` from a frame past 0
 decodes no video and is not refused), the GUI instead of the plan with «Обработать», Ctrl+Enter, the preview and the stage
-runs off, the viewport cell reads «· не декодируется» (its tooltip says why), no proxy is built. A driver that cannot be
-asked leaves it to the first frame: refused then without the exact reason («NVDEC refused this AV1 stream»), and the GUI
-stops the runs as soon as its viewport met it (and remembers it until it is closed). NVDEC or its CUDA device failing to start
+runs off, the viewport cell reads «· не декодируется» (its tooltip says why), no proxy is built. A file whose sample layout
+the probe did not learn is left to the first frame: refused then without the exact reason («NVDEC refused this AV1 stream»),
+and the GUI stops the runs as soon as its viewport met it (and remembers it until it is closed); so is NVDEC refusing a later
+frame (a new sequence header) - `process` then fails after the work started. A driver too old for FFmpeg's NVDEC reads as
+«no NVDEC» (reinstall or update the driver). NVDEC or its CUDA device failing to start
 (out of GPU memory, a driver error; also a driver that could not be asked for such an error) is no verdict on the video: the
 viewport cell reads «· видеокарта не начала декодировать», and those frames are asked for again on the next scrub or step,
 when a frame of that video decodes, and when the task is over; `process` and `render` report the failure. A scrubbing proxy built earlier still shows

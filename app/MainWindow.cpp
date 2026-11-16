@@ -244,23 +244,23 @@ void MainWindow::buildMenus() {
         QSettings().setValue("view/autoProxy", was);
         QSettings().setValue("view/proxyMaxGiB", before);
         // TASK-0076: startProxies skips a video this machine cannot decode - said, not silent (a proxy already there shows it: nothing to say)
-        QStringList skipped;
+        QStringList skipped;  // «<name>: <why>» - the video need not be on screen (no cell's tooltip to point to)
         for (const char* name : {"source", "result"})
-            if (const ViewportSource* s = model_.store().FindSource(name); s && s->proxy.empty() && model_.store().Undecodable(name))
-                skipped << HumanSourceName(name);
-        if (!skipped.isEmpty())
-            statusBar()->showMessage(tr("Прокси не строится (%1): видео не декодируется на этом компьютере, причина — в подсказке ячейки").arg(skipped.join(", ")), 8000);
+            if (const ViewportSource* s = model_.store().FindSource(name); s && s->proxy.empty())
+                if (const auto d = model_.store().Undecodable(name)) skipped << HumanSourceName(name) + ": " + SourceDecodeText(*d);
+        if (!skipped.isEmpty()) QMessageBox::information(this, tr("Прокси для перемотки не строится"), skipped.join("\n\n"));
     });
     view->addAction(tr("Удалить прокси для перемотки"), this, [this] {
         // TASK-0076: a video this machine cannot decode is shown only from its proxy, and it is not built again here
+        QStringList only;
         for (const char* name : {"source", "result"})
-            if (const ViewportSource* s = model_.store().FindSource(name); s && !s->proxy.empty() && model_.store().Undecodable(name)) {
-                if (QMessageBox::question(this, tr("Удалить прокси для перемотки"),
-                                          tr("%1 на этом компьютере не декодируется и показывается только по прокси, а заново он здесь не построится. Удалить прокси?")
-                                              .arg(HumanSourceName(name))) != QMessageBox::Yes)
-                    return;
-                break;
-            }
+            if (const ViewportSource* s = model_.store().FindSource(name); s && !s->proxy.empty() && model_.store().Undecodable(name))
+                only << HumanSourceName(name);
+        if (!only.isEmpty() &&
+            QMessageBox::question(this, tr("Удалить прокси для перемотки"),
+                                  tr("%1: на этом компьютере не декодируется и показывается только по прокси, а заново здесь не построится. Удалить прокси?")
+                                      .arg(only.join(", "))) != QMessageBox::Yes)
+            return;
         model_.cancelProxies();
         RemoveProxy(model_.project().passesRoot, "source");
         RemoveProxy(model_.project().passesRoot, "result");

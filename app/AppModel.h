@@ -113,7 +113,9 @@ public:
     // TASK-0076: whether a task or a preview runs or waits (ProjectTasks, from the queue): with a check of the model's, the viewport does
     // not hold NVDEC between frames meanwhile
     void setTasksRunning(bool running);
-    void noteSourceRefused();  // TASK-0076: a refusal the viewport met on the source's first frame becomes the plan's verdict
+    // TASK-0076: a refusal the viewport met on the source (NVDEC refusing its first frame with no answer from the driver before, or a later
+    // frame) becomes the plan's verdict
+    void noteSourceRefused();
     // a stage the run would refuse although the plan exists (depth does not fit the GPU, TASK-0039): «Обработать» waits
     QString planBlocker() const;
     QString sourceHashStatus() const;                        // «совпадает с пассами» / «N пассов от другого исходника» / «пассов нет»

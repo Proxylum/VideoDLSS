@@ -225,7 +225,7 @@ TEST_CASE("JudgeDecode: the layout is judged before NVDEC is asked; an unknown l
         NvdecAv1Caps noNvdec = GoodCaps();
         noNvdec.nvdecMissing = true;
         noNvdec.supported = false;
-        noNvdec.why = "nvcuvid.dll could not be loaded";
+        noNvdec.why = "nvcuvid.dll could not be loaded (missing, or a driver too old for FFmpeg's NVDEC)";
         NvdecAv1Caps noAv1 = GoodCaps();
         noAv1.supported = false;
         CheckRefusal(JudgeDecode(Av1Info("unknown"), &noCuda), DecodeBlock::NoCuda);
@@ -291,11 +291,11 @@ TEST_CASE("JudgeDecode: no CUDA, no NVDEC, no AV1 decoder, the size limits each 
     noNvdec.supported = false;
     noNvdec.nvdecMissing = true;
     noNvdec.gpu = "NVIDIA GeForce RTX 3060";
-    noNvdec.why = "nvcuvid.dll could not be loaded";
+    noNvdec.why = "nvcuvid.dll could not be loaded (missing, or a driver too old for FFmpeg's NVDEC)";
     const DecodeSupport nn = JudgeDecode(Av1Info(), &noNvdec);
     CheckRefusal(nn, DecodeBlock::NoNvdec);
     CHECK(nn.why == "AV1 decodes only on NVDEC in this build - there is no software AV1 decoder - and the NVIDIA driver's video decoder is missing: "
-                    "nvcuvid.dll could not be loaded");
+                    "nvcuvid.dll could not be loaded (missing, or a driver too old for FFmpeg's NVDEC)");
     // CUDA and NVDEC but no AV1 in it: the GPU and the depth named
     NvdecAv1Caps noAv1 = GoodCaps();
     noAv1.supported = false;
@@ -635,7 +635,8 @@ TEST_CASE(kFakeWarningsChild, "[.][av1-child]") {
     CHECK(Count(log, "later-frame: ignored") == 2);
 }
 
-TEST_CASE("DLSSVID_FAKE_NVDEC_AV1 is said once per value, not once per process: three values faked, two not understood - five warnings", "[unit][av1]") {
+// [gpu]: the child asks the driver for the values it does not understand (a CUDA context)
+TEST_CASE("DLSSVID_FAKE_NVDEC_AV1 is said once per value, not once per process: three values faked, two not understood - five warnings", "[unit][av1][gpu]") {
     char* self = nullptr;
     REQUIRE(_get_pgmptr(&self) == 0);
     REQUIRE(self);

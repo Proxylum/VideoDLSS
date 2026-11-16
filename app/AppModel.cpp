@@ -530,6 +530,14 @@ void AppModel::startProxies() {
             }
         }
         if (!ready.isEmpty()) emit message(tr("Прокси для перемотки готов: %1").arg(ready.join(", ")));
+        // TASK-0076: NVDEC refused the video or did not start in the proxy process (its lines: «<name>: no proxy …») - said, not silent
+        QStringList refused;
+        for (const char* name : {"source", "result"})
+            // «no proxy, the video cannot be decoded here» / «no proxy now, NVDEC did not start» - not «no proxy needed» (a short GOP)
+            if (out.contains(QString("%1: no proxy,").arg(name)) || out.contains(QString("%1: no proxy now").arg(name))) refused << HumanSourceName(name);
+        if (!refused.isEmpty())
+            emit message(tr("Прокси для перемотки не построен (%1): видеокарта не декодировала видео — подробности в логе").arg(refused.join(", ")));
+        if (!refused.isEmpty()) Log()->warn("viewport proxy: {}", out.right(600).toStdString());
         emit proxiesChanged();
     });
     Log()->info("viewport proxy: building {} in the background", names.join(", ").toStdString());
@@ -787,12 +795,11 @@ void AppModel::noteSourceRefused() {
     if (!hasProject() || !sourceDecode_.Ok() || !store_) return;
     const auto refused = store_->Undecodable("source");
     if (!refused) return;
-    if (!planError_.isEmpty()) {  // the plan already says another error and stops the runs: the verdict holds the stage runs too - once
+    refreshPlan();  // reads the refusal before anything else: it replaces another plan error (the more basic one) and drops the plan
+    if (sourceDecode_.Ok()) {  // the plan stopped before the source (no project file...): the verdict still holds the runs - and is kept, once
         sourceDecode_ = *refused;
         emit planChanged();
-        return;
-    }
-    refreshPlan();  // reads the refusal, drops the whole plan (outcome, previews' plans) and says it
+    }  // reads the refusal, drops the whole plan (outcome, previews' plans) and says it
 }
 
 // ---- comparison in one action ----------------------------------------------------------------------

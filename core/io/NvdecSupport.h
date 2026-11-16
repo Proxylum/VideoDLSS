@@ -37,8 +37,9 @@ enum class DecodeBlock {
 
 // What the driver says of AV1 decoding on CUDA device 0 (FFmpeg's NVDEC takes that one), at one bit depth, 4:2:0.
 struct NvdecAv1Caps {
-    bool checked = false;    // a definite answer: no CUDA, or the decoder caps were read. false: the driver could not be asked (an old
-                             // driver without cuvidGetDecoderCaps, or a CUDA error: cudaError) - not cached
+    bool checked = false;    // a definite answer: no CUDA, no nvcuvid.dll (nvdecMissing), or the decoder caps were read. false: the
+                             // driver could not be asked (a CUDA error: cudaError; a driver without cuvidGetDecoderCaps, which FFmpeg's
+                             // loader does not reach) - not cached
     bool cuda = false;       // a CUDA device exists
     bool nvdecMissing = false;  // ... but the driver's video decoder library (nvcuvid.dll) could not be loaded
     bool cudaError = false;     // not checked because a CUDA call failed (a context not created now: memory) - not an old driver

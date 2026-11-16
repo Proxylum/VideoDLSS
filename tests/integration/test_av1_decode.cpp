@@ -38,6 +38,7 @@
 
 #ifdef DLSSVID_WITH_CUDA
 #include <cuda.h>
+#include <cuda_runtime_api.h>
 #endif
 
 using namespace dlssvid;
@@ -1524,6 +1525,60 @@ TEST_CASE("The driver not answering for a CUDA error (query-fails), NVDEC refusi
     REQUIRE(s.Settle(10) == FrameStore::Status::Ready);
     s.CheckTexels(10, ref[10], ci);
     CHECK_FALSE(s.store->StartFailure("source"));
+}
+
+namespace {
+constexpr const char* kFlagsChild = "CUDA primary context active with flags beside BLOCKING_SYNC - the child of the case that starts it";
+}  // namespace
+
+// Hidden ([.]): run by the case below in a process of its own - the CUDA runtime keeps the primary context it starts to the process's end
+TEST_CASE(kFlagsChild, "[.][av1-child]") {
+#ifdef DLSSVID_WITH_CUDA
+    const char* clip = std::getenv("DLSSVID_TEST_AV1_CLIP");
+    REQUIRE(clip);
+    // as a stage whose CUDA runtime came first: the primary context active with the blocking scheduling FFmpeg wants and another flag
+    // (local memory kept at its largest; cudaDeviceMapHost would not do: the driver no longer reports it, every context maps host memory)
+    REQUIRE(cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync | cudaDeviceLmemResizeToMax) == cudaSuccess);
+    REQUIRE(cudaFree(nullptr) == cudaSuccess);
+    CUdevice dev = 0;
+    unsigned flags = 0;
+    int active = 0;
+    REQUIRE(cuDeviceGet(&dev, 0) == CUDA_SUCCESS);
+    REQUIRE(cuDevicePrimaryCtxGetState(dev, &flags, &active) == CUDA_SUCCESS);
+    REQUIRE(active);
+    INFO("primary context flags " << flags);
+    REQUIRE((flags & CU_CTX_SCHED_MASK) == CU_CTX_SCHED_BLOCKING_SYNC);  // the scheduling bits as FFmpeg wants them
+    if (flags == CU_CTX_SCHED_BLOCKING_SYNC) SKIP("the driver keeps no flag beside the scheduling: nothing to tell apart here");
+    // a decoder with the default options: NVDEC, or FFmpeg's «Primary context already active with incompatible flags» - and no frame
+    VideoDecoder dec(clip);
+    CpuFrame f;
+    int frames = 0;
+    while (dec.NextFrame(f)) ++frames;
+    CHECK(frames == 12);
+    CHECK(dec.DecodesOnNvdec());
+#else
+    SKIP("built without CUDA");
+#endif
+}
+
+TEST_CASE("NVDEC takes an AV1 stream after a stage's CUDA runtime made the primary context with another flag beside blocking sync (regression of round 3)",
+          "[integration][gpu][av1][regression]") {
+    const auto dir = Dir("primary_flags");
+    REQUIRE_AV1_CLIP(clip, dir, false, 12);
+    char* self = nullptr;
+    REQUIRE(_get_pgmptr(&self) == 0);
+    REQUIRE(self);
+    const auto log = dir / "child.log";
+    _putenv_s("DLSSVID_TEST_AV1_CLIP", clip.string().c_str());
+    const std::string cmd = std::string("\"\"") + self + "\" \"" + kFlagsChild + "\" -r compact > \"" + log.string() + "\" 2>&1\"";
+    const int code = std::system(cmd.c_str());
+    _putenv_s("DLSSVID_TEST_AV1_CLIP", "");
+    const std::string out = Read(log);
+    INFO(out);
+    if (out.find("skipped") != std::string::npos && out.find("failed") == std::string::npos) SKIP("the child could not set the case up: see its output");
+    CHECK(code == 0);
+    CHECK_THAT(out, ContainsSubstring("All tests passed"));
+    CHECK_THAT(out, !ContainsSubstring("incompatible flags"));
 }
 
 TEST_CASE("NVDEC refusing a frame after a few decoded ones (later-frame) is the stream's verdict: kept, marked, remembered for the file",

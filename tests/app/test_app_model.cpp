@@ -7435,11 +7435,11 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     noNvdec.cuda = true;
     noNvdec.nvdecMissing = true;
     noNvdec.gpu = "NVIDIA GeForce RTX 3060";
-    noNvdec.why = "nvcuvid.dll could not be loaded";
+    noNvdec.why = "nvcuvid.dll could not be loaded (missing, or a driver too old for FFmpeg's NVDEC)";
     const DecodeSupport nn = JudgeDecode(Av1StreamInfo("yuv420p", 8), &noNvdec);
     REQUIRE(nn.block == DecodeBlock::NoNvdec);
     CHECK(SourceDecodeText(nn) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в драйвере NVIDIA не нашёлся видеодекодер (NVDEC), а другого декодера AV1 в этой "
-                                                    "версии программы нет. Что сделать: переустановите драйвер NVIDIA и перезапустите программу или ") +
+                                                    "версии программы нет. Что сделать: переустановите или обновите драйвер NVIDIA и перезапустите программу или ") +
                                       transcode + ".");
     NvdecAv1Caps noAv1;
     noAv1.checked = true;
@@ -7687,7 +7687,7 @@ TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport bec
     QSettings().remove("view/autoProxy");
 }
 
-TEST_CASE("AppModel: a plan already stopped (an impossible encode) takes the viewport's refusal once, not rebuilt; the stage runs go off",
+TEST_CASE("AppModel: the viewport's refusal replaces another plan error (an impossible encode): the plan says it, once; the cards and the stage runs go off",
           "[app][gpu][av1]") {
     App();
     const auto d = Dir("av1_refused_plan_error");
@@ -7695,14 +7695,14 @@ TEST_CASE("AppModel: a plan already stopped (an impossible encode) takes the vie
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
     QSettings().setValue("view/autoProxy", false);
+    const DecodeSupport refused = RefusedDecode(VideoDecoder(clip, VideoDecoder::Probe()).Info(), DecodeBlock::NvdecFailed, "on the first frame");
     std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
     AppModel model(true);
     model.openVideo(Q(clip));
     SettleFrames(model, 0, 6);
     model.setEncode("h264_nvenc", {}, OutputFormatRequest{10, "auto"});  // H.264 NVENC is 8-bit only: a plan error
     model.refreshPlan();
-    const QString encodeError = model.planError();
-    REQUIRE(encodeError.contains("8-bit only"));
+    REQUIRE(model.planError().contains("8-bit only"));
     REQUIRE(model.sourceDecode().Ok());
     fake.emplace("first-frame");
     model.store().SetSources(model.store().Sources());
@@ -7721,19 +7721,78 @@ TEST_CASE("AppModel: a plan already stopped (an impossible encode) takes the vie
         model.notifyFramesUpdated();
     }
     CHECK(planChanged.count() == 1);  // said once: no plan rebuilt on every frame update
-    CHECK(model.planError() == encodeError);
+    INFO("planError: " << model.planError().toStdString());
     CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);
+    CHECK(model.sourceDecode().why == refused.why);
+    CHECK(model.planError() == SourceDecodeText(refused));  // the more basic error: no run on this source, whatever the encode
+    CHECK(model.plan().stages.empty());
+    CHECK(model.outcome().stages.empty());
+    int on = 0;
+    for (const auto& st : model.project().stages) {
+        if (!st.enabled) continue;
+        INFO(st.name);
+        ++on;
+        CHECK(model.cardState(st.name).state == QString::fromUtf8("не запустить: исходник не декодируется на этом компьютере"));
+    }
+    CHECK(on >= 1);
     panel.refresh();
     for (QPushButton* b : RunAloneButtons(panel)) {  // the verdict holds the stage runs: they would refuse the source at once
         CHECK_FALSE(b->isEnabled());
-        CHECK(b->toolTip() == SourceDecodeText(model.sourceDecode()));
+        CHECK(b->toolTip() == SourceDecodeText(refused));
     }
-    // a plan made for another reason (an edit) says the refusal then
+    // a plan made again (an edit) keeps it
     model.refreshPlan();
-    CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);
-    const DecodeSupport refused = RefusedDecode(VideoDecoder(clip, VideoDecoder::Probe()).Info(), DecodeBlock::NvdecFailed, "on the first frame");
+    CHECK(model.planError() == SourceDecodeText(refused));
+    queue.stopAll(10000);
+    QSettings().remove("view/autoProxy");
+}
+
+TEST_CASE("AppModel: the viewport's refusal when the plan stops before the source (the video gone): the verdict is kept, said once; the stage runs go off",
+          "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_refused_video_gone");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    QSettings().setValue("view/autoProxy", false);
+    const auto source = d / "source.mp4";  // moved away below
+    std::filesystem::copy_file(clip, source);
+    const DecodeSupport refused = RefusedDecode(VideoDecoder(source, VideoDecoder::Probe()).Info(), DecodeBlock::NvdecFailed, "on the first frame");
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    AppModel model(true);
+    model.openVideo(Q(source));
+    SettleFrames(model, 0, 6);
+    REQUIRE(model.sourceDecode().Ok());
+    fake.emplace("first-frame");
+    model.store().SetSources(model.store().Sources());
+    model.store().SetCurrentTime(model.time(), {"source"});
+    model.store().WaitForCurrent();
+    REQUIRE(model.store().Undecodable("source"));
+    SettleAny(model, 0, 6);  // no load runs: the refused decoders are closed, the file is free
+    std::filesystem::rename(source, d / "moved.mp4");  // the plan stops at «видео не найдено», before it reads the source
+    QSignalSpy planChanged(&model, &AppModel::planChanged);
+    model.store().Update();
+    model.notifyFramesUpdated();
+    const int said = static_cast<int>(planChanged.count());
+    CHECK(said >= 1);
+    for (int i = 0; i < 2; ++i) {  // the viewport's poll again: nothing more
+        model.store().Update();
+        model.notifyFramesUpdated();
+    }
+    CHECK(planChanged.count() == said);
     INFO("planError: " << model.planError().toStdString());
-    CHECK(model.planError() == SourceDecodeText(refused));  // the source first: no run on it, whatever the encode
+    CHECK(model.planError() == QString::fromUtf8("видео не найдено"));
+    CHECK(model.sourceDecode().block == DecodeBlock::NvdecFailed);  // kept although the plan never got to the source
+    CHECK(model.sourceDecode().why == refused.why);
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    const std::vector<QPushButton*> runs = RunAloneButtons(panel);
+    CHECK(runs.size() >= 4);
+    for (QPushButton* b : runs) {
+        CHECK_FALSE(b->isEnabled());
+        CHECK(b->toolTip() == SourceDecodeText(refused));
+    }
     queue.stopAll(10000);
     QSettings().remove("view/autoProxy");
 }
@@ -8157,6 +8216,32 @@ bool TriggerAction(MainWindow& window, const char* text) {
     return false;
 }
 
+// Answers every QMessageBox as it shows (a modal dialog runs its own event loop: the timer runs in it) and keeps its title and text
+struct BoxAnswerer {
+    QTimer timer;
+    QMessageBox::StandardButton answer = QMessageBox::Ok;
+    QStringList titles, texts;
+    BoxAnswerer() {
+        timer.setInterval(50);
+        QObject::connect(&timer, &QTimer::timeout, [this] {
+            for (QWidget* w : QApplication::topLevelWidgets()) {
+                auto* box = qobject_cast<QMessageBox*>(w);
+                if (!box || !box->isVisible()) continue;
+                titles << box->windowTitle();
+                texts << box->text();
+                if (QAbstractButton* b = box->button(answer)) b->click();
+                else if (QAbstractButton* ok = box->button(QMessageBox::Ok)) ok->click();
+                else box->reject();
+            }
+        });
+        timer.start();
+    }
+    void clear() {
+        titles.clear();
+        texts.clear();
+    }
+};
+
 // A project of `source` (and `result`) saved in `d` with passes of its own (the proxies of one do not show in another): its file and passes
 std::pair<std::filesystem::path, std::filesystem::path> ProxyProject(const std::filesystem::path& d, const std::filesystem::path& source,
                                                                      const std::filesystem::path& result, const std::string& name) {
@@ -8169,7 +8254,7 @@ std::pair<std::filesystem::path, std::filesystem::path> ProxyProject(const std::
 }
 }  // namespace
 
-TEST_CASE("The main window's menu item that builds the scrubbing proxies names the videos it builds none for: not decodable here and without a proxy",
+TEST_CASE("The main window's menu item that builds the scrubbing proxies says in a message box why it builds none: each video not decodable here and without a proxy, with its reason",
           "[app][gpu][av1][proxy]") {
     App();
     const auto d = Dir("av1_proxy_menu");
@@ -8195,26 +8280,31 @@ TEST_CASE("The main window's menu item that builds the scrubbing proxies names t
     BuildProxy(clip, allProxiedPasses, "source");
     BuildProxy(result, allProxiedPasses, "result");
     REQUIRE(ValidProxy(result, allProxiedPasses, "result"));
-    auto said = [](const QString& names) {
-        return QString::fromUtf8("Прокси не строится (%1): видео не декодируется на этом компьютере, причина — в подсказке ячейки").arg(names);
-    };
-    const QString notBuilt = QString::fromUtf8("Прокси не строится");
-    auto statusAfterBuild = [&](const std::filesystem::path& file) {
+    BoxAnswerer boxes;
+    auto shownAfterBuild = [&](const std::filesystem::path& file) {
+        boxes.clear();
         MainWindow window(true);
         window.openPath(Q(file));
         REQUIRE(TriggerAction(window, "Построить прокси для перемотки"));
-        return window.statusBar()->currentMessage();
+        return boxes.texts;
     };
     FakeNvdecEnv env("no-av1");
-    CHECK(statusAfterBuild(both) == said(HumanSourceName("source") + ", " + HumanSourceName("result")));
-    CHECK(statusAfterBuild(ffv1Source) == said(HumanSourceName("result")));     // the result alone: the source decodes
-    CHECK(statusAfterBuild(sourceProxied) == said(HumanSourceName("result")));  // the source shows by its proxy: nothing to say of it
-    CHECK_FALSE(statusAfterBuild(allProxied).startsWith(notBuilt));               // both show by their proxies
-    CHECK_FALSE(statusAfterBuild(plainOnly).startsWith(notBuilt));                // a source that decodes: the build starts, nothing of the kind
+    const DecodeSupport ofSource = CheckDecodeSupport(VideoDecoder(clip, VideoDecoder::Probe()).Info());
+    const DecodeSupport ofResult = CheckDecodeSupport(VideoDecoder(result, VideoDecoder::Probe()).Info());
+    REQUIRE(ofSource.block == DecodeBlock::NoAv1);
+    REQUIRE(ofResult.block == DecodeBlock::NoAv1);
+    const QString sourceWhy = HumanSourceName("source") + ": " + SourceDecodeText(ofSource);
+    const QString resultWhy = HumanSourceName("result") + ": " + SourceDecodeText(ofResult);
+    CHECK(shownAfterBuild(both) == QStringList{sourceWhy + "\n\n" + resultWhy});
+    CHECK(boxes.titles == QStringList{QString::fromUtf8("Прокси для перемотки не строится")});
+    CHECK(shownAfterBuild(ffv1Source) == QStringList{resultWhy});     // the result alone: the source decodes
+    CHECK(shownAfterBuild(sourceProxied) == QStringList{resultWhy});  // the source shows by its proxy: nothing to say of it
+    CHECK(shownAfterBuild(allProxied).isEmpty());                     // both show by their proxies
+    CHECK(shownAfterBuild(plainOnly).isEmpty());                      // a source that decodes: the build starts, no box
     QSettings().remove("view/autoProxy");
 }
 
-TEST_CASE("The main window's menu item that removes the scrubbing proxies asks first when a video is shown only by its proxy here: No keeps it, Yes removes it",
+TEST_CASE("The main window's menu item that removes the scrubbing proxies asks first, naming every video shown only by its proxy here: No keeps them, Yes removes them",
           "[app][gpu][av1][proxy]") {
     App();
     const auto d = Dir("av1_proxy_remove");
@@ -8235,64 +8325,48 @@ TEST_CASE("The main window's menu item that removes the scrubbing proxies asks f
     const auto [withResult, resultPasses] = ProxyProject(d, ffv1, result, "with_result");
     BuildProxy(ffv1, resultPasses, "source");
     BuildProxy(result, resultPasses, "result");
+    const auto [both, bothPasses] = ProxyProject(d, clip, result, "both");
+    BuildProxy(clip, bothPasses, "source");
+    BuildProxy(result, bothPasses, "result");
     const auto [plainOnly, plainPasses] = ProxyProject(d, ffv1, {}, "plain");
     BuildProxy(ffv1, plainPasses, "source");
     REQUIRE(ValidProxy(clip, av1Passes, "source"));
     REQUIRE(ValidProxy(result, resultPasses, "result"));
+    REQUIRE(ValidProxy(result, bothPasses, "result"));
     REQUIRE(ValidProxy(ffv1, plainPasses, "source"));
-    // the question is answered as it shows (a modal dialog: its own event loop runs the timer)
-    QStringList asked;
-    QMessageBox::StandardButton answer = QMessageBox::No;
-    QTimer answerer;
-    answerer.setInterval(50);
-    QObject::connect(&answerer, &QTimer::timeout, [&] {
-        for (QWidget* w : QApplication::topLevelWidgets()) {
-            auto* box = qobject_cast<QMessageBox*>(w);
-            if (!box || !box->isVisible()) continue;
-            asked << box->text();
-            if (QAbstractButton* b = box->button(answer)) b->click();
-            else box->reject();
-        }
-    });
-    answerer.start();
-    const QString question = QString::fromUtf8("%1 на этом компьютере не декодируется и показывается только по прокси, а заново он здесь не построится. Удалить прокси?");
+    BoxAnswerer boxes;
+    auto question = [](const QString& names) {
+        return names + QString::fromUtf8(": на этом компьютере не декодируется и показывается только по прокси, а заново здесь не построится. Удалить прокси?");
+    };
+    auto remove = [&](const std::filesystem::path& file, QMessageBox::StandardButton answer) {
+        boxes.clear();
+        boxes.answer = answer;
+        MainWindow window(true);
+        window.openPath(Q(file));
+        REQUIRE(TriggerAction(window, "Удалить прокси для перемотки"));
+        return boxes.texts;
+    };
     {
         FakeNvdecEnv env("no-av1");
-        {
-            MainWindow window(true);
-            window.openPath(Q(av1));
-            answer = QMessageBox::No;
-            REQUIRE(TriggerAction(window, "Удалить прокси для перемотки"));
-            CHECK(asked == QStringList{question.arg(HumanSourceName("source"))});
-            CHECK(ValidProxy(clip, av1Passes, "source"));  // «Нет»: nothing removed
-            asked.clear();
-            answer = QMessageBox::Yes;
-            REQUIRE(TriggerAction(window, "Удалить прокси для перемотки"));
-            CHECK(asked.size() == 1);
-            CHECK_FALSE(ValidProxy(clip, av1Passes, "source"));  // «Да»: removed
-        }
-        {
-            // the result shown only by its proxy: named in the question; «Нет» keeps both proxies (the source's too)
-            MainWindow window(true);
-            window.openPath(Q(withResult));
-            asked.clear();
-            answer = QMessageBox::No;
-            REQUIRE(TriggerAction(window, "Удалить прокси для перемотки"));
-            CHECK(asked == QStringList{question.arg(HumanSourceName("result"))});
-            CHECK(ValidProxy(result, resultPasses, "result"));
-            CHECK(ValidProxy(ffv1, resultPasses, "source"));
-        }
+        CHECK(remove(av1, QMessageBox::No) == QStringList{question(HumanSourceName("source"))});
+        CHECK(ValidProxy(clip, av1Passes, "source"));  // «Нет»: nothing removed
+        CHECK(remove(av1, QMessageBox::Yes).size() == 1);
+        CHECK_FALSE(ValidProxy(clip, av1Passes, "source"));  // «Да»: removed
+        // the result shown only by its proxy: named; «Нет» keeps both proxies (the source's too)
+        CHECK(remove(withResult, QMessageBox::No) == QStringList{question(HumanSourceName("result"))});
+        CHECK(ValidProxy(result, resultPasses, "result"));
+        CHECK(ValidProxy(ffv1, resultPasses, "source"));
+        // both: one question naming both
+        CHECK(remove(both, QMessageBox::No) == QStringList{question(HumanSourceName("source") + ", " + HumanSourceName("result"))});
+        CHECK(ValidProxy(clip, bothPasses, "source"));
+        CHECK(ValidProxy(result, bothPasses, "result"));
+        CHECK(remove(both, QMessageBox::Yes).size() == 1);
+        CHECK_FALSE(ValidProxy(clip, bothPasses, "source"));
+        CHECK_FALSE(ValidProxy(result, bothPasses, "result"));
     }
-    {
-        // every video decodes here: no question, the proxies go
-        MainWindow window(true);
-        window.openPath(Q(plainOnly));
-        asked.clear();
-        REQUIRE(TriggerAction(window, "Удалить прокси для перемотки"));
-        CHECK(asked.isEmpty());
-        CHECK_FALSE(ValidProxy(ffv1, plainPasses, "source"));
-    }
-    answerer.stop();
+    // every video decodes here: no question, the proxies go
+    CHECK(remove(plainOnly, QMessageBox::No).isEmpty());
+    CHECK_FALSE(ValidProxy(ffv1, plainPasses, "source"));
     QSettings().remove("view/autoProxy");
 }
 
@@ -8341,4 +8415,69 @@ TEST_CASE("RecentPreviews: an AV1 project's thumbnail and size line - the source
     Pump([&] { return ready.count() > 0; }, 20000);
     REQUIRE(previews.get(Q(clip)).has_value());
     CHECK_FALSE(previews.get(Q(clip))->image.isNull());
+}
+
+TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so for the source and the result; a video that needs no proxy says nothing of the kind",
+          "[app][gpu][av1][proxy]") {
+    App();
+    const auto d = Dir("av1_proxy_process");
+    {
+        D3D12Device dev;
+        if (dev.IsWarp() || !dev.IsNvidia() || !VideoEncoder::EncoderAvailable("av1_nvenc")) SKIP("no NVIDIA GPU with av1_nvenc");
+    }
+    ClipSpec spec;
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 24;
+    spec.gop = 16;  // keyframes 16 frames apart: the proxy process builds one (more than kProxyMaxGop)
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto clip = WriteClipIfSupported(d / "clip.mp4", spec, &why);
+    if (!clip) SKIP(why);
+    const auto result = d / "clip_result.mp4";
+    std::filesystem::copy_file(*clip, result, std::filesystem::copy_options::overwrite_existing);
+    const auto [file, passes] = ProxyProject(d, *clip, result, "av1");
+    QSettings().setValue("view/autoProxy", true);
+    const QString notBuilt = QString::fromUtf8("Прокси для перемотки не построен (");
+    auto messagesOf = [](const QSignalSpy& spy) {
+        QStringList out;
+        for (const auto& args : spy) out << args.at(0).toString();
+        return out;
+    };
+    {
+        // NVDEC does not start in the proxy process (it inherits the stand-in): no verdict - the viewport keeps both videos, the build is asked
+        std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+        fake.emplace("start-fails");
+        AppModel model(true);
+        QSignalSpy messages(&model, &AppModel::message);
+        model.openProject(Q(file));
+        REQUIRE(model.hasProject());
+        REQUIRE(model.proxyBuilding());
+        Pump([&] { return !model.proxyBuilding(); }, 60000);
+        REQUIRE_FALSE(model.proxyBuilding());
+        const QStringList said = messagesOf(messages);
+        INFO(said.join(" | ").toStdString());
+        CHECK(said.contains(notBuilt + HumanSourceName("source") + ", " + HumanSourceName("result") +
+                            QString::fromUtf8("): видеокарта не декодировала видео — подробности в логе")));
+        CHECK_FALSE(ValidProxy(*clip, passes, "source"));
+        CHECK_FALSE(ValidProxy(result, passes, "result"));
+        SettleAny(model, 0, 6);
+    }
+    // a video that decodes and needs no proxy (keyframes at most 8 frames apart): the process says «source: no proxy needed» - no refusal
+    ClipSpec plain;
+    plain.frames = 8;
+    plain.width = 48;
+    plain.height = 32;
+    plain.gop = 4;
+    const auto [plainFile, plainPasses] = ProxyProject(d, WriteClip(d / "plain.mkv", plain), {}, "plain");
+    AppModel model(true);
+    QSignalSpy messages(&model, &AppModel::message);
+    model.openProject(Q(plainFile));
+    REQUIRE(model.proxyBuilding());  // the GUI asks the proxy process; it decides whether one is needed
+    Pump([&] { return !model.proxyBuilding(); }, 60000);
+    REQUIRE_FALSE(model.proxyBuilding());
+    const QStringList said = messagesOf(messages);
+    INFO(said.join(" | ").toStdString());
+    for (const QString& m : said) CHECK_FALSE(m.startsWith(notBuilt));
+    QSettings().remove("view/autoProxy");
 }
