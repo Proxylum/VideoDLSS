@@ -376,7 +376,9 @@ void ProjectPanel::refresh() {
         const auto [shownW, shownH] = src.sar.DisplaySize(src.width, src.height);
         if (!src.sar.Square()) frame += tr(" · пиксель %1, показ %2×%3").arg(QString::fromStdString(src.sar.Token())).arg(shownW).arg(shownH);
         sourceFrame_->setText(frame);
-        QString tip = src.codec.empty() ? QString() : tr("Поток: %1 бит %2; декодируется как %3").arg(src.bitDepth).arg(QString::fromStdString(src.chroma)).arg(QString::fromStdString(src.decoded.Name()));
+        QString tip = src.codec.empty()                ? QString()
+                      : !model_.sourceDecode().Ok()    ? tr("Поток: %1 бит %2; на этом компьютере не декодируется").arg(src.bitDepth).arg(QString::fromStdString(src.chroma))  // TASK-0076
+                                                       : tr("Поток: %1 бит %2; декодируется как %3").arg(src.bitDepth).arg(QString::fromStdString(src.chroma)).arg(QString::fromStdString(src.decoded.Name()));
         if (!src.orientation.Identity()) {
             const QString how = src.orientation.rotate ? (src.orientation.hflip ? tr("повёрнутым и отражённым") : tr("повёрнутым")) : tr("отражённым");
             const QString by = src.orientationFrom == "rotate tag" ? tr("по тегу rotate") : tr("по матрице дисплея");

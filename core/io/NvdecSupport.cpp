@@ -29,6 +29,7 @@ extern "C" {
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 
 #include "util/Log.h"
 
@@ -117,12 +118,19 @@ std::string FakeValue() {
     return v ? std::string(v) : std::string();
 }
 
-// DLSSVID_FAKE_NVDEC_AV1: the driver's answer stood in for (no-cuda | no-nvdec | no-av1 | first-frame); nullopt: not set (or not
-// understood - said once)
+// Each value of DLSSVID_FAKE_NVDEC_AV1 is said once (a test process sets several in turn)
+bool FirstTimeFor(const std::string& value) {
+    static std::mutex mutex;
+    static std::set<std::string> said;
+    std::lock_guard<std::mutex> lock(mutex);
+    return said.insert(value).second;
+}
+
+// DLSSVID_FAKE_NVDEC_AV1: the driver's answer stood in for (no-cuda | no-nvdec | no-av1 | first-frame | query-fails | start-fails |
+// device-fails | later-frame); nullopt: not set (or not understood - said once per value)
 std::optional<NvdecAv1Caps> FakeCaps() {
     const std::string value = FakeValue();
     if (value.empty()) return std::nullopt;
-    static std::once_flag said;
     NvdecAv1Caps c;
     c.checked = true;
     c.why = "DLSSVID_FAKE_NVDEC_AV1=" + value;
@@ -151,14 +159,13 @@ std::optional<NvdecAv1Caps> FakeCaps() {
         c.maxWidth = c.maxHeight = 65535;
         c.maxMacroblocks = 0xffffffffu;
     } else {
-        std::call_once(said, [&] {
+        if (FirstTimeFor(value))
             Log()->warn("DLSSVID_FAKE_NVDEC_AV1='{}' is not no-cuda | no-nvdec | no-av1 | first-frame | query-fails | start-fails | device-fails | "
                         "later-frame: ignored",
                         value);
-        });
         return std::nullopt;
     }
-    std::call_once(said, [&] { Log()->warn("DLSSVID_FAKE_NVDEC_AV1={}: NVDEC's AV1 answer is faked", value); });
+    if (FirstTimeFor(value)) Log()->warn("DLSSVID_FAKE_NVDEC_AV1={}: NVDEC's AV1 answer is faked", value);
     return c;
 }
 

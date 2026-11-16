@@ -18,6 +18,15 @@ extern "C" {
 #include "io/NvdecFormat.h"
 #include "io/NvdecSupport.h"
 #include "io/VideoDecoder.h"
+#include "util/Log.h"
+
+#include <spdlog/sinks/ostream_sink.h>
+
+#include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <sstream>
 
 using namespace dlssvid;
 using Catch::Matchers::ContainsSubstring;
@@ -574,4 +583,72 @@ TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit
     CHECK(DescribeDecode(refused) == "unavailable - " + refused.why);
     CHECK_THAT(DescribeDecode(refused), StartsWith("unavailable - the GPU 'Test GPU' has no NVDEC AV1 decoder for 8-bit 4:2:0"));
     CHECK_THAT(DescribeDecode(JudgeDecode(Av1Info("yuv444p"), nullptr)), StartsWith("unavailable - AV1 8-bit 4:4:4 (yuv444p) cannot be decoded here"));
+}
+
+namespace {
+
+// The process's log into `out` for one scope ("<level> <message>")
+struct LogCapture {
+    std::shared_ptr<spdlog::sinks::ostream_sink_mt> sink;
+    explicit LogCapture(std::ostringstream& out) : sink(std::make_shared<spdlog::sinks::ostream_sink_mt>(out)) {
+        sink->set_pattern("%l %v");
+        Log()->sinks().push_back(sink);
+    }
+    ~LogCapture() {
+        auto& sinks = Log()->sinks();
+        sinks.erase(std::remove(sinks.begin(), sinks.end(), sink), sinks.end());
+    }
+};
+
+size_t Count(const std::string& text, const std::string& what) {
+    size_t n = 0;
+    for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) ++n;
+    return n;
+}
+
+constexpr const char* kFakeWarningsChild = "DLSSVID_FAKE_NVDEC_AV1 warnings in a fresh process - the child of the case that starts it";
+
+}  // namespace
+
+// Hidden ([.]): run by the case below in a process of its own - the warnings are said once per process and value, so a process that
+// already set a value (any case before this one) would say nothing of it
+TEST_CASE(kFakeWarningsChild, "[.][av1-child]") {
+    std::ostringstream text;
+    {
+        LogCapture capture(text);
+        for (const char* value : {"no-av1", "no-cuda", "no-av1", "start-fails", "no-cuda", "start-fails", "bogus-one", "bogus-two", "bogus-one"}) {
+            FakeNvdecEnv fake(value);
+            (void)CheckDecodeSupport(Av1Info());
+        }
+    }
+    const std::string log = text.str();
+    INFO(log);
+    for (const char* value : {"no-av1", "no-cuda", "start-fails"}) {
+        INFO(value);
+        CHECK(Count(log, std::string("warning DLSSVID_FAKE_NVDEC_AV1=") + value + ": NVDEC's AV1 answer is faked") == 1);  // each value, once
+    }
+    CHECK(Count(log, "NVDEC's AV1 answer is faked") == 3);
+    for (const char* value : {"bogus-one", "bogus-two"}) {
+        INFO(value);
+        CHECK(Count(log, std::string("warning DLSSVID_FAKE_NVDEC_AV1='") + value + "' is not no-cuda | ") == 1);
+    }
+    CHECK(Count(log, "later-frame: ignored") == 2);
+}
+
+TEST_CASE("DLSSVID_FAKE_NVDEC_AV1 is said once per value, not once per process: three values faked, two not understood - five warnings", "[unit][av1]") {
+    char* self = nullptr;
+    REQUIRE(_get_pgmptr(&self) == 0);
+    REQUIRE(self);
+    const std::filesystem::path log = std::filesystem::path(DLSSVID_TEST_TMP) / "fake_warnings_child.log";
+    std::filesystem::create_directories(log.parent_path());
+    std::filesystem::remove(log);
+    FakeNvdecEnv none(nullptr);  // the child starts without a stand-in
+    const std::string cmd = std::string("\"\"") + self + "\" \"" + kFakeWarningsChild + "\" -r compact > \"" + log.string() + "\" 2>&1\"";
+    const int code = std::system(cmd.c_str());
+    std::ifstream in(log);
+    const std::string out((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    INFO(out);
+    CHECK(code == 0);
+    CHECK_THAT(out, ContainsSubstring("All tests passed"));
+    CHECK_THAT(out, ContainsSubstring("1 test case"));
 }

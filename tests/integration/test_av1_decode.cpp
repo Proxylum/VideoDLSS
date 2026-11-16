@@ -465,6 +465,57 @@ TEST_CASE("dlssvid process --passthrough, render, upscale and info take an AV1 s
     CHECK_THAT(ffv1.out, ContainsSubstring("decode:      software (ffv1); NVDEC does not decode this codec"));
 }
 
+TEST_CASE("AV1 through the stages: upscale bicubic and nr stub take an 8- and a 10-bit clip, process with stages writes the result (regression TASK-0076)",
+          "[integration][cli][gpu][av1][regression]") {
+    for (const bool tenBit : {false, true}) {
+        INFO((tenBit ? "10-bit (p010 in, Main 10 out)" : "8-bit"));
+        const auto dir = Dir(tenBit ? "stages_10" : "stages_8");
+        REQUIRE_AV1_CLIP(clip, dir, tenBit, 12);
+        const std::vector<CpuFrame> ref = DecodeSequential(clip);
+        REQUIRE(ref.size() == 12);
+        const uint8_t depth = tenBit ? 10 : 8;
+        CHECK(ref[0].desc.bitDepth == depth);
+
+        // a stage alone: upscale (the color_sr pass of every frame)
+        const auto sr = dir / "sr";
+        const auto up = RunAll({"upscale", "--backend", "bicubic", "--warp", "-i", clip.string(), "-o", sr.string()}, dir / "upscale.log");
+        {
+            INFO(up.out);
+            CHECK(up.code == 0);
+            CheckNoEnosys(up.out);
+            CheckCudaChosenAtOnce(up.out);
+            PassReader::Open(sr / "color_sr").Validate({2 * kW, 2 * kH, 12, PassKind::ColorSr});
+        }
+        // nr (stub: no model) on the source's frames
+        const auto nrRoot = dir / "nr";
+        const auto nr = RunAll({"nr", "--backend", "stub", "--warp", "-i", clip.string(), "-o", nrRoot.string()}, dir / "nr.log");
+        {
+            INFO(nr.out);
+            CHECK(nr.code == 0);
+            CheckNoEnosys(nr.out);
+            CheckCudaChosenAtOnce(nr.out);
+            PassReader::Open(nrRoot / "color_nr").Validate({kW, kH, 12, PassKind::ColorNr});
+        }
+        // process with stages (not --passthrough): upscale, then nr on its frames, then the encode of the last pass
+        const auto staged = dir / "staged.mkv";
+        const auto pr = RunAll({"process", "-i", clip.string(), "-o", staged.string(), "--passes", (dir / "passes").string(), "--warp", "--codec", "ffv1",
+                                "--stages", "upscale,nr", "--upscale-backend", "bicubic", "--nr-backend", "stub"},
+                               dir / "process.log");
+        INFO(pr.out);
+        CHECK(pr.code == 0);
+        CheckNoEnosys(pr.out);
+        CheckCudaChosenAtOnce(pr.out);
+        CHECK_FALSE(AnyPartFile(dir));
+        CHECK(std::filesystem::exists(dir / "passes" / "color_sr"));
+        CHECK(std::filesystem::exists(dir / "passes" / "color_nr"));
+        const std::vector<CpuFrame> out = DecodeAll(staged);
+        REQUIRE(out.size() == ref.size());
+        CHECK(out[0].desc.width == 2 * kW);
+        CHECK(out[0].desc.height == 2 * kH);
+        CHECK(out[0].desc.bitDepth == depth);  // the source's depth kept through the stages
+    }
+}
+
 TEST_CASE("Without NVDEC AV1 every command refuses an AV1 source with the reason, before it writes anything (DLSSVID_FAKE_NVDEC_AV1)",
           "[integration][cli][gpu][av1]") {
     const auto dir = Dir("refused");
@@ -1523,6 +1574,45 @@ TEST_CASE("NVDEC refusing a frame after a few decoded ones (later-frame) is the 
     REQUIRE(again);
     REQUIRE(again->undecodable);
     CHECK(again->undecodable->block == DecodeBlock::NvdecFailed);
+}
+
+TEST_CASE("A file NVDEC refused is remembered with its size and time: written again on the same path (another size, or only touched), the verdict goes",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("refused_stamp");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    const auto otherDir = Dir("refused_stamp_other");
+    REQUIRE_AV1_CLIP(other, otherDir, false, 16);  // another stream: another size
+    REQUIRE(std::filesystem::file_size(other) != std::filesystem::file_size(clip));
+    // NVDEC refuses the file in a loader (later-frame: a verdict on the stream) - the process remembers it for the path
+    auto refuse = [&] {
+        Av1Store s(0, 1);
+        FakeNvdecEnv fake("later-frame");
+        s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+        REQUIRE(s.Settle(20) == FrameStore::Status::Missing);  // the loaders at rest before the stand-in goes
+        REQUIRE(s.store->Undecodable("source"));
+    };
+    refuse();
+    const auto refusedAt = std::filesystem::last_write_time(clip);
+    REQUIRE(FrameStore::VideoSource("source", clip)->undecodable);  // the same file: remembered
+    REQUIRE(FrameStore::VideoSource("source", clip)->undecodable);  // and asked again: still
+    // only touched: the same bytes, another time - another file as far as the process knows
+    std::filesystem::last_write_time(clip, refusedAt + std::chrono::seconds(2));
+    {
+        const auto again = FrameStore::VideoSource("source", clip);
+        REQUIRE(again);
+        CHECK_FALSE(again->undecodable);  // asked anew: the driver takes it
+    }
+    std::filesystem::last_write_time(clip, refusedAt);  // the old time back: the record went with the first look, nothing comes back
+    CHECK_FALSE(FrameStore::VideoSource("source", clip)->undecodable);
+    // refused again, then written over by another stream of another size - with the time of the refusal
+    refuse();
+    const auto refusedAgainAt = std::filesystem::last_write_time(clip);
+    REQUIRE(FrameStore::VideoSource("source", clip)->undecodable);
+    std::filesystem::copy_file(other, clip, std::filesystem::copy_options::overwrite_existing);
+    std::filesystem::last_write_time(clip, refusedAgainAt);  // only the size tells it from the refused one
+    const auto replaced = FrameStore::VideoSource("source", clip);
+    REQUIRE(replaced);
+    CHECK_FALSE(replaced->undecodable);
 }
 
 TEST_CASE("NVDEC not starting now (start-fails, device-fails): render tries once more and says why; the log and dlssvid proxy say it is not a verdict",

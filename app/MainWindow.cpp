@@ -243,10 +243,24 @@ void MainWindow::buildMenus() {
         model_.startProxies();
         QSettings().setValue("view/autoProxy", was);
         QSettings().setValue("view/proxyMaxGiB", before);
-        if (model_.store().Undecodable("source"))  // TASK-0076: startProxies skips it - said, not silent
-            statusBar()->showMessage(tr("Прокси исходника не строится: видео не декодируется на этом компьютере (причина — в подсказке ячейки)"), 8000);
+        // TASK-0076: startProxies skips a video this machine cannot decode - said, not silent (a proxy already there shows it: nothing to say)
+        QStringList skipped;
+        for (const char* name : {"source", "result"})
+            if (const ViewportSource* s = model_.store().FindSource(name); s && s->proxy.empty() && model_.store().Undecodable(name))
+                skipped << HumanSourceName(name);
+        if (!skipped.isEmpty())
+            statusBar()->showMessage(tr("Прокси не строится (%1): видео не декодируется на этом компьютере, причина — в подсказке ячейки").arg(skipped.join(", ")), 8000);
     });
     view->addAction(tr("Удалить прокси для перемотки"), this, [this] {
+        // TASK-0076: a video this machine cannot decode is shown only from its proxy, and it is not built again here
+        for (const char* name : {"source", "result"})
+            if (const ViewportSource* s = model_.store().FindSource(name); s && !s->proxy.empty() && model_.store().Undecodable(name)) {
+                if (QMessageBox::question(this, tr("Удалить прокси для перемотки"),
+                                          tr("%1 на этом компьютере не декодируется и показывается только по прокси, а заново он здесь не построится. Удалить прокси?")
+                                              .arg(HumanSourceName(name))) != QMessageBox::Yes)
+                    return;
+                break;
+            }
         model_.cancelProxies();
         RemoveProxy(model_.project().passesRoot, "source");
         RemoveProxy(model_.project().passesRoot, "result");

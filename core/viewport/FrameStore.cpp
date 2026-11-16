@@ -203,8 +203,21 @@ std::vector<ViewportSource> FrameStore::DiscoverPassVersions(const std::filesyst
 namespace {
 // TASK-0076: NVDEC's refusal of a file met by a loader (the driver could not be asked before) - a verdict on the stream on this
 // machine: kept for the process, so a new set of sources does not forget it (the plan would let a run start until a frame refuses again)
+// (keyed by the path and checked against the file's size and time: a result written again on the same path is another stream)
+struct RefusedFile {
+    uintmax_t size = 0;
+    std::filesystem::file_time_type time{};
+    DecodeSupport support;
+};
 std::mutex refusedFilesMutex;
-std::map<std::string, DecodeSupport> refusedFiles;
+std::map<std::string, RefusedFile> refusedFiles;
+
+bool SameFile(const std::filesystem::path& file, const RefusedFile& r) {
+    std::error_code e1, e2;
+    const auto size = std::filesystem::file_size(file, e1);
+    const auto time = std::filesystem::last_write_time(file, e2);
+    return !e1 && !e2 && size == r.size && time == r.time;
+}
 
 // TASK-0076: a video that cannot be decoded here is said once per process at warning level - the GUI sets its sources again on many
 // occasions (a preview, a mask, the result let go), each would say it again
@@ -240,7 +253,10 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.hardwareOnly = info.hardwareOnly;
         if (info.hardwareOnly) {
             std::lock_guard<std::mutex> lock(refusedFilesMutex);
-            if (const auto it = refusedFiles.find(file.string()); it != refusedFiles.end()) s.undecodable = it->second;  // met before (TASK-0076)
+            if (const auto it = refusedFiles.find(file.string()); it != refusedFiles.end()) {  // met before (TASK-0076)
+                if (SameFile(file, it->second)) s.undecodable = it->second.support;
+                else refusedFiles.erase(it);  // the file was replaced: its verdict is not this one's
+            }
         }
         if (info.hardwareOnly && !s.undecodable)  // TASK-0076: asked once here (the answer is cached), not by a decoder on every frame
             if (DecodeSupport d = CheckDecodeSupport(info); !d.Ok()) {
@@ -608,7 +624,12 @@ void FrameStore::LoaderMain() {
                     refusedInLoad_.emplace(key.source, e.support);
                     if (const ViewportSource* s = FindSource(key.source)) {
                         std::lock_guard<std::mutex> files(refusedFilesMutex);
-                        refusedFiles.emplace(s->path.string(), e.support);
+                        RefusedFile r;
+                        std::error_code e1, e2;
+                        r.size = std::filesystem::file_size(s->path, e1);
+                        r.time = std::filesystem::last_write_time(s->path, e2);
+                        r.support = e.support;
+                        if (!e1 && !e2) refusedFiles[s->path.string()] = std::move(r);
                     }
                 } else {
                     startFailed_[key.source] = e.support;
