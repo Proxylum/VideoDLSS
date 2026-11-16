@@ -87,7 +87,7 @@ namespace {
 
 AVPixelFormat EncoderFormatFor(const std::string& pixFmt) {
     const AVPixelFormat f = av_get_pix_fmt(pixFmt.c_str());
-    if (f == AV_PIX_FMT_NONE) Throw("test clip pixel format not supported: " + pixFmt);
+    if (f == AV_PIX_FMT_NONE) Throw("test clip pixel format unknown to FFmpeg: " + pixFmt);  // a test's mistake: never read as «unsupported»
     return f;
 }
 
@@ -356,9 +356,11 @@ std::string FfmpegLogCapture::Text() const {
 }
 
 bool SaysUnsupported(const std::string& text) {
+    // NVENC's own words (libavcodec/nvenc.c, FFmpeg 7.1) for a GPU or driver without the encoder or its depth - nothing else: a refused
+    // parameter («unsupported param»), an invalid spec or a test's own error is a failure, not a missing capability
     std::string lower = text;
     for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    for (const char* words : {"not supported", "unsupported", "no capable devices"})
+    for (const char* words : {"no capable devices found", "no cuda capable devices found", "codec not supported", "10 bit encode not supported"})
         if (lower.find(words) != std::string::npos) return true;
     return false;
 }

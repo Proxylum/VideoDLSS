@@ -112,6 +112,7 @@ public:
     const DecodeSupport& sourceDecode() const { return sourceDecode_; }
     // TASK-0076: a run gets the GPU memory the viewport's NVDEC decoders hold (an AV1 video); a later frame opens one again
     void releaseNvdec();
+    void endNvdecUse();  // TASK-0076: the task / preview / check that released NVDEC ended - the viewport may hold it again when none is left
     void noteSourceRefused();  // TASK-0076: a refusal the viewport met on the source's first frame becomes the plan's verdict
     // a stage the run would refuse although the plan exists (depth does not fit the GPU, TASK-0039): «Обработать» waits
     QString planBlocker() const;
@@ -388,6 +389,7 @@ private:
     SourceInfo sourceInfo_;
     QString planError_;
     DecodeSupport sourceDecode_;
+    int nvdecUsers_ = 0;  // TASK-0076: tasks, previews and checks running since releaseNvdec
     std::set<std::string> force_;
     std::map<std::string, int> history_;  // pass -> previous versions on disk
     QTimer planTimer_;

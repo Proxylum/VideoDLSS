@@ -27,6 +27,9 @@ ProjectTasks::ProjectTasks(AppModel& model, TaskQueue& tasks, QObject* parent) :
         model_.cancelCheck();
         model_.releaseNvdec();  // TASK-0076
     });
+    // TASK-0076: the viewport may hold NVDEC between frames again once no task, preview or check runs
+    connect(&tasks_, &TaskQueue::taskFinished, this, [this](int, bool) { model_.endNvdecUse(); });
+    connect(&tasks_, &TaskQueue::previewFinished, this, [this](int, bool) { model_.endNvdecUse(); });
     // TASK-0070: the run encodes the new result next to the old one, to be renamed over it: the viewer lets the old file go. By the file,
     // not the project: a project opened again since, or another one with the same result file, shows that file too.
     connect(&tasks_, &TaskQueue::taskProgress, this, [this](int id, const TaskQueue::Progress& progress) {

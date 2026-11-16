@@ -292,13 +292,15 @@ GeForce RTX 30 series and newer; the driver is asked, the series is only an exam
 decodes (`decode:` line). The sample layout is checked from the file; the driver is asked once (CUDA, NVDEC, AV1 at that
 depth, the frame size limits). A file this machine cannot decode is refused with the reason before the work starts —
 `process` before its stages, a stage command before its model (`nr` reading its colour from `color_sr` from a frame past 0
-decodes no video and is not refused), the GUI instead of the plan with «Обработать», Ctrl+Return, the preview and the stage
+decodes no video and is not refused), the GUI instead of the plan with «Обработать», Ctrl+Enter, the preview and the stage
 runs off, the viewport cell reads «· не декодируется» (its tooltip says why), no proxy is built. A driver that cannot be
 asked leaves it to the first frame: refused then without the exact reason («NVDEC refused this AV1 stream»), and the GUI
-stops the runs as soon as its viewport met it. A scrubbing proxy built earlier (on another PC) still shows such a source.
-The GUI's viewport decodes an AV1 video on NVDEC in its own process and lets that decoder go when a run, a preview or a
-stage check is queued. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be
-the one the stages run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame` stands in for the driver's answer
+stops the runs as soon as its viewport met it. NVDEC failing to start although the driver said yes (out of GPU memory, a
+driver error) is no verdict on the video: the viewport tries again on the next frame, `process` reports the failure. A
+scrubbing proxy built earlier still shows such a source (one copied from another PC is used when the source kept its file
+times). The GUI's viewport decodes an AV1 video on NVDEC in its own process; while a run, a preview or a stage check is
+going on it does not keep that decoder between frames, and the background proxy build of such a video is stopped. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be
+the one the stages run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame|start-fails` stands in for the driver's answer
 (tests, reproducing a support case).
 
 Paths may contain any letters: `dlssvid` and `dlssvid-gui` run with UTF-8 as their code page. The CLI prints UTF-8,

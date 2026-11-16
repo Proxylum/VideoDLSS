@@ -322,7 +322,7 @@ std::optional<DecodeSupport> FrameStore::Undecodable(const std::string& name) co
 }
 
 void FrameStore::ReleaseNvdecDecoders() {
-    std::vector<SourceRuntime*> runtimes;  // the videos that decode on NVDEC only: a software decoder is not waited for (GUI thread)
+    std::vector<SourceRuntime*> runtimes;  // the videos that decode on NVDEC only
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& s : sources_)
@@ -330,9 +330,27 @@ void FrameStore::ReleaseNvdecDecoders() {
                 if (const auto it = runtimes_.find(s.name); it != runtimes_.end()) runtimes.push_back(it->second.get());
     }
     for (SourceRuntime* rt : runtimes) {
-        std::lock_guard<std::mutex> guard(rt->mutex);  // waits for a load in flight on it
+        std::unique_lock<std::mutex> guard(rt->mutex, std::try_to_lock);  // the GUI thread does not wait for a walk through a long GOP
+        if (!guard.owns_lock()) {
+            rt->releasePending = true;  // its loader closes it after this load (ReleaseNvdecAfterLoad)
+            continue;
+        }
         if (rt->decoder && rt->decoder->HoldsCudaDevice()) rt->decoder.reset();
     }
+}
+
+void FrameStore::ReleaseNvdecAfterLoad(const std::string& source) {
+    SourceRuntime* rt = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);  // the key is still in flight: SetSources waits for it, the runtime stays valid
+        const ViewportSource* s = FindSource(source);
+        if (!s || !s->isVideo || !s->hardwareOnly) return;
+        if (const auto it = runtimes_.find(source); it != runtimes_.end()) rt = it->second.get();
+    }
+    if (!rt || (holdNvdec_ && !rt->releasePending)) return;
+    std::lock_guard<std::mutex> guard(rt->mutex);
+    rt->releasePending = false;
+    if (rt->decoder && rt->decoder->HoldsCudaDevice()) rt->decoder.reset();
 }
 
 const ViewportSource* FrameStore::FindSource(const std::string& name) const {
@@ -547,7 +565,8 @@ void FrameStore::LoaderMain() {
             SourceRuntime* refused = nullptr;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                refusedInLoad_.emplace(key.source, e.support);
+                // a start failure (memory, the driver) is no verdict on the video: the next frame tries a new decoder
+                if (!e.support.Transient()) refusedInLoad_.emplace(key.source, e.support);
                 if (const auto it = runtimes_.find(key.source); it != runtimes_.end()) refused = it->second.get();
             }
             if (refused) {  // the refused decoder still holds the CUDA device: let it go now (SetSources waits for this load: still valid)
@@ -566,6 +585,7 @@ void FrameStore::LoaderMain() {
             l.missing = true;
             result.loaded.push_back(std::move(l));
         }
+        ReleaseNvdecAfterLoad(key.source);  // TASK-0076: a pending release, or a task running
         for (auto& l : result.loaded) Publish(std::move(l));
         {
             std::lock_guard<std::mutex> lock(mutex_);

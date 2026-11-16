@@ -23,12 +23,15 @@ bool HasNvdecHwaccel(const AVCodec* codec);
 
 enum class DecodeBlock {
     None,         // decodes: in software, or on NVDEC
-    Layout,       // the stream's sample layout is one NVDEC does not decode for this codec (AV1: 8 / 10-bit 4:2:0 only)
+    Layout,       // a sample layout this build does not decode AV1 in: 8 / 10-bit 4:2:0 only (NVDEC has no AV1 4:2:2 / 4:4:4 / 12-bit;
+                  // 4:0:0 gray / gray10, which FFmpeg's NVDEC path takes, is left out by decision - TASK-0076)
     NoCuda,       // no CUDA device / driver to run NVDEC on
     NoNvdec,      // CUDA is there, the driver's video decoder (nvcuvid.dll) is not
     NoAv1,        // the GPU's NVDEC has no AV1 decoder at the stream's depth
     Size,         // the frame is outside the sizes the GPU's NVDEC decodes
     NvdecFailed,  // NVDEC was asked and refused a frame - the first one, or a later one (why: on the first frame / after N frames)
+    NvdecStartFailed,  // the driver said it takes the stream, and NVDEC still did not start (out of GPU memory, a driver error):
+                       // not the stream's verdict - another decoder may succeed later
 };
 
 // What the driver says of AV1 decoding on CUDA device 0 (FFmpeg's NVDEC takes that one), at one bit depth, 4:2:0.
@@ -55,6 +58,8 @@ struct DecodeSupport {
     unsigned width = 0, height = 0;  // the stored frame
     NvdecAv1Caps caps;
     bool Ok() const { return block == DecodeBlock::None; }
+    // A refusal that says nothing of the stream on this machine (NvdecStartFailed): a viewport tries again, the plan is not stopped
+    bool Transient() const { return block == DecodeBlock::NvdecStartFailed; }
 };
 
 // The verdict from the stream and what NVDEC said (`caps` null: not asked). Order: a decoder with a software path is fine; a layout this
@@ -64,15 +69,17 @@ struct DecodeSupport {
 DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps);
 
 // The driver's answer for AV1 4:2:0 at `bitDepth` (8 / 10): cuInit, device 0, a temporary context of its own (the primary context the
-// decoders share is left alone), cuvidGetDecoderCaps. Loaded at run time (nvcuda.dll, nvcuvid.dll); cached per depth for the process.
+// decoders share is left alone), cuvidGetDecoderCaps. Loaded at run time (nvcuda.dll, nvcuvid.dll); a definite answer is cached per depth
+// for the process, no answer (checked=false: a context that could not be created ...) is asked again next time.
 NvdecAv1Caps QueryNvdecAv1Caps(int bitDepth);
 
 // JudgeDecode with the driver asked when the stream needs NVDEC. DLSSVID_FAKE_NVDEC_AV1 stands in for the driver's answer (tests, a
 // support case), read on every call before the cache: no-cuda | no-nvdec | no-av1 - that refusal; first-frame - no answer (the stream
-// goes on unchecked) and NVDEC then refuses its first frame (FakeNvdecRefusesFrames).
+// goes on unchecked) and NVDEC then refuses its first frame; start-fails - the driver takes the stream and NVDEC still does not start
+// (NvdecStartFailed, FakeNvdecRefusesFrames).
 DecodeSupport CheckDecodeSupport(const VideoStreamInfo& info);
-// DLSSVID_FAKE_NVDEC_AV1=first-frame: VideoDecoder's get_format declines CUDA for a hardware-only decoder (the refusal FFmpeg reports
-// as ENOSYS on the first frame - a GPU whose limits the driver did not tell in advance).
+// DLSSVID_FAKE_NVDEC_AV1=first-frame | start-fails: VideoDecoder's get_format declines CUDA for a hardware-only decoder (the refusal FFmpeg
+// reports as ENOSYS on the first frame - a GPU whose limits the driver did not tell in advance, or NVDEC failing to start).
 bool FakeNvdecRefusesFrames();
 
 // The refusal `block` of the stream, `detail` saying what failed (VideoDecoder: no CUDA device when it is created, NVDEC refusing the

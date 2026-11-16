@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 #include <vector>
 
+#include "io/NvdecSupport.h"
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
 #include "util/Error.h"
@@ -130,7 +131,7 @@ std::filesystem::path BuildProxy(const std::filesystem::path& video, const std::
     };
 
     VideoDecoder dec(video);
-    dec.RequireDecodable();  // TASK-0076: before the part file
+    dec.RequireDecodable();  // TASK-0076: before the part file (a refusal on the first frame removes it below)
     const VideoStreamInfo info = dec.Info();
     if (info.frameRate.num <= 0 || info.frameRate.den <= 0) return fail("the stream has no frame rate");
     // indices from pts as the viewport sees them after a seek
@@ -176,7 +177,17 @@ std::filesystem::path BuildProxy(const std::filesystem::path& video, const std::
     std::vector<std::pair<int64_t, CpuFrame>> samples;  // frames checked against the proxy afterwards
     CpuFrame f, last;
     int64_t expected = 0;
-    while (dec.NextFrame(f)) {
+    const auto next = [&] {  // TASK-0076: NVDEC refusing the first frame (the driver could not be asked) leaves no part file
+        try {
+            return dec.NextFrame(f);
+        } catch (const DecodeUnavailable&) {
+            enc.reset();
+            std::error_code e3;
+            std::filesystem::remove(part, e3);
+            throw;
+        }
+    };
+    while (next()) {
         if (options.cancel && options.cancel->load()) {
             enc.reset();
             return fail("cancelled");

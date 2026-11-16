@@ -470,7 +470,22 @@ void AppModel::releaseResult(const std::filesystem::path& file) {
 void AppModel::requestFrames() { store_->SetCurrentTime(state().time, neededSources()); }
 
 void AppModel::releaseNvdec() {
-    if (store_) store_->ReleaseNvdecDecoders();
+    ++nvdecUsers_;  // a task, a preview or a check: until its end the viewport closes NVDEC after every frame
+    if (store_) {
+        store_->SetHoldNvdec(false);
+        store_->ReleaseNvdecDecoders();
+    }
+    // the background proxy build of an NVDEC-only video decodes on NVDEC in its own process: stopped (started again at the next reload)
+    for (const char* name : {"source", "result"})
+        if (const ViewportSource* s = store_ ? store_->FindSource(name) : nullptr; s && s->hardwareOnly && proxyBuilding()) {
+            cancelProxies();
+            break;
+        }
+}
+
+void AppModel::endNvdecUse() {
+    if (nvdecUsers_ > 0) --nvdecUsers_;
+    if (nvdecUsers_ == 0 && store_) store_->SetHoldNvdec(true);
 }
 
 void AppModel::startProxies() {
@@ -766,12 +781,7 @@ void AppModel::noteSourceRefused() {
     // TASK-0076: NVDEC refused the source's first frame in the viewport (the driver could not be asked before): the plan says it now -
     // «Обработать», Ctrl+Return, the preview and the stage runs stop, as for a refusal known in advance
     if (!hasProject() || !sourceDecode_.Ok() || !store_) return;
-    if (const auto refused = store_->Undecodable("source")) {
-        sourceDecode_ = *refused;
-        planError_ = SourceDecodeText(sourceDecode_);
-        plan_ = {};
-        emit planChanged();
-    }
+    if (store_->Undecodable("source")) refreshPlan();  // reads the refusal, drops the whole plan (outcome, previews' plans) and says it
 }
 
 // ---- comparison in one action ----------------------------------------------------------------------
@@ -2129,6 +2139,7 @@ void AppModel::checkStage(const std::string& stage) {
     connect(proc, &QProcess::finished, this, [this, proc, stage, key, json, dir](int code, QProcess::ExitStatus status) {
         const QString out = QString::fromUtf8(proc->readAll());
         proc->deleteLater();
+        endNvdecUse();  // TASK-0076: the check's releaseNvdec ends
         const QByteArray report = [&] {
             QFile f(json);
             return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();

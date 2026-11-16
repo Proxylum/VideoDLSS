@@ -87,7 +87,7 @@ NvdecAv1Caps GoodCaps() {
     return c;
 }
 
-const char* const kAllBlocks[] = {"None", "Layout", "NoCuda", "NoNvdec", "NoAv1", "Size", "NvdecFailed"};
+const char* const kAllBlocks[] = {"None", "Layout", "NoCuda", "NoNvdec", "NoAv1", "Size", "NvdecFailed", "NvdecStartFailed"};
 
 std::string BlockName(DecodeBlock b) {
     const int i = static_cast<int>(b);
@@ -226,8 +226,8 @@ TEST_CASE("JudgeDecode: the layout is judged before NVDEC is asked; an unknown l
         CHECK(s.Ok());
         CHECK_FALSE(s.verified);
         CHECK(s.hardwareOnly);
-        CHECK(s.why == "NVDEC (av1) on 'Test GPU', the sample layout is not known before the first frame");
-        CHECK(DescribeDecode(s) == "NVDEC only (av1: no software AV1 decoder in this build): NVDEC (av1) on 'Test GPU', the sample layout is not known "
+        CHECK(s.why == "on 'Test GPU', the sample layout is not known before the first frame");
+        CHECK(DescribeDecode(s) == "NVDEC only (av1: no software AV1 decoder in this build), on 'Test GPU', the sample layout is not known "
                                    "before the first frame");
         // the size is the first frame's to judge too (the probe's size of a stream it could not read is no basis for a refusal)
         NvdecAv1Caps narrow = GoodCaps();
@@ -237,14 +237,14 @@ TEST_CASE("JudgeDecode: the layout is judged before NVDEC is asked; an unknown l
         const DecodeSupport blind = JudgeDecode(Av1Info("unknown"), nullptr);
         CHECK(blind.Ok());
         CHECK_FALSE(blind.verified);
-        CHECK(blind.why == "NVDEC (av1), not checked");
+        CHECK(blind.why == "not checked");
     }
 
     // the driver not asked, or no definite answer from it: on blind, as FFmpeg does - not verified, the reason kept
     const DecodeSupport notAsked = JudgeDecode(Av1Info(), nullptr);
     CHECK(notAsked.Ok());
     CHECK_FALSE(notAsked.verified);
-    CHECK(notAsked.why == "NVDEC (av1), not checked");
+    CHECK(notAsked.why == "not checked");
     NvdecAv1Caps unanswered = GoodCaps();
     unanswered.checked = false;
     unanswered.supported = false;  // not read: must not count
@@ -254,7 +254,7 @@ TEST_CASE("JudgeDecode: the layout is judged before NVDEC is asked; an unknown l
     const DecodeSupport blind = JudgeDecode(Av1Info(), &unanswered);
     CHECK(blind.Ok());
     CHECK_FALSE(blind.verified);
-    CHECK(blind.why == "NVDEC (av1), not checked: the driver does not report NVDEC capabilities");
+    CHECK(blind.why == "not checked: the driver does not report NVDEC capabilities");
 }
 
 TEST_CASE("JudgeDecode: no CUDA, no NVDEC, no AV1 decoder, the size limits each refuse with the reason, in that order", "[unit][av1]") {
@@ -366,7 +366,7 @@ TEST_CASE("JudgeDecode: a stream NVDEC takes is verified and described; RefusedD
     CHECK(s.width == 1920);
     CHECK(s.height == 1080);
     CHECK(s.caps.gpu == "Test GPU");
-    CHECK(s.why == "NVDEC on 'Test GPU', AV1 10-bit 4:2:0 up to 8192x8192");
+    CHECK(s.why == "on 'Test GPU', AV1 10-bit 4:2:0 up to 8192x8192");
 
     // VideoDecoder's refusals: NVDEC refusing the stream (ENOSYS), or no CUDA device to create
     const DecodeSupport failed = RefusedDecode(Av1Info(), DecodeBlock::NvdecFailed, "");
@@ -376,6 +376,23 @@ TEST_CASE("JudgeDecode: a stream NVDEC takes is verified and described; RefusedD
           "NVDEC refused this AV1 stream and this build has no software AV1 decoder (on the first frame)");
     CHECK(RefusedDecode(Av1Info(), DecodeBlock::NvdecFailed, "after 12 frames").why ==
           "NVDEC refused this AV1 stream and this build has no software AV1 decoder (after 12 frames)");
+    CHECK_FALSE(failed.Transient());
+    // the driver having said yes, NVDEC did not start (memory, the driver): no verdict on the stream - transient
+    const DecodeSupport start = RefusedDecode(Av1Info(), DecodeBlock::NvdecStartFailed, "on the first frame");
+    CheckRefusal(start, DecodeBlock::NvdecStartFailed);
+    CHECK(start.Transient());
+    CHECK(start.why == "NVDEC could not start decoding this AV1 stream although the driver takes it - out of GPU memory or a driver error (FFmpeg's "
+                       "message is in its output); this build has no software AV1 decoder (on the first frame)");
+    CHECK(RefusedDecode(Av1Info(), DecodeBlock::NvdecStartFailed, "").why ==
+          "NVDEC could not start decoding this AV1 stream although the driver takes it - out of GPU memory or a driver error (FFmpeg's message is "
+          "in its output); this build has no software AV1 decoder");
+    for (const DecodeBlock b : {DecodeBlock::None, DecodeBlock::Layout, DecodeBlock::NoCuda, DecodeBlock::NoNvdec, DecodeBlock::NoAv1, DecodeBlock::Size,
+                                DecodeBlock::NvdecFailed}) {
+        DecodeSupport d;
+        d.block = b;
+        INFO(BlockName(b));
+        CHECK_FALSE(d.Transient());
+    }
     const DecodeSupport device = RefusedDecode(Av1Info(), DecodeBlock::NoCuda, "the CUDA device could not be created: Generic error in an external library");
     CheckRefusal(device, DecodeBlock::NoCuda);
     CHECK_THAT(device.why, ContainsSubstring("the CUDA device could not be created: Generic error in an external library"));
@@ -397,7 +414,7 @@ TEST_CASE("PickNvdecFormat: CUDA when offered; else a hardware-only decoder choo
     CHECK(PickNvdecFormat(software, false) == AV_PIX_FMT_YUV420P10LE);
 }
 
-TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver on every call, also after the driver was asked", "[unit][av1]") {
+TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver on every call, also after the driver was asked", "[unit][av1][gpu]") {
     FakeNvdecEnv unset(nullptr);
     const VideoStreamInfo av1 = Av1Info();
     // the driver's own answer first (it fills the per-process cache), whatever this machine says
@@ -456,12 +473,24 @@ TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver o
         CHECK(s.Ok());
         CHECK_FALSE(s.verified);
         CHECK_FALSE(s.caps.checked);
-        CHECK(s.why == "NVDEC (av1), not checked: DLSSVID_FAKE_NVDEC_AV1=first-frame");
+        CHECK(s.why == "not checked: DLSSVID_FAKE_NVDEC_AV1=first-frame");
         CHECK(FakeNvdecRefusesFrames());
         CHECK(CheckDecodeSupport(Av1Info("yuv444p")).block == DecodeBlock::Layout);  // the layout is still refused first
         const DecodeSupport unknown = CheckDecodeSupport(Av1Info("unknown"));
         CHECK(unknown.Ok());
-        CHECK(unknown.why == "NVDEC (av1), not checked: DLSSVID_FAKE_NVDEC_AV1=first-frame");
+        CHECK(unknown.why == "not checked: DLSSVID_FAKE_NVDEC_AV1=first-frame");
+    }
+    {
+        // the driver says yes (verified, limits wide open) - and NVDEC then does not start: VideoDecoder's get_format declines CUDA
+        FakeNvdecEnv fake("start-fails");
+        const DecodeSupport s = CheckDecodeSupport(av1);
+        CHECK(s.Ok());
+        CHECK(s.verified);
+        CHECK(s.caps.checked);
+        CHECK(s.why == "on 'DLSSVID_FAKE_NVDEC_AV1', AV1 8-bit 4:2:0 up to 65535x65535");
+        CHECK(CheckDecodeSupport(Av1Info("yuv420p", 8, 8192, 4320)).verified);
+        CHECK(FakeNvdecRefusesFrames());
+        CHECK(CheckDecodeSupport(Av1Info("yuv444p")).block == DecodeBlock::Layout);
     }
     {
         FakeNvdecEnv fake("bogus");  // not understood: ignored, the driver answers
@@ -476,8 +505,8 @@ TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit
     CHECK(DescribeDecode(JudgeDecode(H264Info(), nullptr)) == "software (h264); NVDEC with --hwaccel cuda when the GPU decodes this layout");
     CHECK(DescribeDecode(JudgeDecode(Ffv1Info(), nullptr)) == "software (ffv1); NVDEC does not decode this codec");
     const NvdecAv1Caps good = GoodCaps();
-    CHECK(DescribeDecode(JudgeDecode(Av1Info(), &good)) == "NVDEC only (av1: no software AV1 decoder in this build): NVDEC on 'Test GPU', AV1 8-bit 4:2:0 up to 8192x8192");
-    CHECK(DescribeDecode(JudgeDecode(Av1Info(), nullptr)) == "NVDEC only (av1: no software AV1 decoder in this build): NVDEC (av1), not checked");
+    CHECK(DescribeDecode(JudgeDecode(Av1Info(), &good)) == "NVDEC only (av1: no software AV1 decoder in this build), on 'Test GPU', AV1 8-bit 4:2:0 up to 8192x8192");
+    CHECK(DescribeDecode(JudgeDecode(Av1Info(), nullptr)) == "NVDEC only (av1: no software AV1 decoder in this build), not checked");
     NvdecAv1Caps noAv1 = GoodCaps();
     noAv1.supported = false;
     const DecodeSupport refused = JudgeDecode(Av1Info(), &noAv1);

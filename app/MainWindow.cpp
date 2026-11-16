@@ -370,9 +370,11 @@ QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std:
     for (const auto& name : sources)
         if (const auto d = model_.store().Undecodable(name)) {
             const ViewportSource* src = model_.store().FindSource(name);
+            const bool proxied = src && !src->proxy.empty();
             s += "\n" + HumanSourceName(name) + ": " +
-                 (src && !src->proxy.empty() ? tr("показан по прокси перемотки; само видео на этом компьютере не декодируется, обработать его нельзя")
-                                             : SourceDecodeText(*d));
+                 (!proxied              ? SourceDecodeText(*d)
+                  : name == "source"    ? tr("показан по прокси перемотки; само видео на этом компьютере не декодируется, обработать его нельзя")
+                                        : tr("показан по прокси перемотки; само видео на этом компьютере не декодируется"));
         }
     return s;
 }

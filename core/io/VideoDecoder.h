@@ -161,8 +161,9 @@ public:
     bool HasAudio() const { return audioStream_ >= 0; }
     const AVCodecParameters* AudioCodecParameters() const;
     Rational AudioTimeBase() const;
-    // HwAccel::Cuda was asked and the device is up: NextFrame hands out GpuFrames (the on-device fast path). Fixed at the open: a
-    // hardware-only decoder (TASK-0076) decoding on NVDEC without being asked does not turn it on - its consumers stay on host frames.
+    // HwAccel::Cuda was asked and the device is up: NextFrame may hand out GpuFrames (NV12 frames from NVDEC, not turned; a codec without
+    // NVDEC - FFV1, ProRes - decodes in software with none). Fixed at the open: a hardware-only decoder (TASK-0076) decoding on NVDEC
+    // without being asked does not turn it on - its consumers stay on host frames.
     bool UsingHwAccel() const { return gpuFrames_; }
     // A frame came from NVDEC (asked for and the codec has it, or a hardware-only decoder past its first frame).
     bool DecodesOnNvdec() const { return nvdecFrames_; }
@@ -176,8 +177,8 @@ public:
     void SetAudioPacketSink(AudioPacketSink sink) { audioSink_ = std::move(sink); }
 
     // Next decoded frame in presentation order. Returns false at end of stream.
-    // `gpu` (optional): filled with the on-device NV12 frame when decoding with NVDEC; it is
-    // valid until the next NextFrame() call. `cpu = false` skips the device->host copy (the
+    // `gpu` (optional): filled with the on-device NV12 frame when UsingHwAccel() and the frame came from NVDEC as NV12; it is
+    // valid until the next NextFrame() call; asked for without HwAccel::Cuda it stays invalid and the CpuFrame is filled (TASK-0076). `cpu = false` skips the device->host copy (the
     // CpuFrame then only carries index/pts/desc) — only allowed when gpu is requested. When NVDEC
     // yields a layout other than NV12 (10/12-bit, 4:4:4), or the stream is shown turned, `gpu` stays invalid and the CpuFrame is
     // always filled (as Info().decoded: the source's bit depth and chroma layout, turned - 4:4:4 where the turn does not map the chroma
@@ -221,6 +222,7 @@ private:
     bool nvdecStarted_ = false;  // StartNvdec ran (the GPU checked, codec_ on the device)
     bool gpuFrames_ = false;     // UsingHwAccel()
     bool nvdecFrames_ = false;   // DecodesOnNvdec()
+    bool nvdecVerified_ = false;  // StartNvdec: the driver said it takes the stream (an ENOSYS then is a start failure, not a refusal)
     std::shared_ptr<const DecodeSupport> refused_;  // NVDEC refused this stream: every later NextFrame says so again
     AVBufferRef* hwDevice_ = nullptr;
     AVFrame* frame_ = nullptr;

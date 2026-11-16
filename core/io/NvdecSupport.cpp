@@ -97,6 +97,10 @@ std::string RefusalText(const DecodeSupport& s) {
                    std::to_string(s.caps.maxHeight) + ", at most " + std::to_string(s.caps.maxMacroblocks) + " macroblocks)";
         case DecodeBlock::NvdecFailed:
             return "NVDEC refused this AV1 stream and this build has no software AV1 decoder" + (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
+        case DecodeBlock::NvdecStartFailed:
+            return "NVDEC could not start decoding this AV1 stream although the driver takes it - out of GPU memory or a driver error (FFmpeg's message "
+                   "is in its output); this build has no software AV1 decoder" +
+                   (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::None: break;
     }
     return {};
@@ -135,8 +139,17 @@ std::optional<NvdecAv1Caps> FakeCaps() {
         c.checked = false;
         c.cuda = true;
         c.gpu = "DLSSVID_FAKE_NVDEC_AV1";
+    } else if (value == "start-fails") {  // the driver says yes, and NVDEC still does not start (out of GPU memory, a driver error)
+        c.cuda = true;
+        c.supported = true;
+        c.gpu = "DLSSVID_FAKE_NVDEC_AV1";
+        c.minWidth = c.minHeight = 1;
+        c.maxWidth = c.maxHeight = 65535;
+        c.maxMacroblocks = 0xffffffffu;
     } else {
-        std::call_once(said, [&] { Log()->warn("DLSSVID_FAKE_NVDEC_AV1='{}' is not no-cuda | no-nvdec | no-av1 | first-frame: ignored", value); });
+        std::call_once(said, [&] {
+            Log()->warn("DLSSVID_FAKE_NVDEC_AV1='{}' is not no-cuda | no-nvdec | no-av1 | first-frame | start-fails: ignored", value);
+        });
         return std::nullopt;
     }
     std::call_once(said, [&] { Log()->warn("DLSSVID_FAKE_NVDEC_AV1={}: NVDEC's AV1 answer is faked", value); });
@@ -243,14 +256,14 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
     const bool unknown = info.pixelFormat == "unknown";  // the probe did not learn it: NVDEC decides on the first frame (CUDA is asked)
     if (!unknown && info.pixelFormat != "yuv420p" && info.pixelFormat != "yuv420p10le") return Refuse(s, DecodeBlock::Layout);
     if (!caps || !caps->checked) {  // the driver could not be asked: go on blind, as FFmpeg does
-        s.why = "NVDEC (" + info.codecName + "), not checked" + (caps && !caps->why.empty() ? ": " + caps->why : std::string());
+        s.why = "not checked" + (caps && !caps->why.empty() ? ": " + caps->why : std::string());
         return s;
     }
     if (!caps->cuda) return Refuse(s, DecodeBlock::NoCuda);
     if (caps->nvdecMissing) return Refuse(s, DecodeBlock::NoNvdec);
     if (!caps->supported) return Refuse(s, DecodeBlock::NoAv1);
     if (unknown) {
-        s.why = "NVDEC (" + info.codecName + ") on '" + caps->gpu + "', the sample layout is not known before the first frame";
+        s.why = "on '" + caps->gpu + "', the sample layout is not known before the first frame";
         return s;
     }
     const uint64_t macroblocks = static_cast<uint64_t>((info.codedWidth + 15) / 16) * ((info.codedHeight + 15) / 16);
@@ -258,7 +271,7 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
         macroblocks > caps->maxMacroblocks)
         return Refuse(s, DecodeBlock::Size);
     s.verified = true;
-    s.why = "NVDEC on '" + caps->gpu + "', AV1 " + Depth(info.bitDepth) + " 4:2:0 up to " + std::to_string(caps->maxWidth) + "x" + std::to_string(caps->maxHeight);
+    s.why = "on '" + caps->gpu + "', AV1 " + Depth(info.bitDepth) + " 4:2:0 up to " + std::to_string(caps->maxWidth) + "x" + std::to_string(caps->maxHeight);
     return s;
 }
 
@@ -268,6 +281,10 @@ NvdecAv1Caps QueryNvdecAv1Caps(int bitDepth) {
     std::lock_guard<std::mutex> lock(mutex);
     if (const auto it = cache.find(bitDepth); it != cache.end()) return it->second;
     NvdecAv1Caps c = QueryLive(bitDepth);
+    if (!c.checked) {  // no answer (a context that could not be created now ...): asked again next time, not remembered for the process
+        Log()->debug("NVDEC AV1 {}: not checked: {}", Depth(bitDepth), c.why);
+        return c;
+    }
     Log()->debug("NVDEC AV1 {}: checked={} cuda={} supported={} gpu='{}' {}x{}..{}x{} mb<={} {}", Depth(bitDepth), c.checked, c.cuda, c.supported, c.gpu,
                  c.minWidth, c.minHeight, c.maxWidth, c.maxHeight, c.maxMacroblocks, c.why);
     cache.emplace(bitDepth, c);
@@ -288,13 +305,16 @@ DecodeSupport RefusedDecode(const VideoStreamInfo& info, DecodeBlock block, cons
     return Refuse(s, block);
 }
 
-bool FakeNvdecRefusesFrames() { return FakeValue() == "first-frame"; }
+bool FakeNvdecRefusesFrames() {
+    const std::string v = FakeValue();
+    return v == "first-frame" || v == "start-fails";
+}
 
 std::string DescribeDecode(const DecodeSupport& s) {
     if (!s.hardwareOnly)
         return s.why + (s.nvdecCodec ? "; NVDEC with --hwaccel cuda when the GPU decodes this layout" : "; NVDEC does not decode this codec");
     if (!s.Ok()) return "unavailable - " + s.why;
-    return "NVDEC only (" + s.codec + ": no software AV1 decoder in this build): " + s.why;
+    return "NVDEC only (" + s.codec + ": no software AV1 decoder in this build), " + s.why;
 }
 
 }  // namespace dlssvid

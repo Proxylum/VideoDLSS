@@ -7346,6 +7346,20 @@ std::optional<bool> PrimaryContextActive() {
 #endif
 }
 
+// The primary context reaching `want` and staying so for a moment: a load publishes its frame before its decoder is let go (and the
+// store prefetches a neighbour or two), so a check right after a frame shows could read the moment before the release
+bool ContextBecomes(bool want, int timeoutMs = 5000) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    for (;;) {
+        if (PrimaryContextActive() == want) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            if (PrimaryContextActive() == want) return true;
+        }
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
 // The frames `from`..`to` of the source resident (the store's prefetch window loaded: no load runs afterwards)
 void SettleFrames(AppModel& model, int64_t from, int64_t to) {
     QElapsedTimer t;
@@ -7374,7 +7388,7 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
 
     const QString transcode = QString::fromUtf8("перекодируйте ролик в H.264 или HEVC другой программой");
     auto layout = [&](const char* words) {
-        return QString::fromUtf8("Видео AV1 не открыть: его формат (") + QString::fromUtf8(words) +
+        return QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: его формат (") + QString::fromUtf8(words) +
                QString::fromUtf8(") эта версия программы не декодирует — AV1 декодирует только видеокарта, и только 8 и 10 бит 4:2:0. Что сделать: ") +
                transcode + ".";
     };
@@ -7388,8 +7402,9 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     noCuda.why = "nvcuda.dll could not be loaded (no NVIDIA driver)";
     const DecodeSupport nc = JudgeDecode(Av1StreamInfo("yuv420p", 8), &noCuda);
     REQUIRE(nc.block == DecodeBlock::NoCuda);
-    CHECK(SourceDecodeText(nc) == QString::fromUtf8("Видео AV1 не открыть: в этой версии программы AV1 декодирует только видеокарта NVIDIA, а она сейчас "
-                                                    "недоступна. Что сделать: обновите драйвер NVIDIA и перезапустите программу или ") +
+    CHECK(SourceDecodeText(nc) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в этой версии программы AV1 декодирует только видеокарта "
+                                                    "NVIDIA, а она сейчас недоступна для программы. Что сделать: проверьте, что видеокарта NVIDIA включена и "
+                                                    "драйвер NVIDIA установлен, и перезапустите программу или ") +
                                       transcode + QString::fromUtf8("; подробности — в логе."));
     NvdecAv1Caps noNvdec;
     noNvdec.checked = true;
@@ -7399,7 +7414,7 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     noNvdec.why = "nvcuvid.dll could not be loaded";
     const DecodeSupport nn = JudgeDecode(Av1StreamInfo("yuv420p", 8), &noNvdec);
     REQUIRE(nn.block == DecodeBlock::NoNvdec);
-    CHECK(SourceDecodeText(nn) == QString::fromUtf8("Видео AV1 не открыть: в драйвере NVIDIA не нашёлся видеодекодер (NVDEC), а другого декодера AV1 в этой "
+    CHECK(SourceDecodeText(nn) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в драйвере NVIDIA не нашёлся видеодекодер (NVDEC), а другого декодера AV1 в этой "
                                                     "версии программы нет. Что сделать: переустановите драйвер NVIDIA и перезапустите программу или ") +
                                       transcode + ".");
     NvdecAv1Caps noAv1;
@@ -7408,7 +7423,7 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     noAv1.gpu = "NVIDIA GeForce GTX 1080";
     const DecodeSupport na = JudgeDecode(Av1StreamInfo("yuv420p10le", 10), &noAv1);
     REQUIRE(na.block == DecodeBlock::NoAv1);
-    CHECK(SourceDecodeText(na) == QString::fromUtf8("Видео AV1 не открыть: видеокарта NVIDIA GeForce GTX 1080 не декодирует AV1 10 бит, а другого декодера AV1 "
+    CHECK(SourceDecodeText(na) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: видеокарта NVIDIA GeForce GTX 1080 не декодирует AV1 10 бит, а другого декодера AV1 "
                                                     "в этой версии программы нет. Что сделать: ") +
                                       transcode +
                                       QString::fromUtf8(" или откройте его на компьютере с видеокартой, которая декодирует AV1 (например, RTX 30 и новее)."));
@@ -7423,7 +7438,7 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     limits.maxMacroblocks = 262144;
     const DecodeSupport smaller = JudgeDecode(Av1StreamInfo("yuv420p", 8), &limits);
     REQUIRE(smaller.block == DecodeBlock::Size);
-    CHECK(SourceDecodeText(smaller) == QString::fromUtf8("Видео AV1 не открыть: кадр 320×192 меньше, чем декодирует видеокарта NVIDIA GeForce RTX 4090 (от "
+    CHECK(SourceDecodeText(smaller) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: кадр 320×192 меньше, чем декодирует видеокарта NVIDIA GeForce RTX 4090 (от "
                                                          "400×128 до 8192×8192). Что сделать: ") +
                                            transcode + ".");
     limits.minWidth = 64;
@@ -7432,16 +7447,19 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     limits.maxHeight = 4096;
     const DecodeSupport larger = JudgeDecode(Av1StreamInfo("yuv420p", 8), &limits);
     REQUIRE(larger.block == DecodeBlock::Size);
-    CHECK(SourceDecodeText(larger) == QString::fromUtf8("Видео AV1 не открыть: кадр 320×192 больше, чем декодирует видеокарта NVIDIA GeForce RTX 4090 (от 64×64 "
+    CHECK(SourceDecodeText(larger) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: кадр 320×192 больше, чем декодирует видеокарта NVIDIA GeForce RTX 4090 (от 64×64 "
                                                         "до 256×4096). Что сделать: перекодируйте ролик другой программой в H.264 или HEVC либо в кадр "
                                                         "поменьше."));
-    const QString failedText = QString::fromUtf8("Видео AV1 не открыть: видеокарта отказалась его декодировать, а другого декодера AV1 в этой версии программы "
+    const QString failedText = QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: видеокарта отказалась его декодировать, а другого декодера AV1 в этой версии программы "
                                                  "нет. Что сделать: обновите драйвер NVIDIA или ") +
                                transcode + ".";
     CHECK(SourceDecodeText(RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecFailed, "")) == failedText);
     CHECK(SourceDecodeText(RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecFailed, "on the first frame")) == failedText);
+    const DecodeSupport start = RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::NvdecStartFailed, "on the first frame");
+    CHECK(SourceDecodeText(start) == QString::fromUtf8("Видеокарта не смогла начать декодировать этот AV1, хотя умеет, — скорее всего, не хватило её памяти. Что "
+                                                       "сделать: дождитесь конца обработки или закройте программы, которые занимают видеокарту, и попробуйте снова."));
     // the core's English details stay in the log; every text says what to do
-    for (const DecodeSupport& s : {nc, nn, na, smaller, larger}) {
+    for (const DecodeSupport& s : {nc, nn, na, smaller, larger, start}) {
         CHECK(SourceDecodeText(s).contains(QString::fromUtf8("Что сделать: ")));
         for (const char* english : {"nvcuda", "nvcuvid", "could not", "NVDEC on", "AV1 decodes", "refused"}) {
             INFO(english);
@@ -7480,6 +7498,7 @@ TEST_CASE("AppModel opens an AV1 video as any other; without NVDEC AV1 the plan 
         QPushButton* process = ProcessButton(panel);
         REQUIRE(process);
         CHECK(process->isEnabled());
+        CHECK(process->text().startsWith(QString::fromUtf8("Обработать · ")));  // what it would run
         for (QPushButton* b : RunAloneButtons(panel)) CHECK(b->isEnabled());
         // the GPU loses AV1 between two plans and Ctrl+Return comes before the scheduled plan: processAll makes that plan first
         {
@@ -7502,7 +7521,7 @@ TEST_CASE("AppModel opens an AV1 video as any other; without NVDEC AV1 the plan 
         REQUIRE(expected.block == DecodeBlock::NoAv1);
         INFO("planError: " << model.planError().toStdString());
         CHECK(model.planError() == SourceDecodeText(expected));
-        CHECK(model.planError() == QString::fromUtf8("Видео AV1 не открыть: видеокарта DLSSVID_FAKE_NVDEC_AV1 не декодирует AV1 8 бит, а другого декодера "
+        CHECK(model.planError() == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: видеокарта DLSSVID_FAKE_NVDEC_AV1 не декодирует AV1 8 бит, а другого декодера "
                                                      "AV1 в этой версии программы нет. Что сделать: перекодируйте ролик в H.264 или HEVC другой программой "
                                                      "или откройте его на компьютере с видеокартой, которая декодирует AV1 (например, RTX 30 и новее)."));
         CHECK(model.sourceDecode().block == DecodeBlock::NoAv1);
@@ -7526,6 +7545,7 @@ TEST_CASE("AppModel opens an AV1 video as any other; without NVDEC AV1 the plan 
         QPushButton* process = ProcessButton(panel);
         REQUIRE(process);
         CHECK_FALSE(process->isEnabled());
+        CHECK(process->text() == QString::fromUtf8("Обработать"));  // no «· N стадий»: nothing can run on this source
         PressCtrlReturn(panel);  // the button's shortcut: held as the button is
         CHECK_FALSE(queue.mainBusy());
         // «Запустить отдельно» is off on every card and says why; the run itself refuses too (a press that came before the refresh)
@@ -7585,9 +7605,13 @@ TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport bec
     // the same, step by step: a plan made while the GPU still decoded, then the viewport's decoder refused
     AppModel model(true);
     model.openVideo(Q(clip));
+    model.setForce("upscale", true);  // a mark above NR: the preview plans without it (planNoForce_)
+    model.refreshPlan();
     model.store().WaitForCurrent();
     REQUIRE(model.sourceDecode().Ok());
     REQUIRE(model.planError().isEmpty());
+    REQUIRE_FALSE(model.outcome().stages.empty());
+    REQUIRE_FALSE(model.previewPlan().stages.empty());
     FakeNvdecEnv fake("first-frame");
     model.store().SetSources(model.store().Sources());  // the decoders open again (a reload of the sources)
     model.store().SetCurrentTime(model.time(), {"source"});
@@ -7602,6 +7626,8 @@ TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport bec
     CHECK(model.sourceDecode().why == refused.why);
     CHECK(model.planError() == SourceDecodeText(refused));
     CHECK(model.plan().stages.empty());
+    CHECK(model.outcome().stages.empty());        // the run's estimate goes with the plan
+    CHECK(model.previewPlan().stages.empty());    // and the preview's plan
     CHECK(planChanged.count() >= 1);
     TaskQueue queue;
     ProjectPanel panel(model, queue);
@@ -7609,6 +7635,7 @@ TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport bec
     QPushButton* process = ProcessButton(panel);
     REQUIRE(process);
     CHECK_FALSE(process->isEnabled());
+    CHECK(process->text() == QString::fromUtf8("Обработать"));
     PressCtrlReturn(panel);
     CHECK_FALSE(queue.mainBusy());
     // a plan made again keeps the verdict: the driver still says nothing, the viewport's refusal stands
@@ -7619,7 +7646,7 @@ TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport bec
     QSettings().remove("view/autoProxy");
 }
 
-TEST_CASE("A queued task and a started preview let the GPU memory of the viewport's NVDEC decoders go; the next frames open them again",
+TEST_CASE("A task and a preview: the viewport lets NVDEC go for their whole run - each frame closes its decoder - and holds it again after; the AV1 proxy build stops",
           "[app][gpu][av1]") {
     App();
     const auto before = PrimaryContextActive();
@@ -7631,34 +7658,53 @@ TEST_CASE("A queued task and a started preview let the GPU memory of the viewpor
     std::string why;
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
     if (clip.empty()) SKIP(why);
-    QSettings().setValue("view/autoProxy", false);
+    QSettings().setValue("view/autoProxy", true);  // the background proxy build of the AV1 source starts with the project
     AppModel model(true);
     TaskQueue queue;
     ProjectTasks tasks(model, queue);
     model.openVideo(Q(clip));
     REQUIRE(model.hasProject());
-    SettleFrames(model, 0, 6);
-    CHECK(PrimaryContextActive() == true);  // the viewport's decoder on NVDEC
-    // a task queued (the run, a stage alone): taskQueued
-    const int task = queue.enqueue("t", "cmd", {"/c", "exit", "0"});
+    REQUIRE(model.proxyBuilding());  // `dlssvid proxy` decodes the AV1 source on NVDEC in a process of its own
+    QSettings().setValue("view/autoProxy", false);
+
+    // a task queued (the run, a stage alone): NVDEC let go - the viewport's decoder and the proxy build
+    const int task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});
     REQUIRE(task >= 0);
-    CHECK(PrimaryContextActive() == false);
-    Pump([&] { return queue.finished(task); }, 20000);
-    // the next frames open a decoder again
+    CHECK_FALSE(model.proxyBuilding());
+    CHECK(ContextBecomes(false));
+    // while it runs, the viewport still shows frames - each load closes its decoder after it
+    SettleFrames(model, 0, 6);
+    CHECK(ContextBecomes(false));
     model.setTime(0.5);
     SettleFrames(model, 6, 18);
     CHECK(model.frameStateOf("source") == FrameState::Ready);
-    CHECK(PrimaryContextActive() == true);
-    // the NR preview, a task of its own lane: previewStarted
+    CHECK(ContextBecomes(false));
+    // the task ends: the viewport holds NVDEC between frames again
+    queue.cancel(task);
+    Pump([&] { return queue.finished(task); }, 20000);
+    REQUIRE(queue.finished(task));
+    model.setTime(0.8);  // frames not loaded yet
+    SettleFrames(model, 19, 23);
+    CHECK(ContextBecomes(true));
+
+    // the NR preview, a task of its own lane: the same from its start to its end
     bool started = false;
     QObject::connect(&queue, &TaskQueue::previewStarted, &queue, [&](int) { started = true; });
-    const int preview = queue.enqueue("p", "cmd", {"/c", "ping", "-n", "2", "127.0.0.1"}, {}, TaskQueue::Lane::Preview);
+    const int preview = queue.enqueue("p", "ping", {"-n", "30", "127.0.0.1"}, {}, TaskQueue::Lane::Preview);
     REQUIRE(preview >= 0);
     Pump([&] { return started; }, 20000);
     REQUIRE(started);
-    CHECK(PrimaryContextActive() == false);
+    CHECK(ContextBecomes(false));
+    model.reloadSources();  // the frames load again while the preview runs
+    SettleFrames(model, 13, 23);
+    CHECK(ContextBecomes(false));
+    queue.cancel(preview);
+    Pump([&] { return queue.finished(preview); }, 20000);
+    REQUIRE(queue.finished(preview));
+    model.reloadSources();
+    SettleFrames(model, 13, 23);
+    CHECK(ContextBecomes(true));
     queue.stopAll(10000);
-    QSettings().remove("view/autoProxy");
 }
 
 TEST_CASE("The main window's cell says a video cannot be decoded here, and its tooltip says why: refused in advance, on the first frame, or shown by its proxy",
@@ -7708,7 +7754,70 @@ TEST_CASE("The main window's cell says a video cannot be decoded here, and its t
     REQUIRE(cell);
     INFO("label: " << cell->text().toStdString() << "; tooltip: " << cell->toolTip().toStdString());
     CHECK(cell->toolTip().contains(viaProxy));
-    CHECK_FALSE(cell->toolTip().contains(QString::fromUtf8("Видео AV1 не открыть")));  // not the refusal: it shows
+    CHECK_FALSE(cell->toolTip().contains(QString::fromUtf8("Видео AV1 не декодируется на этом компьютере:")));  // not the refusal: it shows
+    CHECK_FALSE(cell->text().endsWith(SourceDecodeShort()));
+    QSettings().remove("view/autoProxy");
+}
+
+TEST_CASE("AppModel: NVDEC failing to start although the driver takes the source is no verdict - the plan stands, Process stays on", "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_start_fails");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    QSettings().setValue("view/autoProxy", false);
+    FakeNvdecEnv fake("start-fails");  // the driver says yes; NVDEC does not start (out of memory, say)
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    model.store().WaitForCurrent();
+    model.store().Update();
+    model.notifyFramesUpdated();  // the viewport's poll
+    CHECK_FALSE(model.store().Undecodable("source"));
+    CHECK(model.sourceDecode().Ok());
+    CHECK(model.sourceDecode().verified);
+    CHECK(model.planError().isEmpty());
+    CHECK_FALSE(model.plan().stages.empty());
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    QPushButton* process = ProcessButton(panel);
+    REQUIRE(process);
+    CHECK(process->isEnabled());
+    QSettings().remove("view/autoProxy");
+}
+
+TEST_CASE("The main window's tooltip of a result shown by its proxy says the video is not decoded here, nothing of processing", "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_result_cell");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    QSettings().setValue("view/autoProxy", false);
+    const auto result = d / "clip_result.mp4";
+    std::filesystem::copy_file(clip, result, std::filesystem::copy_options::overwrite_existing);
+    const auto passes = d / "passes";
+    Project p = Project::Create(clip, passes);
+    p.resultVideo = result;
+    p.viewport.layers[0].source = "result";  // the result in the viewport
+    p.Save(d / "proj.dlssvid.json");
+    BuildProxy(result, passes, "result");  // made where NVDEC decodes AV1
+    REQUIRE(ValidProxy(result, passes, "result"));
+    FakeNvdecEnv env("no-av1");
+    MainWindow window(true);
+    window.openPath(Q(d / "proj.dlssvid.json"));
+    const QString viaProxy = "\n" + HumanSourceName("result") + QString::fromUtf8(": показан по прокси перемотки; само видео на этом компьютере не декодируется");
+    QLabel* cell = nullptr;
+    Pump(
+        [&] {
+            cell = CellLabel(window);
+            return cell && cell->toolTip().contains(viaProxy) && !cell->text().contains(QString::fromUtf8("загрузка"));
+        },
+        20000);
+    REQUIRE(cell);
+    INFO("label: " << cell->text().toStdString() << "; tooltip: " << cell->toolTip().toStdString());
+    CHECK(cell->toolTip().contains(viaProxy));
+    CHECK_FALSE(cell->toolTip().contains(QString::fromUtf8("обработать его нельзя")));  // the result is not what a run reads
     CHECK_FALSE(cell->text().endsWith(SourceDecodeShort()));
     QSettings().remove("view/autoProxy");
 }

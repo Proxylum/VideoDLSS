@@ -444,7 +444,9 @@ void ProjectPanel::refresh() {
     outError_->setText(model_.planError());
     outError_->setVisible(!model_.planError().isEmpty() && hasSource);
     const int toRun = std::max(0, out.stagesToRun - 1);  // the encode is not a «stage» for the button
-    process_->setText(toRun > 0 ? tr("Обработать · %1").arg(Plural(toRun, tr("стадия"), tr("стадии"), tr("стадий"))) : tr("Обработать · только кодирование"));
+    process_->setText(!model_.sourceDecode().Ok() ? tr("Обработать")  // TASK-0076: nothing can be run on a source this machine cannot decode
+                      : toRun > 0                 ? tr("Обработать · %1").arg(Plural(toRun, tr("стадия"), tr("стадии"), tr("стадий")))
+                                                  : tr("Обработать · только кодирование"));
     // a preview does not hold processing back: «Обработать» preempts it (TaskQueue)
     process_->setEnabled(hasSource && canProcess());
     if (hasSource && model_.planError().isEmpty() && !model_.planBlocker().isEmpty()) {  // a stage the run would refuse

@@ -58,8 +58,9 @@ AVBufferRef* CreateCudaDevice(std::string* why) {
     unsigned flags = 0;
     int active = 0;
     CUdevice dev = 0;
+    // the same test as FFmpeg's cuda_context_init (libavutil/hwcontext_cuda.c): it refuses an active context whose flags are not exactly these
     if (cuInit(0) == CUDA_SUCCESS && cuDeviceGet(&dev, 0) == CUDA_SUCCESS && cuDevicePrimaryCtxGetState(dev, &flags, &active) == CUDA_SUCCESS && active &&
-        (flags & CU_CTX_SCHED_MASK) != CU_CTX_SCHED_BLOCKING_SYNC)
+        flags != CU_CTX_SCHED_BLOCKING_SYNC)
         if (const cudaError_t e = cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync); e != cudaSuccess)
             Log()->debug("cudaSetDeviceFlags(BlockingSync) before NVDEC: {}", cudaGetErrorString(e));
 #endif
@@ -476,15 +477,18 @@ void VideoDecoder::StartNvdec() {
         hwDevice_ = device;
     }
     nvdecStarted_ = true;
-    Log()->log(probe_ ? spdlog::level::debug : spdlog::level::info, "{}: {} has no software decoder in this build, decoding on {}", url_, info_.codecName,
+    nvdecVerified_ = support.verified;
+    Log()->log(probe_ ? spdlog::level::debug : spdlog::level::info, "{}: {} decodes on NVDEC only (no software decoder in this build), {}", url_, info_.codecName,
                support.why);
 }
 
 void VideoDecoder::CheckDecode(int err, const char* what) {
     if (err >= 0) return;
-    if (hwOnly_ && err == AVERROR(ENOSYS)) {  // av1dec without a working hwaccel: every frame header would fail the same way - kept
-        refused_ = std::make_shared<const DecodeSupport>(
-            RefusedDecode(info_, DecodeBlock::NvdecFailed, framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "on the first frame"));
+    if (hwOnly_ && err == AVERROR(ENOSYS)) {  // av1dec without a working hwaccel: every frame header would fail the same way - kept (this
+        // decoder must not be fed again). The driver having said it takes the stream, NVDEC did not start (memory, the driver): a new
+        // decoder may succeed - the refusal is transient
+        const std::string when = framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "on the first frame";
+        refused_ = std::make_shared<const DecodeSupport>(RefusedDecode(info_, nvdecVerified_ ? DecodeBlock::NvdecStartFailed : DecodeBlock::NvdecFailed, when));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }
     CheckAv(err, what);

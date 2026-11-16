@@ -95,8 +95,11 @@ public:
     // first frame in a loader; nullopt: it decodes (or is no video)
     std::optional<DecodeSupport> Undecodable(const std::string& name) const;
     // TASK-0076: closes the videos' decoders that hold NVDEC (an AV1 source in the GUI process): a run gets that memory; a later frame of
-    // the viewport opens one again
+    // the viewport opens one again. Never waits for a load in flight (the GUI thread): a busy decoder is closed by its loader after it.
     void ReleaseNvdecDecoders();
+    // TASK-0076: false - every load of an NVDEC-only video closes its decoder afterwards (a task runs: the viewport does not hold NVDEC
+    // between frames); true (the default) - kept for the next frame
+    void SetHoldNvdec(bool hold) { holdNvdec_ = hold; }
     // Pass folders with a manifest directly under passesRoot, named by their folder (the texture kind comes from the manifest).
     static std::vector<ViewportSource> DiscoverPasses(const std::filesystem::path& passesRoot);
     // Previous versions under <pass>.v/ as sources named "<pass>@<id>" (stage 9: compare versions with the wipe).
@@ -205,7 +208,9 @@ private:
         };
         std::array<ProxySlot, 4> proxies;
         std::atomic<int64_t> aborted{0}, proxyLoads{0};
+        std::atomic<bool> releasePending{false};  // TASK-0076: ReleaseNvdecDecoders found it busy - the loader closes it after the load
     };
+    void ReleaseNvdecAfterLoad(const std::string& source);  // TASK-0076: a pending release, or every load while SetHoldNvdec(false)
     struct LoadResult {
         std::vector<Loaded> loaded;
         bool aborted = false;  // not loaded because nobody wants it any more; not missing
@@ -239,6 +244,7 @@ private:
     Options options_;
     std::vector<ViewportSource> sources_;
     std::map<std::string, DecodeSupport> refusedInLoad_;  // TASK-0076: NVDEC refused a video in a loader (under mutex_; SetSources forgets)
+    std::atomic<bool> holdNvdec_{true};                   // TASK-0076: SetHoldNvdec
     std::map<std::string, std::unique_ptr<SourceRuntime>> runtimes_;
     uint32_t imageW_ = 0, imageH_ = 0;
     Rational fps_{0, 1};

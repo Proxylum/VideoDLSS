@@ -171,7 +171,7 @@ void BuildMissingProxies(const Project& project, const std::vector<std::string>&
                 std::printf("%s: proxy up to date: %s\n", name.c_str(), valid->string().c_str());
                 continue;
             }
-        {  // TASK-0076: nothing here decodes it (AV1 without NVDEC AV1) - the other proxy and the render go on
+        {  // TASK-0076: nothing here decodes it (AV1 without NVDEC AV1) - the other proxy and the render go on (and below: NVDEC refusing its first frame)
             VideoDecoder probe(video, VideoDecoder::Probe());
             if (const DecodeSupport d = CheckDecodeSupport(probe.Info()); !d.Ok()) {
                 std::printf("%s: no proxy, the video cannot be decoded here: %s\n", name.c_str(), d.why.c_str());
@@ -203,7 +203,13 @@ void BuildMissingProxies(const Project& project, const std::vector<std::string>&
                 std::fflush(stdout);
             }
         };
-        const auto path = BuildProxy(video, project.passesRoot, name, o);
+        std::filesystem::path path;
+        try {
+            path = BuildProxy(video, project.passesRoot, name, o);
+        } catch (const DecodeUnavailable& e) {  // TASK-0076: NVDEC refused its first frame - the other proxy and the render go on
+            std::printf("%s: no proxy, the video cannot be decoded here: %s\n", name.c_str(), e.support.why.c_str());
+            continue;
+        }
         std::printf("%s: proxy %s (%.1f MB) in %.1f s\n", name.c_str(), path.string().c_str(), static_cast<double>(std::filesystem::file_size(path)) / 1e6,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
