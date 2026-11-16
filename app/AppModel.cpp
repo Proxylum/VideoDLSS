@@ -511,7 +511,6 @@ void AppModel::startProxies() {
         if (video.empty() || !std::filesystem::exists(video) || ValidProxy(video, project_.passesRoot, name)) continue;
         if (isReleased(video)) continue;  // being replaced (TASK-0070)
         if (store_ && store_->Undecodable(name)) continue;  // TASK-0076: nothing here decodes it
-        if (proxyRefused_.count(FileStamp(video))) continue;  // TASK-0076: the proxy process found it undecodable - not again for the same file
         names << name;
     }
     if (names.isEmpty()) return;
@@ -523,7 +522,9 @@ void AppModel::startProxies() {
     proxyArgs_ = args;
     proxyProcess_ = new QProcess(this);
     proxyProcess_->setProcessChannelMode(QProcess::MergedChannels);
-    connect(proxyProcess_, &QProcess::finished, this, [this, p = proxyProcess_](int code, QProcess::ExitStatus status) {
+    // the videos of this build, not the ones of a project opened before it ends (TASK-0076: its verdicts are theirs)
+    connect(proxyProcess_, &QProcess::finished, this,
+            [this, p = proxyProcess_, builtSource = project_.sourceVideo, builtResult = project_.resultVideo](int code, QProcess::ExitStatus status) {
         const QString out = QString::fromUtf8(p->readAll());  // dlssvid writes UTF-8 (TASK-0066)
         p->deleteLater();
         if (proxyProcess_ == p) proxyProcess_ = nullptr;
@@ -559,9 +560,37 @@ void AppModel::startProxies() {
                        "для перемотки)")
                         .arg(notNow.join(", "));
         if (!said.isEmpty()) emit message(said.join("; "));
-        for (const char* name : {"source", "result"})  // a verdict on the file: the background build does not try it again (while it is the same file)
-            if (out.contains(QString("%1: no proxy,").arg(name)))
-                proxyRefused_.insert(FileStamp(std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo));
+        // a verdict on a file is the viewport's too: the sources set again say it (the plan stops, the viewport and the menus say it, the
+        // background build does not try it again). The driver's answer this process gets as well (no AV1 on this GPU, the size): the sources
+        // find it themselves; NVDEC refusing the stream there: remembered with the file's size and time as a loader's refusal is
+        bool heardVerdict = false;
+        for (const QString& line : out.split('\n')) {
+            const QString l = line.trimmed();
+            for (const char* name : {"source", "result"}) {
+                const QString head = QString("%1: no proxy, the video cannot be decoded here: ").arg(name);
+                if (!l.startsWith(head)) continue;
+                const std::filesystem::path video = std::string(name) == "source" ? builtSource : builtResult;
+                try {
+                    VideoDecoder probe(video, VideoDecoder::Probe());
+                    if (!probe.Info().hardwareOnly) continue;
+                    if (!CheckDecodeSupport(probe.Info()).Ok()) {
+                        heardVerdict = true;
+                        continue;
+                    }
+                    // «NVDEC refused this AV1 stream ... (<when>)»: its detail, said as the proxy build's
+                    std::string detail = l.mid(head.size()).toStdString();
+                    const std::string refusedWords = RefusedDecode(probe.Info(), DecodeBlock::NvdecFailed, "").why;
+                    if (detail.rfind(refusedWords + " (", 0) == 0 && detail.back() == ')')
+                        detail = detail.substr(refusedWords.size() + 2, detail.size() - refusedWords.size() - 3);
+                    // not remembered (the file not readable now): the sources are not set again - they would start the same build again
+                    if (FrameStore::RememberRefusedFile(video, RefusedDecode(probe.Info(), DecodeBlock::NvdecFailed, "the proxy build: " + detail)))
+                        heardVerdict = true;
+                } catch (const std::exception& e) {
+                    Log()->debug("viewport proxy: {} not probed: {}", video.string(), e.what());
+                }
+            }
+        }
+        if (heardVerdict && (SameFile(builtSource, project_.sourceVideo) || SameFile(builtResult, project_.resultVideo))) reloadSources();
         emit proxiesChanged();
     });
     Log()->info("viewport proxy: building {} in the background", names.join(", ").toStdString());
@@ -821,7 +850,7 @@ void AppModel::noteSourceRefused() {
     if (!refused) return;
     // once per refusal: a plan that decided otherwise after hearing it (the file replaced by one in another codec) is not made again on
     // every frame update; another refusal (a new one, another file) is heard
-    const std::string heard = project_.sourceVideo.string() + "|" + refused->why;
+    const std::string heard = FileStamp(project_.sourceVideo) + "|" + refused->why;
     if (heard == heardRefusal_) return;
     heardRefusal_ = heard;
     refreshPlan();  // reads the refusal before anything else: it replaces another plan error (the more basic one) and drops the plan

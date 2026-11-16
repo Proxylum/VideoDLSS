@@ -8555,8 +8555,9 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
         }
     }
     // a verdict in the proxy process alone (the stand-in set while the viewport rests, after its sources were made): before the build
-    // (no-av1: the process asks the driver) and on a frame of it (later-frame: NVDEC refuses after a few frames)
-    for (const char* value : {"no-av1", "later-frame"}) {
+    // (no-av1: the process asks the driver) and on its first frame (first-frame: the driver says nothing in advance, NVDEC refuses - at once,
+    // whatever the load: later-frame refuses only once 3 frames came back before the next packet, which a busy GPU may not give)
+    for (const char* value : {"no-av1", "first-frame"}) {
         INFO(value);
         RemoveProxy(passes, "source");
         RemoveProxy(passes, "result");
@@ -8589,13 +8590,40 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
             const auto lines = linesOf(log, start);
             REQUIRE(lines.size() == 1);
             if (std::string(value) == "no-av1") CHECK(lines[0] == start + noAv1);
-            else CHECK_THAT(lines[0], Catch::Matchers::EndsWith(" frames)"));  // «... (after N frames)»: the reason to its end
+            else CHECK(lines[0] == start + "NVDEC refused this AV1 stream and this build has no software AV1 decoder (on the first frame)");  // whole
         }
+        // the process's verdict is the viewport's too: the sources set again say it - the store, the plan - and the background build
+        // leaves the videos alone
+        const auto ofSource = model.store().Undecodable("source");
+        const auto ofResult = model.store().Undecodable("result");
+        REQUIRE(ofSource);
+        REQUIRE(ofResult);
         if (std::string(value) == "no-av1") {
-            // the process's verdict is kept for the files: a new start of the background build leaves them alone
-            model.startProxies();
-            CHECK_FALSE(model.proxyBuilding());
-            // the result written again - another stream, another size, its time as before: tried again (it alone)
+            // the driver's answer this process gets as well: the sources find it themselves, nothing is remembered for the files
+            CHECK(ofSource->block == DecodeBlock::NoAv1);
+            CHECK(ofResult->block == DecodeBlock::NoAv1);
+        } else {
+            // NVDEC refusing the stream in the process (this process's driver takes it): remembered for the files as a loader's refusal is,
+            // in the process's words without its wrapper
+            const std::string refusedWords = "NVDEC refused this AV1 stream and this build has no software AV1 decoder";
+            for (const auto& r : {ofSource, ofResult}) {
+                CHECK(r->block == DecodeBlock::NvdecFailed);
+                CHECK(r->why == refusedWords + " (the proxy build: on the first frame)");  // the process's words said once
+            }
+            // remembered for the files - however their paths are written: the test's spelling, not the project's
+            REQUIRE(clip->string() != model.project().sourceVideo.string());
+            CHECK(FrameStore::VideoSource("source", *clip)->undecodable);
+            CHECK(FrameStore::VideoSource("result", result)->undecodable);
+        }
+        CHECK(model.sourceDecode().block == ofSource->block);
+        CHECK(model.planError() == SourceDecodeText(*ofSource));
+        model.startProxies();
+        CHECK_FALSE(model.proxyBuilding());
+        if (std::string(value) == "first-frame") {
+            // the files written again: tried again - the result another stream of another size with its time as before, the source only
+            // touched (the same bytes, another time); the stand-in gone (the loaders at rest): the proxies are made
+            SettleAny(model, 0, 6);
+            fake.reset();
             const auto resultTime = std::filesystem::last_write_time(result);
             ClipSpec longer = spec;
             longer.frames = 32;
@@ -8604,26 +8632,26 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
             REQUIRE(std::filesystem::file_size(*other) != std::filesystem::file_size(result));
             std::filesystem::copy_file(*other, result, std::filesystem::copy_options::overwrite_existing);
             std::filesystem::last_write_time(result, resultTime);
-            messages.clear();
-            model.startProxies();
-            CHECK(model.proxyBuilding());
+            model.reloadSources();  // the sources set again (the GUI does it when a result is written): the background build starts
+            CHECK_FALSE(model.store().Undecodable("result"));
+            CHECK(model.store().Undecodable("source"));  // the same file still
+            REQUIRE(model.proxyBuilding());
+            CHECK(model.proxyBuildSources() == QStringList{"result"});
             Pump([&] { return !model.proxyBuilding(); }, 60000);
             REQUIRE_FALSE(model.proxyBuilding());
-            CHECK(messagesOf(messages).contains(notHere + HumanSourceName("result") + verdictWords));  // refused again: the result alone
-            model.startProxies();
-            CHECK_FALSE(model.proxyBuilding());
-            // the source only touched (the same bytes, another time): tried again (it alone)
+            CHECK(ValidProxy(result, passes, "result"));
             std::filesystem::last_write_time(*clip, std::filesystem::last_write_time(*clip) + std::chrono::seconds(2));
-            messages.clear();
-            model.startProxies();
-            CHECK(model.proxyBuilding());
+            model.reloadSources();
+            CHECK_FALSE(model.store().Undecodable("source"));
+            REQUIRE(model.proxyBuilding());
+            CHECK(model.proxyBuildSources() == QStringList{"source"});
             Pump([&] { return !model.proxyBuilding(); }, 60000);
             REQUIRE_FALSE(model.proxyBuilding());
-            CHECK(messagesOf(messages).contains(notHere + HumanSourceName("source") + verdictWords));
-            model.startProxies();
-            CHECK_FALSE(model.proxyBuilding());
+            CHECK(ValidProxy(*clip, passes, "source"));
+            CHECK(model.sourceDecode().Ok());
         }
-        fake.reset();  // the loaders at rest still: nothing asked for frames
+        SettleAny(model, 0, 6);
+        fake.reset();
     }
     // a video that decodes and needs no proxy (keyframes at most 8 frames apart): the process says «source: no proxy needed» - nothing of it
     ClipSpec plain;
@@ -8767,4 +8795,116 @@ TEST_CASE("AppModel: the viewport's refusal heard after the file was written in 
         model.notifyFramesUpdated();
     }
     CHECK(planChanged.count() == said);
+}
+
+TEST_CASE("AppModel: a background proxy build's verdict is its videos' - a project opened before the build ends keeps its own", "[app][gpu][av1][proxy]") {
+    App();
+    const auto d = Dir("av1_proxy_other_project");
+    AutoProxySetting autoProxy(false);
+    {
+        D3D12Device dev;
+        if (dev.IsWarp() || !dev.IsNvidia() || !VideoEncoder::EncoderAvailable("av1_nvenc")) SKIP("no NVIDIA GPU with av1_nvenc");
+    }
+    ClipSpec spec;
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 24;
+    spec.gop = 16;  // keyframes 16 frames apart: the proxy process builds one
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto clip = WriteClipIfSupported(d / "clip.mp4", spec, &why);
+    if (!clip) SKIP(why);
+    const auto other = d / "other.mp4";  // the second project's video: the same stream, another file
+    std::filesystem::copy_file(*clip, other);
+    const auto [first, firstPasses] = ProxyProject(d, *clip, {}, "first");
+    const auto [second, secondPasses] = ProxyProject(d, other, {}, "second");
+    BuildProxy(other, secondPasses, "source");  // the second project shows its video by a proxy: no NVDEC, no build of its own
+    REQUIRE(ValidProxy(other, secondPasses, "source"));
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    AppModel model(true);
+    model.openProject(Q(first));
+    REQUIRE(model.hasProject());
+    SettleFrames(model, 0, 6);
+    fake.emplace("first-frame");  // the proxy process: NVDEC refuses the stream's first frame - a verdict, at once
+    autoProxy.set(true);
+    model.startProxies();
+    REQUIRE(model.proxyBuilding());
+    const std::filesystem::path firstVideo = model.project().sourceVideo;  // the paths as the projects write them (the refusals are kept per path)
+    model.openProject(Q(second));  // before the build ends: the second project's video has its proxy - the first's build goes on
+    const std::filesystem::path secondVideo = model.project().sourceVideo;
+    REQUIRE(model.hasProject());
+    REQUIRE(model.proxyBuilding());
+    QSignalSpy sources(&model, &AppModel::sourcesChanged);
+    Pump([&] { return !model.proxyBuilding(); }, 60000);
+    REQUIRE_FALSE(model.proxyBuilding());
+    CHECK(FrameStore::VideoSource("source", firstVideo)->undecodable);        // the verdict kept for the video it was on
+    CHECK_FALSE(FrameStore::VideoSource("source", secondVideo)->undecodable);  // not for the open project's video
+    CHECK(sources.count() == 0);  // the open project's sources not set again for another's verdict
+    CHECK_FALSE(model.store().Undecodable("source"));
+    CHECK(model.sourceDecode().Ok());
+    CHECK(model.planError().isEmpty());
+    SettleFrames(model, 0, 6);  // the loaders at rest before the stand-in goes
+}
+
+TEST_CASE("AppModel: the viewport's refusal is heard once per file as it is - the file written again with the same refusal is heard again",
+          "[app][gpu][av1][regression]") {
+    App();
+    const auto d = Dir("av1_heard_again");
+    AutoProxySetting autoProxy(false);
+    {
+        D3D12Device dev;
+        if (dev.IsWarp() || !dev.IsNvidia() || !VideoEncoder::EncoderAvailable("av1_nvenc")) SKIP("no NVIDIA GPU with av1_nvenc");
+    }
+    ClipSpec spec;
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 24;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto written = WriteClipIfSupported(d / "clip.mkv", spec, &why);  // MKV: FFV1 can take its place under the same name
+    if (!written) SKIP(why);
+    const std::filesystem::path clip = *written;
+    const auto av1 = d / "av1_copy.mkv";  // the AV1 stream, to write back
+    std::filesystem::copy_file(clip, av1);
+    ClipSpec plain;
+    plain.width = 320;
+    plain.height = 192;
+    plain.frames = 24;
+    const auto ffv1 = WriteClip(d / "plain.mkv", plain);
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    SettleFrames(model, 0, 6);
+    fake.emplace("first-frame");  // NVDEC refuses the viewport's first frame: a verdict the probe did not give
+    model.store().SetSources(model.store().Sources());
+    model.store().SetCurrentTime(model.time(), {"source"});
+    model.store().WaitForCurrent();
+    REQUIRE(model.store().Undecodable("source"));
+    SettleAny(model, 0, 6);
+    fake.reset();
+    const DecodeSupport refused = *model.store().Undecodable("source");
+    auto poll = [&] {  // the viewport's
+        model.store().Update();
+        model.notifyFramesUpdated();
+    };
+    poll();
+    REQUIRE(model.planError() == SourceDecodeText(refused));  // heard
+    // FFV1 in its place, a plan made again (an edit) runs on it; the viewport's refusal (the sources not set again) heard once for this file
+    std::filesystem::copy_file(ffv1, clip, std::filesystem::copy_options::overwrite_existing);
+    model.refreshPlan();
+    REQUIRE(model.planError().isEmpty());
+    QSignalSpy planChanged(&model, &AppModel::planChanged);
+    for (int i = 0; i < 3; ++i) poll();
+    CHECK(planChanged.count() == 1);  // heard for this file, the plan decided (it runs) - not made again on every poll
+    CHECK(model.planError().isEmpty());
+    // the AV1 stream written back in its place: the same refusal, another file as it is now - heard again: the plan says it
+    std::filesystem::copy_file(av1, clip, std::filesystem::copy_options::overwrite_existing);
+    planChanged.clear();
+    poll();
+    CHECK(planChanged.count() >= 1);
+    INFO("planError: " << model.planError().toStdString());
+    CHECK(model.planError() == SourceDecodeText(refused));
+    CHECK(model.sourceDecode().block == refused.block);
 }

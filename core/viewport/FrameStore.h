@@ -105,6 +105,9 @@ public:
     // TASK-0076: closes the videos' decoders that hold NVDEC (an AV1 source in the GUI process): a run gets that memory; a later frame of
     // the viewport opens one again. Never waits for a load in flight (the GUI thread): a busy decoder is closed by its loader after it.
     void ReleaseNvdecDecoders();
+    // TASK-0076: a verdict on `file` met elsewhere (the proxy process): remembered with the file's size and time as a loader's refusal is
+    // - the next VideoSource of it is undecodable (the file however its path is written). false: the file could not be read (not remembered)
+    static bool RememberRefusedFile(const std::filesystem::path& file, const DecodeSupport& support);
     // TASK-0076: false - every load of an NVDEC-only video closes its decoder afterwards (a task runs: the viewport does not hold NVDEC
     // between frames); true (the default) - kept for the next frame
     void SetHoldNvdec(bool hold) { holdNvdec_ = hold; }

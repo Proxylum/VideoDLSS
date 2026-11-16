@@ -112,6 +112,15 @@ std::optional<NativeLayout> NativeLayoutFor(AVPixelFormat fmt, int streamDepth) 
     return NativeLayout{FrameDesc{0, 0, PixelFormatFor(chroma, bitDepth), static_cast<uint8_t>(bitDepth)}, shiftRight, semi};
 }
 
+// "420" | "422" | "444" | "other" (RGB, grey) - the VideoStreamInfo::chroma of a pixel format
+std::string ChromaOf(const AVPixFmtDescriptor* d) {
+    return (d->flags & AV_PIX_FMT_FLAG_RGB) || d->nb_components < 3 ? "other"
+           : d->log2_chroma_w == 0 && d->log2_chroma_h == 0        ? "444"
+           : d->log2_chroma_w == 1 && d->log2_chroma_h == 0        ? "422"
+           : d->log2_chroma_w == 1 && d->log2_chroma_h == 1        ? "420"
+                                                                   : "other";
+}
+
 }  // namespace
 
 FrameDesc DecodedFrameDescFor(const std::string& pixelFormat) {
@@ -375,11 +384,7 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     info_.pixelFormat = pixName ? pixName : "unknown";
     if (const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(streamFmt)) {
         info_.bitDepth = d->comp[0].depth;
-        info_.chroma = (d->flags & AV_PIX_FMT_FLAG_RGB) || d->nb_components < 3 ? "other"
-                       : d->log2_chroma_w == 0 && d->log2_chroma_h == 0        ? "444"
-                       : d->log2_chroma_w == 1 && d->log2_chroma_h == 0        ? "422"
-                       : d->log2_chroma_w == 1 && d->log2_chroma_h == 1        ? "420"
-                                                                               : "other";
+        info_.chroma = ChromaOf(d);
     }
     info_.decoded = DecodedFrameDescFor(info_.pixelFormat);
     info_.decoded.width = info_.codedWidth;
@@ -495,10 +500,29 @@ void VideoDecoder::CheckDecode(int err, const char* what) {
                                (codec_->width > 0 && static_cast<uint32_t>(codec_->width) != info_.codedWidth) ||
                                (codec_->height > 0 && static_cast<uint32_t>(codec_->height) != info_.codedHeight);
         std::string when = framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "on the first frame";
-        if (otherPart)
-            when += ", on a part of the stream in other parameters (" + std::string(swFmt ? swFmt : "?") + " " + std::to_string(codec_->width) + "x" +
-                    std::to_string(codec_->height) + ")";
-        const bool startFailed = nvdecStartTransient_ && framesDecoded_ == 0 && !otherPart;
+        bool transient = nvdecStartTransient_;
+        if (otherPart) {  // the part judged against the GPU as the probe was: refused - that verdict with its reason; taken - as for the probe
+            const std::string part = std::string(swFmt ? swFmt : "?") + " " + std::to_string(codec_->width) + "x" + std::to_string(codec_->height);
+            when += ", on a part of the stream in other parameters (" + part + ")";
+            VideoStreamInfo other = info_;
+            if (swFmt) {
+                other.pixelFormat = swFmt;
+                if (const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(codec_->sw_pix_fmt)) {
+                    other.bitDepth = d->comp[0].depth;
+                    other.chroma = ChromaOf(d);
+                }
+            }
+            if (codec_->width > 0) other.codedWidth = static_cast<uint32_t>(codec_->width);
+            if (codec_->height > 0) other.codedHeight = static_cast<uint32_t>(codec_->height);
+            DecodeSupport judged = CheckDecodeSupport(other);
+            if (!judged.Ok()) {
+                judged.why += " (" + when + ")";
+                refused_ = std::make_shared<const DecodeSupport>(std::move(judged));
+                throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
+            }
+            transient = judged.verified || (!judged.caps.checked && judged.caps.cudaError);
+        }
+        const bool startFailed = transient && framesDecoded_ == 0;
         refused_ = std::make_shared<const DecodeSupport>(RefusedDecode(info_, startFailed ? DecodeBlock::NvdecStartFailed : DecodeBlock::NvdecFailed, when));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }

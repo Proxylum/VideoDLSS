@@ -212,6 +212,15 @@ struct RefusedFile {
 std::mutex refusedFilesMutex;
 std::map<std::string, RefusedFile> refusedFiles;
 
+// the file as one key however its path is written (separators, «..», letter case on Windows): the project's path and a loader's
+std::string RefusedKey(const std::filesystem::path& file) {
+    std::error_code ec;
+    std::filesystem::path p = std::filesystem::weakly_canonical(file, ec);
+    if (ec || p.empty()) p = std::filesystem::absolute(file, ec).lexically_normal();
+    if (ec || p.empty()) p = file.lexically_normal();
+    return p.make_preferred().string();
+}
+
 bool SameFile(const std::filesystem::path& file, const RefusedFile& r) {
     std::error_code e1, e2;
     const auto size = std::filesystem::file_size(file, e1);
@@ -253,7 +262,7 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.hardwareOnly = info.hardwareOnly;
         if (info.hardwareOnly) {
             std::lock_guard<std::mutex> lock(refusedFilesMutex);
-            if (const auto it = refusedFiles.find(file.string()); it != refusedFiles.end()) {  // met before (TASK-0076)
+            if (const auto it = refusedFiles.find(RefusedKey(file)); it != refusedFiles.end()) {  // met before (TASK-0076)
                 if (SameFile(file, it->second)) s.undecodable = it->second.support;
                 else refusedFiles.erase(it);  // the file was replaced: its verdict is not this one's
             }
@@ -363,6 +372,19 @@ void FrameStore::RetryStartFailures(const std::string& source) {
         any = true;
     }
     if (any) RequeueLocked();  // the frames of the window are asked for again
+}
+
+bool FrameStore::RememberRefusedFile(const std::filesystem::path& file, const DecodeSupport& support) {
+    const std::string key = RefusedKey(file);
+    std::lock_guard<std::mutex> files(refusedFilesMutex);
+    RefusedFile r;
+    std::error_code e1, e2;
+    r.size = std::filesystem::file_size(file, e1);
+    r.time = std::filesystem::last_write_time(file, e2);
+    r.support = support;
+    if (e1 || e2) return false;
+    refusedFiles[key] = std::move(r);
+    return true;
 }
 
 std::optional<DecodeSupport> FrameStore::StartFailure(const std::string& name) const {
@@ -623,15 +645,7 @@ void FrameStore::LoaderMain() {
                 // a start failure (memory, the driver) is no verdict on the video: the next frame tries a new decoder
                 if (!e.support.Transient()) {
                     refusedInLoad_.emplace(key.source, e.support);
-                    if (const ViewportSource* s = FindSource(key.source)) {
-                        std::lock_guard<std::mutex> files(refusedFilesMutex);
-                        RefusedFile r;
-                        std::error_code e1, e2;
-                        r.size = std::filesystem::file_size(s->path, e1);
-                        r.time = std::filesystem::last_write_time(s->path, e2);
-                        r.support = e.support;
-                        if (!e1 && !e2) refusedFiles[s->path.string()] = std::move(r);
-                    }
+                    if (const ViewportSource* s = FindSource(key.source)) RememberRefusedFile(s->path, e.support);
                 } else {
                     startFailure = e.support;
                 }

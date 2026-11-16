@@ -257,6 +257,20 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
     };
 
     if (a.bench > 0) {
+        {  // TASK-0076: a video this machine cannot decode (no proxy to show it) would be timed as empty frames - said instead
+            bool usable = false;
+            std::string refusal;
+            for (const auto& nm : needed) {
+                const ViewportSource* s = store.FindSource(nm);
+                if (!s) continue;
+                if (s->undecodable && s->proxy.empty()) {
+                    if (refusal.empty()) refusal = "render: '" + nm + "': " + s->undecodable->why;
+                    continue;
+                }
+                usable = true;
+            }
+            if (!usable && !refusal.empty()) Throw(refusal);
+        }
         const int64_t n = store.FrameCount() > 0 ? std::min<int64_t>(a.bench, store.FrameCount()) : a.bench;
         if (a.benchMode != "all" && a.benchMode != "cold" && a.benchMode != "warm" && a.benchMode != "random")
             Throw("render: --bench-mode must be all | cold | warm | random");
@@ -415,6 +429,13 @@ int CmdProxy(const ViewportCommands::ProxyArgs& a) {
             if (video.empty() || !std::filesystem::exists(video)) {
                 std::printf("%-8s no video\n", name.c_str());
                 continue;
+            }
+            {  // TASK-0076: as `proxy` itself would answer
+                VideoDecoder probe(video, VideoDecoder::Probe());
+                if (const DecodeSupport d = CheckDecodeSupport(probe.Info()); !d.Ok()) {
+                    std::printf("%-8s %s: cannot be decoded here, no proxy: %s\n", name.c_str(), video.filename().string().c_str(), d.why.c_str());
+                    continue;
+                }
             }
             const ProxyPlan plan = PlanProxy(video);
             const auto valid = ValidProxy(video, project.passesRoot, name);

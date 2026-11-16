@@ -393,8 +393,7 @@ private:
     DecodeSupport sourceDecode_;
     bool tasksRunning_ = false, nvdecLetGo_ = false;  // TASK-0076: setTasksRunning, updateNvdecHold
     std::string heardRefusal_;  // TASK-0076: the source's refusal noteSourceRefused acted on last (its file and why)
-    std::set<std::string> proxyRefused_;  // TASK-0076: FileStamp of the videos the proxy process found undecodable here
-    static std::string FileStamp(const std::filesystem::path& file);
+    static std::string FileStamp(const std::filesystem::path& file);  // TASK-0076: path|size|time
     void updateNvdecHold();
     std::set<std::string> force_;
     std::map<std::string, int> history_;  // pass -> previous versions on disk
