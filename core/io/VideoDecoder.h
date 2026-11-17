@@ -99,7 +99,9 @@ struct Av1SequenceKey {
 };
 std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view sequenceHeader);
 // TASK-0076: a decoded frame smaller than the maximum its sequence header declares (an AV1 frame size override, a resize within the
-// sequence) - FFmpeg 7.1.1's NVDEC gives such a frame with the chroma read from the wrong place. false: the header does not parse
+// sequence) - FFmpeg 7.1.1's NVDEC makes its surfaces for the maximum and hands such a frame out at that size, a lower one also with the
+// chroma mapped by its own height (refused; a narrower one of the full height out of caution - not seen on a GPU: no clip has an
+// override). false: the header does not parse
 bool Av1FrameBelowSequence(int width, int height, std::string_view sequenceHeader);
 
 struct DecodeSupport;
@@ -162,7 +164,8 @@ DisplayOrientation OrientationFromRotateTag(std::string_view tag, std::string* w
 // and software decoding agree bit for bit). With HwAccel::Cuda the stream is decoded by NVDEC; an NV12 frame stays in
 // CUDA memory (primary context) and is exposed as a GpuFrame, and the CPU copy is made only when asked for (bit-exact
 // NV12 -> YUV420P). Audio packets are handed to the sink untouched for stream copy. A stream shown turned (a display matrix, the
-// 'rotate' tag: a phone video) is turned on the CPU after the copy (OrientFrame) and has no GpuFrame (TASK-0072).
+// 'rotate' tag: a phone video) is turned on the CPU after the copy (OrientFrame) and has no GpuFrame (TASK-0072); so has a frame of an
+// odd width (any codec on NVDEC: the on-device consumers take even rows; TASK-0076 - the frame cut to its own size, NVDEC's being even).
 // A decoder without a software path (this build's AV1, TASK-0076, NvdecSupport.h) decodes on NVDEC whatever the options say: with
 // HwAccel::Cuda the device is created at the open, as for any codec; otherwise on the first NextFrame (StartNvdec reopens codec_ on it) -
 // a Probe() open never creates one. A stream this GPU cannot decode is refused then (or at RequireDecodable) with DecodeUnavailable,
@@ -201,7 +204,7 @@ public:
     bool HasAudio() const { return audioStream_ >= 0; }
     const AVCodecParameters* AudioCodecParameters() const;
     Rational AudioTimeBase() const;
-    // HwAccel::Cuda was asked and the device is up: NextFrame may hand out GpuFrames (NV12 frames from NVDEC, not turned; a codec without
+    // HwAccel::Cuda was asked and the device is up: NextFrame may hand out GpuFrames (NV12 frames from NVDEC, not turned, of an even width; a codec without
     // NVDEC - FFV1, ProRes - decodes in software with none). Fixed at the open: a hardware-only decoder (TASK-0076) decoding on NVDEC
     // without being asked does not turn it on - its consumers stay on host frames.
     bool UsingHwAccel() const { return gpuFrames_; }
@@ -220,7 +223,7 @@ public:
     // `gpu` (optional): filled with the on-device NV12 frame when UsingHwAccel() and the frame came from NVDEC as NV12; it is
     // valid until the next NextFrame() call; asked for without HwAccel::Cuda it stays invalid and the CpuFrame is filled (TASK-0076). `cpu = false` skips the device->host copy (the
     // CpuFrame then only carries index/pts/desc) — only allowed when gpu is requested. When NVDEC
-    // yields a layout other than NV12 (10/12-bit, 4:4:4), or the stream is shown turned, `gpu` stays invalid and the CpuFrame is
+    // yields a layout other than NV12 (10/12-bit, 4:4:4), the frame is of an odd width, or the stream is shown turned, `gpu` stays invalid and the CpuFrame is
     // always filled (as Info().decoded: the source's bit depth and chroma layout, turned - 4:4:4 where the turn does not map the chroma
     // grid onto itself, OrientedDesc), whatever `cpu` says.
     bool NextFrame(CpuFrame& out, GpuFrame* gpu = nullptr, bool cpu = true);

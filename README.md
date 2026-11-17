@@ -302,9 +302,11 @@ fails after the work started. A part of the video in other parameters (a new seq
 against the GPU as the file was: a part it does not take is refused with that reason (the GUI says it is a part of the video);
 a part it takes gets an NVDEC decoder of its own (FFmpeg 7.1.1 would go on with the first part's, made for its size and depth),
 and NVDEC refusing it is judged as for the file (on that decoder's first frame, a start failure as below). Frames smaller than
-their sequence's declared maximum (a frame size override, a resize within one sequence) and frames of an odd height are refused:
-FFmpeg 7.1.1's NVDEC gives them with the colours read from the wrong place. An odd width is decoded: the frame NVDEC hands
-out one column wider (its surface) is cut to the video's own size. A gray (monochrome) AV1 is refused also when the probe
+their sequence's declared maximum (a frame size override, a resize within one sequence) are refused: FFmpeg 7.1.1's NVDEC hands them
+out at the maximum's size, a lower one also with its colours read from the wrong place (a narrower one of the full height is refused
+out of caution - not seen on a GPU). Frames of an odd height are refused: their colours come a row off. An odd width is decoded: the frame NVDEC hands
+out one column wider (its surface) is cut to the video's own size. With `--hwaccel cuda`, any codec of an odd width has no on-GPU
+frames (the host path, OFA through ABGR), and one with a software decoder and an odd height (VP9 1920x803, H.264 320x191) decodes in software: NVDEC gives its colours wrong. A gray (monochrome) AV1 is refused also when the probe
 did not learn its layout or it starts in a later part. A driver too old for
 FFmpeg's NVDEC is reported as the driver's video decoder being unavailable («nvcuvid.dll could not be loaded»; the GUI says to
 reinstall or update the driver). NVDEC or its CUDA device failing to start

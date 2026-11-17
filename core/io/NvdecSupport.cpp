@@ -70,12 +70,11 @@ bool HardwareOnlyDecoder(const AVCodec* codec) {
     return codec && codec->id == AV_CODEC_ID_AV1 && std::string(codec->name) == "av1" && HasNvdecHwaccel(codec);
 }
 
-AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly) {
-    if (hardwareOnly) {
-        const AVPixelFormat* last = formats;
-        while (*last != AV_PIX_FMT_NONE && *(last + 1) != AV_PIX_FMT_NONE) ++last;
-        if (!Av1NvdecLayout(*last)) return AV_PIX_FMT_NONE;  // gray, 4:4:4, 12-bit: refused with that layout's reason
-    }
+AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly, int codedHeight) {
+    const AVPixelFormat* last = formats;  // the software format, as FFmpeg's ff_get_format reads it
+    while (*last != AV_PIX_FMT_NONE && *(last + 1) != AV_PIX_FMT_NONE) ++last;
+    if (hardwareOnly && !Av1NvdecLayout(*last)) return AV_PIX_FMT_NONE;  // gray, 4:4:4, 12-bit: refused with that layout's reason
+    if (!hardwareOnly && codedHeight % 2 == 1 && *last != AV_PIX_FMT_NONE) return *last;  // the chroma a row off on NVDEC: software
     for (const AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p)
         if (*p == AV_PIX_FMT_CUDA) return *p;
     // no CUDA on offer: a decoder with a software path goes on with FFmpeg's cascade from the first format (as before); a hardware-only
@@ -302,7 +301,9 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
     if (!unknown && !Av1NvdecLayout(av_get_pix_fmt(info.pixelFormat.c_str()))) return Refuse(s, DecodeBlock::Layout);
     // an odd height (OddHeight) after the GPU's answer: a machine whose GPU has no AV1 says that first - the even height would not help
     // there; without an answer (VideoDecoder: a part, NVDEC refusing a frame) it is refused before going on blind
-    const bool oddHeight = info.codedHeight % 2 == 1;
+    // (a layout the probe did not learn: its size is the container's, the sequence header unread - the first frame judges the height, as
+    // it does the size; ReceiveFrame has the frame's own)
+    const bool oddHeight = !unknown && info.codedHeight % 2 == 1;
     const auto refuseOdd = [&] {  // the driver's own words (a CUDA error, a stand-in) are not this refusal's reason
         s.caps.why.clear();
         return Refuse(s, DecodeBlock::OddHeight);

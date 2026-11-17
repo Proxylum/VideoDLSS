@@ -42,8 +42,16 @@ int kHardwareOnly = 1;
 AVPixelFormat GetHwFormat(AVCodecContext* ctx, const AVPixelFormat* formats) {
     const bool hardwareOnly = ctx->opaque == &kHardwareOnly;
     if (hardwareOnly && FakeNvdecRefusesFrames()) return AV_PIX_FMT_NONE;  // DLSSVID_FAKE_NVDEC_AV1=first-frame | query-fails | start-fails (tests)
-    const AVPixelFormat f = PickNvdecFormat(formats, hardwareOnly);
-    if (f != AV_PIX_FMT_CUDA && !hardwareOnly) Log()->warn("NVDEC pixel format not offered by decoder, falling back to software");
+    // the height as shown, else as coded: H.264 / HEVC code it aligned (191 as 192) and crop it - their last chroma row would be lost on
+    // the way to the host (FFmpeg copies height / 2 chroma rows)
+    const int height = ctx->height % 2 == 1 ? ctx->height : ctx->coded_height;
+    const AVPixelFormat f = PickNvdecFormat(formats, hardwareOnly, height);
+    if (f != AV_PIX_FMT_CUDA && !hardwareOnly) {
+        if (height % 2 == 1)
+            Log()->warn("a frame of an odd height ({}): FFmpeg's NVDEC gives its chroma wrong, decoding in software", height);
+        else
+            Log()->warn("NVDEC pixel format not offered by decoder, falling back to software");
+    }
     return f;
 }
 
@@ -295,7 +303,7 @@ DecodeSupport VerdictFromWhy(const VideoStreamInfo& probe, const std::string& wh
             if (const auto detail = detailOf(RefusedDecode(sized, block, "").why)) {
                 DecodeSupport s = RefusedDecode(sized, block, withWhere(*detail));
                 // an odd height where the probe's is even: a part (as VideoDecoder::ReceiveFrame marks it)
-                s.part = block == DecodeBlock::OddHeight && probe.codedHeight % 2 == 0 && probe.codedHeight > 0;
+                s.part = block == DecodeBlock::OddHeight && probe.pixelFormat != "unknown" && probe.codedHeight % 2 == 0 && probe.codedHeight > 0;
                 return s;
             }
         break;
@@ -888,7 +896,8 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         const uint32_t w = static_cast<uint32_t>(frameW), h = static_cast<uint32_t>(frameH);
         av_frame_unref(frame_);
         DecodeSupport s = RefusedDecode(StreamPartInfo(info_, "", w, h), DecodeBlock::OddHeight, frame);
-        s.part = info_.codedHeight % 2 == 0 && info_.codedHeight > 0;  // the probe's height was even: a part in other parameters
+        // the probe's height (of the stream, its layout learned) was even: a part in other parameters
+        s.part = info_.pixelFormat != "unknown" && info_.codedHeight % 2 == 0 && info_.codedHeight > 0;
         refused_ = std::make_shared<const DecodeSupport>(std::move(s));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }

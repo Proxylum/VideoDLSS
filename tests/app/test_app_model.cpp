@@ -7542,8 +7542,8 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
                                                 QString::fromUtf8(" или откройте его на компьютере с видеокартой, которая декодирует AV1 (например, RTX 30 и новее)."));
     // frames smaller than the sequence's (a frame size override): VideoDecoder's Resized
     const DecodeSupport resized = RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::Resized, "a frame of 160x96, after 3 frames");
-    CHECK(SourceDecodeText(resized) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: размер его кадров меняется внутри потока (есть кадры меньше "
-                                                         "кадра в файле 320×192), а такие AV1 эта версия программы не декодирует. Что сделать: ") +
+    CHECK(SourceDecodeText(resized) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть кадры меньше размера, заявленного в файле "
+                                                         "(320×192), а такие AV1 эта версия программы не декодирует. Что сделать: ") +
                                            transcode + ".");
     // TASK-0076: an odd frame height (FFmpeg's NVDEC gives its chroma a row off): of the video, and of a part of it
     VideoStreamInfo oddInfo = Av1StreamInfo("yuv420p", 8);
@@ -9939,6 +9939,122 @@ TEST_CASE("AppModel: a refused AV1, a good one written over it, then the same re
     CHECK(sources.count() == 2);
     CHECK_FALSE(model.store().Undecodable("source"));
     CHECK(model.sourceInfo().frames == 20);
+    CHECK(model.planError().isEmpty());
+    SettleFrames(model, 0, 6);
+    CHECK(model.frameStateOf("source") == FrameState::Ready);
+}
+
+TEST_CASE("AppModel: a file refused by its probe (no AV1 decoder), another with the same refusal written over it, then a good one - set again each time",
+          "[app][gpu][av1][regression]") {
+    App();
+    const auto d = Dir("av1_probe_refused_twice");
+    AutoProxySetting autoProxy(false);
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);  // 24 frames
+    if (clip.empty()) SKIP(why);
+    const auto same = Av1AppClip(d / "same.mp4", &why, 16);  // another AV1 file: the same refusal under the stand-in
+    const auto good = Av1AppClip(d / "good.mp4", &why, 20);  // another AV1 file, decoded once the stand-in is gone
+    REQUIRE_FALSE(same.empty());
+    REQUIRE_FALSE(good.empty());
+    std::optional<FakeNvdecEnv> fake;
+    fake.emplace("no-av1");  // the probe's verdict: the GPU has no AV1 decoder (no load is made of a source refused so)
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    REQUIRE(model.store().Undecodable("source"));
+    const DecodeSupport refused = *model.store().Undecodable("source");
+    REQUIRE(refused.block == DecodeBlock::NoAv1);
+    REQUIRE(model.sourceDecode().block == DecodeBlock::NoAv1);
+    QSignalSpy sources(&model, &AppModel::sourcesChanged);
+    // another file with the same refusal: set again (once for that refusal), refused again
+    std::filesystem::copy_file(same, clip, std::filesystem::copy_options::overwrite_existing);
+    REQUIRE(model.store().SourceChanged("source"));
+    model.refreshPlan();
+    Pump([&] { return sources.count() > 0; }, 10000);
+    REQUIRE(sources.count() == 1);
+    REQUIRE(model.store().Undecodable("source"));
+    CHECK(model.store().Undecodable("source")->why == refused.why);
+    CHECK(model.sourceInfo().frames == 16);
+    // the GPU decodes AV1 now; a good file written over it: its probe says otherwise than the stale probe's verdict - set again, though
+    // that refusal's words were set again for already
+    fake.reset();
+    std::filesystem::copy_file(good, clip, std::filesystem::copy_options::overwrite_existing);
+    REQUIRE(model.store().SourceChanged("source"));
+    model.refreshPlan();
+    Pump([&] { return sources.count() > 1; }, 10000);
+    CHECK(sources.count() == 2);
+    CHECK_FALSE(model.store().Undecodable("source"));
+    CHECK(model.sourceInfo().frames == 20);
+    CHECK(model.planError().isEmpty());
+    SettleFrames(model, 0, 6);
+    CHECK(model.frameStateOf("source") == FrameState::Ready);
+}
+
+TEST_CASE("AppModel: a broken copy over a refused AV1, the AV1 back refused with the same words, then FFV1 over it - set again for FFV1 though the key matches",
+          "[app][gpu][av1][regression]") {
+    App();
+    const auto d = Dir("av1_broken_av1_ffv1");
+    AutoProxySetting autoProxy(false);
+    {
+        D3D12Device dev;
+        if (dev.IsWarp() || !dev.IsNvidia() || !VideoEncoder::EncoderAvailable("av1_nvenc")) SKIP("no NVIDIA GPU with av1_nvenc");
+    }
+    ClipSpec spec;
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 24;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto av1 = WriteClipIfSupported(d / "av1.mkv", spec, &why);  // MKV: FFV1 can take its place under the same name
+    if (!av1) SKIP(why);
+    ClipSpec plainSpec;
+    plainSpec.width = 320;
+    plainSpec.height = 192;
+    plainSpec.frames = 24;
+    const auto ffv1 = WriteClip(d / "plain.mkv", plainSpec);
+    const auto broken = d / "broken.mkv";
+    std::ofstream(broken, std::ios::binary) << "not a video";
+    const auto clip = d / "clip.mkv";
+    std::filesystem::copy_file(*av1, clip);
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    SettleFrames(model, 0, 6);
+    // NVDEC refuses the viewport's first frame: a loader's verdict (not one a probe gives), remembered for the file
+    fake.emplace("first-frame");
+    model.store().SetSources(model.store().Sources());
+    model.store().SetCurrentTime(model.time(), {"source"});
+    model.store().WaitForCurrent();
+    REQUIRE(model.store().Undecodable("source"));
+    SettleAny(model, 0, 6);
+    fake.reset();
+    const DecodeSupport first = *model.store().Undecodable("source");
+    REQUIRE(first.block == DecodeBlock::NvdecFailed);
+    QSignalSpy sources(&model, &AppModel::sourcesChanged);
+    // a broken copy over it: set again for that refusal (the key set) - no frame of it shows, so the key stays
+    std::filesystem::copy_file(broken, clip, std::filesystem::copy_options::overwrite_existing);
+    REQUIRE(model.store().SourceChanged("source"));
+    model.refreshPlan();
+    Pump([&] { return sources.count() > 0; }, 10000);
+    REQUIRE(sources.count() == 1);
+    REQUIRE_FALSE(model.store().Undecodable("source"));
+    // the AV1 written back (the very file: its size and time) and opened again: refused with the same words (the process remembers it)
+    std::filesystem::copy_file(*av1, clip, std::filesystem::copy_options::overwrite_existing);
+    model.openVideo(Q(clip));
+    REQUIRE(model.store().Undecodable("source"));
+    REQUIRE(model.store().Undecodable("source")->why == first.why);
+    REQUIRE(model.planError() == SourceDecodeText(first));
+    const auto opened = sources.count();
+    // FFV1 over it: the key of that refusal is set already - set again because the file there now is no AV1 (its probe)
+    std::filesystem::copy_file(ffv1, clip, std::filesystem::copy_options::overwrite_existing);
+    REQUIRE(model.store().SourceChanged("source"));
+    model.refreshPlan();
+    Pump([&] { return sources.count() > opened; }, 10000);
+    CHECK(sources.count() == opened + 1);
+    CHECK_FALSE(model.store().Undecodable("source"));
+    CHECK(model.sourceInfo().codec == "ffv1");
     CHECK(model.planError().isEmpty());
     SettleFrames(model, 0, 6);
     CHECK(model.frameStateOf("source") == FrameState::Ready);

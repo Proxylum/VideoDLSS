@@ -858,7 +858,9 @@ void AppModel::noteSourceRefused() {
     if (!refused) {
         // the file as loaded decodes (a frame of it shown, no verdict, not written since): a refusal met later on that path is set again
         // anew - reloadedFor_ holds back only a file still being written (just set again, its loads not yet refused: no frame)
-        if (!store_->SourceChanged("source") && store_->StatusAt(state().time, "source") == FrameStore::Status::Ready) reloadedFor_.clear();
+        // (the cheap checks first: no file is read for a video that never needed it - any H.264 on every frame update)
+        if (!reloadedFor_.empty() && store_->StatusAt(state().time, "source") == FrameStore::Status::Ready && !store_->SourceChanged("source"))
+            reloadedFor_.clear();
         return;
     }
     // another file on that path now (written over, still being written): not its verdict - the plan probes the file there and sets the
@@ -1049,18 +1051,22 @@ void AppModel::refreshPlan() {
         sourceInfo_.frames = src->lastFrame + 1;
     }
     // TASK-0076: the store's verdict is the file's as it loaded it: one written there since (another AV1, a broken copy, another codec) gets
-    // its sources set again, whatever its probe says - once per verdict, so a file still being written is not set again on every plan
+    // its sources set again - once per verdict (a file still being written is not set again on every plan), and whenever its own probe
+    // says otherwise than a verdict a probe gives (another codec; the layout, the GPU, the size: another answer) - see below
+    std::optional<DecodeSupport> stale;
     if (hasProject())
-        if (const auto refused = store_->Undecodable("source"); refused && store_->SourceChanged("source")) {
-            const std::string key = project_.sourceVideo.string() + "|" + refused->why;
+        if (auto refused = store_->Undecodable("source"); refused && store_->SourceChanged("source")) {
             heardRefusal_.clear();  // the file as it comes back (the same bytes again) is heard anew
-            if (key != reloadedFor_) {
-                reloadedFor_ = key;
-                QTimer::singleShot(0, this, [this] {
-                    if (store_ && store_->SourceChanged("source") && store_->Undecodable("source")) reloadSources();
-                });
-            }
+            stale = std::move(refused);
         }
+    const auto setSourcesAgain = [this](const DecodeSupport& refused, bool whatever) {
+        const std::string key = project_.sourceVideo.string() + "|" + refused.why;
+        if (!whatever && key == reloadedFor_) return;
+        reloadedFor_ = key;
+        QTimer::singleShot(0, this, [this] {
+            if (store_ && store_->SourceChanged("source") && store_->Undecodable("source")) reloadSources();
+        });
+    };
     // TASK-0076: a plan that stops before it probes the source (the video not found, the probe failing): the viewport's verdict on it
     // still holds the runs (a plan that probed it decides itself - a file replaced by one with a software decoder is no AV1 refusal)
     // (of the file as the viewport loaded it: one written there since - a broken copy, another video - is not that file)
@@ -1091,6 +1097,13 @@ void AppModel::refreshPlan() {
         sourceInfo_.chroma = probe.Info().chroma;
         sourceInfo_.pixelFormat = probe.Info().pixelFormat;
         sourceDecode_ = CheckDecodeSupport(probe.Info());
+        if (stale) {  // TASK-0076: the file written over - its probe tells a probe's verdict apart (a loader's: once, as above)
+            const DecodeBlock b = stale->block;
+            const bool probeVerdict = !stale->part && (b == DecodeBlock::Layout || b == DecodeBlock::NoCuda || b == DecodeBlock::NoNvdec ||
+                                                       b == DecodeBlock::NoAv1 || b == DecodeBlock::Size || b == DecodeBlock::OddHeight);
+            setSourcesAgain(*stale, !probe.Info().hardwareOnly ||
+                                        (probeVerdict && (sourceDecode_.block != stale->block || sourceDecode_.why != stale->why)));
+        }
         // TASK-0076: NVDEC refused the viewport's frames (the driver could not be asked, a part, frames of another size) - for this file
         // as loaded (another one on that path: set again above, no old verdict)
         if (sourceDecode_.Ok() && probe.Info().hardwareOnly && !store_->SourceChanged("source"))
@@ -1135,6 +1148,7 @@ void AppModel::refreshPlan() {
     } catch (const std::exception& e) {
         planError_ = QString::fromUtf8(e.what());
         keepViewportVerdict();
+        if (stale) setSourcesAgain(*stale, false);  // a broken copy: once
     }
     emit planChanged();
 }

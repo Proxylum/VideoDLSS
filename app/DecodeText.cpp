@@ -98,9 +98,9 @@ QString SourceDecodeText(const DecodeSupport& s) {
                       "другой программой или в кадр с чётными сторонами.")
                 .arg(s.width)
                 .arg(s.height);
-        case DecodeBlock::Resized:  // «кадр в файле»: the stored frame - a turned video is shown the other way round
-            return Tr("Видео AV1 не декодируется на этом компьютере: размер его кадров меняется внутри потока (есть кадры меньше кадра в файле "
-                      "%1×%2), а такие AV1 эта версия программы не декодирует. Что сделать: %3.")
+        case DecodeBlock::Resized:  // the sequence's declared maximum, as stored (a turned video is shown the other way round)
+            return Tr("Видео AV1 не декодируется на этом компьютере: в нём есть кадры меньше размера, заявленного в файле (%1×%2), а такие AV1 "
+                      "эта версия программы не декодирует. Что сделать: %3.")
                 .arg(s.width)
                 .arg(s.height)
                 .arg(transcode);

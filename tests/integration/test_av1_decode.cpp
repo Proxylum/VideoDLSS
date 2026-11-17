@@ -2632,3 +2632,210 @@ TEST_CASE("An AV1 stream of an odd frame width decodes on NVDEC at its own width
     REQUIRE(proxied.size() == oddFrames.size());
     CHECK(proxied[0].desc.width == kW - 1);
 }
+
+TEST_CASE("NVDEC with a software path: an odd frame height (MPEG-4 320x191) decodes in software, as the software decode; an even one on NVDEC",
+          "[integration][gpu][nvdec][regression]") {
+    const auto dir = Dir("odd_height_software_codec");
+    if (!HaveNvidia()) SKIP("no NVIDIA GPU");
+    if (!VideoEncoder::EncoderAvailable("mpeg4")) SKIP("no MPEG-4 encoder in this build");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH - 1;
+    spec.frames = 6;
+    spec.codec = "mpeg4";  // FFmpeg's own encoder: the frame's height as it is (H.264 / HEVC code 16 / 8-row aligned heights)
+    const auto odd = WriteClip(dir / "odd.mkv", spec);
+    spec.height = kH;
+    const auto even = WriteClip(dir / "even.mkv", spec);
+    VideoDecoder::Options cuda;
+    cuda.hwaccel = HwAccel::Cuda;
+    {
+        // the even one: NVDEC (the path is there for this codec here)
+        VideoDecoder dec(even, cuda);
+        CpuFrame f;
+        GpuFrame g;
+        REQUIRE(dec.NextFrame(f, &g));
+        if (!dec.DecodesOnNvdec()) SKIP("NVDEC does not decode MPEG-4 here");
+        CHECK(g.Valid());
+    }
+    // the odd one: software, said once; the frames as the software decode's, the chroma's last row too
+    std::ostringstream text;
+    std::vector<CpuFrame> hard;
+    {
+        DecoderLog capture(text);
+        VideoDecoder dec(odd, cuda);
+        CpuFrame f;
+        GpuFrame g;
+        while (dec.NextFrame(f, &g)) {
+            CHECK_FALSE(g.Valid());
+            hard.push_back(f);
+        }
+        CHECK_FALSE(dec.DecodesOnNvdec());
+    }
+    VideoDecoder plain(odd);
+    const std::vector<CpuFrame> soft = DecodeAllOf(plain);
+    REQUIRE(hard.size() == 6);
+    REQUIRE(soft.size() == hard.size());
+    for (size_t i = 0; i < hard.size(); ++i) {
+        INFO("frame " << i);
+        CHECK(hard[i].desc.height == kH - 1);
+        CHECK((hard[i].data == soft[i].data));  // (not decomposed: no dump of the frames)
+    }
+    const std::string log = text.str();
+    INFO(log);
+    CHECK(CountOf(log, "a frame of an odd height (191): ") == 1);
+    CHECK(CountOf(log, "decoding in software") == 1);
+}
+
+TEST_CASE("NVDEC with a software path: an H.264 stream of an odd height (cropped from 192) with --hwaccel cuda gives the software decode's frames, the chroma's last row too",
+          "[integration][gpu][nvdec][regression]") {
+    const auto dir = Dir("odd_height_h264");
+    if (!HaveNvidia() || !VideoEncoder::EncoderAvailable("h264_nvenc")) SKIP("no NVIDIA GPU with h264_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH - 1;
+    spec.frames = 6;
+    spec.codec = "h264_nvenc";
+    std::string why;
+    const auto clip = WriteClipIfSupported(dir / "odd.mkv", spec, &why);
+    if (!clip) SKIP("h264_nvenc does not support the clip here: " << why);
+    VideoDecoder plain(*clip);
+    const std::vector<CpuFrame> soft = DecodeAllOf(plain);
+    VideoDecoder::Options cuda;
+    cuda.hwaccel = HwAccel::Cuda;
+    std::ostringstream text;
+    std::vector<CpuFrame> hard;
+    std::optional<VideoDecoder> decoder;
+    {
+        DecoderLog capture(text);
+        decoder.emplace(*clip, cuda);
+        CpuFrame f;
+        while (decoder->NextFrame(f)) hard.push_back(f);
+    }
+    const VideoDecoder& dec = *decoder;
+    {
+        // the height as shown (191; H.264 codes it as 192 and crops): software, said once with that height
+        const std::string log = text.str();
+        INFO(log);
+        CHECK_FALSE(dec.DecodesOnNvdec());
+        CHECK(CountOf(log, "a frame of an odd height (191): ") == 1);
+    }
+    REQUIRE(soft.size() == 6);
+    REQUIRE(hard.size() == soft.size());
+    for (size_t i = 0; i < hard.size(); ++i) {
+        INFO("frame " << i << (dec.DecodesOnNvdec() ? " (NVDEC)" : " (software)"));
+        CHECK(hard[i].desc.height == kH - 1);
+        // the chroma rows: (191 + 1) / 2 = 96 - FFmpeg's CUDA transfer copies 191 >> 1 = 95 of them
+        const size_t cw = soft[i].desc.PlaneWidth(1), ch = soft[i].desc.PlaneHeight(1);
+        REQUIRE(ch == 96);
+        CHECK(std::memcmp(hard[i].Plane(1) + (ch - 1) * cw, soft[i].Plane(1) + (ch - 1) * cw, cw) == 0);
+        CHECK((hard[i].data == soft[i].data));  // (not decomposed: no dump of the frames)
+    }
+}
+
+TEST_CASE("An AV1 stream whose layout the probe did not learn: the container's odd height judges nothing; the first frame's odd height is refused, not as a part",
+          "[integration][gpu][av1][regression]") {
+    const auto dir = Dir("unknown_odd_height");
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 16;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto a = WriteClipIfSupported(dir / "a.ivf", spec, &why);
+    if (!a) SKIP("av1_nvenc does not support the clip here: " << why);
+    // 320x191 in its sequence headers, none before frame 160: the probe does not learn the layout; its size is the IVF header's - 192
+    // (even: a stream judged by it would call the odd frames a part), then 191
+    constexpr int kFirstHeader = 160;
+    const auto evenHeader = RepeatIvf(*a, 13, dir / "unknown_odd.ivf", [](int i, const std::string& u) {
+        const std::string shorter = ShorterFrameTemporalUnit(u, 1);
+        return i < kFirstHeader ? WithoutSequenceHeaders(shorter) : shorter;
+    });
+    const auto oddHeader = dir / "unknown_odd191.ivf";
+    std::filesystem::copy_file(evenHeader, oddHeader);
+    SetIvfFrameSize(oddHeader, static_cast<uint16_t>(kW), static_cast<uint16_t>(kH - 1));
+    for (const auto& [file, containerHeight] : {std::pair{evenHeader, kH}, std::pair{oddHeader, kH - 1}}) {
+        INFO(file.filename().string());
+        const VideoStreamInfo info = VideoDecoder(file, VideoDecoder::Probe()).Info();
+        REQUIRE(info.pixelFormat == "unknown");
+        REQUIRE(info.codedHeight == containerHeight);
+        CHECK(CheckDecodeSupport(info).Ok());  // the container's height is no verdict
+        VideoDecoder dec(file);
+        CHECK_NOTHROW(dec.RequireDecodable());
+        REQUIRE(dec.SeekToKeyframeBefore(170));
+        const auto refused = RefusalOfNextFrame(dec);  // the frame's own height, 191
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::OddHeight);
+        CHECK(refused->support.height == kH - 1);
+        CHECK_FALSE(refused->support.part);  // the stream's own height: the probe knew no layout of it
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(the first frame)"));
+    }
+}
+
+TEST_CASE("dlssvid process --project P -i <an AV1 video not decodable here> refuses it before hashing it: the reason, no word of P's source (also --plan)",
+          "[integration][cli][gpu][av1]") {
+    const auto dir = Dir("process_project_other");
+    REQUIRE_AV1_CLIP(clip, dir, false, 12);
+    ClipSpec plain;
+    plain.frames = 6;
+    plain.width = 64;
+    plain.height = 48;
+    const auto own = WriteClip(dir / "own.mkv", plain);
+    Project::Create(own, dir / "passes").Save(dir / "own.dlssvid.json");
+    FakeNvdecEnv fake("no-av1");
+    for (const bool plan : {false, true}) {
+        INFO((plan ? "--plan" : "a run"));
+        std::vector<std::string> args{"process", "--project", (dir / "own.dlssvid.json").string(), "-i", clip.string(), "-o", (dir / "out.mkv").string(),
+                                      "--warp", "--codec", "ffv1"};
+        if (plan) args.push_back("--plan");
+        const auto r = RunAll(args, dir / (plan ? "plan.log" : "run.log"));
+        INFO(r.out);
+        CHECK(r.code != 0);
+        CHECK_THAT(r.out, ContainsSubstring(kNoAv1Reason));
+        CHECK_THAT(r.out, !ContainsSubstring("is not the source of the project"));
+        CHECK_FALSE(std::filesystem::exists(dir / "out.mkv"));
+    }
+}
+
+TEST_CASE("dlssvid info of an AV1 video not decodable here: its samples without decoded-as - no AV1 decoder, a layout refused; one that decodes says it",
+          "[integration][cli][gpu][av1]") {
+    const auto dir = Dir("info_not_decoded");
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 16;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto a = WriteClipIfSupported(dir / "a.ivf", spec, &why);
+    if (!a) SKIP("av1_nvenc does not support the clip here: " << why);
+    const auto twelve = RepeatIvf(*a, 1, dir / "twelve.ivf", [](int, const std::string& u) { return TwelveBitTemporalUnit(u); });  // 12-bit: a layout refused
+    REQUIRE(VideoDecoder(twelve, VideoDecoder::Probe()).Info().bitDepth == 12);
+    {
+        // decodes here: «decoded as»
+        const auto r = RunAll({"info", a->string()}, dir / "a.log");
+        INFO(r.out);
+        CHECK(r.code == 0);
+        CHECK_THAT(r.out, ContainsSubstring("samples:     8-bit 420, decoded as "));
+        CHECK_THAT(r.out, !ContainsSubstring("not decoded here"));
+    }
+    {
+        const auto r = RunAll({"info", twelve.string()}, dir / "twelve.log");
+        INFO(r.out);
+        CHECK(r.code == 0);
+        CHECK_THAT(r.out, ContainsSubstring("samples:     12-bit 420 (not decoded here, see decode)"));
+        CHECK_THAT(r.out, !ContainsSubstring("decoded as"));
+        CHECK_THAT(r.out, ContainsSubstring("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here"));
+    }
+    {
+        FakeNvdecEnv fake("no-av1");
+        const auto r = RunAll({"info", a->string()}, dir / "noav1.log");
+        INFO(r.out);
+        CHECK(r.code == 0);
+        CHECK_THAT(r.out, ContainsSubstring("samples:     8-bit 420 (not decoded here, see decode)"));
+        CHECK_THAT(r.out, !ContainsSubstring("decoded as"));
+        CHECK_THAT(r.out, ContainsSubstring(kNoAv1Reason));
+    }
+}

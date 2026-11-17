@@ -474,6 +474,19 @@ TEST_CASE("PickNvdecFormat: CUDA when offered; else a hardware-only decoder choo
     CHECK(PickNvdecFormat(onlyCuda, true) == AV_PIX_FMT_NONE);
     const AVPixelFormat empty[] = {AV_PIX_FMT_NONE};
     CHECK(PickNvdecFormat(empty, true) == AV_PIX_FMT_NONE);
+    // TASK-0076: a codec with a software path whose frame is of an odd height (VP9 1920x803, MPEG-2 ...): FFmpeg's NVDEC maps its chroma a
+    // row off - the software format (the list's last) though CUDA is offered; an even height, or none known: CUDA as before
+    const AVPixelFormat vp9List[] = {AV_PIX_FMT_D3D11, AV_PIX_FMT_CUDA, AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE};
+    CHECK(PickNvdecFormat(vp9List, false, 803) == AV_PIX_FMT_YUV420P);
+    CHECK(PickNvdecFormat(vp9List, false, 191) == AV_PIX_FMT_YUV420P);
+    CHECK(PickNvdecFormat(vp9List, false, 804) == AV_PIX_FMT_CUDA);
+    CHECK(PickNvdecFormat(vp9List, false, 0) == AV_PIX_FMT_CUDA);
+    CHECK(PickNvdecFormat(vp9List, false) == AV_PIX_FMT_CUDA);
+    const AVPixelFormat tenBitList[] = {AV_PIX_FMT_CUDA, AV_PIX_FMT_YUV420P10LE, AV_PIX_FMT_NONE};
+    CHECK(PickNvdecFormat(tenBitList, false, 803) == AV_PIX_FMT_YUV420P10LE);
+    // a hardware-only decoder (AV1): no software path to take - CUDA; its odd height is refused elsewhere (JudgeDecode, ReceiveFrame)
+    CHECK(PickNvdecFormat(vp9List, true, 191) == AV_PIX_FMT_CUDA);
+    CHECK(PickNvdecFormat(tenBitList, true, 803) == AV_PIX_FMT_CUDA);
 }
 
 TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver on every call, also after the driver was asked", "[unit][av1][gpu]") {
@@ -823,7 +836,14 @@ TEST_CASE("JudgeDecode: an odd frame height is refused after the layout and the 
     CHECK(JudgeDecode(Av1Info(), &cudaError).why == "not checked: cuCtxCreate failed: x");  // an even height: the words where they belong
     // 10-bit, and a layout the probe did not learn: the same
     CHECK(JudgeDecode(Av1Info("yuv420p10le", 10, 1920, 1081), &good).block == DecodeBlock::OddHeight);
-    CHECK(JudgeDecode(Av1Info("unknown", 8, 320, 191), &good).block == DecodeBlock::OddHeight);
+    // a layout the probe did not learn: its size is the container's (the sequence header unread) - the first frame judges the height
+    // (VideoDecoder::ReceiveFrame), as it does the layout and the size
+    const DecodeSupport unknownOdd = JudgeDecode(Av1Info("unknown", 8, 320, 191), &good);
+    CHECK(unknownOdd.Ok());
+    CHECK_FALSE(unknownOdd.verified);
+    CHECK(unknownOdd.why == "on 'Test GPU', the sample layout is not known before the first frame");
+    CHECK(JudgeDecode(Av1Info("unknown", 8, 320, 191), nullptr).Ok());
+    CHECK(JudgeDecode(Av1Info("unknown", 8, 320, 191), nullptr).why == "not checked");
     // the layout first: a 4:4:4 stream of an odd height is refused for its layout
     CHECK(JudgeDecode(Av1Info("yuv444p", 8, 320, 191), &good).block == DecodeBlock::Layout);
     // an even height decodes; so does an odd width - NVDEC hands the frame out even-sided (322 wide) and VideoDecoder cuts it to the video's
@@ -901,6 +921,15 @@ TEST_CASE("VerdictFromWhy reads another process's refusal back with its own bloc
         CHECK(odd.height == 191);
         CHECK(odd.part);  // the probe's height is even: a part of the stream (as VideoDecoder::ReceiveFrame marks it)
         CHECK(odd.why == oddWords + (detail.empty() ? " (the proxy build)" : " (the proxy build: " + detail + ")"));
+    }
+    // the probe did not learn the layout (its size the container's): the stream's own height met at its first frame - no part
+    {
+        VideoStreamInfo noLayout = probe;
+        noLayout.pixelFormat = "unknown";
+        const DecodeSupport whole = VerdictFromWhy(noLayout, RefusedDecode(oddSize, DecodeBlock::OddHeight, "the first frame").why, "the proxy build");
+        CHECK(whole.block == DecodeBlock::OddHeight);
+        CHECK(whole.height == 191);
+        CHECK_FALSE(whole.part);
     }
     // the probe's own height odd (the stream as a whole) or not known: the stream's verdict, no part
     for (const uint32_t probeHeight : {191u, 0u}) {

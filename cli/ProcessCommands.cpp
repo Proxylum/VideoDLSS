@@ -8,7 +8,9 @@
 #include <sstream>
 
 #include "gpu/D3D12Device.h"
+#include "io/NvdecSupport.h"
 #include "io/OutputFormat.h"
+#include "io/VideoDecoder.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/ParamSchema.h"
@@ -275,6 +277,12 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
         std::error_code ec;
         const bool samePath = std::filesystem::equivalent(o.input, projectInput, ec) && !ec;
         if (!samePath) {
+            // TASK-0076: a video this machine cannot decode is refused before it is hashed (a 10 GB AV1 is read for nothing otherwise)
+            if (std::filesystem::exists(o.input, ec)) {
+                VideoDecoder probe(o.input, VideoDecoder::Probe());
+                if (const DecodeSupport s = CheckDecodeSupport(probe.Info()); !s.Ok())
+                    throw DecodeUnavailable(s, "process: " + o.input.string() + ": " + s.why);
+            }
             const std::string inputHash = "sha256:" + Sha256FileCached(o.input);
             if (inputHash != o.sourceHash) {  // also when the project knows no hash of its video: it cannot be told apart
                 Log()->info("process: {} is not the source of the project: its own hash, passes and result", o.input.string());
