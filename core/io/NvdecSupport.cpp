@@ -117,15 +117,16 @@ std::string RefusalText(const DecodeSupport& s) {
                    " macroblocks), and this build has no software AV1 decoder";
         case DecodeBlock::OddHeight:
             return codec + " " + std::to_string(s.width) + "x" + std::to_string(s.height) +
-                   " has an odd frame height - FFmpeg's NVDEC reads the chroma of such a frame a row off (its surfaces are even), and this build "
-                   "has no software AV1 decoder" +
+                   " (the frame as stored) has an odd frame height - FFmpeg's NVDEC reads the chroma of such a frame a row off (its surfaces are "
+                   "even), and this build has no software AV1 decoder" +
                    (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::NvdecFailed:
             return "NVDEC refused this AV1 stream and this build has no software AV1 decoder" + (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::Resized:
             return codec + " frames smaller than the sequence's " + std::to_string(s.width) + "x" + std::to_string(s.height) +
-                   " (a frame size override or a resize within it) cannot be decoded here - FFmpeg's NVDEC takes only frames of the sequence's full "
-                   "size, and this build has no software AV1 decoder" +
+                   " (a frame size override or a resize within it) cannot be decoded here - FFmpeg's NVDEC makes its surfaces for the "
+                   "sequence's maximum and gives such a frame wrong (the chroma mapped by the frame's own height), and this build has no "
+                   "software AV1 decoder" +
                    (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::NvdecStartFailed:
             return "NVDEC could not start decoding this AV1 stream now - out of GPU memory or a driver error; this build has no software AV1 decoder" +
@@ -299,14 +300,22 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
     }
     const bool unknown = info.pixelFormat == "unknown";  // the probe did not learn it: NVDEC decides on the first frame (CUDA is asked)
     if (!unknown && !Av1NvdecLayout(av_get_pix_fmt(info.pixelFormat.c_str()))) return Refuse(s, DecodeBlock::Layout);
-    if (info.codedHeight % 2 == 1) return Refuse(s, DecodeBlock::OddHeight);  // known without the GPU, as the layout
-    if (!caps || !caps->checked) {  // the driver could not be asked: go on blind, as FFmpeg does
+    // an odd height (OddHeight) after the GPU's answer: a machine whose GPU has no AV1 says that first - the even height would not help
+    // there; without an answer (VideoDecoder: a part, NVDEC refusing a frame) it is refused before going on blind
+    const bool oddHeight = info.codedHeight % 2 == 1;
+    const auto refuseOdd = [&] {  // the driver's own words (a CUDA error, a stand-in) are not this refusal's reason
+        s.caps.why.clear();
+        return Refuse(s, DecodeBlock::OddHeight);
+    };
+    if (!caps || !caps->checked) {  // the driver could not be asked (a CUDA error on the temporary context): FFmpeg asks it on the first frame
+        if (oddHeight) return refuseOdd();
         s.why = "not checked" + (caps && !caps->why.empty() ? ": " + caps->why : std::string());
         return s;
     }
     if (!caps->cuda) return Refuse(s, DecodeBlock::NoCuda);
     if (caps->nvdecMissing) return Refuse(s, DecodeBlock::NoNvdec);
     if (!caps->supported) return Refuse(s, DecodeBlock::NoAv1);
+    if (oddHeight) return refuseOdd();
     if (unknown) {
         s.why = "on '" + caps->gpu + "', the sample layout is not known before the first frame";
         return s;
@@ -340,7 +349,8 @@ NvdecAv1Caps QueryNvdecAv1Caps(int bitDepth) {
 
 DecodeSupport CheckDecodeSupport(const VideoStreamInfo& info) {
     if (!info.hardwareOnly) return JudgeDecode(info, nullptr);
-    if (const DecodeSupport pre = JudgeDecode(info, nullptr); !pre.Ok()) return pre;  // the layout first: no GPU asked
+    // the layout first: no GPU asked (an odd height waits for the GPU's answer - JudgeDecode's order)
+    if (const DecodeSupport pre = JudgeDecode(info, nullptr); pre.block == DecodeBlock::Layout) return pre;
     if (const auto fake = FakeCaps()) return JudgeDecode(info, &*fake);
     const NvdecAv1Caps caps = QueryNvdecAv1Caps(info.pixelFormat == "unknown" ? 8 : info.bitDepth);  // unknown: what 8 bits says
     return JudgeDecode(info, &caps);

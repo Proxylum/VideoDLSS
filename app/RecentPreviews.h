@@ -21,6 +21,7 @@ public:
     struct Preview {
         QImage image;  // kWidth×kHeight at kScale (cover-cropped); null when the video could not be decoded
         QString meta;  // «1920×800 24 fps» / «1920×800 24 fps → 3840×1600 48 fps»; empty when the file could not be opened
+        bool retry = false;  // TASK-0076: no image because NVDEC did not start now (memory, the driver) - forgetRetries makes it again
     };
     static constexpr int kWidth = 96, kHeight = 40, kScale = 2;
 
@@ -30,6 +31,9 @@ public:
     // The preview of `video` (and `result`): from memory, else nullopt and a worker makes it — previewReady(video)
     // follows on this object's thread.
     std::optional<Preview> get(const QString& video, const QString& result = {});
+    // TASK-0076: the previews without an image because NVDEC did not start (Preview::retry) are forgotten - the next get() makes them
+    // again (the start page shown again: once per showing, not on every previewReady)
+    void forgetRetries();
     // Makes one synchronously (the worker; tests): the disk cache first, then the decoder.
     static Preview Make(const QString& video, const QString& result = {});
     static QString CacheDir();
@@ -42,6 +46,7 @@ signals:
 private:
     QHash<QString, Preview> ready_;
     QSet<QString> pending_;
+    QSet<QString> retry_;  // TASK-0076: keys of ready_ made without an image because NVDEC did not start
     QThreadPool pool_;
 };
 

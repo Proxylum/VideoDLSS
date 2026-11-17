@@ -67,8 +67,9 @@ struct DecodeSupport {
     int bitDepth = 8;
     std::string chroma;  // VideoStreamInfo::chroma: "420" | "422" | "444" | "other" (gray among them)
     unsigned width = 0, height = 0;  // the stored frame
-    // the verdict is on a part of the stream in other parameters than the probe's (a new sequence header: pixelFormat ... width / height
-    // are that part's) - VideoDecoder::CheckDecode, the GUI reading the proxy build's
+    // the verdict is on a part of the stream in other parameters than the probe's (a new sequence header): VideoDecoder::CheckDecode -
+    // pixelFormat ... width / height are that part's -, ReceiveFrame and VerdictFromWhy for OddHeight - width / height the part's, the
+    // layout the probe's -, the GUI reading the proxy build's
     bool part = false;
     NvdecAv1Caps caps;
     bool Ok() const { return block == DecodeBlock::None; }
@@ -77,9 +78,10 @@ struct DecodeSupport {
 };
 
 // The verdict from the stream and what NVDEC said (`caps` null: not asked). Order: a decoder with a software path is fine; a layout this
-// build does not decode AV1 in (8 / 10-bit 4:2:0 only) is refused before the GPU is asked; no answer from the driver goes on blind (as
-// FFmpeg does); then no CUDA, no nvcuvid, no AV1; an unknown pixel format (the probe did not learn it) is left to the first frame from
-// there on; then the size.
+// build does not decode AV1 in (8 / 10-bit 4:2:0 only) is refused before the GPU is asked (CheckDecodeSupport asks nothing for it); a
+// driver that could not be asked (a CUDA error on the temporary context) - an odd frame height (OddHeight) refused, else on blind (FFmpeg
+// asks the driver itself on the first frame); then no CUDA, no nvcuvid, no AV1; then an odd frame height; an unknown pixel format (the
+// probe did not learn it) is left to the first frame from there on; then the size.
 DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps);
 
 // The driver's answer for AV1 4:2:0 at `bitDepth` (8 / 10): cuInit, device 0, a temporary context of its own (the primary context the

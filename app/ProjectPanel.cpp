@@ -392,11 +392,11 @@ void ProjectPanel::refresh() {
         QString stream = refusedLayout ? DecodeLayoutText(decode.bitDepth, decode.chroma)
                          : unknown     ? tr("формат заранее неизвестен (его узнаёт декодер на первом кадре)")
                                        : DecodeLayoutText(src.bitDepth, src.chroma);
-        if (!decode.Ok() && decode.part) {  // what the part was refused for: its frame (Size), else its layout
+        if (!decode.Ok() && decode.part) {  // what the part was refused for: its frame as stored (Size, OddHeight), else its layout
             const bool otherLayout = decode.pixelFormat != src.pixelFormat && !unknown;
-            if (decode.block == DecodeBlock::Size)
-                stream += otherLayout ? tr(", в части — %1, кадр %2×%3").arg(DecodeLayoutText(decode.bitDepth, decode.chroma)).arg(decode.width).arg(decode.height)
-                                      : tr(", в части — кадр %1×%2").arg(decode.width).arg(decode.height);
+            if (decode.block == DecodeBlock::Size || decode.block == DecodeBlock::OddHeight)
+                stream += otherLayout ? tr(", в части — %1, кадр в файле %2×%3").arg(DecodeLayoutText(decode.bitDepth, decode.chroma)).arg(decode.width).arg(decode.height)
+                                      : tr(", в части — кадр в файле %1×%2").arg(decode.width).arg(decode.height);
             else
                 stream += tr(", в части — %1").arg(DecodeLayoutText(decode.bitDepth, decode.chroma));
         }

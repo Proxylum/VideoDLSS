@@ -174,7 +174,7 @@ void BuildMissingProxies(const Project& project, const std::vector<std::string>&
         // TASK-0076: --force over a proxy built earlier for a video this machine cannot decode: that one stays (the GUI never forces: its
         // «no proxy,» lines are not these)
         const auto kept = [&]() -> std::optional<std::filesystem::path> { return force ? ValidProxy(video, project.passesRoot, name) : std::nullopt; };
-        {  // TASK-0076: nothing here decodes it (AV1 without NVDEC AV1) - the other proxy and the render go on (and below: NVDEC refusing its first frame)
+        {  // TASK-0076: nothing here decodes it (AV1 without NVDEC AV1) - the other proxy and the render go on (and below: NVDEC refusing a frame on the way, the first or a later one)
             VideoDecoder probe(video, VideoDecoder::Probe());
             if (const DecodeSupport d = CheckDecodeSupport(probe.Info()); !d.Ok()) {
                 if (const auto earlier = kept())
@@ -213,7 +213,7 @@ void BuildMissingProxies(const Project& project, const std::vector<std::string>&
         std::filesystem::path path;
         try {
             path = BuildProxy(video, project.passesRoot, name, o);
-        } catch (const DecodeUnavailable& e) {  // TASK-0076: NVDEC refused its first frame - the other proxy and the render go on
+        } catch (const DecodeUnavailable& e) {  // TASK-0076: NVDEC refused a frame (the first or a later one; a verdict or a start failure) - the other proxy and the render go on
             if (const auto earlier = kept()) {
                 std::printf("%s: proxy not rebuilt, %s (the proxy built earlier stays: %s): %s\n", name.c_str(),
                             e.support.Transient() ? "NVDEC did not start (run it again later)" : "the video cannot be decoded here", earlier->string().c_str(),

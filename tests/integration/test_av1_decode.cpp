@@ -2426,11 +2426,12 @@ TEST_CASE("An AV1 stream of an odd frame height is refused before any frame; a p
     REQUIRE(info.hardwareOnly);
     REQUIRE(info.codedHeight == kH - 1);
     REQUIRE(info.pixelFormat == "yuv420p");
-    const std::string oddWords = "AV1 320x191 has an odd frame height - FFmpeg's NVDEC reads the chroma of such a frame a row off";
+    const std::string oddWords = "AV1 320x191 (the frame as stored) has an odd frame height - FFmpeg's NVDEC reads the chroma of such a frame a row off";
     {
+        // the driver's answer first (this GPU decodes AV1: av1_nvenc wrote the clip), then the height - the caps as for the even stream
         const DecodeSupport s = CheckDecodeSupport(info);
         CHECK(s.block == DecodeBlock::OddHeight);
-        CHECK_FALSE(s.caps.checked);  // the GPU not asked
+        CHECK(s.caps.checked == CheckDecodeSupport(VideoDecoder(*a, VideoDecoder::Probe()).Info()).caps.checked);
         CHECK_THAT(s.why, StartsWith(oddWords));
     }
     {

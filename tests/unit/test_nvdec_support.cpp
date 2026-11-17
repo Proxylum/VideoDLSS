@@ -505,15 +505,25 @@ TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver o
         // not consulted where the driver would not be: software decoders, layouts refused first; an unknown layout is refused by it
         CHECK(CheckDecodeSupport(H264Info()).Ok());
         CHECK(CheckDecodeSupport(H264Info()).why == "software (h264)");
-        // the layout and an odd height are judged before the driver (here: its stand-in) is asked - no caps read, none said
-        for (const VideoStreamInfo& early : {Av1Info("yuv444p"), Av1Info("yuv420p12le", 12), Av1Info("yuv420p", 8, 320, 191)}) {
-            INFO(early.pixelFormat << " " << early.codedWidth << "x" << early.codedHeight);
+        // the layout is judged before the driver (here: its stand-in) is asked - no caps read, none said
+        for (const VideoStreamInfo& early : {Av1Info("yuv444p"), Av1Info("yuv420p12le", 12)}) {
+            INFO(early.pixelFormat);
             const DecodeSupport e = CheckDecodeSupport(early);
-            CHECK(e.block == (early.codedHeight == 191 ? DecodeBlock::OddHeight : DecodeBlock::Layout));
+            CHECK(e.block == DecodeBlock::Layout);
             CHECK_FALSE(e.caps.checked);
             CHECK(e.caps.why.empty());
             CHECK(e.caps.gpu.empty());
         }
+        // an odd height waits for the driver's answer: a GPU without AV1 says that first (an even height would not help there)
+        const DecodeSupport oddNoAv1 = CheckDecodeSupport(Av1Info("yuv420p", 8, 320, 191));
+        CheckRefusal(oddNoAv1, DecodeBlock::NoAv1);
+        CHECK(oddNoAv1.caps.checked);
+        CHECK(oddNoAv1.caps.gpu == "DLSSVID_FAKE_NVDEC_AV1");
+        CHECK(oddNoAv1.height == 191);
+        // a layout refused and an odd height: the layout, before the driver
+        const DecodeSupport oddLayout = CheckDecodeSupport(Av1Info("yuv444p", 8, 320, 191));
+        CHECK(oddLayout.block == DecodeBlock::Layout);
+        CHECK_FALSE(oddLayout.caps.checked);
         CheckRefusal(CheckDecodeSupport(Av1Info("unknown")), DecodeBlock::NoAv1);
         CHECK_FALSE(FakeNvdecRefusesFrames());
     }
@@ -522,6 +532,7 @@ TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver o
         const DecodeSupport s = CheckDecodeSupport(av1);
         CheckRefusal(s, DecodeBlock::NoCuda);
         CHECK_THAT(s.why, ContainsSubstring("DLSSVID_FAKE_NVDEC_AV1=no-cuda"));
+        CheckRefusal(CheckDecodeSupport(Av1Info("yuv420p", 8, 320, 191)), DecodeBlock::NoCuda);  // no CUDA first, also for an odd height
         CHECK(CheckDecodeSupport(H264Info()).Ok());
         CheckRefusal(CheckDecodeSupport(Av1Info("unknown", 10)), DecodeBlock::NoCuda);
         CHECK_FALSE(FakeNvdecRefusesFrames());
@@ -549,6 +560,12 @@ TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver o
         const DecodeSupport unknown = CheckDecodeSupport(Av1Info("unknown"));
         CHECK(unknown.Ok());
         CHECK(unknown.why == "not checked: DLSSVID_FAKE_NVDEC_AV1=first-frame");
+        // no answer from the driver: an odd height is refused rather than gone on blind - the stand-in's words are not its reason
+        const DecodeSupport odd = CheckDecodeSupport(Av1Info("yuv420p", 8, 320, 191));
+        CheckRefusal(odd, DecodeBlock::OddHeight);
+        CHECK_FALSE(odd.caps.checked);
+        CHECK_THAT(odd.why, Catch::Matchers::EndsWith("has no software AV1 decoder"));
+        CHECK_THAT(odd.why, !ContainsSubstring(" (DLSSVID_FAKE"));
     }
     {
         // the driver says yes (verified, limits wide open) - and NVDEC then does not start: VideoDecoder's get_format declines CUDA
@@ -559,6 +576,12 @@ TEST_CASE("CheckDecodeSupport: DLSSVID_FAKE_NVDEC_AV1 stands in for the driver o
         CHECK(s.caps.checked);
         CHECK(s.why == "on 'DLSSVID_FAKE_NVDEC_AV1', AV1 8-bit 4:2:0 up to 65535x65535");
         CHECK(CheckDecodeSupport(Av1Info("yuv420p", 8, 8192, 4320)).verified);
+        // the driver takes AV1: an odd height is refused after its answer (the caps read) - with its own reason only
+        const DecodeSupport odd = CheckDecodeSupport(Av1Info("yuv420p", 8, 320, 191));
+        CheckRefusal(odd, DecodeBlock::OddHeight);
+        CHECK(odd.caps.checked);
+        CHECK_THAT(odd.why, Catch::Matchers::EndsWith("has no software AV1 decoder"));
+        CHECK_THAT(odd.why, !ContainsSubstring(" (DLSSVID_FAKE"));
         CHECK(FakeNvdecRefusesFrames());
         CHECK_FALSE(FakeNvdecDeviceFails());
         CHECK(CheckDecodeSupport(Av1Info("yuv444p")).block == DecodeBlock::Layout);
@@ -738,18 +761,32 @@ TEST_CASE("A layout the probe did not learn, read back from a refusal: judged be
     }
 }
 
-TEST_CASE("JudgeDecode: an odd frame height is refused before NVDEC is asked, after the layout - FFmpeg's NVDEC reads its chroma a row off",
+TEST_CASE("JudgeDecode: an odd frame height is refused after the layout and the GPU's answer - no CUDA, NVDEC or AV1 says that first",
           "[unit][av1]") {
     const NvdecAv1Caps good = GoodCaps();
     NvdecAv1Caps noCuda = GoodCaps();
     noCuda.cuda = false;
     noCuda.supported = false;
     noCuda.why = "nvcuda.dll could not be loaded (no NVIDIA driver)";
-    const std::string odd = "AV1 320x191 has an odd frame height - FFmpeg's NVDEC reads the chroma of such a frame a row off (its surfaces are even), "
-                            "and this build has no software AV1 decoder";
-    // whatever the driver says - not asked, yes, no CUDA at all: the height decides first (known without the GPU)
-    for (const NvdecAv1Caps* caps : {static_cast<const NvdecAv1Caps*>(nullptr), &good, static_cast<const NvdecAv1Caps*>(&noCuda)}) {
-        INFO((caps ? caps->why : std::string("no caps")));
+    NvdecAv1Caps noNvdec = GoodCaps();
+    noNvdec.supported = false;
+    noNvdec.nvdecMissing = true;
+    noNvdec.why = "nvcuvid.dll could not be loaded (missing, or a driver too old for FFmpeg's NVDEC)";
+    NvdecAv1Caps noAv1 = GoodCaps();
+    noAv1.supported = false;
+    NvdecAv1Caps unchecked;  // the driver could not be asked: no answer to wait for
+    unchecked.checked = false;
+    const std::string odd = "AV1 320x191 (the frame as stored) has an odd frame height - FFmpeg's NVDEC reads the chroma of such a frame a row off "
+                            "(its surfaces are even), and this build has no software AV1 decoder";
+    // a machine that could not decode it anyway says why first: no CUDA, no NVDEC, no AV1 (an even height would not help there)
+    CheckRefusal(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &noCuda), DecodeBlock::NoCuda);
+    CheckRefusal(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &noNvdec), DecodeBlock::NoNvdec);
+    const DecodeSupport noAv1Odd = JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &noAv1);
+    CheckRefusal(noAv1Odd, DecodeBlock::NoAv1);
+    CHECK(noAv1Odd.height == 191);
+    // no answer (not asked, or none), or a GPU that decodes AV1: the odd height
+    for (const NvdecAv1Caps* caps : {static_cast<const NvdecAv1Caps*>(nullptr), static_cast<const NvdecAv1Caps*>(&unchecked), &good}) {
+        INFO((caps ? (caps->checked ? "good caps" : "unchecked caps") : "no caps"));
         const DecodeSupport s = JudgeDecode(Av1Info("yuv420p", 8, 320, 191), caps);
         CheckRefusal(s, DecodeBlock::OddHeight);
         CHECK_THAT(s.why, StartsWith(odd));
@@ -758,9 +795,33 @@ TEST_CASE("JudgeDecode: an odd frame height is refused before NVDEC is asked, af
         CHECK(s.height == 191);
         CHECK_FALSE(s.part);
         CHECK_FALSE(s.Transient());
-        CHECK(s.caps.checked == (caps && caps->checked));  // nothing read for it: the caps are the ones given, if any
+        CHECK(s.caps.checked == (caps && caps->checked));  // the caps as given, if any
     }
     CHECK_FALSE(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), nullptr).caps.checked);
+    // the odd height before the size: a GPU whose limits the frame is outside of says the height (both would refuse it)
+    NvdecAv1Caps low = GoodCaps();
+    low.maxHeight = 128;
+    CHECK(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &low).block == DecodeBlock::OddHeight);
+    // caps with words of their own - the driver not asked for a CUDA error, or a GPU that answered with a note: the height is this refusal's
+    // reason, the driver's words are not said in it (they are for «not checked»)
+    NvdecAv1Caps cudaError;
+    cudaError.checked = false;
+    cudaError.cudaError = true;
+    cudaError.why = "cuCtxCreate failed: x";
+    NvdecAv1Caps noted = GoodCaps();
+    noted.why = "a note of the driver";
+    for (const NvdecAv1Caps* caps : {static_cast<const NvdecAv1Caps*>(&cudaError), static_cast<const NvdecAv1Caps*>(&noted)}) {
+        INFO(caps->why);
+        const DecodeSupport s = JudgeDecode(Av1Info("yuv420p", 8, 320, 191), caps);
+        CheckRefusal(s, DecodeBlock::OddHeight);
+        CHECK(s.why == odd);
+        CHECK_THAT(s.why, Catch::Matchers::EndsWith("has no software AV1 decoder"));
+        CHECK_THAT(s.why, !ContainsSubstring(" (cuCtxCreate"));
+        CHECK_THAT(s.why, !ContainsSubstring("a note of the driver"));
+        CHECK(s.caps.checked == caps->checked);  // the rest of the answer kept
+    }
+    CHECK(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &cudaError).caps.cudaError);
+    CHECK(JudgeDecode(Av1Info(), &cudaError).why == "not checked: cuCtxCreate failed: x");  // an even height: the words where they belong
     // 10-bit, and a layout the probe did not learn: the same
     CHECK(JudgeDecode(Av1Info("yuv420p10le", 10, 1920, 1081), &good).block == DecodeBlock::OddHeight);
     CHECK(JudgeDecode(Av1Info("unknown", 8, 320, 191), &good).block == DecodeBlock::OddHeight);
@@ -828,6 +889,10 @@ TEST_CASE("VerdictFromWhy reads another process's refusal back with its own bloc
     // an odd frame height (VideoDecoder's run-time refusal): its size
     const VideoStreamInfo oddSize = StreamPartInfo(probe, "", 320, 191);
     const std::string oddWords = RefusedDecode(oddSize, DecodeBlock::OddHeight, "").why;
+    REQUIRE(oddWords == "AV1 320x191 (the frame as stored) has an odd frame height - FFmpeg's NVDEC reads the chroma of such a frame a row off (its "
+                        "surfaces are even), and this build has no software AV1 decoder");
+    REQUIRE_THAT(resizedWords, StartsWith("AV1 frames smaller than the sequence's 640x480 (a frame size override or a resize within it) cannot be "
+                                          "decoded here - FFmpeg's NVDEC makes its surfaces for the sequence's maximum"));
     for (const std::string& detail : {std::string("after 16 frames"), std::string("the first frame"), std::string()}) {
         INFO("detail: " << detail);
         const DecodeSupport odd = VerdictFromWhy(probe, RefusedDecode(oddSize, DecodeBlock::OddHeight, detail).why, "the proxy build");
@@ -865,6 +930,41 @@ TEST_CASE("VerdictFromWhy reads another process's refusal back with its own bloc
         CHECK(other.why == failedWords + " (the proxy build: " + text + ")");
         CHECK(other.height == 192);
     }
+}
+
+TEST_CASE("VerdictFromWhy under DLSSVID_FAKE_NVDEC_AV1: a part the GPU takes is NVDEC refusing the stream; a part it does not take is that verdict",
+          "[unit][av1]") {
+    const VideoStreamInfo probe = Av1Info();  // 320x192 8-bit 4:2:0
+    StreamPart bigger;  // an 8-bit part of another size: its layout decodes here
+    bigger.pixelFormat = "yuv420p";
+    bigger.codedWidth = 384;
+    bigger.codedHeight = 224;
+    const std::string failedWords = RefusedDecode(probe, DecodeBlock::NvdecFailed, "").why;
+    const std::string when = "after 16 frames" + StreamPartWords(bigger);
+    const std::string why = failedWords + " (" + when + ")";  // VideoDecoder::CheckDecode's, the proxy build's line
+    // the driver takes the part (start-fails: verified) or does not answer (first-frame): not the part's verdict - NVDEC refused the
+    // stream, the whole detail kept, the probe's size
+    for (const char* value : {"start-fails", "first-frame"}) {
+        INFO(value);
+        FakeNvdecEnv fake(value);
+        const DecodeSupport v = VerdictFromWhy(probe, why, "the proxy build");
+        CheckRefusal(v, DecodeBlock::NvdecFailed);
+        CHECK_FALSE(v.part);
+        CHECK(v.why == failedWords + " (the proxy build: " + when + ")");
+        CHECK(v.why == failedWords + " (the proxy build: after 16 frames, on a part of the stream in other parameters (yuv420p 384x224))");
+        CHECK(v.width == 320);
+        CHECK(v.height == 192);
+        CHECK_FALSE(v.Transient());
+    }
+    // a GPU without AV1 (no-av1): the part's verdict - the driver's answer, a part
+    FakeNvdecEnv fake("no-av1");
+    const DecodeSupport v = VerdictFromWhy(probe, why, "the proxy build");
+    CheckRefusal(v, DecodeBlock::NoAv1);
+    CHECK(v.part);
+    CHECK(v.caps.checked);
+    CHECK(v.width == 384);
+    CHECK(v.height == 224);
+    CHECK(v.why == "the proxy build: " + why);
 }
 
 namespace {
@@ -1032,7 +1132,8 @@ TEST_CASE("Av1FrameBelowSequence: a frame smaller than its sequence header's max
     CHECK(s.width == 640);
     CHECK(s.height == 480);
     CHECK(s.why == "AV1 frames smaller than the sequence's 640x480 (a frame size override or a resize within it) cannot be decoded here - FFmpeg's "
-                   "NVDEC takes only frames of the sequence's full size, and this build has no software AV1 decoder (a frame of 320x240, after 5 frames)");
+                   "NVDEC makes its surfaces for the sequence's maximum and gives such a frame wrong (the chroma mapped by the frame's own height), and "
+                   "this build has no software AV1 decoder (a frame of 320x240, after 5 frames)");
 }
 
 TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit][av1]") {

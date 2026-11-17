@@ -7550,14 +7550,15 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     oddInfo.height = oddInfo.codedHeight = 191;
     const DecodeSupport odd = JudgeDecode(oddInfo, nullptr);
     REQUIRE(odd.block == DecodeBlock::OddHeight);
-    CHECK(SourceDecodeText(odd) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: высота его кадра нечётная (320×191), а такой AV1 видеокарта "
-                                                     "в этой версии программы выдаёт со сдвинутым цветом, другого же декодера AV1 нет. Что сделать: "
-                                                     "перекодируйте ролик в H.264 или HEVC другой программой или в кадр чётной высоты."));
+    CHECK(SourceDecodeText(odd) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: высота его кадра в файле нечётная (320×191), а такой AV1 "
+                                                     "видеокарта в этой версии программы выдаёт со сдвинутым цветом, другого же декодера AV1 нет. Что "
+                                                     "сделать: перекодируйте ролик в H.264 или HEVC другой программой или в кадр с чётными сторонами."));
     DecodeSupport oddPart = RefusedDecode(oddInfo, DecodeBlock::OddHeight, "after 16 frames");
     oddPart.part = true;
-    CHECK(SourceDecodeText(oddPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть, где высота кадра нечётная (320×191), а "
-                                                         "такой AV1 видеокарта в этой версии программы выдаёт со сдвинутым цветом, другого же декодера AV1 нет. "
-                                                         "Что сделать: перекодируйте ролик в H.264 или HEVC другой программой или в кадр чётной высоты."));
+    CHECK(SourceDecodeText(oddPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть, где высота кадра в файле нечётная "
+                                                         "(320×191), а такой AV1 видеокарта в этой версии программы выдаёт со сдвинутым цветом, другого же "
+                                                         "декодера AV1 нет. Что сделать: перекодируйте ролик в H.264 или HEVC другой программой или в кадр с "
+                                                         "чётными сторонами."));
     for (const DecodeSupport& o : {odd, oddPart}) {
         for (const char* english : {"odd", "FFmpeg", "chroma", "frames", "refused"}) {
             INFO(english);
@@ -9377,7 +9378,7 @@ TEST_CASE("ProjectPanel's source row of a video refused for the frame size of a 
     panel.refresh();
     const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
     REQUIRE(row);
-    CHECK(row->toolTip() == QString::fromUtf8("Поток: 8 бит 4:2:0, в части — кадр 384×224; на этом компьютере не декодируется"));
+    CHECK(row->toolTip() == QString::fromUtf8("Поток: 8 бит 4:2:0, в части — кадр в файле 384×224; на этом компьютере не декодируется"));
     CHECK(model.planError() == SourceDecodeText(verdict));
     CHECK(model.planError().contains(QString::fromUtf8("в нём есть часть, где кадр в файле 384×224")));
 }
@@ -9438,7 +9439,7 @@ TEST_CASE("ProjectPanel's source row of a video refused for its layout says the 
     panel.refresh();
     const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
     REQUIRE(row);
-    CHECK(row->toolTip() == QString::fromUtf8("Поток: 8 бит 4:2:0, в части — 10 бит 4:2:0, кадр 384×224; на этом компьютере не декодируется"));
+    CHECK(row->toolTip() == QString::fromUtf8("Поток: 8 бит 4:2:0, в части — 10 бит 4:2:0, кадр в файле 384×224; на этом компьютере не декодируется"));
     INFO("row: " << row->text().toStdString());
     CHECK(row->text().endsWith(QString::fromUtf8(" · AV1 8 бит 4:2:0")));  // the stream's own layout: a part is said in the tooltip
 }
@@ -9669,4 +9670,203 @@ TEST_CASE("A task queued while the background proxy build of an AV1 video runs l
     Pump([&] { return queue.finished(task); }, 20000);
     model.cancelProxies();
     CHECK_FALSE(model.proxyBuilding());
+}
+
+namespace {
+// ProjectPanel's source row (its text and tooltip) for a project of `video`
+std::pair<QString, QString> SourceRowOf(const std::filesystem::path& video) {
+    AppModel model(true);
+    model.openVideo(Q(video));
+    REQUIRE(model.hasProject());
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
+    REQUIRE(row);
+    return {row->text(), row->toolTip()};
+}
+}  // namespace
+
+TEST_CASE("ProjectPanel's source row of a part refused for an odd frame height names the part's stored frame; with a layout the probe did not learn, no layout for the part",
+          "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_part_odd_row");  // its own files: the verdicts remembered for the process are for these alone
+    AutoProxySetting autoProxy(false);
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    // a part of 320x191 after the probe's 320x192 (VideoDecoder::ReceiveFrame's refusal: the probe's layout, the part's size)
+    const VideoStreamInfo probe = VideoDecoder(clip, VideoDecoder::Probe()).Info();
+    DecodeSupport odd = RefusedDecode(StreamPartInfo(probe, "", 320, 191), DecodeBlock::OddHeight, "after 16 frames");
+    odd.part = true;
+    REQUIRE(FrameStore::RememberRefusedFile(clip, odd));
+    {
+        AppModel model(true);
+        model.openVideo(Q(clip));
+        REQUIRE(model.hasProject());
+        REQUIRE(model.sourceDecode().block == DecodeBlock::OddHeight);
+        REQUIRE(model.sourceDecode().part);
+        CHECK(model.planError() == SourceDecodeText(odd));
+        CHECK(model.planError().contains(QString::fromUtf8("в нём есть часть, где высота кадра в файле нечётная (320×191)")));
+    }
+    const auto [text, tip] = SourceRowOf(clip);
+    CHECK(tip == QString::fromUtf8("Поток: 8 бит 4:2:0, в части — кадр в файле 320×191; на этом компьютере не декодируется"));
+    INFO("row: " << text.toStdString());
+    CHECK(text.endsWith(QString::fromUtf8(" · AV1 8 бит 4:2:0")));
+    // a stream whose layout the probe did not learn (no sequence header before frame 160): the part is named by its frame alone - the
+    // probe's defaults (8 bits 4:2:0) are no layout of it
+    ClipSpec spec;
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 16;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    const auto a = WriteClipIfSupported(d / "a.ivf", spec, &why);
+    REQUIRE(a);
+    const auto unknownOdd = RepeatIvf(*a, 13, d / "unknown_odd.ivf", [](int i, const std::string& u) { return i < 160 ? WithoutSequenceHeaders(u) : u; });
+    const auto unknownSize = d / "unknown_size.ivf";
+    std::filesystem::copy_file(unknownOdd, unknownSize);
+    const VideoStreamInfo unknownProbe = VideoDecoder(unknownOdd, VideoDecoder::Probe()).Info();
+    REQUIRE(unknownProbe.pixelFormat == "unknown");
+    // the odd part as ReceiveFrame says it (the probe's «unknown» kept)
+    DecodeSupport oddUnknown = RefusedDecode(StreamPartInfo(unknownProbe, "", 320, 191), DecodeBlock::OddHeight, "after 160 frames");
+    oddUnknown.part = true;
+    REQUIRE(FrameStore::RememberRefusedFile(unknownOdd, oddUnknown));
+    // a part refused for its frame size with the layout learned there (VideoDecoder::CheckDecode's: yuv420p)
+    NvdecAv1Caps limits;
+    limits.checked = true;
+    limits.cuda = true;
+    limits.supported = true;
+    limits.gpu = "Test GPU";
+    limits.minWidth = 16;
+    limits.minHeight = 16;
+    limits.maxWidth = 320;
+    limits.maxHeight = 192;
+    limits.maxMacroblocks = 1u << 20;
+    DecodeSupport sizeLearned = JudgeDecode(StreamPartInfo(unknownProbe, "yuv420p", 384, 224), &limits);
+    REQUIRE(sizeLearned.block == DecodeBlock::Size);
+    REQUIRE(sizeLearned.pixelFormat == "yuv420p");
+    sizeLearned.part = true;
+    REQUIRE(FrameStore::RememberRefusedFile(unknownSize, sizeLearned));
+    const QString unknownWords = QString::fromUtf8("Поток: формат заранее неизвестен (его узнаёт декодер на первом кадре)");
+    for (const auto& [file, frame] : {std::pair{unknownOdd, "320×191"}, std::pair{unknownSize, "384×224"}}) {
+        INFO(file.filename().string());
+        const auto [rowText, rowTip] = SourceRowOf(file);
+        CHECK(rowTip == unknownWords + QString::fromUtf8(", в части — кадр в файле ") + QString::fromUtf8(frame) +
+                            QString::fromUtf8("; на этом компьютере не декодируется"));
+        INFO("row: " << rowText.toStdString());
+        CHECK(rowText.endsWith(QString::fromUtf8(" · AV1, формат заранее неизвестен")));
+        CHECK_FALSE(rowText.contains(QString::fromUtf8("8 бит 4:2:0")));
+        CHECK_FALSE(rowTip.contains(QString::fromUtf8("8 бит 4:2:0")));
+    }
+}
+
+TEST_CASE("RecentPreviews: NVDEC not starting now leaves a preview without a frame to be made again (forgetRetries); a refusal of the video is no retry",
+          "[app][gpu][av1][previews][regression]") {
+    App();
+    const auto d = Dir("av1_previews_retry");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    const auto refused = d / "refused.mp4";  // the same stream in a file of its own: its own key and cache file
+    std::filesystem::copy_file(clip, refused);
+    // made at once: NVDEC not started (the CUDA device not created, the decoder not started) - no frame, the line as any, a retry
+    for (const char* value : {"device-fails", "start-fails"}) {
+        INFO(value);
+        RecentPreviews::SetCacheDir(Q(d / (std::string("cache_") + value)));
+        FakeNvdecEnv fake(value);
+        const RecentPreviews::Preview p = RecentPreviews::Make(Q(clip));
+        CHECK(p.image.isNull());
+        CHECK(p.retry);
+        CHECK(p.meta == QString::fromUtf8("320×192 24 fps"));
+        CHECK_FALSE(std::filesystem::exists(std::filesystem::path(RecentPreviews::CacheFile(Q(clip), {}).toStdWString())));  // nothing cached
+    }
+    {
+        // the GPU has no AV1 decoder: a verdict - nothing to make again
+        RecentPreviews::SetCacheDir(Q(d / "cache_no_av1"));
+        FakeNvdecEnv fake("no-av1");
+        const RecentPreviews::Preview p = RecentPreviews::Make(Q(clip));
+        CHECK(p.image.isNull());
+        CHECK_FALSE(p.retry);
+    }
+    // the start page's way: a worker, previewReady - once, no loop of makes
+    RecentPreviews::SetCacheDir(Q(d / "cache_async"));
+    RecentPreviews previews;
+    QSignalSpy ready(&previews, &RecentPreviews::previewReady);
+    {
+        FakeNvdecEnv fake("start-fails");  // until the worker's preview is delivered (the worker reads it)
+        CHECK_FALSE(previews.get(Q(clip)).has_value());
+        Pump([&] { return ready.count() > 0; }, 20000);
+        REQUIRE(ready.count() == 1);
+    }
+    const auto empty = previews.get(Q(clip));
+    REQUIRE(empty);
+    CHECK(empty->image.isNull());
+    CHECK(empty->retry);
+    Pump([] { return false; }, 300);
+    CHECK(ready.count() == 1);  // not made again by itself
+    // NVDEC would start now - without forgetRetries the preview made is kept (no new make)
+    const auto kept = previews.get(Q(clip));
+    REQUIRE(kept);
+    CHECK(kept->image.isNull());
+    Pump([] { return false; }, 300);
+    CHECK(ready.count() == 1);
+    // forgetRetries (the start page shown again): made again, now with its frame
+    previews.forgetRetries();
+    CHECK_FALSE(previews.get(Q(clip)).has_value());
+    Pump([&] { return ready.count() > 1; }, 20000);
+    REQUIRE(ready.count() == 2);
+    const auto made = previews.get(Q(clip));
+    REQUIRE(made);
+    CHECK_FALSE(made->image.isNull());
+    CHECK_FALSE(made->retry);
+    previews.forgetRetries();  // a preview with its frame is no retry: kept
+    CHECK(previews.get(Q(clip)).has_value());
+    // a refusal (no AV1 decoder here): no frame, no retry - forgetRetries keeps it too
+    {
+        FakeNvdecEnv fake("no-av1");
+        CHECK_FALSE(previews.get(Q(refused)).has_value());
+        Pump([&] { return ready.count() > 2; }, 20000);
+        REQUIRE(ready.count() == 3);
+    }
+    const auto verdict = previews.get(Q(refused));
+    REQUIRE(verdict);
+    CHECK(verdict->image.isNull());
+    CHECK_FALSE(verdict->retry);
+    previews.forgetRetries();
+    CHECK(previews.get(Q(refused)).has_value());
+    Pump([] { return false; }, 300);
+    CHECK(ready.count() == 3);
+}
+
+TEST_CASE("StartPage shown again makes again a recent AV1 card's preview NVDEC did not start for: the frame then shown",
+          "[app][gpu][av1][start][previews][regression]") {
+    App();
+    const auto d = Dir("av1_start_retry");
+    RecentPreviews::SetCacheDir(Q(d / "cache"));
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    AppModel model(true);
+    model.clearRecents();
+    dlssvid::StartPage page(model);  // qualified: <windows.h> has a GDI StartPage()
+    auto* previews = page.findChild<RecentPreviews*>();
+    REQUIRE(previews);
+    QSignalSpy ready(previews, &RecentPreviews::previewReady);
+    {
+        FakeNvdecEnv fake("start-fails");  // until the worker's preview is delivered (the worker reads it)
+        model.addRecent(Q(clip));          // the page refreshes: its card asks for the preview
+        REQUIRE(page.cardTitles().size() == 1);
+        Pump([&] { return ready.count() > 0; }, 20000);
+        REQUIRE(ready.count() == 1);
+    }
+    CHECK_FALSE(page.cardHasPreview(0));  // NVDEC did not start: no frame
+    Pump([] { return false; }, 300);
+    CHECK(ready.count() == 1);  // not made again by itself
+    // the page shown again (NVDEC starts now): the preview made again, its frame on the card
+    page.refresh();
+    Pump([&] { return ready.count() > 1 && page.cardHasPreview(0); }, 20000);
+    CHECK(ready.count() == 2);
+    CHECK(page.cardHasPreview(0));
+    model.clearRecents();
 }
