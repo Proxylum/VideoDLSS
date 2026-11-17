@@ -125,8 +125,8 @@ std::string RefusalText(const DecodeSupport& s) {
         case DecodeBlock::Resized:
             return codec + " frames smaller than the sequence's " + std::to_string(s.width) + "x" + std::to_string(s.height) +
                    " (a frame size override or a resize within it) cannot be decoded here - FFmpeg's NVDEC makes its surfaces for the "
-                   "sequence's maximum and gives such a frame wrong (the chroma mapped by the frame's own height), and this build has no "
-                   "software AV1 decoder" +
+                   "sequence's maximum and hands such a frame out at that size, not its own (a lower one also with the chroma mapped by its "
+                   "own height), and this build has no software AV1 decoder" +
                    (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::NvdecStartFailed:
             return "NVDEC could not start decoding this AV1 stream now - out of GPU memory or a driver error; this build has no software AV1 decoder" +

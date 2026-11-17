@@ -32,7 +32,7 @@ public:
     // follows on this object's thread.
     std::optional<Preview> get(const QString& video, const QString& result = {});
     // TASK-0076: the previews without an image because NVDEC did not start (Preview::retry) are forgotten - the next get() makes them
-    // again (the start page shown again: once per showing, not on every previewReady)
+    // again (StartPage::refresh: the page shown again or the recents changed, a project opened among them - not on every previewReady)
     void forgetRetries();
     // Makes one synchronously (the worker; tests): the disk cache first, then the decoder.
     static Preview Make(const QString& video, const QString& result = {});

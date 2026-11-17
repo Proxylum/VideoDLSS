@@ -2543,3 +2543,92 @@ TEST_CASE("FrameStore::RememberRefusedFile with keep: a verdict remembered for t
     // no file: nothing remembered, keep or not
     CHECK_FALSE(FrameStore::RememberRefusedFile(dir / "none.mp4", proxy, true));
 }
+
+TEST_CASE("An AV1 stream of an odd frame width decodes on NVDEC at its own width: frames cut to it, no GpuFrame; process --passthrough and BuildProxy take it",
+          "[integration][gpu][av1][regression]") {
+    const auto dir = Dir("odd_width");
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 16;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto even = WriteClipIfSupported(dir / "even.ivf", spec, &why);
+    if (!even) SKIP("av1_nvenc does not support the clip here: " << why);
+    // av1_nvenc's 320x192 said as 319x192 (the sequence header's maximum, the IVF header): the 8-pixel block columns (MiCols) are the same,
+    // the frames' headers valid - NVDEC decodes it into an even-sided surface (320)
+    const auto odd = RepeatIvf(*even, 1, dir / "odd.ivf", [](int, const std::string& u) { return NarrowerFrameTemporalUnit(u, 1); });
+    SetIvfFrameSize(odd, static_cast<uint16_t>(kW - 1), static_cast<uint16_t>(kH));
+    const VideoStreamInfo info = VideoDecoder(odd, VideoDecoder::Probe()).Info();
+    REQUIRE(info.width == kW - 1);
+    REQUIRE(info.codedWidth == kW - 1);
+    CHECK(CheckDecodeSupport(info).Ok());  // the driver takes it
+    std::vector<CpuFrame> evenFrames, oddFrames;
+    {
+        VideoDecoder dec(*even);
+        evenFrames = DecodeAllOf(dec);
+    }
+    {
+        VideoDecoder dec(odd);
+        oddFrames = DecodeAllOf(dec);  // no refusal, no start failure
+    }
+    REQUIRE(evenFrames.size() == 16);
+    REQUIRE(oddFrames.size() == 16);
+    for (size_t i = 0; i < oddFrames.size(); ++i) {
+        INFO("frame " << i);
+        const CpuFrame& o = oddFrames[i];
+        const CpuFrame& e = evenFrames[i];
+        CHECK(o.desc.width == kW - 1);  // the video's own width, not the surface's
+        CHECK(o.desc.height == kH);
+        REQUIRE(o.data.size() == o.desc.ByteSize());
+        // the chroma (160 wide for 319 and 320) as the even stream's, row for row; the luma too, away from the right edge (the frame's own
+        // edge filtering differs in its last columns)
+        const size_t ew = e.desc.width, ow = o.desc.width, ecw = e.desc.PlaneWidth(1), ocw = o.desc.PlaneWidth(1);
+        REQUIRE(ocw == 160);
+        int lumaRows = 0, uRows = 0, vRows = 0;
+        for (size_t r = 0; r < kH; ++r) lumaRows += std::memcmp(e.Plane(0) + r * ew, o.Plane(0) + r * ow, 256) == 0;
+        for (size_t r = 0; r < kH / 2; ++r) {
+            uRows += std::memcmp(e.Plane(1) + r * ecw, o.Plane(1) + r * ocw, 160) == 0;
+            vRows += std::memcmp(e.Plane(2) + r * ecw, o.Plane(2) + r * ocw, 160) == 0;
+        }
+        CHECK(lumaRows == static_cast<int>(kH));
+        CHECK(uRows == static_cast<int>(kH / 2));
+        CHECK(vRows == static_cast<int>(kH / 2));
+    }
+    // CUDA asked for and a GpuFrame with it: an odd width goes through the host (the device's NV12 consumers take even rows); an even one
+    // has its GpuFrame
+    for (const auto& [file, oddWidth] : {std::pair{*even, false}, std::pair{odd, true}}) {
+        INFO(file.filename().string());
+        VideoDecoder::Options o;
+        o.hwaccel = HwAccel::Cuda;
+        VideoDecoder dec(file, o);
+        CpuFrame f;
+        GpuFrame g;
+        REQUIRE(dec.NextFrame(f, &g));
+        REQUIRE(dec.UsingHwAccel());
+        CHECK(g.Valid() == !oddWidth);
+        if (oddWidth) {
+            CHECK(f.desc.width == kW - 1);
+            CHECK(f.data == oddFrames[0].data);
+        } else {
+            CHECK(g.width == kW);
+        }
+    }
+    // process --passthrough: the frames into FFV1 as decoded (it used to fail: «frame format mismatch»)
+    const auto pt = RunAll({"process", "-i", odd.string(), "-o", (dir / "pt.mkv").string(), "--passthrough", "--warp", "--codec", "ffv1"}, dir / "pt.log");
+    INFO(pt.out);
+    CHECK(pt.code == 0);
+    CHECK_THAT(pt.out, !ContainsSubstring("frame format mismatch"));
+    const std::vector<CpuFrame> written = DecodeAll(dir / "pt.mkv");
+    REQUIRE(written.size() == oddFrames.size());
+    for (size_t i = 0; i < written.size(); ++i) CHECK(written[i].data == oddFrames[i].data);
+    // the scrubbing proxy: built, of the video's own width
+    const auto passes = dir / "passes";
+    const auto proxy = BuildProxy(odd, passes, "source");
+    CHECK(ValidProxy(odd, passes, "source"));
+    const std::vector<CpuFrame> proxied = DecodeAll(proxy);
+    REQUIRE(proxied.size() == oddFrames.size());
+    CHECK(proxied[0].desc.width == kW - 1);
+}

@@ -912,7 +912,22 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     AVFrame* src = frame_;
     if (frame_->format == AV_PIX_FMT_CUDA) {
         nvdecFrames_ = true;
-        if (gpu && !info_.orientation.Identity()) {
+        // TASK-0076: NVDEC's frame comes at its surface's size (even sides: a 853-wide AV1 as 854), the frame's own is codec_'s - cut to
+        // it, as FFmpeg's apply_cropping does for a hardware frame of a codec that exports cropping (the width and height; the pointers
+        // and the pitch stay - the chroma of 853 and 854 is as wide)
+        if (frameW > 0 && frameH > 0 && (frameW < frame_->width || frameH < frame_->height)) {
+            frame_->width = std::min(frame_->width, frameW);
+            frame_->height = std::min(frame_->height, frameH);
+        }
+        if (gpu && frame_->width % 2 == 1) {
+            // an odd width: the NV12 consumers on the device (OFA, the pass cache) take even rows - the host path, as for a turned stream
+            *gpu = GpuFrame{};
+            cpu = true;
+            if (!warnedOddWidthGpu_) {
+                Log()->info("the stream is {} wide (odd): frames go through the host, the on-device fast path is off", frame_->width);
+                warnedOddWidthGpu_ = true;
+            }
+        } else if (gpu && !info_.orientation.Identity()) {
             // a turned stream: the NV12 frame on the device is stored, not shown - no GpuFrame (OFA re-initialises for ABGR uploads of
             // the turned CPU frame, as for 10-bit streams)
             *gpu = GpuFrame{};

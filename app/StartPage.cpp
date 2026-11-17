@@ -268,7 +268,7 @@ StartPage::StartPage(AppModel& model, QWidget* parent) : QWidget(parent), model_
 }
 
 void StartPage::refresh() {
-    previews_->forgetRetries();  // TASK-0076: a preview NVDEC did not start for is made again as the page shows again
+    previews_->forgetRetries();  // TASK-0076: a preview NVDEC did not start for is made again on each rebuild of the cards (shown, recents changed)
     readiness_->setText(model_.readiness());
     switch (model_.readinessLevel()) {
         case AppModel::Readiness::Ready: SetRole(readinessDot_, "dot-ok"); break;

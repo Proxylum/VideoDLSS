@@ -7543,7 +7543,7 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     // frames smaller than the sequence's (a frame size override): VideoDecoder's Resized
     const DecodeSupport resized = RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::Resized, "a frame of 160x96, after 3 frames");
     CHECK(SourceDecodeText(resized) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: размер его кадров меняется внутри потока (есть кадры меньше "
-                                                         "заявленных 320×192), а такие AV1 эта версия программы не декодирует. Что сделать: ") +
+                                                         "кадра в файле 320×192), а такие AV1 эта версия программы не декодирует. Что сделать: ") +
                                            transcode + ".");
     // TASK-0076: an odd frame height (FFmpeg's NVDEC gives its chroma a row off): of the video, and of a part of it
     VideoStreamInfo oddInfo = Av1StreamInfo("yuv420p", 8);
@@ -9537,18 +9537,29 @@ TEST_CASE("AppModel: a source still being written after the viewport refused it 
             if (i == 0) Pump([&] { return sources.count() > 0; }, 10000);  // the sources set again (deferred)
             else Pump([] { return false; }, 300);                          // nothing set again: a chance for it anyway
             CHECK(sources.count() == 1);
-            // NVDEC refuses the file as it is now as well - the same refusal (set again: heard once, a plan with it)
-            Pump(
-                [&] {
-                    poll(model);
-                    return model.store().Undecodable("source").has_value();
-                },
-                20000);
-            REQUIRE(model.store().Undecodable("source"));
-            CHECK(model.store().Undecodable("source")->why == refused.why);
-            SettleAny(model, 0, 6);
-            poll(model);
-            if (i == 0) CHECK(model.planError() == SourceDecodeText(refused));
+            if (i == 0) {
+                // set again: NVDEC refuses the file as it is now as well - the same refusal, heard once, a plan with it
+                Pump(
+                    [&] {
+                        poll(model);
+                        return model.store().Undecodable("source").has_value();
+                    },
+                    20000);
+                REQUIRE(model.store().Undecodable("source"));
+                CHECK(model.store().Undecodable("source")->why == refused.why);
+                SettleAny(model, 0, 6);
+                poll(model);
+                CHECK(model.planError() == SourceDecodeText(refused));
+            } else {
+                // not set again (once per refusal of a file still being written): the viewport keeps its verdict on the file as it loaded it,
+                // the plan probes the file there now - it runs; the refusal is not said of the grown file
+                REQUIRE(model.store().Undecodable("source"));
+                CHECK(model.store().Undecodable("source")->why == refused.why);
+                CHECK(model.store().SourceChanged("source"));
+                CHECK(model.planError().isEmpty());
+                CHECK(model.sourceDecode().Ok());
+                poll(model);
+            }
             const auto plans = planChanged.count();
             for (int k = 0; k < 3; ++k) poll(model);
             CHECK(planChanged.count() == plans);  // no plan made again on every poll
@@ -9869,4 +9880,66 @@ TEST_CASE("StartPage shown again makes again a recent AV1 card's preview NVDEC d
     CHECK(ready.count() == 2);
     CHECK(page.cardHasPreview(0));
     model.clearRecents();
+}
+
+TEST_CASE("AppModel: a refused AV1, a good one written over it, then the same refusal again and another good one - each good file gets its sources set again",
+          "[app][gpu][av1][regression]") {
+    App();
+    const auto d = Dir("av1_refused_good_twice");
+    AutoProxySetting autoProxy(false);
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);  // 24 frames
+    if (clip.empty()) SKIP(why);
+    const auto good1 = Av1AppClip(d / "good1.mp4", &why, 16);  // other AV1 videos (other sizes of file): what NVDEC decodes
+    const auto good2 = Av1AppClip(d / "good2.mp4", &why, 20);
+    REQUIRE_FALSE(good1.empty());
+    REQUIRE_FALSE(good2.empty());
+    auto poll = [](AppModel& m) {  // the viewport's
+        m.store().Update();
+        m.notifyFramesUpdated();
+    };
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    SettleFrames(model, 0, 6);
+    // the viewport's loaders refuse the file at its first frame (the stand-in, set only while they start): a verdict
+    auto refuseNow = [&] {
+        fake.emplace("first-frame");
+        model.store().SetSources(model.store().Sources());
+        model.store().SetCurrentTime(model.time(), {"source"});
+        model.store().WaitForCurrent();
+        REQUIRE(model.store().Undecodable("source"));
+        SettleAny(model, 0, 6);
+        fake.reset();
+        poll(model);
+        return *model.store().Undecodable("source");
+    };
+    const DecodeSupport first = refuseNow();
+    REQUIRE(model.planError() == SourceDecodeText(first));  // heard
+    QSignalSpy sources(&model, &AppModel::sourcesChanged);
+    // a good AV1 written over it: the sources set again for that refusal, its frames shown
+    std::filesystem::copy_file(good1, clip, std::filesystem::copy_options::overwrite_existing);
+    REQUIRE(model.store().SourceChanged("source"));
+    model.refreshPlan();
+    Pump([&] { return sources.count() > 0; }, 10000);
+    REQUIRE(sources.count() == 1);
+    SettleFrames(model, 0, 6);
+    poll(model);  // a frame of the file as loaded shown, no verdict: the refusal it was set again for is forgotten
+    REQUIRE(model.sourceInfo().frames == 16);
+    REQUIRE(model.planError().isEmpty());
+    // the same refusal again (the same words) of the file there now, then another good AV1 written over it: set again too
+    const DecodeSupport second = refuseNow();
+    REQUIRE(second.why == first.why);
+    REQUIRE(model.planError() == SourceDecodeText(second));
+    std::filesystem::copy_file(good2, clip, std::filesystem::copy_options::overwrite_existing);
+    REQUIRE(model.store().SourceChanged("source"));
+    model.refreshPlan();
+    Pump([&] { return sources.count() > 1; }, 10000);
+    CHECK(sources.count() == 2);
+    CHECK_FALSE(model.store().Undecodable("source"));
+    CHECK(model.sourceInfo().frames == 20);
+    CHECK(model.planError().isEmpty());
+    SettleFrames(model, 0, 6);
+    CHECK(model.frameStateOf("source") == FrameState::Ready);
 }

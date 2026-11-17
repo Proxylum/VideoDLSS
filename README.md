@@ -296,15 +296,15 @@ decodes no video and is not refused), the GUI instead of the plan with «Обр�
 runs off, the viewport cell reads «· не декодируется» (its tooltip says why), no proxy is built (`proxy --check` says so and
 names a proxy built earlier, which stays in use), `render` and `render --bench` refuse with the reason when none of the requested
 sources gives a frame (a refused source beside others is an empty cell, the reason in the log). A file whose sample layout the probe did not learn is checked on its first frame, once the decoder has learned it, as
-above (a layout, a size, NVDEC not starting); only when the driver could not be asked is it refused without the exact reason
-(«NVDEC refused this AV1 stream»). The GUI stops the runs as soon as its viewport or the background proxy build met such a
+above (a layout, a size, NVDEC not starting; a driver that could not be asked for a CUDA error is a start failure, as below). The GUI stops the runs as soon as its viewport or the background proxy build met such a
 refusal (and remembers it while the file is the same, until it is closed); so is NVDEC refusing a later frame - `process` then
 fails after the work started. A part of the video in other parameters (a new sequence header: size, bit depth) is checked
 against the GPU as the file was: a part it does not take is refused with that reason (the GUI says it is a part of the video);
 a part it takes gets an NVDEC decoder of its own (FFmpeg 7.1.1 would go on with the first part's, made for its size and depth),
 and NVDEC refusing it is judged as for the file (on that decoder's first frame, a start failure as below). Frames smaller than
 their sequence's declared maximum (a frame size override, a resize within one sequence) and frames of an odd height are refused:
-FFmpeg 7.1.1's NVDEC gives them with the colours read from the wrong place. A gray (monochrome) AV1 is refused also when the probe
+FFmpeg 7.1.1's NVDEC gives them with the colours read from the wrong place. An odd width is decoded: the frame NVDEC hands
+out one column wider (its surface) is cut to the video's own size. A gray (monochrome) AV1 is refused also when the probe
 did not learn its layout or it starts in a later part. A driver too old for
 FFmpeg's NVDEC is reported as the driver's video decoder being unavailable («nvcuvid.dll could not be loaded»; the GUI says to
 reinstall or update the driver). NVDEC or its CUDA device failing to start
@@ -312,8 +312,9 @@ reinstall or update the driver). NVDEC or its CUDA device failing to start
 viewport cell reads «· видеокарта не начала декодировать», and those frames are asked for again on the next jump or step, when
 other sources are shown, when a frame of that video decodes, and when the task is over (not on a pan, a zoom or the wipe); `process` and `render` report the failure. A scrubbing proxy built earlier still shows
 such a source (one copied from another PC is used when the source kept its file times). The GUI's viewport decodes an AV1
-video on NVDEC in its own process; while a run, a preview or a stage check is going on it does not keep that decoder between
-frames. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be the one the stages
+video on NVDEC in its own process; while any task of its queue waits or runs (processing, a stage run alone, a pass export, an
+NR preview) or a stage check is going on, it does not keep that decoder between frames (scrubbing AV1 without a proxy is slower
+then). A recent project's thumbnail that NVDEC could not decode now is made again the next time the start page is rebuilt. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be the one the stages
 run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame|query-fails|start-fails|device-fails|later-frame` stands in for the driver's answer
 (tests, reproducing a support case).
 

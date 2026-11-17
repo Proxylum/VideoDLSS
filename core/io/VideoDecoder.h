@@ -287,6 +287,7 @@ private:
     bool warnedConversion_ = false;
     bool warnedNonNv12_ = false;  // NVDEC layout other than NV12: the GPU fast path is off for this stream
     bool warnedTurnedGpu_ = false;  // a turned stream under NVDEC: no GpuFrame
+    bool warnedOddWidthGpu_ = false;  // TASK-0076: an odd width under NVDEC: no GpuFrame
     bool checkedFrameMatrix_ = false;  // the first frame's own display matrix (an orientation SEI) compared with the stream's
     CpuFrame unturned_;  // the frame as stored, before OrientFrame
     bool seeked_ = false;  // indices come from pts after a seek

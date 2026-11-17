@@ -855,7 +855,12 @@ void AppModel::noteSourceRefused() {
     // «Обработать», Ctrl+Return, the preview and the stage runs stop, as for a refusal known in advance
     if (!hasProject() || !sourceDecode_.Ok() || !store_) return;
     const auto refused = store_->Undecodable("source");
-    if (!refused) return;
+    if (!refused) {
+        // the file as loaded decodes (a frame of it shown, no verdict, not written since): a refusal met later on that path is set again
+        // anew - reloadedFor_ holds back only a file still being written (just set again, its loads not yet refused: no frame)
+        if (!store_->SourceChanged("source") && store_->StatusAt(state().time, "source") == FrameStore::Status::Ready) reloadedFor_.clear();
+        return;
+    }
     // another file on that path now (written over, still being written): not its verdict - the plan probes the file there and sets the
     // sources again, once per refusal (refreshPlan marks it: reloadedFor_), not on every frame update
     if (store_->SourceChanged("source")) {

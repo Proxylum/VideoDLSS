@@ -662,27 +662,38 @@ std::string InitialDisplayDelaySequenceHeader(const std::string& payload) {
 std::string InitialDisplayDelayTemporalUnit(const std::string& unit) { return WithSequenceHeadersWritten(unit, InitialDisplayDelaySequenceHeader); }
 
 // A sequence header whose max_frame_height_minus_1 is `rows` less (in the same bits): everything else as it was
-std::string ShorterFrameSequenceHeader(const std::string& payload, int rows) {
+// A sequence header whose max_frame_width_minus_1 / max_frame_height_minus_1 are `columns` / `rows` less (in the same bits): everything else
+// as it was
+std::string SmallerFrameSequenceHeader(const std::string& payload, int columns, int rows) {
     const SequenceFrameSize size = FrameSizeOf(payload);
-    const size_t at = size.at + static_cast<size_t>(size.widthBits);
-    BitReader b{payload};
-    b.pos = at;
-    const uint32_t height = b.f(size.heightBits);  // max_frame_height_minus_1
-    Need(rows > 0 && height >= static_cast<uint32_t>(rows), __LINE__);
-    const uint32_t shorter = height - static_cast<uint32_t>(rows);
     std::string out = payload;
-    for (int i = 0; i < size.heightBits; ++i) {
-        const size_t bit = at + static_cast<size_t>(i);
-        const auto mask = static_cast<uint8_t>(0x80u >> (bit % 8));
-        const bool one = (shorter >> (size.heightBits - 1 - i)) & 1u;
-        const auto byte = static_cast<uint8_t>(out[bit / 8]);
-        out[bit / 8] = static_cast<char>(one ? byte | mask : byte & static_cast<uint8_t>(~mask));
-    }
+    const auto lessBy = [&](size_t at, int bits, int by) {
+        if (by == 0) return;
+        BitReader b{payload};
+        b.pos = at;
+        const uint32_t value = b.f(bits);  // max_frame_{width,height}_minus_1
+        Need(by > 0 && value >= static_cast<uint32_t>(by), __LINE__);
+        const uint32_t less = value - static_cast<uint32_t>(by);
+        for (int i = 0; i < bits; ++i) {
+            const size_t bit = at + static_cast<size_t>(i);
+            const auto mask = static_cast<uint8_t>(0x80u >> (bit % 8));
+            const bool one = (less >> (bits - 1 - i)) & 1u;
+            const auto byte = static_cast<uint8_t>(out[bit / 8]);
+            out[bit / 8] = static_cast<char>(one ? byte | mask : byte & static_cast<uint8_t>(~mask));
+        }
+    };
+    Need(columns > 0 || rows > 0, __LINE__);
+    lessBy(size.at, size.widthBits, columns);
+    lessBy(size.at + static_cast<size_t>(size.widthBits), size.heightBits, rows);
     return out;
 }
 
 std::string ShorterFrameTemporalUnit(const std::string& unit, int rows) {
-    return WithSequenceHeadersWritten(unit, [rows](const std::string& payload) { return ShorterFrameSequenceHeader(payload, rows); });
+    return WithSequenceHeadersWritten(unit, [rows](const std::string& payload) { return SmallerFrameSequenceHeader(payload, 0, rows); });
+}
+
+std::string NarrowerFrameTemporalUnit(const std::string& unit, int columns) {
+    return WithSequenceHeadersWritten(unit, [columns](const std::string& payload) { return SmallerFrameSequenceHeader(payload, columns, 0); });
 }
 
 void SetIvfFrameSize(const std::filesystem::path& ivf, uint16_t width, uint16_t height) {

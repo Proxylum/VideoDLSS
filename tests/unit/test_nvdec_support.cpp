@@ -789,8 +789,7 @@ TEST_CASE("JudgeDecode: an odd frame height is refused after the layout and the 
         INFO((caps ? (caps->checked ? "good caps" : "unchecked caps") : "no caps"));
         const DecodeSupport s = JudgeDecode(Av1Info("yuv420p", 8, 320, 191), caps);
         CheckRefusal(s, DecodeBlock::OddHeight);
-        CHECK_THAT(s.why, StartsWith(odd));
-        if (!caps || caps->why.empty()) CHECK(s.why == odd);  // (caps given with a reason of their own: RefusalText appends it, as for NoAv1)
+        CHECK(s.why == odd);  // the height is this refusal's reason: no words of the driver's in it, whatever the caps carry
         CHECK(s.width == 320);
         CHECK(s.height == 191);
         CHECK_FALSE(s.part);
@@ -827,7 +826,8 @@ TEST_CASE("JudgeDecode: an odd frame height is refused after the layout and the 
     CHECK(JudgeDecode(Av1Info("unknown", 8, 320, 191), &good).block == DecodeBlock::OddHeight);
     // the layout first: a 4:4:4 stream of an odd height is refused for its layout
     CHECK(JudgeDecode(Av1Info("yuv444p", 8, 320, 191), &good).block == DecodeBlock::Layout);
-    // an even height decodes; an odd width is no such case (the chroma plane starts after the luma rows)
+    // an even height decodes; so does an odd width - NVDEC hands the frame out even-sided (322 wide) and VideoDecoder cuts it to the video's
+    // own width (integration: «An AV1 stream of an odd frame width ...»)
     CHECK(JudgeDecode(Av1Info("yuv420p", 8, 320, 190), &good).Ok());
     CHECK(JudgeDecode(Av1Info("yuv420p", 8, 321, 192), &good).Ok());
     CHECK(JudgeDecode(Av1Info("yuv420p", 8, 320, 0), nullptr).Ok());  // a height not known: nothing to judge
@@ -1132,8 +1132,8 @@ TEST_CASE("Av1FrameBelowSequence: a frame smaller than its sequence header's max
     CHECK(s.width == 640);
     CHECK(s.height == 480);
     CHECK(s.why == "AV1 frames smaller than the sequence's 640x480 (a frame size override or a resize within it) cannot be decoded here - FFmpeg's "
-                   "NVDEC makes its surfaces for the sequence's maximum and gives such a frame wrong (the chroma mapped by the frame's own height), and "
-                   "this build has no software AV1 decoder (a frame of 320x240, after 5 frames)");
+                   "NVDEC makes its surfaces for the sequence's maximum and hands such a frame out at that size, not its own (a lower one also with the "
+                   "chroma mapped by its own height), and this build has no software AV1 decoder (a frame of 320x240, after 5 frames)");
 }
 
 TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit][av1]") {
