@@ -3149,4 +3149,34 @@ TEST_CASE("NVDEC: an H.264 stream cropped at the top (its SPS) with --hwaccel cu
         CHECK(luma == static_cast<int>(kH - 8));
         CHECK(chroma == static_cast<int>(kH - 8));
     }
+    // cropped 64 columns on the left (shown 256x192; 64 keeps the software decode's pointers aligned, so it really crops - FFmpeg rounds a
+    // smaller left crop down to 0): the NVDEC frame not cut to 256 keeping the left columns - its 320 columns, the picture in 64..319
+    const auto croppedLeft = dir / "cropped_left.mkv";
+    REQUIRE(WithBitstreamFilter(*plain, croppedLeft, "h264_metadata", {{"crop_left", "64"}}));
+    REQUIRE(VideoDecoder(croppedLeft, VideoDecoder::Probe()).Info().width == kW - 64);
+    VideoDecoder leftPlain(croppedLeft);
+    const std::vector<CpuFrame> softLeft = DecodeAllOf(leftPlain);
+    REQUIRE(softLeft.size() == 6);
+    REQUIRE(softLeft[0].desc.width == kW - 64);
+    REQUIRE(softLeft[0].desc.height == kH);
+    VideoDecoder leftDec(croppedLeft, cuda);
+    std::vector<CpuFrame> hardLeft;
+    while (leftDec.NextFrame(f)) hardLeft.push_back(f);
+    REQUIRE(leftDec.DecodesOnNvdec());
+    REQUIRE(hardLeft.size() == softLeft.size());
+    for (size_t i = 0; i < hardLeft.size(); ++i) {
+        INFO("cropped left, frame " << i);
+        REQUIRE(hardLeft[i].desc.width == kW);
+        REQUIRE(hardLeft[i].desc.height == kH);
+        const size_t hw = kW, sw = kW - 64, hcw = hardLeft[i].desc.PlaneWidth(1), scw = softLeft[i].desc.PlaneWidth(1);
+        REQUIRE(scw == 128);
+        int luma = 0, chroma = 0;
+        for (size_t r = 0; r < kH; ++r) luma += std::memcmp(hardLeft[i].Plane(0) + r * hw + 64, softLeft[i].Plane(0) + r * sw, sw) == 0;
+        for (size_t r = 0; r < kH / 2; ++r) {
+            chroma += std::memcmp(hardLeft[i].Plane(1) + r * hcw + 32, softLeft[i].Plane(1) + r * scw, scw) == 0;
+            chroma += std::memcmp(hardLeft[i].Plane(2) + r * hcw + 32, softLeft[i].Plane(2) + r * scw, scw) == 0;
+        }
+        CHECK(luma == static_cast<int>(kH));
+        CHECK(chroma == static_cast<int>(kH));
+    }
 }

@@ -1334,7 +1334,8 @@ TEST_CASE("DLSSVID_FAKE_NVDEC_AV1 is said once per value, not once per process: 
     CHECK_THAT(out, ContainsSubstring("1 test case"));
 }
 
-TEST_CASE("LayoutKindOf: what a chroma other than 4:2:0 / 4:2:2 / 4:4:4 is - RGB, one component (grey), else other", "[unit][av1]") {
+TEST_CASE("LayoutKindOf: the kind a chroma other is told by - a palette, RGB, one component (grey), a YUV as its J:a:b digits; an unknown format is other",
+          "[unit][av1]") {
     for (const char* rgb : {"gbrp", "bgr0", "rgb24", "gbrp10le"}) {
         INFO(rgb);
         CHECK(LayoutKindOf(rgb) == "rgb");

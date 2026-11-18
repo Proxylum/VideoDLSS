@@ -176,7 +176,8 @@ DisplayOrientation OrientationFromRotateTag(std::string_view tag, std::string* w
 // CUDA memory (primary context) and is exposed as a GpuFrame, and the CPU copy is made only when asked for (bit-exact
 // NV12 -> YUV420P). Audio packets are handed to the sink untouched for stream copy. A stream shown turned (a display matrix, the
 // 'rotate' tag: a phone video) is turned on the CPU after the copy (OrientFrame) and has no GpuFrame (TASK-0072); so has a frame of an
-// odd width (any codec on NVDEC: the on-device consumers take even rows; TASK-0076 - the frame cut to its own size, NVDEC's being even).
+// odd width (any codec on NVDEC: the on-device consumers take even rows; TASK-0076 - an AV1 / VP9 frame comes at its surface's even size
+// and is cut to its own, an H.264 / HEVC one comes cut by FFmpeg).
 // A codec with NVDEC and a software path (h264, hevc, vp9 ...) of an odd height decodes in software also with HwAccel::Cuda (TASK-0076:
 // FFmpeg's NVDEC gives its chroma wrong) - no device then, UsingHwAccel() false; a codec without NVDEC (ProRes, FFV1) holds the device
 // whatever its height, as before, and hands out no GpuFrame.

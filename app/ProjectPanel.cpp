@@ -389,9 +389,13 @@ void ProjectPanel::refresh() {
         sourceFrame_->setText(frame);
         // TASK-0076: the same reading in the tooltip (a refusal learned the layout, or it is not known in advance); a refusal of a part
         // names that part
-        QString stream = refusedLayout ? DecodeLayoutText(decode.bitDepth, decode.chroma, decode.pixelFormat)
-                         : unknown     ? tr("формат заранее неизвестен (его узнаёт декодер на первом кадре)")
-                                       : DecodeLayoutText(src.bitDepth, src.chroma, src.pixelFormat);
+        // (no decoder starts here - no CUDA, no nvcuvid, no AV1 in NVDEC: no first frame to learn the layout from)
+        const bool noDecoder = !decode.Ok() && !decode.part &&
+                               (decode.block == DecodeBlock::NoCuda || decode.block == DecodeBlock::NoNvdec || decode.block == DecodeBlock::NoAv1);
+        QString stream = refusedLayout          ? DecodeLayoutText(decode.bitDepth, decode.chroma, decode.pixelFormat)
+                         : unknown && noDecoder ? tr("формат заранее неизвестен")
+                         : unknown              ? tr("формат заранее неизвестен (его узнаёт декодер на первом кадре)")
+                                                : DecodeLayoutText(src.bitDepth, src.chroma, src.pixelFormat);
         if (!decode.Ok() && decode.part) {  // what the part was refused for: its frame as stored (Size, OddHeight), else its layout
             const bool otherLayout = decode.pixelFormat != src.pixelFormat && !unknown;
             if (decode.block == DecodeBlock::Size || decode.block == DecodeBlock::OddHeight)

@@ -44,7 +44,9 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <nlohmann/json.hpp>
+#include <spdlog/sinks/base_sink.h>
 #include <spdlog/sinks/ostream_sink.h>
 #include <sstream>
 
@@ -7417,11 +7419,31 @@ struct AutoProxySetting {
     AutoProxySetting& operator=(const AutoProxySetting&) = delete;
 };
 
-// The process's log into `out` for one scope ("<level> <message>", every level)
+// The process's log for one scope ("<level> <message>", every level) into a string under the sink's own mutex - a case reads it (Text())
+// while the loaders of a model log from their threads. Made before the model: the logger's sinks are not changed while it logs
+class StringSink : public spdlog::sinks::base_sink<std::mutex> {
+public:
+    std::string Text() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return text_;
+    }
+
+protected:
+    void sink_it_(const spdlog::details::log_msg& msg) override {
+        spdlog::memory_buf_t formatted;
+        formatter_->format(msg, formatted);
+        text_.append(formatted.data(), formatted.size());
+    }
+    void flush_() override {}
+
+private:
+    std::string text_;
+};
+
 struct LogCapture {
-    std::shared_ptr<spdlog::sinks::ostream_sink_mt> sink;
+    std::shared_ptr<StringSink> sink;
     spdlog::level::level_enum level;
-    explicit LogCapture(std::ostringstream& out) : sink(std::make_shared<spdlog::sinks::ostream_sink_mt>(out)), level(Log()->level()) {
+    LogCapture() : sink(std::make_shared<StringSink>()), level(Log()->level()) {
         sink->set_pattern("%l %v");
         Log()->set_level(spdlog::level::debug);
         Log()->sinks().push_back(sink);
@@ -7431,6 +7453,7 @@ struct LogCapture {
         sinks.erase(std::remove(sinks.begin(), sinks.end(), sink), sinks.end());
         Log()->set_level(level);
     }
+    std::string Text() const { return sink->Text(); }
     LogCapture(const LogCapture&) = delete;
     LogCapture& operator=(const LogCapture&) = delete;
 };
@@ -8504,9 +8527,13 @@ TEST_CASE("The main window's menu item that builds the scrubbing proxies says in
     REQUIRE(ofResult.block == DecodeBlock::NoAv1);
     const QString sourceWhy = HumanSourceName("source") + ": " + SourceDecodeText(ofSource);
     const QString resultWhy = HumanSourceName("result") + ": " + SourceDecodeText(ofResult);
-    CHECK(shownAfterBuild(both) == QStringList{sourceWhy + "\n\n" + resultWhy});
+    const QString advice =
+        QString::fromUtf8("\nРезультат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».");
+    CHECK(shownAfterBuild(both) == QStringList{sourceWhy + "\n\n" + resultWhy});  // the source not decodable either: no run to advise
     CHECK(boxes.titles == QStringList{QString::fromUtf8("Прокси для перемотки не строится")});
-    CHECK(shownAfterBuild(ffv1Source) == QStringList{resultWhy});     // the result alone: the source decodes
+    CHECK_FALSE(boxes.texts.join("").contains(QString::fromUtf8("Кодирование")));
+    CHECK(shownAfterBuild(ffv1Source) == QStringList{resultWhy + advice});  // the result alone: the source decodes - a run can write it again
+    CHECK(boxes.texts.join("").contains(QString::fromUtf8("«Кодирование»")));
     CHECK(shownAfterBuild(sourceProxied) == QStringList{resultWhy});  // the source shows by its proxy: nothing to say of it
     CHECK(shownAfterBuild(allProxied).isEmpty());                     // both show by their proxies
     CHECK(shownAfterBuild(plainOnly).isEmpty());                      // a source that decodes: the build starts, no box
@@ -8671,8 +8698,7 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
         // NVDEC does not start in the proxy process (it inherits the stand-in): no verdict - the viewport keeps both videos, the build is asked
         std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
         fake.emplace("start-fails");
-        std::ostringstream text;
-        LogCapture capture(text);
+        LogCapture capture;
         AppModel model(true);
         QSignalSpy messages(&model, &AppModel::message);
         model.openProject(Q(file));
@@ -8688,7 +8714,7 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
         CHECK_FALSE(ValidProxy(*clip, passes, "source"));
         CHECK_FALSE(ValidProxy(result, passes, "result"));
         SettleAny(model, 0, 6);
-        const std::string log = text.str();
+        const std::string log = capture.Text();
         INFO(log);
         for (const char* name : {"source", "result"}) {  // the process's reason, whole: the line as it wrote it
             const auto lines = linesOf(log, std::string("warning viewport proxy: ") + name + ": no proxy now, NVDEC did not start (run it again later): ");
@@ -8705,8 +8731,7 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
         RemoveProxy(passes, "result");
         autoProxy.set(false);
         std::optional<FakeNvdecEnv> fake;  // outlives the model
-        std::ostringstream text;
-        LogCapture capture(text);
+        LogCapture capture;
         AppModel model(true);
         QSignalSpy messages(&model, &AppModel::message);
         model.openProject(Q(file));
@@ -8723,7 +8748,7 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
         CHECK(said.contains(notHere + names + verdictWords));
         for (const QString& m : said) CHECK_FALSE(m.startsWith(notNow));
         CHECK_FALSE(ValidProxy(*clip, passes, "source"));
-        const std::string log = text.str();
+        const std::string log = capture.Text();
         INFO(log);
         // no-av1: the process's reason is the driver's answer as this process gets it too
         const std::string noAv1 = CheckDecodeSupport(VideoDecoder(*clip, VideoDecoder::Probe()).Info()).why;
@@ -8963,8 +8988,7 @@ TEST_CASE("AppModel: a background proxy build's verdict is its videos' - a proje
     BuildProxy(other, secondPasses, "source");  // the second project shows its video by a proxy: no NVDEC, no build of its own
     REQUIRE(ValidProxy(other, secondPasses, "source"));
     std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
-    std::ostringstream text;
-    LogCapture capture(text);  // from before the model: the sinks are not changed while its loaders log
+    LogCapture capture;  // from before the model: the sinks are not changed while its loaders log
     AppModel model(true);
     model.openProject(Q(first));
     REQUIRE(model.hasProject());
@@ -8980,7 +9004,6 @@ TEST_CASE("AppModel: a background proxy build's verdict is its videos' - a proje
     REQUIRE(model.proxyBuilding());
     QSignalSpy sources(&model, &AppModel::sourcesChanged);
     QSignalSpy messages(&model, &AppModel::message);
-    const size_t logged = text.str().size();  // (the loaders at rest)
     Pump([&] { return !model.proxyBuilding(); }, 60000);
     REQUIRE_FALSE(model.proxyBuilding());
     {
@@ -8989,9 +9012,9 @@ TEST_CASE("AppModel: a background proxy build's verdict is its videos' - a proje
         for (const auto& m : messages) said << m[0].toString();
         INFO("messages: " << said.join(" | ").toStdString());
         CHECK_FALSE(said.join(" | ").contains(QString::fromUtf8("Прокси для перемотки не построен")));
-        const std::string since = text.str().substr(logged);
-        INFO(since);
-        CHECK(since.find("viewport proxy: source: no proxy, the video cannot be decoded here: ") != std::string::npos);
+        const std::string log = capture.Text();  // (the line is written by the build's finish handler, in Pump)
+        INFO(log);
+        CHECK(log.find("viewport proxy: source: no proxy, the video cannot be decoded here: ") != std::string::npos);
     }
     CHECK(FrameStore::VideoSource("source", firstVideo)->undecodable);        // the verdict kept for the video it was on
     CHECK_FALSE(FrameStore::VideoSource("source", secondVideo)->undecodable);  // not for the open project's video
@@ -9145,8 +9168,7 @@ TEST_CASE("AppModel asks NVDEC again for frames it could not start for on a jump
     Project p = Project::Create(clip, d / "passes");
     p.resultVideo = ffv1;
     p.Save(d / "proj.dlssvid.json");
-    std::ostringstream text;
-    LogCapture capture(text);
+    LogCapture capture;
     std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
     fake.emplace("start-fails");
     AppModel model(true);
@@ -9155,7 +9177,7 @@ TEST_CASE("AppModel asks NVDEC again for frames it could not start for on a jump
     SettleAny(model, 0, 6);
     REQUIRE(model.store().StartFailure("source"));
     auto tries = [&] {  // the loads of the source NVDEC did not start for, so far
-        const std::string log = text.str();
+        const std::string log = capture.Text();
         size_t n = 0;
         for (size_t at = log.find("'source': NVDEC did not start now"); at != std::string::npos; at = log.find("'source': NVDEC did not start now", at + 1)) ++n;
         return n;
@@ -9267,6 +9289,23 @@ TEST_CASE("ProjectPanel's source row of a stream whose layout the probe did not 
         CHECK(row->text().endsWith(QString::fromUtf8(" · AV1, формат заранее неизвестен")));
         CHECK_FALSE(row->text().contains(QString::fromUtf8("8 бит 4:2:0")));
         SettleAny(model, 0, 6);
+    }
+    {
+        // no AV1 in NVDEC here (no-av1): no decoder starts - nothing learns the layout at a first frame
+        FakeNvdecEnv fake("no-av1");  // (a source refused so is never loaded: no loader reads the stand-in)
+        AppModel model(true);
+        model.openVideo(Q(plain));
+        REQUIRE(model.hasProject());
+        REQUIRE(model.sourceInfo().pixelFormat == "unknown");
+        REQUIRE(model.sourceDecode().block == DecodeBlock::NoAv1);
+        REQUIRE_FALSE(model.sourceDecode().part);
+        TaskQueue queue;
+        ProjectPanel panel(model, queue);
+        panel.refresh();
+        const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
+        REQUIRE(row);
+        CHECK(row->toolTip() == QString::fromUtf8("Поток: формат заранее неизвестен; на этом компьютере не декодируется"));
+        CHECK(row->text().endsWith(QString::fromUtf8(" · AV1, формат заранее неизвестен")));
     }
     AppModel model(true);
     model.openVideo(Q(twelve));
@@ -10095,8 +10134,7 @@ TEST_CASE("A task queued while a stage check runs keeps the viewport off NVDEC: 
     if (clip.empty()) SKIP(why);
     AutoProxySetting autoProxy(false);
     std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
-    std::ostringstream text;
-    LogCapture capture(text);  // from before the model: the sinks are not changed while its loaders log
+    LogCapture capture;  // from before the model: the sinks are not changed while its loaders log
     AppModel model(false);  // the GPU's own adapter: a check (DLSS-G here) is offered only there
     TaskQueue queue;
     ProjectTasks tasks(model, queue);
@@ -10117,7 +10155,7 @@ TEST_CASE("A task queued while a stage check runs keeps the viewport off NVDEC: 
     model.setTime(0.5);
     SettleAny(model, 6, 18);
     REQUIRE(model.store().StartFailure("source"));
-    const size_t logged = text.str().size();  // (the loaders at rest)
+    const size_t logged = capture.Text().size();  // the start failures before the task are in the text too
     const int task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});  // a run of the project: the check goes, the run holds the GPU
     REQUIRE(task >= 0);
     CHECK_FALSE(model.checkRunning());
@@ -10128,7 +10166,7 @@ TEST_CASE("A task queued while a stage check runs keeps the viewport off NVDEC: 
         },
         800);
     SettleAny(model, 6, 18);
-    const std::string log = text.str().substr(logged);
+    const std::string log = capture.Text().substr(logged);
     INFO(log);
     size_t tries = 0;
     for (size_t at = log.find("NVDEC did not start now"); at != std::string::npos; at = log.find("NVDEC did not start now", at + 1)) ++tries;

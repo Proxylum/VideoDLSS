@@ -248,7 +248,8 @@ void MainWindow::buildMenus() {
         QStringList skipped;  // «<name>: <why>» - the video need not be on screen (no cell's tooltip to point to)
         for (const char* name : {"source", "result"})
             if (const ViewportSource* s = model_.store().FindSource(name); s && s->proxy.empty())
-                if (const auto d = model_.store().Undecodable(name)) skipped << HumanSourceName(name) + ": " + SourceDecodeText(*d);
+                if (const auto d = model_.store().Undecodable(name))
+                    skipped << HumanSourceName(name) + ": " + SourceDecodeText(*d) + resultRewriteAdvice(name, *d);
         if (!skipped.isEmpty()) QMessageBox::information(this, tr("Прокси для перемотки не строится"), skipped.join("\n\n"));
     });
     view->addAction(tr("Удалить прокси для перемотки"), this, [this] {
@@ -385,6 +386,15 @@ void MainWindow::selectSource(int hotkey) {
     model_.showSource(chips[static_cast<size_t>(hotkey - 1)].source);
 }
 
+// TASK-0076: a result this machine cannot decode, of a source it decodes and has read: written again here in H.264 / HEVC - not when
+// the GPU decodes nothing (no CUDA, no nvcuvid). Empty otherwise; else a line of its own
+QString MainWindow::resultRewriteAdvice(const std::string& name, const DecodeSupport& refusal) const {
+    if (name != "result" || !model_.sourceDecode().Ok() || model_.sourceInfo().codec.empty() || refusal.block == DecodeBlock::NoCuda ||
+        refusal.block == DecodeBlock::NoNvdec)
+        return {};
+    return "\n" + tr("Результат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».");
+}
+
 // TASK-0076: the tooltip of a cell showing a video this machine cannot decode says why and what to do
 QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std::string>& sources) {
     QString s = tech;
@@ -398,11 +408,7 @@ QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std:
             const ViewportSource* src = model_.store().FindSource(name);
             const bool proxied = src && !src->proxy.empty();
             s += "\n" + HumanSourceName(name) + ": " +
-                 (!proxied && name == "result" && model_.sourceDecode().Ok() && !model_.sourceInfo().codec.empty() && d->block != DecodeBlock::NoCuda &&
-                          d->block != DecodeBlock::NoNvdec
-                      ? SourceDecodeText(*d) + "\n" +
-                                                     tr("Результат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».")
-                  : !proxied            ? SourceDecodeText(*d)
+                 (!proxied            ? SourceDecodeText(*d) + resultRewriteAdvice(name, *d)
                   : name == "source"    ? tr("показан по прокси перемотки; само видео на этом компьютере не декодируется, обработать его нельзя")
                                         : tr("показан по прокси перемотки; само видео на этом компьютере не декодируется"));
         }

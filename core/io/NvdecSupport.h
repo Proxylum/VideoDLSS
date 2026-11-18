@@ -107,8 +107,9 @@ bool FakeNvdecDeviceFails();
 // start failure; a header Av1SequenceHeader does not find would come here.
 bool FakeNvdecRefusesLater();
 
-// The refusal `block` of the stream, `detail` saying what failed (VideoDecoder: no CUDA device when it is created, NVDEC refusing the
-// first frame).
+// The refusal `block` of the stream, `detail` saying what failed: the CUDA device not created (StartNvdec: NvdecStartFailed), NVDEC
+// refusing this decoder's first frame or a later one (CheckDecode: NvdecStartFailed, NvdecFailed), a frame NVDEC would give wrong
+// (ReceiveFrame: Resized, OddHeight), another process's words (VerdictFromWhy).
 DecodeSupport RefusedDecode(const VideoStreamInfo& info, DecodeBlock block, const std::string& detail);
 
 // One line for `dlssvid info`: «software (h264); NVDEC with --hwaccel cuda when the GPU decodes this layout», «software (prores); NVDEC
@@ -117,7 +118,8 @@ DecodeSupport RefusedDecode(const VideoStreamInfo& info, DecodeBlock block, cons
 std::string DescribeDecode(const DecodeSupport& support);
 
 // The refusal of a stream that cannot be decoded here: CheckDecodeSupport (RequireDecodable, StartNvdec, process), the CUDA device not
-// created, or NVDEC refusing a frame (the first or a later one; why says which, and a part of the stream in other parameters).
+// created, NVDEC refusing a frame (the first or a later one; why says which, and a part of the stream in other parameters), or a frame
+// NVDEC would give wrong (ReceiveFrame: Resized, OddHeight).
 class DecodeUnavailable : public Error {
 public:
     DecodeUnavailable(DecodeSupport s, const std::string& message) : Error(message), support(std::move(s)) {}
