@@ -1098,11 +1098,8 @@ void AppModel::refreshPlan() {
         sourceInfo_.pixelFormat = probe.Info().pixelFormat;
         sourceDecode_ = CheckDecodeSupport(probe.Info());
         if (stale) {  // TASK-0076: the file written over - its probe tells a probe's verdict apart (a loader's: once, as above)
-            const DecodeBlock b = stale->block;
-            const bool probeVerdict = !stale->part && (b == DecodeBlock::Layout || b == DecodeBlock::NoCuda || b == DecodeBlock::NoNvdec ||
-                                                       b == DecodeBlock::NoAv1 || b == DecodeBlock::Size || b == DecodeBlock::OddHeight);
             setSourcesAgain(*stale, !probe.Info().hardwareOnly ||
-                                        (probeVerdict && (sourceDecode_.block != stale->block || sourceDecode_.why != stale->why)));
+                                        (IsProbeVerdict(*stale) && (sourceDecode_.block != stale->block || sourceDecode_.why != stale->why)));
         }
         // TASK-0076: NVDEC refused the viewport's frames (the driver could not be asked, a part, frames of another size) - for this file
         // as loaded (another one on that path: set again above, no old verdict)

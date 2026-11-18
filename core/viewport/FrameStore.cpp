@@ -955,10 +955,21 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
         }
         if (!done) {
             std::lock_guard<std::mutex> guard(rt.mutex);  // one decoder per video: its frames decode sequentially
-            openOriginal();
-            tDecoder = Clock::now();
-            if (!DecodeTo(*rt.decoder, key, kWalkLimit, kept, missing)) result.aborted = true;
-            tDecoded = Clock::now();
+            // TASK-0076: another loader's verdict on this video since this one looked (it writes the verdict, then closes the decoder
+            // under rt.mutex): no new NVDEC decoder for it - the frame is missing as the next ones will be
+            bool refusedSince = false;
+            if (!rt.decoder) {
+                std::lock_guard<std::mutex> lock(mutex_);  // rt.mutex then mutex_, as DecodeTo takes them
+                refusedSince = refusedInLoad_.count(key.source) > 0;
+            }
+            if (refusedSince) {
+                missing = true;
+            } else {
+                openOriginal();
+                tDecoder = Clock::now();
+                if (!DecodeTo(*rt.decoder, key, kWalkLimit, kept, missing)) result.aborted = true;
+                tDecoded = Clock::now();
+            }
         }
     }
     if (result.aborted) {

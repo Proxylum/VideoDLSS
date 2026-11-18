@@ -9739,9 +9739,10 @@ TEST_CASE("ProjectPanel's source row of a part refused for an odd frame height n
     std::filesystem::copy_file(unknownOdd, unknownSize);
     const VideoStreamInfo unknownProbe = VideoDecoder(unknownOdd, VideoDecoder::Probe()).Info();
     REQUIRE(unknownProbe.pixelFormat == "unknown");
-    // the odd part as ReceiveFrame says it (the probe's «unknown» kept)
-    DecodeSupport oddUnknown = RefusedDecode(StreamPartInfo(unknownProbe, "", 320, 191), DecodeBlock::OddHeight, "after 160 frames");
-    oddUnknown.part = true;
+    // an odd height met at the first frame, as ReceiveFrame says it of a stream whose layout the probe did not learn: the stream's own
+    // height (the probe's size is the container's), no part
+    const DecodeSupport oddUnknown = RefusedDecode(StreamPartInfo(unknownProbe, "", 320, 191), DecodeBlock::OddHeight, "the first frame");
+    REQUIRE_FALSE(oddUnknown.part);
     REQUIRE(FrameStore::RememberRefusedFile(unknownOdd, oddUnknown));
     // a part refused for its frame size with the layout learned there (VideoDecoder::CheckDecode's: yuv420p)
     NvdecAv1Caps limits;
@@ -9760,11 +9761,10 @@ TEST_CASE("ProjectPanel's source row of a part refused for an odd frame height n
     sizeLearned.part = true;
     REQUIRE(FrameStore::RememberRefusedFile(unknownSize, sizeLearned));
     const QString unknownWords = QString::fromUtf8("Поток: формат заранее неизвестен (его узнаёт декодер на первом кадре)");
-    for (const auto& [file, frame] : {std::pair{unknownOdd, "320×191"}, std::pair{unknownSize, "384×224"}}) {
+    for (const auto& [file, part] : {std::pair{unknownOdd, ""}, std::pair{unknownSize, ", в части — кадр в файле 384×224"}}) {
         INFO(file.filename().string());
         const auto [rowText, rowTip] = SourceRowOf(file);
-        CHECK(rowTip == unknownWords + QString::fromUtf8(", в части — кадр в файле ") + QString::fromUtf8(frame) +
-                            QString::fromUtf8("; на этом компьютере не декодируется"));
+        CHECK(rowTip == unknownWords + QString::fromUtf8(part) + QString::fromUtf8("; на этом компьютере не декодируется"));
         INFO("row: " << rowText.toStdString());
         CHECK(rowText.endsWith(QString::fromUtf8(" · AV1, формат заранее неизвестен")));
         CHECK_FALSE(rowText.contains(QString::fromUtf8("8 бит 4:2:0")));
@@ -10058,4 +10058,162 @@ TEST_CASE("AppModel: a broken copy over a refused AV1, the AV1 back refused with
     CHECK(model.planError().isEmpty());
     SettleFrames(model, 0, 6);
     CHECK(model.frameStateOf("source") == FrameState::Ready);
+}
+
+TEST_CASE("A task queued while a stage check runs keeps the viewport off NVDEC: frames NVDEC could not start for are not tried again meanwhile",
+          "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_check_then_task");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    AutoProxySetting autoProxy(false);
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    AppModel model(false);  // the GPU's own adapter: a check (DLSS-G here) is offered only there
+    TaskQueue queue;
+    ProjectTasks tasks(model, queue);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    SettleFrames(model, 0, 6);
+    model.setStageEnabled("fg", true);
+    model.setStageParam("fg", "backend", "dlssg");
+    model.refreshPlan();
+    if (!model.availability("fg").checkable) SKIP("DLSS-G cannot be checked here: " << model.availability("fg").text.toStdString());
+    // a check that runs until it is cancelled (cmd.exe waits on its input whatever the check's arguments): the viewport lets NVDEC go
+    model.setCheckProgramForTests("cmd.exe");
+    model.checkStage("fg");
+    Pump([] { return false; }, 300);
+    REQUIRE(model.checkRunning());
+    // NVDEC does not start meanwhile (start-fails): the frames of another time left out - a start failure
+    fake.emplace("start-fails");
+    model.setTime(0.5);
+    SettleAny(model, 6, 18);
+    REQUIRE(model.store().StartFailure("source"));
+    std::ostringstream text;
+    int task = -1;
+    {
+        LogCapture capture(text);
+        task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});  // a run of the project: the check goes, the run holds the GPU
+        REQUIRE(task >= 0);
+        CHECK_FALSE(model.checkRunning());
+        Pump(
+            [&] {
+                model.store().Update();
+                return false;
+            },
+            800);
+        SettleAny(model, 6, 18);
+    }
+    const std::string log = text.str();
+    INFO(log);
+    size_t tries = 0;
+    for (size_t at = log.find("NVDEC did not start now"); at != std::string::npos; at = log.find("NVDEC did not start now", at + 1)) ++tries;
+    CHECK(tries == 0);  // nothing tried again between the check's end and the run's start
+    CHECK(model.store().StartFailure("source"));
+    queue.cancel(task);
+    Pump([&] { return queue.finished(task); }, 20000);
+    Pump([] { return false; }, 300);  // the run's end: the frames are asked for again (still under the stand-in)
+    SettleAny(model, 6, 18);
+    fake.reset();
+    queue.stopAll(10000);
+    model.setCheckProgramForTests({});
+}
+
+TEST_CASE("The main window's cell tooltip says a source's reason once when two of its layers show it", "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_cell_two_layers");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    AutoProxySetting autoProxy(false);
+    Project p = Project::Create(clip, d / "passes");
+    p.viewport.mode = ViewMode::Overlay;
+    p.viewport.layers = {LayerState{}, LayerState{}};  // «source» twice: the base and a layer over it
+    p.viewport.layers[1].opacity = 0.5f;
+    p.Save(d / "clip.dlssvid.json");
+    FakeNvdecEnv env("no-av1");
+    const DecodeSupport expected = CheckDecodeSupport(VideoDecoder(clip, VideoDecoder::Probe()).Info());
+    REQUIRE(expected.block == DecodeBlock::NoAv1);
+    const QString reason = SourceDecodeText(expected);
+    MainWindow window(true);
+    window.openPath(Q(d / "clip.dlssvid.json"));
+    QLabel* cell = nullptr;
+    Pump(
+        [&] {
+            cell = CellLabel(window);
+            return cell && cell->toolTip().contains(reason);
+        },
+        20000);
+    REQUIRE(cell);
+    INFO("tooltip: " << cell->toolTip().toStdString());
+    CHECK(cell->toolTip().startsWith("source + source"));  // both layers shown
+    CHECK(cell->toolTip().count(reason) == 1);
+}
+
+TEST_CASE("AppModel: a source whose layout the probe did not learn, refused for it at its first frame (12-bit), set again once over three growths",
+          "[app][gpu][av1][regression]") {
+    App();
+    const auto d = Dir("av1_unknown12_growing");
+    AutoProxySetting autoProxy(false);
+    {
+        D3D12Device dev;
+        if (dev.IsWarp() || !dev.IsNvidia() || !VideoEncoder::EncoderAvailable("av1_nvenc")) SKIP("no NVIDIA GPU with av1_nvenc");
+    }
+    ClipSpec spec;
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 16;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto a = WriteClipIfSupported(d / "a.ivf", spec, &why);
+    if (!a) SKIP(why);
+    // no sequence header before frame 160, 12-bit ones from there: the probe learns no layout; NVDEC meets 12-bit at the keyframe 168
+    const auto twelve =
+        RepeatIvf(*a, 13, d / "unknown12.ivf", [](int i, const std::string& u) { return i < 160 ? WithoutSequenceHeaders(u) : TwelveBitTemporalUnit(u); });
+    auto poll = [](AppModel& m) {  // the viewport's
+        m.store().Update();
+        m.notifyFramesUpdated();
+    };
+    AppModel model(true);
+    model.openVideo(Q(twelve));
+    REQUIRE(model.hasProject());
+    REQUIRE(model.sourceInfo().pixelFormat == "unknown");
+    model.setTime(170.0 / 24.0);
+    Pump(
+        [&] {
+            poll(model);
+            return model.sourceDecode().block == DecodeBlock::Layout;
+        },
+        20000);
+    REQUIRE(model.store().Undecodable("source"));
+    const DecodeSupport refused = *model.store().Undecodable("source");
+    REQUIRE(refused.block == DecodeBlock::Layout);
+    REQUIRE_FALSE(IsProbeVerdict(refused));  // learned at the first frame: a decoder's verdict
+    SettleAny(model, 164, 176);
+    QSignalSpy sources(&model, &AppModel::sourcesChanged);
+    for (int i = 0; i < 3; ++i) {
+        INFO("the file grown " << i + 1 << " times");
+        {
+            std::ofstream grow(twelve, std::ios::binary | std::ios::app);  // 3 bytes: an IVF frame header cut short - the demuxer ends there
+            grow << std::string(3, '\0');
+        }
+        REQUIRE(model.store().SourceChanged("source"));
+        model.refreshPlan();  // its probe: the layout not known - no answer of a probe's to compare the old verdict with
+        if (i == 0) Pump([&] { return sources.count() > 0; }, 10000);
+        else Pump([] { return false; }, 300);
+        CHECK(sources.count() == 1);
+        if (i == 0) {  // set again: refused again at its first frame for the layout
+            Pump(
+                [&] {
+                    poll(model);
+                    return model.store().Undecodable("source").has_value();
+                },
+                20000);
+            REQUIRE(model.store().Undecodable("source"));
+            CHECK(model.store().Undecodable("source")->why == refused.why);
+            SettleAny(model, 164, 176);
+        }
+    }
+    CHECK(sources.count() == 1);
 }

@@ -35,7 +35,10 @@ int CmdScenes(const ScenesCommands::Args& a) {
         Throw("scenes: " + all);
     }
     VideoDecoder decoder(a.input);
-    decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
+    // TASK-0076: AV1 without NVDEC AV1 refused before the preparation - when the command decodes: not to re-derive the cuts from stored
+    // scores, nor to write the pass off (--threshold 0)
+    const bool decodes = a.threshold > 0.0;
+    if (decodes && a.reanalyze) decoder.RequireDecodable();
     const auto& info = decoder.Info();
     ScenesStageOptions o;
     o.threshold = a.threshold;
@@ -47,6 +50,7 @@ int CmdScenes(const ScenesCommands::Args& a) {
     const int64_t needed = a.frames > 0 ? a.frames : 0;
     std::optional<ScenesSource> scores;
     if (!a.reanalyze) scores = FindSceneScores(a.output, o.sourceHash, o.sourceFormat, needed);
+    if (decodes && !scores) decoder.RequireDecodable();  // before the pass on disk goes to the history
     // the pass on disk goes to the history, as process does: a version a later run would restore is not overwritten
     if (const auto id = RetirePassVersion(a.output, kScenesPass)) Log()->info("scenes: the previous pass kept as version {}", *id);
     ScenesRunResult r;

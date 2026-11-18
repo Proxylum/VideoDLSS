@@ -272,6 +272,20 @@ std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view header) {
     return k;
 }
 
+bool IsProbeVerdict(const DecodeSupport& s) {
+    if (s.part || s.pixelFormat == "unknown") return false;
+    if (const auto met = StreamPartOf(s.why); met && met->learned) return false;
+    switch (s.block) {
+        case DecodeBlock::Layout:
+        case DecodeBlock::NoCuda:
+        case DecodeBlock::NoNvdec:
+        case DecodeBlock::NoAv1:
+        case DecodeBlock::Size:
+        case DecodeBlock::OddHeight: return true;
+        default: return false;
+    }
+}
+
 DecodeSupport VerdictFromWhy(const VideoStreamInfo& probe, const std::string& why, const std::string& where) {
     if (const auto part = StreamPartOf(why)) {
         DecodeSupport judged = CheckDecodeSupport(StreamPartInfo(probe, part->pixelFormat, part->codedWidth, part->codedHeight));
@@ -580,7 +594,12 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     hwOnly_ = HardwareOnlyDecoder(decoder);
     probe_ = options.probe;
     sliceThreadsOnly_ = options.sliceThreadsOnly;
-    if (options.hwaccel == HwAccel::Cuda) {
+    if (options.hwaccel == HwAccel::Cuda && !hwOnly_ && vs->codecpar->height % 2 == 1 && HasNvdecHwaccel(decoder)) {
+        // TASK-0076: an odd height (VP9 1920x803, H.264 cropped to 191 rows): FFmpeg's NVDEC gives its chroma wrong - software from the
+        // open (with its threads; no CUDA device held), not from get_format (one thread). GetHwFormat still guards a size met later
+        Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info,
+                   "{}: an odd height ({}): FFmpeg's NVDEC gives its chroma wrong, decoding in software", url, vs->codecpar->height);
+    } else if (options.hwaccel == HwAccel::Cuda) {
         std::string why;
         hwDevice_ = hwOnly_ && FakeNvdecDeviceFails() ? nullptr : CreateCudaDevice(&why);  // (device-fails: as StartNvdec would meet it)
         // a hardware-only decoder has no software to fall back to: StartNvdec tries again and refuses with the reason
@@ -987,7 +1006,7 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         CheckAv(av_hwframe_transfer_data(swFrame_, frame_, 0), "av_hwframe_transfer_data");
         src = swFrame_;
     }
-    if (!cpu) {  // software frame skipped by the caller (seeking): no conversion
+    if (!cpu && !gpu) {  // software frame skipped by the caller (DiscardFrames: seeking): no conversion; with gpu asked it comes on the host
         out.desc = OrientedDesc(FrameDesc{static_cast<uint32_t>(src->width), static_cast<uint32_t>(src->height), info_.decoded.format, info_.decoded.bitDepth},
                                 info_.orientation);
         out.desc.format = info_.decoded.format;

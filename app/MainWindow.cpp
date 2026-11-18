@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include <algorithm>
 #include <QAction>
 #include <QCloseEvent>
 #include <QDesktopServices>
@@ -387,7 +388,10 @@ void MainWindow::selectSource(int hotkey) {
 // TASK-0076: the tooltip of a cell showing a video this machine cannot decode says why and what to do
 QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std::string>& sources) {
     QString s = tech;
+    std::vector<std::string> said;  // two layers of one source: its reason once
     for (const auto& name : sources) {
+        if (std::find(said.begin(), said.end(), name) != said.end()) continue;
+        said.push_back(name);
         const auto d = model_.store().Undecodable(name);
         if (const auto f = model_.store().StartFailure(name); f && !d) s += "\n" + HumanSourceName(name) + ": " + SourceDecodeText(*f);  // not now
         if (d) {

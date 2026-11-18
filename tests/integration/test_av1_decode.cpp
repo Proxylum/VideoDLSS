@@ -13,6 +13,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <map>
 #include <optional>
 #include <string>
 #include <thread>
@@ -991,12 +992,15 @@ TEST_CASE("Without NVDEC AV1 the stage commands refuse an AV1 source at once: th
             CHECK(opens == 1);
         }
     }
+    // scenes over its earlier pass: the cuts re-derived from the stored scores, no decoding - nothing refused; the pass before it kept
+    // as a version
     const auto sc = RunAll({"scenes", "-i", c, "-o", scenesRoot.string()}, dir / "scenes_again.log");
     INFO("scenes over its earlier pass:\n" << sc.out);
-    CHECK(sc.code != 0);
-    CHECK_THAT(sc.out, ContainsSubstring(c + ": " + kNoAv1Reason));
+    CHECK(sc.code == 0);
+    CHECK_THAT(sc.out, ContainsSubstring("stored scores, no decoding"));
+    CHECK_THAT(sc.out, !ContainsSubstring(kNoAv1Reason));
     CHECK(std::filesystem::exists(scenesRoot / "scenes"));
-    CHECK_FALSE(std::filesystem::exists(scenesRoot / "scenes.v"));
+    CHECK(std::filesystem::exists(scenesRoot / "scenes.v"));
 }
 
 TEST_CASE("dlssvid proxy and render --proxy build skip a video this machine cannot decode, saying why", "[integration][cli][gpu][av1][proxy]") {
@@ -2657,12 +2661,14 @@ TEST_CASE("NVDEC with a software path: an odd frame height (MPEG-4 320x191) deco
         if (!dec.DecodesOnNvdec()) SKIP("NVDEC does not decode MPEG-4 here");
         CHECK(g.Valid());
     }
-    // the odd one: software, said once; the frames as the software decode's, the chroma's last row too
+    // the odd one: software from the open (no CUDA device, no GpuFrame), said once; the frames as the software decode's
     std::ostringstream text;
     std::vector<CpuFrame> hard;
     {
         DecoderLog capture(text);
         VideoDecoder dec(odd, cuda);
+        CHECK_FALSE(dec.UsingHwAccel());
+        CHECK_FALSE(dec.HoldsCudaDevice());
         CpuFrame f;
         GpuFrame g;
         while (dec.NextFrame(f, &g)) {
@@ -2670,6 +2676,7 @@ TEST_CASE("NVDEC with a software path: an odd frame height (MPEG-4 320x191) deco
             hard.push_back(f);
         }
         CHECK_FALSE(dec.DecodesOnNvdec());
+        CHECK_FALSE(dec.HoldsCudaDevice());
     }
     VideoDecoder plain(odd);
     const std::vector<CpuFrame> soft = DecodeAllOf(plain);
@@ -2682,8 +2689,8 @@ TEST_CASE("NVDEC with a software path: an odd frame height (MPEG-4 320x191) deco
     }
     const std::string log = text.str();
     INFO(log);
-    CHECK(CountOf(log, "a frame of an odd height (191): ") == 1);
-    CHECK(CountOf(log, "decoding in software") == 1);
+    CHECK(CountOf(log, odd.string() + ": an odd height (191): FFmpeg's NVDEC gives its chroma wrong, decoding in software") == 1);
+    CHECK(CountOf(log, "a frame of an odd height") == 0);  // get_format's warning: for a size met later only
 }
 
 TEST_CASE("NVDEC with a software path: an H.264 stream of an odd height (cropped from 192) with --hwaccel cuda gives the software decode's frames, the chroma's last row too",
@@ -2713,11 +2720,14 @@ TEST_CASE("NVDEC with a software path: an H.264 stream of an odd height (cropped
     }
     const VideoDecoder& dec = *decoder;
     {
-        // the height as shown (191; H.264 codes it as 192 and crops): software, said once with that height
+        // the height as shown (191; H.264 codes it as 192 and crops): software from the open, said once with that height
         const std::string log = text.str();
         INFO(log);
         CHECK_FALSE(dec.DecodesOnNvdec());
-        CHECK(CountOf(log, "a frame of an odd height (191): ") == 1);
+        CHECK_FALSE(dec.UsingHwAccel());
+        CHECK_FALSE(dec.HoldsCudaDevice());
+        CHECK(CountOf(log, clip->string() + ": an odd height (191): FFmpeg's NVDEC gives its chroma wrong, decoding in software") == 1);
+        CHECK(CountOf(log, "a frame of an odd height") == 0);
     }
     REQUIRE(soft.size() == 6);
     REQUIRE(hard.size() == soft.size());
@@ -2837,5 +2847,162 @@ TEST_CASE("dlssvid info of an AV1 video not decodable here: its samples without 
         CHECK_THAT(r.out, ContainsSubstring("samples:     8-bit 420 (not decoded here, see decode)"));
         CHECK_THAT(r.out, !ContainsSubstring("decoded as"));
         CHECK_THAT(r.out, ContainsSubstring(kNoAv1Reason));
+    }
+}
+
+TEST_CASE("NVDEC with a software path: a frame decoded in software, asked for on the device without a host copy (cpu = false), comes on the host - FFV1, an odd-height MPEG-4",
+          "[integration][gpu][nvdec][regression]") {
+    const auto dir = Dir("software_no_cpu");
+    if (!HaveNvidia()) SKIP("no NVIDIA GPU");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 4;
+    std::vector<std::filesystem::path> files{WriteClip(dir / "ffv1.mkv", spec)};  // no NVDEC for FFV1: software with the device held
+    if (VideoEncoder::EncoderAvailable("mpeg4")) {
+        spec.height = kH - 1;
+        spec.codec = "mpeg4";
+        files.push_back(WriteClip(dir / "odd.mkv", spec));  // an odd height: software from the open
+    }
+    for (const auto& file : files) {
+        INFO(file.filename().string());
+        VideoDecoder plain(file);
+        const std::vector<CpuFrame> soft = DecodeAllOf(plain);
+        REQUIRE(soft.size() == 4);
+        VideoDecoder::Options cuda;
+        cuda.hwaccel = HwAccel::Cuda;
+        VideoDecoder dec(file, cuda);
+        if (file.filename() == "ffv1.mkv") REQUIRE(dec.UsingHwAccel());  // GpuFrames may come: the path where cpu = false is kept
+        for (size_t i = 0; i < soft.size(); ++i) {
+            INFO("frame " << i);
+            CpuFrame f;
+            GpuFrame g;
+            REQUIRE(dec.NextFrame(f, &g, false));  // a consumer that takes GpuFrames and copies nothing to the host itself
+            CHECK_FALSE(g.Valid());                 // no frame on the device: software
+            REQUIRE_FALSE(f.data.empty());          // so on the host, whatever cpu said
+            CHECK(f.data.size() == f.desc.ByteSize());
+            CHECK((f.data == soft[i].data));
+        }
+    }
+}
+
+TEST_CASE("dlssvid info of an MPEG-4 video of an odd height: software even with --hwaccel cuda, and why; an even one may use NVDEC", "[integration][cli][nvdec]") {
+    const auto dir = Dir("info_odd_height");
+    if (!VideoEncoder::EncoderAvailable("mpeg4")) SKIP("no MPEG-4 encoder in this build");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH - 1;
+    spec.frames = 3;
+    spec.codec = "mpeg4";
+    const auto odd = WriteClip(dir / "odd.mkv", spec);
+    spec.height = kH;
+    const auto even = WriteClip(dir / "even.mkv", spec);
+    const auto o = RunAll({"info", odd.string()}, dir / "odd.log");
+    INFO(o.out);
+    CHECK(o.code == 0);
+    CHECK_THAT(o.out, ContainsSubstring("decode:      software (mpeg4); not NVDEC even with --hwaccel cuda: an odd frame height (191) - FFmpeg's NVDEC "
+                                        "gives its chroma wrong"));
+    const auto e = RunAll({"info", even.string()}, dir / "even.log");
+    INFO(e.out);
+    CHECK(e.code == 0);
+    CHECK_THAT(e.out, ContainsSubstring("decode:      software (mpeg4); NVDEC with --hwaccel cuda when the GPU decodes this layout"));
+}
+
+namespace {
+// Every file under `dir` with its bytes (relative paths)
+std::map<std::string, std::string> FilesOf(const std::filesystem::path& dir) {
+    std::map<std::string, std::string> out;
+    if (!std::filesystem::exists(dir)) return out;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(dir))
+        if (e.is_regular_file()) out[std::filesystem::relative(e.path(), dir).generic_string()] = Read(e.path());
+    return out;
+}
+}  // namespace
+
+TEST_CASE("dlssvid scenes without NVDEC AV1 refuses only when it decodes: --threshold 0 and stored scores go on; --reanalyze and no scores refuse before the pass is kept as a version",
+          "[integration][cli][gpu][av1]") {
+    const auto dir = Dir("scenes_no_av1");
+    REQUIRE_AV1_CLIP(clip, dir, false, 8);
+    const std::string c = clip.string();
+    // a pass with this video's scores, made where NVDEC decodes AV1; a pass of another video (no scores for this one)
+    const auto scored = dir / "scored";
+    REQUIRE(RunAll({"scenes", "-i", c, "-o", scored.string()}, dir / "scored.log").code == 0);
+    ClipSpec plain;
+    plain.frames = 8;
+    plain.width = 64;
+    plain.height = 48;
+    const auto other = WriteClip(dir / "other.mkv", plain);
+    const auto foreign = dir / "foreign";
+    REQUIRE(RunAll({"scenes", "-i", other.string(), "-o", foreign.string()}, dir / "foreign.log").code == 0);
+    FakeNvdecEnv fake("no-av1");
+    {
+        // --threshold 0: the pass written off - nothing to decode
+        const auto off = dir / "off";
+        const auto r = RunAll({"scenes", "-i", c, "-o", off.string(), "--threshold", "0"}, dir / "off.log");
+        INFO(r.out);
+        CHECK(r.code == 0);
+        CHECK_THAT(r.out, ContainsSubstring("threshold 0.00 (off"));
+        CHECK_THAT(r.out, !ContainsSubstring(kNoAv1Reason));
+        CHECK(std::filesystem::exists(off / "scenes" / "manifest.json"));
+    }
+    {
+        // --reanalyze over the scored pass: refused; that pass as it was, no version of it made
+        const auto before = FilesOf(scored);
+        const auto r = RunAll({"scenes", "-i", c, "-o", scored.string(), "--reanalyze"}, dir / "reanalyze.log");
+        INFO(r.out);
+        CHECK(r.code != 0);
+        CHECK_THAT(r.out, ContainsSubstring(c + ": " + kNoAv1Reason));
+        CHECK_FALSE(std::filesystem::exists(scored / "scenes.v"));
+        CHECK((FilesOf(scored) == before));
+    }
+    {
+        // no scores for this video (another one's pass there): refused before that pass goes to the history
+        const auto before = FilesOf(foreign);
+        const auto r = RunAll({"scenes", "-i", c, "-o", foreign.string()}, dir / "foreign_again.log");
+        INFO(r.out);
+        CHECK(r.code != 0);
+        CHECK_THAT(r.out, ContainsSubstring(c + ": " + kNoAv1Reason));
+        CHECK_FALSE(std::filesystem::exists(foreign / "scenes.v"));
+        CHECK((FilesOf(foreign) == before));
+    }
+    {
+        // no pass at all: refused, nothing made
+        const auto none = dir / "none";
+        const auto r = RunAll({"scenes", "-i", c, "-o", none.string()}, dir / "none.log");
+        INFO(r.out);
+        CHECK(r.code != 0);
+        CHECK_THAT(r.out, ContainsSubstring(c + ": " + kNoAv1Reason));
+        CHECK_FALSE(std::filesystem::exists(none / "scenes"));
+        CHECK_FALSE(std::filesystem::exists(none / "scenes.v"));
+    }
+    {
+        // the stored scores: the cuts re-derived, no decoding - the earlier pass kept as a version
+        const auto r = RunAll({"scenes", "-i", c, "-o", scored.string()}, dir / "rederive.log");
+        INFO(r.out);
+        CHECK(r.code == 0);
+        CHECK_THAT(r.out, ContainsSubstring("stored scores, no decoding"));
+        CHECK(std::filesystem::exists(scored / "scenes.v"));
+    }
+}
+
+TEST_CASE("dlssvid process --project P whose own source is an AV1 video not decodable here refuses it at once: the reason, no GPU device, nothing written (also --plan)",
+          "[integration][cli][gpu][av1]") {
+    const auto dir = Dir("process_project_own");
+    REQUIRE_AV1_CLIP(clip, dir, false, 12);
+    const auto passes = dir / "passes";
+    Project::Create(clip, passes).Save(dir / "clip.dlssvid.json");
+    FakeNvdecEnv fake("no-av1");
+    for (const bool plan : {false, true}) {
+        INFO((plan ? "--plan" : "a run"));
+        const auto out = dir / "out.mkv";
+        std::vector<std::string> args{"process", "--project", (dir / "clip.dlssvid.json").string(), "-o", out.string(), "--warp", "--codec", "ffv1"};
+        if (plan) args.push_back("--plan");
+        const auto r = RunAll(args, dir / (plan ? "plan.log" : "run.log"));
+        INFO(r.out);
+        CHECK(r.code != 0);
+        CHECK_THAT(r.out, ContainsSubstring("] process: "));  // (the project's path, as it stores it)
+        CHECK_THAT(r.out, ContainsSubstring(clip.filename().string() + ": " + kNoAv1Reason));
+        CHECK_THAT(r.out, !ContainsSubstring("D3D12 device"));
+        CHECK_FALSE(std::filesystem::exists(out));
     }
 }

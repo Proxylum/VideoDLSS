@@ -316,8 +316,7 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
     if (!caps->cuda) return Refuse(s, DecodeBlock::NoCuda);
     if (caps->nvdecMissing) return Refuse(s, DecodeBlock::NoNvdec);
     if (!caps->supported) return Refuse(s, DecodeBlock::NoAv1);
-    if (oddHeight) return refuseOdd();
-    if (unknown) {
+    if (unknown) {  // (no odd height either: the probe's size is the container's)
         s.why = "on '" + caps->gpu + "', the sample layout is not known before the first frame";
         return s;
     }
@@ -326,7 +325,8 @@ DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps)
     const uint64_t macroblocks = static_cast<uint64_t>(info.codedWidth) * info.codedHeight / 256;
     if (info.codedWidth < caps->minWidth || info.codedHeight < caps->minHeight || info.codedWidth > caps->maxWidth || info.codedHeight > caps->maxHeight ||
         macroblocks > caps->maxMacroblocks)
-        return Refuse(s, DecodeBlock::Size);
+        return Refuse(s, DecodeBlock::Size);  // before an odd height: an even one would not bring the frame within the GPU's limits
+    if (oddHeight) return refuseOdd();
     s.verified = true;
     s.why = "on '" + caps->gpu + "', AV1 " + Depth(info.bitDepth) + " 4:2:0 up to " + std::to_string(caps->maxWidth) + "x" + std::to_string(caps->maxHeight);
     return s;
@@ -373,8 +373,13 @@ bool FakeNvdecDeviceFails() { return FakeValue() == "device-fails"; }
 bool FakeNvdecRefusesLater() { return FakeValue() == "later-frame"; }
 
 std::string DescribeDecode(const DecodeSupport& s) {
-    if (!s.hardwareOnly)
-        return s.why + (s.nvdecCodec ? "; NVDEC with --hwaccel cuda when the GPU decodes this layout" : "; NVDEC does not decode this codec");
+    if (!s.hardwareOnly) {
+        if (!s.nvdecCodec) return s.why + "; NVDEC does not decode this codec";
+        if (s.height % 2 == 1)  // as VideoDecoder decides it (an odd height: software also with --hwaccel cuda)
+            return s.why + "; not NVDEC even with --hwaccel cuda: an odd frame height (" + std::to_string(s.height) +
+                   ") - FFmpeg's NVDEC gives its chroma wrong";
+        return s.why + "; NVDEC with --hwaccel cuda when the GPU decodes this layout";
+    }
     if (!s.Ok()) return "unavailable - " + s.why;
     return "NVDEC only (" + s.codec + ": no software AV1 decoder in this build), " + s.why;
 }

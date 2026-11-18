@@ -259,6 +259,16 @@ void PrintReport(const ProcessResult& r) {
 }
 
 int CmdProcess(const ProcessCommands::ProcessArgs& a) {
+    {  // TASK-0076: the video this run decodes, refused before anything is hashed - the project's own source rehashed when its file
+       // changed, another -i hashed in full: a 10 GB AV1 read for nothing otherwise
+        std::filesystem::path input = a.input;
+        if (input.empty() && !a.project.empty()) input = Project::Load(a.project).sourceVideo;
+        std::error_code ec;
+        if (!input.empty() && std::filesystem::exists(input, ec)) {
+            VideoDecoder probe(input, VideoDecoder::Probe());
+            if (const DecodeSupport s = CheckDecodeSupport(probe.Info()); !s.Ok()) throw DecodeUnavailable(s, "process: " + input.string() + ": " + s.why);
+        }
+    }
     ProcessOptions o;
     FileLayer file;
     BuildStages(a.project, a.paramFiles, a.stages, a.params, a.depthBackend, a.flowBackend, a.upscaleBackend, a.nrBackend, a.fgBackend, a.scale, a.multiplier, o,
@@ -277,12 +287,6 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
         std::error_code ec;
         const bool samePath = std::filesystem::equivalent(o.input, projectInput, ec) && !ec;
         if (!samePath) {
-            // TASK-0076: a video this machine cannot decode is refused before it is hashed (a 10 GB AV1 is read for nothing otherwise)
-            if (std::filesystem::exists(o.input, ec)) {
-                VideoDecoder probe(o.input, VideoDecoder::Probe());
-                if (const DecodeSupport s = CheckDecodeSupport(probe.Info()); !s.Ok())
-                    throw DecodeUnavailable(s, "process: " + o.input.string() + ": " + s.why);
-            }
             const std::string inputHash = "sha256:" + Sha256FileCached(o.input);
             if (inputHash != o.sourceHash) {  // also when the project knows no hash of its video: it cannot be told apart
                 Log()->info("process: {} is not the source of the project: its own hash, passes and result", o.input.string());

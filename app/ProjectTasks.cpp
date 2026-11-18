@@ -21,14 +21,16 @@ void ProjectTasks::syncTasksRunning() { model_.setTasksRunning(tasks_.busy() || 
 ProjectTasks::ProjectTasks(AppModel& model, TaskQueue& tasks, QObject* parent) : QObject(parent), model_(model), tasks_(tasks) {
     // at the queueing, not at the start: a task waits in the queue while another project is opened
     connect(&tasks_, &TaskQueue::taskQueued, this, [this](int id) {
+        // TASK-0076: the viewport's NVDEC decoders of an AV1 video let go first (opened again by a later frame) - cancelCheck's
+        // updateNvdecHold must not see «nothing runs» and open them again just as the run starts
+        syncTasksRunning();
         model_.cancelCheck();  // TASK-0071: a check's NGX feature does not share the GPU with a run (nothing is stored of it)
-        syncTasksRunning();     // TASK-0076: nor the viewport's NVDEC decoders of an AV1 video (opened again by a later frame)
         const Project& p = model_.project();
         origins_[id] = {model_.generation(), p.passesRoot, QString::fromStdWString(p.sourceVideo.filename().wstring()), p.resultVideo};
     });
     connect(&tasks_, &TaskQueue::previewStarted, this, [this](int) {  // the NR preview, as a task
+        syncTasksRunning();  // TASK-0076: first, as above
         model_.cancelCheck();
-        syncTasksRunning();  // TASK-0076
     });
     // TASK-0076: the viewport may hold NVDEC between frames again once nothing runs. TaskQueue updates its state before it emits these;
     // the deferred call keeps that independent of the order (a slot connected before this one could start another task)

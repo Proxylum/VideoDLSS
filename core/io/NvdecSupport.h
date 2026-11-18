@@ -80,8 +80,8 @@ struct DecodeSupport {
 // The verdict from the stream and what NVDEC said (`caps` null: not asked). Order: a decoder with a software path is fine; a layout this
 // build does not decode AV1 in (8 / 10-bit 4:2:0 only) is refused before the GPU is asked (CheckDecodeSupport asks nothing for it); a
 // driver that could not be asked (a CUDA error on the temporary context) - an odd frame height (OddHeight) refused, else on blind (FFmpeg
-// asks the driver itself on the first frame); then no CUDA, no nvcuvid, no AV1; then an odd frame height; an unknown pixel format (the
-// probe did not learn it) is left to the first frame from there on; then the size.
+// asks the driver itself on the first frame); then no CUDA, no nvcuvid, no AV1; an unknown pixel format (the probe did not learn it) is
+// left to the first frame from there on (its size, the container's, too); then the size; then an odd frame height.
 DecodeSupport JudgeDecode(const VideoStreamInfo& info, const NvdecAv1Caps* caps);
 
 // The driver's answer for AV1 4:2:0 at `bitDepth` (8 / 10): cuInit, device 0, a temporary context of its own (the primary context the
@@ -112,7 +112,7 @@ bool FakeNvdecRefusesLater();
 DecodeSupport RefusedDecode(const VideoStreamInfo& info, DecodeBlock block, const std::string& detail);
 
 // One line for `dlssvid info`: «software (h264); NVDEC with --hwaccel cuda when the GPU decodes this layout», «software (prores); NVDEC
-// does not decode this codec», «NVDEC only (av1: no software AV1 decoder in this build), on '<gpu>', AV1 8-bit 4:2:0 up to WxH» (or
+// does not decode this codec», «software (vp9); not NVDEC even with --hwaccel cuda: an odd frame height (803) - …», «NVDEC only (av1: no software AV1 decoder in this build), on '<gpu>', AV1 8-bit 4:2:0 up to WxH» (or
 // «..., not checked: <why>»), «unavailable - <why>».
 std::string DescribeDecode(const DecodeSupport& support);
 

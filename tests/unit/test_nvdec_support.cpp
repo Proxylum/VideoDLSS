@@ -810,10 +810,17 @@ TEST_CASE("JudgeDecode: an odd frame height is refused after the layout and the 
         CHECK(s.caps.checked == (caps && caps->checked));  // the caps as given, if any
     }
     CHECK_FALSE(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), nullptr).caps.checked);
-    // the odd height before the size: a GPU whose limits the frame is outside of says the height (both would refuse it)
+    // the size before the odd height: an even height would not bring the frame within the GPU's limits - the size is said; within them,
+    // the odd height
     NvdecAv1Caps low = GoodCaps();
     low.maxHeight = 128;
-    CHECK(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &low).block == DecodeBlock::OddHeight);
+    CHECK(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &low).block == DecodeBlock::Size);
+    NvdecAv1Caps narrow = GoodCaps();
+    narrow.maxWidth = 256;
+    CHECK(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &narrow).block == DecodeBlock::Size);
+    NvdecAv1Caps wide = GoodCaps();
+    wide.maxHeight = 192;  // 191 within the limits
+    CHECK(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &wide).block == DecodeBlock::OddHeight);
     // caps with words of their own - the driver not asked for a CUDA error, or a GPU that answered with a note: the height is this refusal's
     // reason, the driver's words are not said in it (they are for «not checked»)
     NvdecAv1Caps cudaError;
@@ -1177,6 +1184,73 @@ TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit
     CHECK(DescribeDecode(refused) == "unavailable - " + refused.why);
     CHECK_THAT(DescribeDecode(refused), StartsWith("unavailable - the GPU 'Test GPU' has no NVDEC AV1 decoder for 8-bit 4:2:0"));
     CHECK_THAT(DescribeDecode(JudgeDecode(Av1Info("yuv444p"), nullptr)), StartsWith("unavailable - AV1 8-bit 4:4:4 (yuv444p) cannot be decoded here"));
+    // TASK-0076: a codec NVDEC decodes, of an odd height - software also with --hwaccel cuda (as VideoDecoder decides it)
+    VideoStreamInfo h264Odd = H264Info();
+    h264Odd.height = h264Odd.codedHeight = 191;
+    CHECK(DescribeDecode(JudgeDecode(h264Odd, nullptr)) ==
+          "software (h264); not NVDEC even with --hwaccel cuda: an odd frame height (191) - FFmpeg's NVDEC gives its chroma wrong");
+    VideoStreamInfo vp9 = SoftwareInfo("vp9", true);
+    vp9.width = vp9.codedWidth = 1920;
+    vp9.height = vp9.codedHeight = 803;
+    CHECK(DescribeDecode(JudgeDecode(vp9, nullptr)) ==
+          "software (vp9); not NVDEC even with --hwaccel cuda: an odd frame height (803) - FFmpeg's NVDEC gives its chroma wrong");
+    vp9.height = vp9.codedHeight = 804;
+    CHECK(DescribeDecode(JudgeDecode(vp9, nullptr)) == "software (vp9); NVDEC with --hwaccel cuda when the GPU decodes this layout");
+    VideoStreamInfo ffv1Odd = Ffv1Info();  // NVDEC does not decode it at all: that, not the height
+    ffv1Odd.height = ffv1Odd.codedHeight = 191;
+    CHECK(DescribeDecode(JudgeDecode(ffv1Odd, nullptr)) == "software (ffv1); NVDEC does not decode this codec");
+}
+
+TEST_CASE("IsProbeVerdict: the verdicts a probe gives - the layout, no CUDA / NVDEC / AV1, the size, an odd height; not a decoder's", "[unit][av1]") {
+    const NvdecAv1Caps good = GoodCaps();
+    NvdecAv1Caps noCuda = GoodCaps();
+    noCuda.cuda = false;
+    NvdecAv1Caps noNvdec = GoodCaps();
+    noNvdec.nvdecMissing = true;
+    NvdecAv1Caps noAv1 = GoodCaps();
+    noAv1.supported = false;
+    NvdecAv1Caps low = GoodCaps();
+    low.maxHeight = 128;
+    struct Case {
+        const char* what;
+        DecodeSupport s;
+        DecodeBlock block;
+    };
+    const Case probes[] = {
+        {"layout", JudgeDecode(Av1Info("yuv444p"), nullptr), DecodeBlock::Layout},
+        {"no CUDA", JudgeDecode(Av1Info(), &noCuda), DecodeBlock::NoCuda},
+        {"no NVDEC", JudgeDecode(Av1Info(), &noNvdec), DecodeBlock::NoNvdec},
+        {"no AV1", JudgeDecode(Av1Info(), &noAv1), DecodeBlock::NoAv1},
+        {"size", JudgeDecode(Av1Info(), &low), DecodeBlock::Size},
+        {"odd height", JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &good), DecodeBlock::OddHeight},
+    };
+    for (const Case& c : probes) {
+        INFO(c.what);
+        REQUIRE(c.s.block == c.block);
+        CHECK(IsProbeVerdict(c.s));
+        // the same block on a part of the stream: a decoder met it
+        DecodeSupport part = c.s;
+        part.part = true;
+        CHECK_FALSE(IsProbeVerdict(part));
+        // of a stream whose layout the probe did not learn: no probe gave it
+        DecodeSupport unknown = c.s;
+        unknown.pixelFormat = "unknown";
+        CHECK_FALSE(IsProbeVerdict(unknown));
+    }
+    // a layout learned at the first frame (VideoDecoder::CheckDecode's words): the decoder's
+    StreamPart learned;
+    learned.pixelFormat = "yuv420p12le";
+    learned.learned = true;
+    DecodeSupport late = JudgeDecode(Av1Info("yuv420p12le", 12), nullptr);
+    REQUIRE(late.block == DecodeBlock::Layout);
+    late.why += " (on the first frame" + StreamPartWords(learned) + ")";
+    CHECK_FALSE(IsProbeVerdict(late));
+    // NVDEC refusing frames, frames of another size, not starting, nothing at all: no probe's
+    for (const DecodeBlock b : {DecodeBlock::NvdecFailed, DecodeBlock::Resized, DecodeBlock::NvdecStartFailed}) {
+        INFO(BlockName(b));
+        CHECK_FALSE(IsProbeVerdict(RefusedDecode(Av1Info(), b, "on the first frame")));
+    }
+    CHECK_FALSE(IsProbeVerdict(JudgeDecode(Av1Info(), &good)));
 }
 
 namespace {
