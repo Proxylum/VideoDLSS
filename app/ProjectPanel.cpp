@@ -376,7 +376,7 @@ void ProjectPanel::refresh() {
         const bool learned = unknown && !decode.Ok() && !decode.part && !decode.pixelFormat.empty() && decode.pixelFormat != "unknown";
         const bool refusedLayout = learned || (!decode.Ok() && !decode.part && decode.block == DecodeBlock::Layout);
         if (!src.codec.empty())
-            frame += " · " + (refusedLayout ? AppModel::codecLabel(src.codec) + " " + DecodeLayoutText(decode.bitDepth, decode.chroma)
+            frame += " · " + (refusedLayout ? AppModel::codecLabel(src.codec) + " " + DecodeLayoutText(decode.bitDepth, decode.chroma, decode.pixelFormat)
                               : unknown     ? AppModel::codecLabel(src.codec) + tr(", формат заранее неизвестен")
                                             : AppModel::formatLabel(src.codec, src.layout.width ? src.layout : src.decoded));  // «HEVC 10 бит 4:4:4»
         // TASK-0072: a phone video stored landscape, shown turned - as in a player
@@ -389,16 +389,16 @@ void ProjectPanel::refresh() {
         sourceFrame_->setText(frame);
         // TASK-0076: the same reading in the tooltip (a refusal learned the layout, or it is not known in advance); a refusal of a part
         // names that part
-        QString stream = refusedLayout ? DecodeLayoutText(decode.bitDepth, decode.chroma)
+        QString stream = refusedLayout ? DecodeLayoutText(decode.bitDepth, decode.chroma, decode.pixelFormat)
                          : unknown     ? tr("формат заранее неизвестен (его узнаёт декодер на первом кадре)")
-                                       : DecodeLayoutText(src.bitDepth, src.chroma);
+                                       : DecodeLayoutText(src.bitDepth, src.chroma, src.pixelFormat);
         if (!decode.Ok() && decode.part) {  // what the part was refused for: its frame as stored (Size, OddHeight), else its layout
             const bool otherLayout = decode.pixelFormat != src.pixelFormat && !unknown;
             if (decode.block == DecodeBlock::Size || decode.block == DecodeBlock::OddHeight)
-                stream += otherLayout ? tr(", в части — %1, кадр в файле %2×%3").arg(DecodeLayoutText(decode.bitDepth, decode.chroma)).arg(decode.width).arg(decode.height)
+                stream += otherLayout ? tr(", в части — %1, кадр в файле %2×%3").arg(DecodeLayoutText(decode.bitDepth, decode.chroma, decode.pixelFormat)).arg(decode.width).arg(decode.height)
                                       : tr(", в части — кадр в файле %1×%2").arg(decode.width).arg(decode.height);
             else
-                stream += tr(", в части — %1").arg(DecodeLayoutText(decode.bitDepth, decode.chroma));
+                stream += tr(", в части — %1").arg(DecodeLayoutText(decode.bitDepth, decode.chroma, decode.pixelFormat));
         }
         QString tip = src.codec.empty() ? QString()
                       : !decode.Ok()    ? tr("Поток: %1; на этом компьютере не декодируется").arg(stream)

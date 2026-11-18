@@ -98,6 +98,10 @@ struct Av1SequenceKey {
     bool operator==(const Av1SequenceKey&) const = default;
 };
 std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view sequenceHeader);
+// TASK-0076: what a chroma "other" is (VideoStreamInfo::chroma): "rgb" (gbrp, bgr0 ...), "gray" (one component), else "other" - for the
+// words a GUI says it in
+std::string LayoutKindOf(const std::string& pixelFormat);
+
 struct DecodeSupport;
 // TASK-0076: a verdict a probe gives (the layout, no CUDA / NVDEC / AV1, the size, an odd height of a stream whose layout it learned) - not
 // one a decoder met: on a part, in a layout the probe did not learn (its words), NVDEC refusing frames, frames of another size. A file
@@ -172,8 +176,9 @@ DisplayOrientation OrientationFromRotateTag(std::string_view tag, std::string* w
 // NV12 -> YUV420P). Audio packets are handed to the sink untouched for stream copy. A stream shown turned (a display matrix, the
 // 'rotate' tag: a phone video) is turned on the CPU after the copy (OrientFrame) and has no GpuFrame (TASK-0072); so has a frame of an
 // odd width (any codec on NVDEC: the on-device consumers take even rows; TASK-0076 - the frame cut to its own size, NVDEC's being even).
-// A codec with a software path and an odd height decodes in software also with HwAccel::Cuda (TASK-0076: FFmpeg's NVDEC gives its chroma
-// wrong) - no device then, UsingHwAccel() false.
+// A codec with NVDEC and a software path (h264, hevc, vp9 ...) of an odd height decodes in software also with HwAccel::Cuda (TASK-0076:
+// FFmpeg's NVDEC gives its chroma wrong) - no device then, UsingHwAccel() false; a codec without NVDEC (ProRes, FFV1) holds the device
+// whatever its height, as before, and hands out no GpuFrame.
 // A decoder without a software path (this build's AV1, TASK-0076, NvdecSupport.h) decodes on NVDEC whatever the options say: with
 // HwAccel::Cuda the device is created at the open, as for any codec; otherwise on the first NextFrame (StartNvdec reopens codec_ on it) -
 // a Probe() open never creates one. A stream this GPU cannot decode is refused then (or at RequireDecodable) with DecodeUnavailable,
@@ -218,7 +223,8 @@ public:
     bool UsingHwAccel() const { return gpuFrames_; }
     // A frame came from NVDEC (asked for and the codec has it, or a hardware-only decoder past its first frame).
     bool DecodesOnNvdec() const { return nvdecFrames_; }
-    // A CUDA device is held (HwAccel::Cuda at the open, or StartNvdec - even one NVDEC then refused): closing the decoder lets it go.
+    // A CUDA device is held (HwAccel::Cuda at the open - not for an NVDEC codec of an odd height, nor when the device could not be created -
+    // or StartNvdec - even one NVDEC then refused): closing the decoder lets it go.
     bool HoldsCudaDevice() const { return hwDevice_ != nullptr; }
     // TASK-0076: refuses at once (DecodeUnavailable) a stream this machine cannot decode - a command calls it before its heavy preparation
     // (hashing, a model, an NGX feature) instead of learning it on the first frame. A no-op for a decoder with a software path.

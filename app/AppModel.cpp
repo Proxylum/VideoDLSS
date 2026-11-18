@@ -553,6 +553,9 @@ void AppModel::startProxies() {
         // TASK-0076: NVDEC refused the video or did not start in the proxy process (its lines: «<name>: no proxy …») - said, not silent
         QStringList refused, notNow;
         for (const char* name : {"source", "result"}) {
+            // of the videos of the project open now only: a build of the one before says nothing of these (its reasons are in the log)
+            if (!SameFile(std::string(name) == "source" ? builtSource : builtResult, std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo))
+                continue;
             // «no proxy, the video cannot be decoded here» / «no proxy now, NVDEC did not start» - not «no proxy needed» (a short GOP)
             if (out.contains(QString("%1: no proxy,").arg(name))) refused << HumanSourceName(name);
             if (out.contains(QString("%1: no proxy now").arg(name))) notNow << HumanSourceName(name);

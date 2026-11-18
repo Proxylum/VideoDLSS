@@ -44,10 +44,12 @@ AVPixelFormat GetHwFormat(AVCodecContext* ctx, const AVPixelFormat* formats) {
     if (hardwareOnly && FakeNvdecRefusesFrames()) return AV_PIX_FMT_NONE;  // DLSSVID_FAKE_NVDEC_AV1=first-frame | query-fails | start-fails (tests)
     // the height as shown, else as coded: H.264 / HEVC code it aligned (191 as 192) and crop it - their last chroma row would be lost on
     // the way to the host (FFmpeg copies height / 2 chroma rows)
-    const int height = ctx->height % 2 == 1 ? ctx->height : ctx->coded_height;
+    const int height = NvdecJudgedHeight(ctx->height, ctx->coded_height);
     const AVPixelFormat f = PickNvdecFormat(formats, hardwareOnly, height);
+    bool cudaOffered = false;  // a codec NVDEC does not decode (ProRes) is no odd height's fault
+    for (const AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p) cudaOffered = cudaOffered || *p == AV_PIX_FMT_CUDA;
     if (f != AV_PIX_FMT_CUDA && !hardwareOnly) {
-        if (height % 2 == 1)
+        if (height % 2 == 1 && cudaOffered)
             Log()->warn("a frame of an odd height ({}): FFmpeg's NVDEC gives its chroma wrong, decoding in software", height);
         else
             Log()->warn("NVDEC pixel format not offered by decoder, falling back to software");
@@ -270,6 +272,14 @@ std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view header) {
     }
     if (!ok) return std::nullopt;
     return k;
+}
+
+std::string LayoutKindOf(const std::string& pixelFormat) {
+    const AVPixFmtDescriptor* d = pixelFormat.empty() ? nullptr : av_pix_fmt_desc_get(av_get_pix_fmt(pixelFormat.c_str()));
+    if (!d) return "other";
+    if (d->flags & AV_PIX_FMT_FLAG_RGB) return "rgb";
+    if (d->nb_components < 3) return "gray";
+    return "other";
 }
 
 bool IsProbeVerdict(const DecodeSupport& s) {

@@ -16,6 +16,10 @@ namespace dlssvid {
 // a hardware-only one is refused for it instead.
 AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly, int codedHeight = 0);
 
+// TASK-0076: the height a frame is judged by for NVDEC: the shown one when it is odd (H.264 / HEVC code it aligned and crop it: 191 as
+// 192), else the coded one (VP9 codes it as it is)
+inline int NvdecJudgedHeight(int height, int codedHeight) { return height % 2 == 1 ? height : codedHeight; }
+
 // TASK-0076: the sample layouts this build decodes AV1 in (on NVDEC): 8 and 10-bit 4:2:0 - JudgeDecode's Layout and get_format both
 inline bool Av1NvdecLayout(AVPixelFormat format) { return format == AV_PIX_FMT_YUV420P || format == AV_PIX_FMT_YUV420P10LE; }
 

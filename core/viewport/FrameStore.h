@@ -93,9 +93,9 @@ public:
     void SetSources(std::vector<ViewportSource> sources);
     const std::vector<ViewportSource>& Sources() const { return sources_; }
     const ViewportSource* FindSource(const std::string& name) const;
-    // TASK-0076: why the video `name` cannot be decoded here - the probe's verdict (ViewportSource::undecodable), or NVDEC refusing a
-    // frame in a loader as a verdict (a later frame, a part of the stream in other parameters or a layout the probe did not learn that the
-    // GPU does not take, the first frame when the driver could not be asked); nullopt: it decodes
+    // TASK-0076: why the video `name` cannot be decoded here - the verdict its ViewportSource carries (undecodable: the probe's, or one
+    // remembered for the file in this process - an earlier set's loader, the proxy build: RememberRefusedFile), or a loader's refusal that is
+    // no start failure (refusedInLoad_: any non-Transient DecodeUnavailable of its decoder); nullopt: it decodes
     std::optional<DecodeSupport> Undecodable(const std::string& name) const;
     // TASK-0076: the video `name` was written again since it was loaded (another size or time) - its verdicts are the old file's. A file
     // gone, a pass folder or no such source: false

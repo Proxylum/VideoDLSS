@@ -376,8 +376,8 @@ std::string DescribeDecode(const DecodeSupport& s) {
     if (!s.hardwareOnly) {
         if (!s.nvdecCodec) return s.why + "; NVDEC does not decode this codec";
         if (s.height % 2 == 1)  // as VideoDecoder decides it (an odd height: software also with --hwaccel cuda)
-            return s.why + "; not NVDEC even with --hwaccel cuda: an odd frame height (" + std::to_string(s.height) +
-                   ") - FFmpeg's NVDEC gives its chroma wrong";
+            return s.why + "; not NVDEC even with --hwaccel cuda: an odd frame height (" + std::to_string(s.width) + "x" + std::to_string(s.height) +
+                   ", the frame as stored) - FFmpeg's NVDEC gives its chroma wrong";
         return s.why + "; NVDEC with --hwaccel cuda when the GPU decodes this layout";
     }
     if (!s.Ok()) return "unavailable - " + s.why;

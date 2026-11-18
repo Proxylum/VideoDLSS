@@ -955,8 +955,8 @@ TEST_CASE("Without NVDEC AV1 the stage commands refuse an AV1 source at once: th
           "[integration][cli][gpu][av1]") {
     const auto dir = Dir("refused_commands");
     REQUIRE_AV1_CLIP(clip, dir, false, 8);
-    // a scenes pass made where NVDEC decodes AV1: its scores would let scenes re-derive the cuts without decoding - the refusal comes
-    // first, the pass is not retired to its history
+    // a scenes pass made where NVDEC decodes AV1: with its scores scenes re-derives the cuts without decoding (at the end) - nothing to
+    // refuse there
     const auto scenesRoot = dir / "scenes_root";
     REQUIRE(RunAll({"scenes", "-i", clip.string(), "-o", scenesRoot.string()}, dir / "scenes_first.log").code == 0);
     REQUIRE(std::filesystem::exists(scenesRoot / "scenes"));
@@ -983,7 +983,9 @@ TEST_CASE("Without NVDEC AV1 the stage commands refuse an AV1 source at once: th
         INFO(cmd.name << ":\n" << r.out);
         CHECK(r.code != 0);
         CHECK_THAT(r.out, ContainsSubstring(c + ": " + kNoAv1Reason));
-        CHECK_THAT(r.out, !ContainsSubstring("D3D12 device"));  // refused before the GPU work, the model and the hash
+        // refused before the GPU work and the model (scenes, with no pass in its root at all: before the hash too; with a pass there that
+        // has no scores of this video it hashes first)
+        CHECK_THAT(r.out, !ContainsSubstring("D3D12 device"));
         CheckNoEnosys(r.out);
         CHECK_FALSE(std::filesystem::exists(cmd.pass));
         if (std::string(cmd.name) == "compare") {  // refused at its first video: the second is not opened
@@ -2900,8 +2902,8 @@ TEST_CASE("dlssvid info of an MPEG-4 video of an odd height: software even with 
     const auto o = RunAll({"info", odd.string()}, dir / "odd.log");
     INFO(o.out);
     CHECK(o.code == 0);
-    CHECK_THAT(o.out, ContainsSubstring("decode:      software (mpeg4); not NVDEC even with --hwaccel cuda: an odd frame height (191) - FFmpeg's NVDEC "
-                                        "gives its chroma wrong"));
+    CHECK_THAT(o.out, ContainsSubstring("decode:      software (mpeg4); not NVDEC even with --hwaccel cuda: an odd frame height (320x191, the frame as "
+                                        "stored) - FFmpeg's NVDEC gives its chroma wrong"));
     const auto e = RunAll({"info", even.string()}, dir / "even.log");
     INFO(e.out);
     CHECK(e.code == 0);
@@ -3005,4 +3007,36 @@ TEST_CASE("dlssvid process --project P whose own source is an AV1 video not deco
         CHECK_THAT(r.out, !ContainsSubstring("D3D12 device"));
         CHECK_FALSE(std::filesystem::exists(out));
     }
+}
+
+TEST_CASE("A codec NVDEC does not decode (ProRes) of an odd height with --hwaccel cuda: software, and no word of an odd height - NVDEC was not offered",
+          "[integration][gpu][nvdec]") {
+    const auto dir = Dir("prores_odd_height");
+    if (!HaveNvidia()) SKIP("no NVIDIA GPU");
+    if (!VideoEncoder::EncoderAvailable("prores_ks")) SKIP("no ProRes encoder in this build");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH - 1;
+    spec.frames = 3;
+    spec.codec = "prores_ks";
+    spec.pixFmt = "yuv422p10le";
+    const auto odd = WriteClip(dir / "odd.mov", spec);
+    VideoDecoder plain(odd);
+    const std::vector<CpuFrame> soft = DecodeAllOf(plain);
+    REQUIRE(soft.size() == 3);
+    std::ostringstream text;
+    std::vector<CpuFrame> frames;
+    {
+        DecoderLog capture(text);
+        VideoDecoder::Options cuda;
+        cuda.hwaccel = HwAccel::Cuda;
+        VideoDecoder dec(odd, cuda);
+        frames = DecodeAllOf(dec);
+        CHECK_FALSE(dec.DecodesOnNvdec());
+    }
+    const std::string log = text.str();
+    INFO(log);
+    REQUIRE(frames.size() == soft.size());
+    for (size_t i = 0; i < frames.size(); ++i) CHECK((frames[i].data == soft[i].data));
+    CHECK(CountOf(log, "odd height") == 0);  // no CUDA in the decoder's list: not the height's doing
 }

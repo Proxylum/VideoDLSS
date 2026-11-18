@@ -7458,7 +7458,8 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     };
     CHECK(SourceDecodeText(JudgeDecode(Av1StreamInfo("yuv444p", 8, "444"), nullptr)) == layout("8 бит 4:4:4"));
     CHECK(SourceDecodeText(JudgeDecode(Av1StreamInfo("yuv422p10le", 10, "422"), nullptr)) == layout("10 бит 4:2:2"));
-    CHECK(SourceDecodeText(JudgeDecode(Av1StreamInfo("gray", 8, "other"), nullptr)) == layout("8 бит, монохромный или особый формат"));
+    CHECK(SourceDecodeText(JudgeDecode(Av1StreamInfo("gray", 8, "other"), nullptr)) == layout("8 бит, монохромный"));
+    CHECK(SourceDecodeText(JudgeDecode(Av1StreamInfo("gbrp", 8, "other"), nullptr)) == layout("8 бит RGB"));
     CHECK(SourceDecodeText(JudgeDecode(Av1StreamInfo("yuv420p12le", 12, "420"), nullptr)) == layout("12 бит 4:2:0"));
 
     NvdecAv1Caps noCuda;
@@ -7569,8 +7570,15 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     CHECK(DecodeLayoutText(8, "420") == QString::fromUtf8("8 бит 4:2:0"));
     CHECK(DecodeLayoutText(10, "444") == QString::fromUtf8("10 бит 4:4:4"));
     CHECK(DecodeLayoutText(12, "422") == QString::fromUtf8("12 бит 4:2:2"));
-    CHECK(DecodeLayoutText(10, "other") == QString::fromUtf8("10 бит, монохромный или особый формат"));
+    CHECK(DecodeLayoutText(10, "other") == QString::fromUtf8("10 бит, монохромный или особый формат"));  // no format said: either
     CHECK(DecodeLayoutText(8, "") == QString::fromUtf8("8 бит, монохромный или особый формат"));
+    // TASK-0076: «other» told apart by the pixel format - RGB, one component, else either
+    CHECK(DecodeLayoutText(8, "other", "gbrp") == QString::fromUtf8("8 бит RGB"));
+    CHECK(DecodeLayoutText(10, "other", "gbrp10le") == QString::fromUtf8("10 бит RGB"));
+    CHECK(DecodeLayoutText(10, "other", "gray10le") == QString::fromUtf8("10 бит, монохромный"));
+    CHECK(DecodeLayoutText(8, "other", "unknown") == QString::fromUtf8("8 бит, монохромный или особый формат"));
+    CHECK(DecodeLayoutText(8, "other", "") == QString::fromUtf8("8 бит, монохромный или особый формат"));
+    CHECK(DecodeLayoutText(10, "420", "gray10le") == QString::fromUtf8("10 бит 4:2:0"));  // a chroma known: that
     // TASK-0076: a part of the video in other parameters (a new sequence header): the same reasons, said of that part
     DecodeSupport layoutPart = JudgeDecode(Av1StreamInfo("yuv420p12le", 12, "420"), nullptr);
     REQUIRE(layoutPart.block == DecodeBlock::Layout);
@@ -7582,9 +7590,9 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     DecodeSupport grayPart = JudgeDecode(Av1StreamInfo("gray12le", 12, "other"), nullptr);
     REQUIRE(grayPart.block == DecodeBlock::Layout);
     grayPart.part = true;
-    CHECK(SourceDecodeText(grayPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть, формат которой (12 бит, монохромный или "
-                                                          "особый формат) эта версия программы не декодирует — AV1 декодирует только видеокарта, и только 8 "
-                                                          "и 10 бит 4:2:0. Что сделать: ") +
+    CHECK(SourceDecodeText(grayPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть, формат которой (12 бит, монохромный) "
+                                                          "эта версия программы не декодирует — AV1 декодирует только видеокарта, и только 8 и 10 бит 4:2:0. "
+                                                          "Что сделать: ") +
                                         transcode + ".");
     DecodeSupport av1Part = na;
     av1Part.part = true;
@@ -8965,8 +8973,22 @@ TEST_CASE("AppModel: a background proxy build's verdict is its videos' - a proje
     REQUIRE(model.hasProject());
     REQUIRE(model.proxyBuilding());
     QSignalSpy sources(&model, &AppModel::sourcesChanged);
-    Pump([&] { return !model.proxyBuilding(); }, 60000);
+    QSignalSpy messages(&model, &AppModel::message);
+    std::ostringstream text;
+    {
+        LogCapture capture(text);
+        Pump([&] { return !model.proxyBuilding(); }, 60000);
+    }
     REQUIRE_FALSE(model.proxyBuilding());
+    {
+        // the open project's videos: no word of the other's build (its proxy is there); that build's reasons in the log
+        QStringList said;
+        for (const auto& m : messages) said << m[0].toString();
+        INFO("messages: " << said.join(" | ").toStdString());
+        CHECK_FALSE(said.join(" | ").contains(QString::fromUtf8("Прокси для перемотки не построен")));
+        INFO(text.str());
+        CHECK(text.str().find("viewport proxy: source: no proxy, the video cannot be decoded here: ") != std::string::npos);
+    }
     CHECK(FrameStore::VideoSource("source", firstVideo)->undecodable);        // the verdict kept for the video it was on
     CHECK_FALSE(FrameStore::VideoSource("source", secondVideo)->undecodable);  // not for the open project's video
     CHECK(sources.count() == 0);  // the open project's sources not set again for another's verdict
@@ -9421,9 +9443,9 @@ TEST_CASE("ProjectPanel's source row of a video refused for its layout says the 
         const QLabel* row = panel.findChild<QLabel*>("sourceFrame");
         REQUIRE(row);
         INFO("row: " << row->text().toStdString());
-        CHECK(row->text().endsWith(QString::fromUtf8(" · AV1 10 бит, монохромный или особый формат")));
+        CHECK(row->text().endsWith(QString::fromUtf8(" · AV1 10 бит, монохромный")));
         CHECK_FALSE(row->text().contains(QString::fromUtf8("8 бит 4:2:0")));  // not the layout the probe has
-        CHECK(row->toolTip() == QString::fromUtf8("Поток: 10 бит, монохромный или особый формат; на этом компьютере не декодируется"));
+        CHECK(row->toolTip() == QString::fromUtf8("Поток: 10 бит, монохромный; на этом компьютере не декодируется"));
     }
     // a part in another layout and of another size, refused for its frame: both said
     DecodeSupport part = JudgeDecode(StreamPartInfo(probe, "yuv420p10le", 384, 224), &caps);

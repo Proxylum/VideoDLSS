@@ -115,8 +115,8 @@ public:
     // TASK-0076: whether a task or a preview runs or waits (ProjectTasks, from the queue): with a check of the model's, the viewport does
     // not hold NVDEC between frames meanwhile
     void setTasksRunning(bool running);
-    // TASK-0076: a refusal the viewport met on the source as a verdict (the probe did not learn the layout and NVDEC refused the first
-    // frame, NVDEC refused a later frame or a part of the stream in other parameters) becomes the plan's verdict
+    // TASK-0076: a verdict the viewport holds on the source (FrameStore::Undecodable: a loader's refusal or one remembered for the file)
+    // the plan did not have becomes the plan's verdict
     void noteSourceRefused();
     // a stage the run would refuse although the plan exists (depth does not fit the GPU, TASK-0039): «Обработать» waits
     QString planBlocker() const;

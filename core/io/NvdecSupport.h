@@ -112,7 +112,7 @@ bool FakeNvdecRefusesLater();
 DecodeSupport RefusedDecode(const VideoStreamInfo& info, DecodeBlock block, const std::string& detail);
 
 // One line for `dlssvid info`: «software (h264); NVDEC with --hwaccel cuda when the GPU decodes this layout», «software (prores); NVDEC
-// does not decode this codec», «software (vp9); not NVDEC even with --hwaccel cuda: an odd frame height (803) - …», «NVDEC only (av1: no software AV1 decoder in this build), on '<gpu>', AV1 8-bit 4:2:0 up to WxH» (or
+// does not decode this codec», «software (vp9); not NVDEC even with --hwaccel cuda: an odd frame height (1920x803, the frame as stored) - …», «NVDEC only (av1: no software AV1 decoder in this build), on '<gpu>', AV1 8-bit 4:2:0 up to WxH» (or
 // «..., not checked: <why>»), «unavailable - <why>».
 std::string DescribeDecode(const DecodeSupport& support);
 

@@ -11,7 +11,8 @@ namespace dlssvid {
 QString SourceDecodeText(const DecodeSupport& support);
 // The cell label's suffix for such a video: « · не декодируется».
 QString SourceDecodeShort();
-// A sample layout in the GUI's words: «10 бит 4:4:4», «8 бит, монохромный или особый формат» (VideoStreamInfo::chroma "other")
-QString DecodeLayoutText(int bitDepth, const std::string& chroma);
+// A sample layout in the GUI's words: «10 бит 4:4:4», for VideoStreamInfo::chroma "other" by the pixel format «8 бит RGB», «8 бит,
+// монохромный», else «8 бит, монохромный или особый формат»
+QString DecodeLayoutText(int bitDepth, const std::string& chroma, const std::string& pixelFormat = {});
 
 }  // namespace dlssvid

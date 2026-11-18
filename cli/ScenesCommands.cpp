@@ -38,7 +38,8 @@ int CmdScenes(const ScenesCommands::Args& a) {
     // TASK-0076: AV1 without NVDEC AV1 refused before the preparation - when the command decodes: not to re-derive the cuts from stored
     // scores, nor to write the pass off (--threshold 0)
     const bool decodes = a.threshold > 0.0;
-    if (decodes && a.reanalyze) decoder.RequireDecodable();
+    // no stored scores to re-derive from (--reanalyze, or no scenes pass in the root at all): it will decode - refused before the hash
+    if (decodes && (a.reanalyze || ListPassVersions(a.output, kScenesPass).empty())) decoder.RequireDecodable();
     const auto& info = decoder.Info();
     ScenesStageOptions o;
     o.threshold = a.threshold;

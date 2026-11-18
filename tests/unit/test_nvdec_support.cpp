@@ -477,6 +477,16 @@ TEST_CASE("PickNvdecFormat: CUDA when offered; else a hardware-only decoder choo
     // TASK-0076: a codec with a software path whose frame is of an odd height (VP9 1920x803, MPEG-2 ...): FFmpeg's NVDEC maps its chroma a
     // row off - the software format (the list's last) though CUDA is offered; an even height, or none known: CUDA as before
     const AVPixelFormat vp9List[] = {AV_PIX_FMT_D3D11, AV_PIX_FMT_CUDA, AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE};
+    // the height judged (NvdecJudgedHeight): the shown one when odd - H.264 / HEVC code 191 rows as 192 and crop them -, else the coded one
+    CHECK(NvdecJudgedHeight(191, 192) == 191);
+    CHECK(NvdecJudgedHeight(803, 803) == 803);
+    CHECK(NvdecJudgedHeight(192, 192) == 192);
+    CHECK(NvdecJudgedHeight(1080, 1088) == 1088);
+    const AVPixelFormat h264List[] = {AV_PIX_FMT_D3D11VA_VLD, AV_PIX_FMT_D3D11, AV_PIX_FMT_CUDA, AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE};
+    CHECK(PickNvdecFormat(h264List, false, NvdecJudgedHeight(191, 192)) == AV_PIX_FMT_YUV420P);  // cropped to an odd height: software
+    CHECK(PickNvdecFormat(h264List, false, NvdecJudgedHeight(803, 803)) == AV_PIX_FMT_YUV420P);
+    CHECK(PickNvdecFormat(h264List, false, NvdecJudgedHeight(192, 192)) == AV_PIX_FMT_CUDA);
+    CHECK(PickNvdecFormat(h264List, false, NvdecJudgedHeight(1080, 1088)) == AV_PIX_FMT_CUDA);
     CHECK(PickNvdecFormat(vp9List, false, 803) == AV_PIX_FMT_YUV420P);
     CHECK(PickNvdecFormat(vp9List, false, 191) == AV_PIX_FMT_YUV420P);
     CHECK(PickNvdecFormat(vp9List, false, 804) == AV_PIX_FMT_CUDA);
@@ -1188,12 +1198,14 @@ TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit
     VideoStreamInfo h264Odd = H264Info();
     h264Odd.height = h264Odd.codedHeight = 191;
     CHECK(DescribeDecode(JudgeDecode(h264Odd, nullptr)) ==
-          "software (h264); not NVDEC even with --hwaccel cuda: an odd frame height (191) - FFmpeg's NVDEC gives its chroma wrong");
+          "software (h264); not NVDEC even with --hwaccel cuda: an odd frame height (320x191, the frame as stored) - FFmpeg's NVDEC gives its "
+          "chroma wrong");
     VideoStreamInfo vp9 = SoftwareInfo("vp9", true);
     vp9.width = vp9.codedWidth = 1920;
     vp9.height = vp9.codedHeight = 803;
     CHECK(DescribeDecode(JudgeDecode(vp9, nullptr)) ==
-          "software (vp9); not NVDEC even with --hwaccel cuda: an odd frame height (803) - FFmpeg's NVDEC gives its chroma wrong");
+          "software (vp9); not NVDEC even with --hwaccel cuda: an odd frame height (1920x803, the frame as stored) - FFmpeg's NVDEC gives its "
+          "chroma wrong");
     vp9.height = vp9.codedHeight = 804;
     CHECK(DescribeDecode(JudgeDecode(vp9, nullptr)) == "software (vp9); NVDEC with --hwaccel cuda when the GPU decodes this layout");
     VideoStreamInfo ffv1Odd = Ffv1Info();  // NVDEC does not decode it at all: that, not the height
@@ -1320,4 +1332,19 @@ TEST_CASE("DLSSVID_FAKE_NVDEC_AV1 is said once per value, not once per process: 
     CHECK(code == 0);
     CHECK_THAT(out, ContainsSubstring("All tests passed"));
     CHECK_THAT(out, ContainsSubstring("1 test case"));
+}
+
+TEST_CASE("LayoutKindOf: what a chroma other than 4:2:0 / 4:2:2 / 4:4:4 is - RGB, one component (grey), else other", "[unit][av1]") {
+    for (const char* rgb : {"gbrp", "bgr0", "rgb24", "gbrp10le"}) {
+        INFO(rgb);
+        CHECK(LayoutKindOf(rgb) == "rgb");
+    }
+    for (const char* gray : {"gray", "gray10le", "gray12le"}) {
+        INFO(gray);
+        CHECK(LayoutKindOf(gray) == "gray");
+    }
+    for (const char* other : {"yuv420p", "yuv444p12le", "", "unknown", "nonsense"}) {
+        INFO(other);
+        CHECK(LayoutKindOf(other) == "other");
+    }
 }

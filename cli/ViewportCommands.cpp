@@ -516,7 +516,7 @@ void ViewportCommands::Register(CLI::App& app) {
     proxy_->add_option("--passes", xa_.passes, "passes root folder");
     proxy_->add_option("--result", xa_.result, "result video");
     proxy_->add_option("--sources", xa_.sources, "comma-separated: source, result")->default_val("source,result");
-    proxy_->add_flag("--force", xa_.force, "rebuild even a valid proxy");
+    proxy_->add_flag("--force", xa_.force, "rebuild even a valid proxy (one of a video that cannot be decoded here is kept)");
     proxy_->add_flag("--check", xa_.check, "print what is needed and what exists; build nothing");
     proxy_->add_flag("--background", xa_.background, "below-normal priority (the GUI builds while you work)");
     proxy_->add_option("--max-gb,--max_gb", xa_.maxGb, "skip a proxy estimated above this size or above a quarter of the free disk (0 = no limit)");

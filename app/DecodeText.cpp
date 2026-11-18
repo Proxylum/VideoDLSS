@@ -2,17 +2,22 @@
 
 #include <QCoreApplication>
 
+#include "io/VideoDecoder.h"
+
 namespace dlssvid {
 
 namespace {
 QString Tr(const char* s) { return QCoreApplication::translate("DecodeText", s); }
 
-QString LayoutText(const DecodeSupport& s) { return DecodeLayoutText(s.bitDepth, s.chroma); }
+QString LayoutText(const DecodeSupport& s) { return DecodeLayoutText(s.bitDepth, s.chroma, s.pixelFormat); }
 }  // namespace
 
-QString DecodeLayoutText(int bitDepth, const std::string& chroma) {  // «10 бит 4:4:4», «8 бит, монохромный или особый формат»
+QString DecodeLayoutText(int bitDepth, const std::string& chroma, const std::string& pixelFormat) {  // «10 бит 4:4:4», «8 бит RGB»
     if (chroma == "420" || chroma == "422" || chroma == "444")
         return Tr("%1 бит %2:%3:%4").arg(bitDepth).arg(chroma[0]).arg(chroma[1]).arg(chroma[2]);
+    const std::string kind = LayoutKindOf(pixelFormat);  // TASK-0076: «other» told apart where the format says it
+    if (kind == "rgb") return Tr("%1 бит RGB").arg(bitDepth);
+    if (kind == "gray") return Tr("%1 бит, монохромный").arg(bitDepth);
     return Tr("%1 бит, монохромный или особый формат").arg(bitDepth);
 }
 
