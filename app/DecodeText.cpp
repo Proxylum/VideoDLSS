@@ -18,6 +18,8 @@ QString DecodeLayoutText(int bitDepth, const std::string& chroma, const std::str
     const std::string kind = LayoutKindOf(pixelFormat);  // TASK-0076: «other» told apart where the format says it
     if (kind == "rgb") return Tr("%1 бит RGB").arg(bitDepth);
     if (kind == "gray") return Tr("%1 бит, монохромный").arg(bitDepth);
+    if (kind == "palette") return Tr("%1 бит, палитра").arg(bitDepth);
+    if (kind.size() == 3) return Tr("%1 бит %2:%3:%4").arg(bitDepth).arg(kind[0]).arg(kind[1]).arg(kind[2]);  // 4:1:1, 4:4:0 ...
     return Tr("%1 бит, монохромный или особый формат").arg(bitDepth);
 }
 

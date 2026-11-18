@@ -38,6 +38,12 @@
 #include <spdlog/sinks/ostream_sink.h>
 #include <sstream>
 
+extern "C" {
+#include <libavcodec/bsf.h>
+#include <libavformat/avformat.h>
+#include <libavutil/opt.h>
+}
+
 #ifdef DLSSVID_WITH_CUDA
 #include <cuda.h>
 #include <cuda_runtime_api.h>
@@ -2654,15 +2660,6 @@ TEST_CASE("NVDEC with a software path: an odd frame height (MPEG-4 320x191) deco
     const auto even = WriteClip(dir / "even.mkv", spec);
     VideoDecoder::Options cuda;
     cuda.hwaccel = HwAccel::Cuda;
-    {
-        // the even one: NVDEC (the path is there for this codec here)
-        VideoDecoder dec(even, cuda);
-        CpuFrame f;
-        GpuFrame g;
-        REQUIRE(dec.NextFrame(f, &g));
-        if (!dec.DecodesOnNvdec()) SKIP("NVDEC does not decode MPEG-4 here");
-        CHECK(g.Valid());
-    }
     // the odd one: software from the open (no CUDA device, no GpuFrame), said once; the frames as the software decode's
     std::ostringstream text;
     std::vector<CpuFrame> hard;
@@ -2693,6 +2690,16 @@ TEST_CASE("NVDEC with a software path: an odd frame height (MPEG-4 320x191) deco
     INFO(log);
     CHECK(CountOf(log, odd.string() + ": an odd height (191): FFmpeg's NVDEC gives its chroma wrong, decoding in software") == 1);
     CHECK(CountOf(log, "a frame of an odd height") == 0);  // get_format's warning: for a size met later only
+    {
+        // the even one: NVDEC where this GPU decodes MPEG-4 (last: the odd-height checks above hold on any NVIDIA GPU)
+        VideoDecoder dec(even, cuda);
+        CpuFrame f;
+        GpuFrame g;
+        REQUIRE(dec.NextFrame(f, &g));
+        if (!dec.DecodesOnNvdec()) SKIP("NVDEC does not decode MPEG-4 here");
+        CHECK(dec.UsingHwAccel());
+        CHECK(g.Valid());
+    }
 }
 
 TEST_CASE("NVDEC with a software path: an H.264 stream of an odd height (cropped from 192) with --hwaccel cuda gives the software decode's frames, the chroma's last row too",
@@ -3039,4 +3046,107 @@ TEST_CASE("A codec NVDEC does not decode (ProRes) of an odd height with --hwacce
     REQUIRE(frames.size() == soft.size());
     for (size_t i = 0; i < frames.size(); ++i) CHECK((frames[i].data == soft[i].data));
     CHECK(CountOf(log, "odd height") == 0);  // no CUDA in the decoder's list: not the height's doing
+}
+
+namespace {
+// `in`'s video stream through the bitstream filter `bsf` with `options` ("key=value", ...) into `out` (the same container kind); false: the
+// filter is not in this build
+bool WithBitstreamFilter(const std::filesystem::path& in, const std::filesystem::path& out, const char* bsf,
+                         const std::vector<std::pair<const char*, const char*>>& options) {
+    const AVBitStreamFilter* filter = av_bsf_get_by_name(bsf);
+    if (!filter) return false;
+    AVFormatContext* ic = nullptr;
+    REQUIRE(avformat_open_input(&ic, in.string().c_str(), nullptr, nullptr) == 0);
+    REQUIRE(avformat_find_stream_info(ic, nullptr) >= 0);
+    const int vi = av_find_best_stream(ic, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    REQUIRE(vi >= 0);
+    AVBSFContext* ctx = nullptr;
+    REQUIRE(av_bsf_alloc(filter, &ctx) == 0);
+    REQUIRE(avcodec_parameters_copy(ctx->par_in, ic->streams[vi]->codecpar) >= 0);
+    ctx->time_base_in = ic->streams[vi]->time_base;
+    for (const auto& [key, value] : options) REQUIRE(av_opt_set(ctx->priv_data, key, value, 0) == 0);
+    REQUIRE(av_bsf_init(ctx) == 0);
+    AVFormatContext* oc = nullptr;
+    REQUIRE(avformat_alloc_output_context2(&oc, nullptr, nullptr, out.string().c_str()) >= 0);
+    AVStream* os = avformat_new_stream(oc, nullptr);
+    REQUIRE(os);
+    REQUIRE(avcodec_parameters_copy(os->codecpar, ctx->par_out) >= 0);
+    os->codecpar->codec_tag = 0;
+    os->time_base = ctx->time_base_out;
+    REQUIRE(avio_open(&oc->pb, out.string().c_str(), AVIO_FLAG_WRITE) >= 0);
+    REQUIRE(avformat_write_header(oc, nullptr) >= 0);
+    AVPacket* pkt = av_packet_alloc();
+    auto drain = [&] {
+        while (av_bsf_receive_packet(ctx, pkt) == 0) {
+            av_packet_rescale_ts(pkt, ctx->time_base_out, os->time_base);
+            pkt->stream_index = 0;
+            REQUIRE(av_interleaved_write_frame(oc, pkt) >= 0);
+        }
+    };
+    while (av_read_frame(ic, pkt) >= 0) {
+        if (pkt->stream_index != vi) {
+            av_packet_unref(pkt);
+            continue;
+        }
+        REQUIRE(av_bsf_send_packet(ctx, pkt) == 0);
+        drain();
+    }
+    REQUIRE(av_bsf_send_packet(ctx, nullptr) == 0);
+    drain();
+    REQUIRE(av_write_trailer(oc) == 0);
+    av_packet_free(&pkt);
+    avio_closep(&oc->pb);
+    avformat_free_context(oc);
+    av_bsf_free(&ctx);
+    avformat_close_input(&ic);
+    return true;
+}
+}  // namespace
+
+TEST_CASE("NVDEC: an H.264 stream cropped at the top (its SPS) with --hwaccel cuda is not cut at the top-left corner - its frame as before the cut, the picture where it was",
+          "[integration][gpu][nvdec][regression]") {
+    const auto dir = Dir("h264_crop_top");
+    if (!HaveNvidia() || !VideoEncoder::EncoderAvailable("h264_nvenc")) SKIP("no NVIDIA GPU with h264_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 6;
+    spec.codec = "h264_nvenc";
+    std::string why;
+    const auto plain = WriteClipIfSupported(dir / "plain.mkv", spec, &why);
+    if (!plain) SKIP("h264_nvenc does not support the clip here: " << why);
+    // its SPS rewritten to crop 8 rows at the top: shown 320x184, coded 320x192 - FFmpeg crops a CUDA frame only on the right and the
+    // bottom (the pointers stay): crop_top stays on the frame
+    const auto cropped = dir / "cropped.mkv";
+    if (!WithBitstreamFilter(*plain, cropped, "h264_metadata", {{"crop_top", "8"}})) SKIP("no h264_metadata bitstream filter in this build");
+    const VideoStreamInfo info = VideoDecoder(cropped, VideoDecoder::Probe()).Info();
+    REQUIRE(info.height == kH - 8);
+    VideoDecoder plainDec(cropped);
+    const std::vector<CpuFrame> soft = DecodeAllOf(plainDec);  // software: cropped as it should be
+    REQUIRE(soft.size() == 6);
+    REQUIRE(soft[0].desc.height == kH - 8);
+    VideoDecoder::Options cuda;
+    cuda.hwaccel = HwAccel::Cuda;
+    VideoDecoder dec(cropped, cuda);
+    std::vector<CpuFrame> hard;
+    CpuFrame f;
+    while (dec.NextFrame(f)) hard.push_back(f);
+    REQUIRE(dec.DecodesOnNvdec());
+    REQUIRE(hard.size() == soft.size());
+    for (size_t i = 0; i < hard.size(); ++i) {
+        INFO("frame " << i);
+        // not cut to 184 keeping the top rows (that would move the picture 8 rows down): the surface's 192 rows, as before the task -
+        // the shown picture in its rows 8..191, as the software decode's
+        REQUIRE(hard[i].desc.width == kW);
+        REQUIRE(hard[i].desc.height == kH);
+        const size_t w = kW, cw = hard[i].desc.PlaneWidth(1);
+        int luma = 0, chroma = 0;
+        for (size_t r = 0; r < kH - 8; ++r) luma += std::memcmp(hard[i].Plane(0) + (r + 8) * w, soft[i].Plane(0) + r * w, w) == 0;
+        for (size_t r = 0; r < (kH - 8) / 2; ++r) {
+            chroma += std::memcmp(hard[i].Plane(1) + (r + 4) * cw, soft[i].Plane(1) + r * cw, cw) == 0;
+            chroma += std::memcmp(hard[i].Plane(2) + (r + 4) * cw, soft[i].Plane(2) + r * cw, cw) == 0;
+        }
+        CHECK(luma == static_cast<int>(kH - 8));
+        CHECK(chroma == static_cast<int>(kH - 8));
+    }
 }

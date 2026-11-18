@@ -14,7 +14,8 @@ namespace dlssvid {
 // A codec with a software path whose frame is of an odd height (VP9 1920x803 coded so; H.264 / HEVC 320x191 coded aligned and cropped):
 // its software format - FFmpeg's NVDEC gives the chroma of such a frame wrong (a row off, or its last row lost on the way to the host);
 // a hardware-only one is refused for it instead.
-AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly, int codedHeight = 0);
+// judgedHeight: what NvdecJudgedHeight(ctx->height, ctx->coded_height) gives (the shown height when odd, else the coded one); 0 - not judged
+AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly, int judgedHeight = 0);
 
 // TASK-0076: the height a frame is judged by for NVDEC: the shown one when it is odd (H.264 / HEVC code it aligned and crop it: 191 as
 // 192), else the coded one (VP9 codes it as it is)

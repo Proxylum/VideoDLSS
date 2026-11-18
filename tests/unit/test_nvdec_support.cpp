@@ -1343,7 +1343,19 @@ TEST_CASE("LayoutKindOf: what a chroma other than 4:2:0 / 4:2:2 / 4:4:4 is - RGB
         INFO(gray);
         CHECK(LayoutKindOf(gray) == "gray");
     }
-    for (const char* other : {"yuv420p", "yuv444p12le", "", "unknown", "nonsense"}) {
+    CHECK(LayoutKindOf("pal8") == "palette");  // one component, a colour palette: not grey
+    // a YUV: its J:a:b digits - the common ones and the rarer subsamplings
+    struct Yuv {
+        const char* format;
+        const char* kind;
+    };
+    for (const Yuv& y : {Yuv{"yuv420p", "420"}, Yuv{"yuv422p10le", "422"}, Yuv{"yuv444p12le", "444"}, Yuv{"yuv411p", "411"}, Yuv{"yuv440p", "440"},
+                         Yuv{"yuv410p", "410"}}) {
+        INFO(y.format);
+        CHECK(LayoutKindOf(y.format) == y.kind);
+    }
+    // a format not known: other
+    for (const char* other : {"", "unknown", "nonsense"}) {
         INFO(other);
         CHECK(LayoutKindOf(other) == "other");
     }

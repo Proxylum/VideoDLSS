@@ -98,8 +98,9 @@ struct Av1SequenceKey {
     bool operator==(const Av1SequenceKey&) const = default;
 };
 std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view sequenceHeader);
-// TASK-0076: what a chroma "other" is (VideoStreamInfo::chroma): "rgb" (gbrp, bgr0 ...), "gray" (one component), else "other" - for the
-// words a GUI says it in
+// TASK-0076: what a chroma "other" is (VideoStreamInfo::chroma): "palette" (pal8), "rgb" (gbrp, bgr0 ...), "gray" (one component), a
+// YUV as its J:a:b digits ("420", "444"; for a chroma "other": "411", "440", "410"), else "other" (an unknown format) - for the words
+// a GUI says it in
 std::string LayoutKindOf(const std::string& pixelFormat);
 
 struct DecodeSupport;

@@ -277,8 +277,13 @@ std::optional<Av1SequenceKey> Av1SequenceKeyOf(std::string_view header) {
 std::string LayoutKindOf(const std::string& pixelFormat) {
     const AVPixFmtDescriptor* d = pixelFormat.empty() ? nullptr : av_pix_fmt_desc_get(av_get_pix_fmt(pixelFormat.c_str()));
     if (!d) return "other";
+    if (d->flags & AV_PIX_FMT_FLAG_PAL) return "palette";  // pal8: one component, a colour palette
     if (d->flags & AV_PIX_FMT_FLAG_RGB) return "rgb";
     if (d->nb_components < 3) return "gray";
+    // a YUV: its J:a:b ("420"; for a chroma "other" - 4:1:1 DV NTSC, 4:4:0 some MJPEG, 4:1:0)
+    const int a = 4 >> d->log2_chroma_w;
+    const int b = d->log2_chroma_h == 0 ? a : 0;
+    if (a >= 1 && d->log2_chroma_h <= 2) return "4" + std::to_string(a) + std::to_string(b);
     return "other";
 }
 
@@ -953,7 +958,9 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         // TASK-0076: NVDEC's frame comes at its surface's size (even sides: a 853-wide AV1 as 854), the frame's own is codec_'s - cut to
         // it, as FFmpeg's apply_cropping does for a hardware frame of a codec that exports cropping (the width and height; the pointers
         // and the pitch stay - the chroma of 853 and 854 is as wide)
-        if (frameW > 0 && frameH > 0 && (frameW < frame_->width || frameH < frame_->height)) {
+        // (not a frame FFmpeg left cropped on the left or the top - H.264 / HEVC: the cut keeps the top-left corner, it would shift the
+        // picture; such a frame comes as it did before, at its surface's width)
+        if (frameW > 0 && frameH > 0 && frame_->crop_left == 0 && frame_->crop_top == 0 && (frameW < frame_->width || frameH < frame_->height)) {
             frame_->width = std::min(frame_->width, frameW);
             frame_->height = std::min(frame_->height, frameH);
         }

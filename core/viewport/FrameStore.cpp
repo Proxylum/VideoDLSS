@@ -444,7 +444,9 @@ void FrameStore::ReleaseNvdecAfterLoad(const std::string& source) {
         if (const auto it = runtimes_.find(source); it != runtimes_.end()) rt = it->second.get();
     }
     if (!rt || (holdNvdec_ && !rt->releasePending)) return;
-    std::lock_guard<std::mutex> guard(rt->mutex);
+    // busy: the loader that holds it closes it after its own load (it comes here too) - not waited for (a walk on a long GOP)
+    std::unique_lock<std::mutex> guard(rt->mutex, std::try_to_lock);
+    if (!guard.owns_lock()) return;
     rt->releasePending = false;
     if (rt->decoder && rt->decoder->HoldsCudaDevice()) rt->decoder.reset();
 }

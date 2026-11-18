@@ -70,11 +70,11 @@ bool HardwareOnlyDecoder(const AVCodec* codec) {
     return codec && codec->id == AV_CODEC_ID_AV1 && std::string(codec->name) == "av1" && HasNvdecHwaccel(codec);
 }
 
-AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly, int codedHeight) {
+AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly, int judgedHeight) {
     const AVPixelFormat* last = formats;  // the software format, as FFmpeg's ff_get_format reads it
     while (*last != AV_PIX_FMT_NONE && *(last + 1) != AV_PIX_FMT_NONE) ++last;
     if (hardwareOnly && !Av1NvdecLayout(*last)) return AV_PIX_FMT_NONE;  // gray, 4:4:4, 12-bit: refused with that layout's reason
-    if (!hardwareOnly && codedHeight % 2 == 1 && *last != AV_PIX_FMT_NONE) return *last;  // the chroma a row off on NVDEC: software
+    if (!hardwareOnly && judgedHeight % 2 == 1 && *last != AV_PIX_FMT_NONE) return *last;  // the chroma a row off on NVDEC: software
     for (const AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p)
         if (*p == AV_PIX_FMT_CUDA) return *p;
     // no CUDA on offer: a decoder with a software path goes on with FFmpeg's cascade from the first format (as before); a hardware-only

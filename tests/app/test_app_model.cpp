@@ -7579,6 +7579,10 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     CHECK(DecodeLayoutText(8, "other", "unknown") == QString::fromUtf8("8 бит, монохромный или особый формат"));
     CHECK(DecodeLayoutText(8, "other", "") == QString::fromUtf8("8 бит, монохромный или особый формат"));
     CHECK(DecodeLayoutText(10, "420", "gray10le") == QString::fromUtf8("10 бит 4:2:0"));  // a chroma known: that
+    CHECK(DecodeLayoutText(8, "420", "yuv420p") == QString::fromUtf8("8 бит 4:2:0"));
+    CHECK(DecodeLayoutText(8, "other", "pal8") == QString::fromUtf8("8 бит, палитра"));
+    CHECK(DecodeLayoutText(8, "other", "yuv411p") == QString::fromUtf8("8 бит 4:1:1"));
+    CHECK(DecodeLayoutText(8, "other", "yuv440p") == QString::fromUtf8("8 бит 4:4:0"));
     // TASK-0076: a part of the video in other parameters (a new sequence header): the same reasons, said of that part
     DecodeSupport layoutPart = JudgeDecode(Av1StreamInfo("yuv420p12le", 12, "420"), nullptr);
     REQUIRE(layoutPart.block == DecodeBlock::Layout);
@@ -8959,6 +8963,8 @@ TEST_CASE("AppModel: a background proxy build's verdict is its videos' - a proje
     BuildProxy(other, secondPasses, "source");  // the second project shows its video by a proxy: no NVDEC, no build of its own
     REQUIRE(ValidProxy(other, secondPasses, "source"));
     std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    std::ostringstream text;
+    LogCapture capture(text);  // from before the model: the sinks are not changed while its loaders log
     AppModel model(true);
     model.openProject(Q(first));
     REQUIRE(model.hasProject());
@@ -8974,11 +8980,8 @@ TEST_CASE("AppModel: a background proxy build's verdict is its videos' - a proje
     REQUIRE(model.proxyBuilding());
     QSignalSpy sources(&model, &AppModel::sourcesChanged);
     QSignalSpy messages(&model, &AppModel::message);
-    std::ostringstream text;
-    {
-        LogCapture capture(text);
-        Pump([&] { return !model.proxyBuilding(); }, 60000);
-    }
+    const size_t logged = text.str().size();  // (the loaders at rest)
+    Pump([&] { return !model.proxyBuilding(); }, 60000);
     REQUIRE_FALSE(model.proxyBuilding());
     {
         // the open project's videos: no word of the other's build (its proxy is there); that build's reasons in the log
@@ -8986,8 +8989,9 @@ TEST_CASE("AppModel: a background proxy build's verdict is its videos' - a proje
         for (const auto& m : messages) said << m[0].toString();
         INFO("messages: " << said.join(" | ").toStdString());
         CHECK_FALSE(said.join(" | ").contains(QString::fromUtf8("Прокси для перемотки не построен")));
-        INFO(text.str());
-        CHECK(text.str().find("viewport proxy: source: no proxy, the video cannot be decoded here: ") != std::string::npos);
+        const std::string since = text.str().substr(logged);
+        INFO(since);
+        CHECK(since.find("viewport proxy: source: no proxy, the video cannot be decoded here: ") != std::string::npos);
     }
     CHECK(FrameStore::VideoSource("source", firstVideo)->undecodable);        // the verdict kept for the video it was on
     CHECK_FALSE(FrameStore::VideoSource("source", secondVideo)->undecodable);  // not for the open project's video
@@ -10091,6 +10095,8 @@ TEST_CASE("A task queued while a stage check runs keeps the viewport off NVDEC: 
     if (clip.empty()) SKIP(why);
     AutoProxySetting autoProxy(false);
     std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    std::ostringstream text;
+    LogCapture capture(text);  // from before the model: the sinks are not changed while its loaders log
     AppModel model(false);  // the GPU's own adapter: a check (DLSS-G here) is offered only there
     TaskQueue queue;
     ProjectTasks tasks(model, queue);
@@ -10111,22 +10117,18 @@ TEST_CASE("A task queued while a stage check runs keeps the viewport off NVDEC: 
     model.setTime(0.5);
     SettleAny(model, 6, 18);
     REQUIRE(model.store().StartFailure("source"));
-    std::ostringstream text;
-    int task = -1;
-    {
-        LogCapture capture(text);
-        task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});  // a run of the project: the check goes, the run holds the GPU
-        REQUIRE(task >= 0);
-        CHECK_FALSE(model.checkRunning());
-        Pump(
-            [&] {
-                model.store().Update();
-                return false;
-            },
-            800);
-        SettleAny(model, 6, 18);
-    }
-    const std::string log = text.str();
+    const size_t logged = text.str().size();  // (the loaders at rest)
+    const int task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});  // a run of the project: the check goes, the run holds the GPU
+    REQUIRE(task >= 0);
+    CHECK_FALSE(model.checkRunning());
+    Pump(
+        [&] {
+            model.store().Update();
+            return false;
+        },
+        800);
+    SettleAny(model, 6, 18);
+    const std::string log = text.str().substr(logged);
     INFO(log);
     size_t tries = 0;
     for (size_t at = log.find("NVDEC did not start now"); at != std::string::npos; at = log.find("NVDEC did not start now", at + 1)) ++tries;
