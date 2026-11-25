@@ -723,7 +723,10 @@ void FrameStore::LoaderMain() {
             inFlight_.erase(key);
             if (prefetch) --prefetchActive_;
             cv_.notify_all();  // a current frame done: the prefetch waiting for it may start
-            if (result.aborted) {
+            // TASK-0076: a load that published nothing (LoadOne found the frame published already, waiting for Update) as well: a
+            // retry (RetryStartFailures at a task's end) may have forgotten that missing frame meanwhile - its requeue skipped the key in
+            // flight; without this nobody loads it again until the time moves
+            if (result.aborted || result.loaded.empty()) {
                 // dropped before decoding (TASK-0040). In the same critical section as the erase: if the time came back to
                 // this frame meanwhile, SetCurrentTime skipped it (it was in flight) - queue it again, or nobody loads it
                 queued_.erase(key);
