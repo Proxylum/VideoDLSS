@@ -2803,6 +2803,57 @@ TEST_CASE("An AV1 stream of an odd frame height is refused before any frame; a p
     }
 }
 
+TEST_CASE("A 10-bit part of an odd height after an 8-bit part is refused in its own layout - as its words say it and VerdictFromWhy reads them",
+          "[integration][gpu][av1][regression]") {
+    const auto dir = Dir("odd_part_ten_bit");
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 16;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto a = WriteClipIfSupported(dir / "a.ivf", spec, &why);
+    if (!a) SKIP("av1_nvenc does not support the clip here: " << why);
+    ClipSpec ten = spec;  // Main 10 (p010 in), its sequence headers then cut by a row: 320x191
+    ten.pixFmt = "p010le";
+    const auto b = WriteClipIfSupported(dir / "b10.ivf", ten, &why);
+    if (!b) SKIP("av1_nvenc writes no 10-bit clip here: " << why);
+    const auto parts = ConcatIvf(*a, *b, dir / "parts10.ivf", [](const std::string& u) { return ShorterFrameTemporalUnit(u, 1); });
+    const VideoStreamInfo probe = VideoDecoder(parts, VideoDecoder::Probe()).Info();
+    REQUIRE(probe.pixelFormat == "yuv420p");  // the probe sees the 8-bit part
+    REQUIRE(probe.codedHeight == kH);
+    VideoDecoder dec(parts);
+    CpuFrame f;
+    int frames = 0;
+    std::optional<DecodeUnavailable> refused;
+    try {
+        while (dec.NextFrame(f)) ++frames;
+        FAIL("the part of an odd height decoded: " << frames << " frames");
+    } catch (const DecodeUnavailable& e) {
+        refused = e;
+    }
+    REQUIRE(refused);
+    CHECK(frames == 16);
+    const DecodeSupport& viewport = refused->support;  // ReceiveFrame's verdict, as a loader keeps it
+    CHECK(viewport.block == DecodeBlock::OddHeight);
+    CHECK(viewport.part);
+    CHECK(viewport.width == kW);
+    CHECK(viewport.height == kH - 1);
+    CHECK(viewport.pixelFormat == "yuv420p10le");  // the part's layout, not the probe's
+    CHECK(viewport.bitDepth == 10);
+    CHECK_THAT(viewport.why, Catch::Matchers::EndsWith("(at frame 16, on a part of the stream in other parameters (yuv420p10le 320x191))"));
+    // another process's line read back (the GUI reading the proxy build's): the same verdict
+    const DecodeSupport read = VerdictFromWhy(probe, viewport.why, "the proxy build");
+    CHECK(read.block == DecodeBlock::OddHeight);
+    CHECK(read.part);
+    CHECK(read.pixelFormat == viewport.pixelFormat);
+    CHECK(read.bitDepth == viewport.bitDepth);
+    CHECK(read.width == viewport.width);
+    CHECK(read.height == viewport.height);
+}
+
 TEST_CASE("FrameStore::RememberRefusedFile with keep: a verdict remembered for the very file stays; a file written again since takes the new one",
           "[integration][viewport][gpu][av1]") {
     const auto dir = Dir("refused_keep");

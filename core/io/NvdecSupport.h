@@ -67,9 +67,10 @@ struct DecodeSupport {
     int bitDepth = 8;
     std::string chroma;  // VideoStreamInfo::chroma: "420" | "422" | "444" | "other" (gray among them)
     unsigned width = 0, height = 0;  // the stored frame
-    // the verdict is on a part of the stream in other parameters than the probe's (a new sequence header): VideoDecoder::CheckDecode -
-    // pixelFormat ... width / height are that part's -, ReceiveFrame and VerdictFromWhy for OddHeight - width / height the part's, the
-    // layout the probe's -, the GUI reading the proxy build's
+    // the verdict is on a part of the stream in other parameters than the probe's (a new sequence header): VideoDecoder::CheckDecode,
+    // ReceiveFrame for OddHeight and VerdictFromWhy reading a part's words - pixelFormat ... width / height are that part's (its layout
+    // not said, «?»: the probe's) -; VerdictFromWhy reading a refusal by its size alone (no part's words) - the size the part's, the
+    // layout the probe's; the GUI reading the proxy build's
     bool part = false;
     NvdecAv1Caps caps;
     bool Ok() const { return block == DecodeBlock::None; }

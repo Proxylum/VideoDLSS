@@ -981,15 +981,17 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         // part in other parameters - said in the words too (as CheckDecode's): another process reads it back (VerdictFromWhy), its probe
         // knowing nothing of this decoder's sequences
         const bool part = (info_.pixelFormat != "unknown" && info_.codedHeight % 2 == 0 && info_.codedHeight > 0) || decodedOtherSequence_;
+        // a part's own layout (av1dec set it with its sequence header): the verdict's, as its words say it and VerdictFromWhy reads them
+        const std::string partFormat = part && codec_->sw_pix_fmt != AV_PIX_FMT_NONE ? av_get_pix_fmt_name(codec_->sw_pix_fmt) : "";
         if (part) {
             StreamPart words;
-            words.pixelFormat = codec_->sw_pix_fmt != AV_PIX_FMT_NONE ? av_get_pix_fmt_name(codec_->sw_pix_fmt) : "?";
+            words.pixelFormat = partFormat.empty() ? "?" : partFormat;
             words.codedWidth = w;
             words.codedHeight = h;
             frame += StreamPartWords(words);
         }
         av_frame_unref(frame_);
-        DecodeSupport s = RefusedDecode(StreamPartInfo(info_, "", w, h), DecodeBlock::OddHeight, frame);
+        DecodeSupport s = RefusedDecode(StreamPartInfo(info_, partFormat, w, h), DecodeBlock::OddHeight, frame);
         s.part = part;
         refused_ = std::make_shared<const DecodeSupport>(std::move(s));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
