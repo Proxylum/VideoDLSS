@@ -661,11 +661,12 @@ void FrameStore::LoaderMain() {
             if (prefetch) ++prefetchActive_;
         }
         LoadResult result;
-        std::optional<DecodeSupport> startFailure;  // TASK-0076: recorded after the missing frame is published (below)
+        std::optional<DecodeSupport> startFailure;  // TASK-0076: marked with the missing frame (Publish)
         try {
             result = LoadOne(key);
         } catch (const DecodeUnavailable& e) {  // TASK-0076: NVDEC refused the video - its later frames open no decoder
             SourceRuntime* refused = nullptr;
+            std::filesystem::path file;  // a start failure is said once per file: its words name the frame's place - another each seek
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 // a start failure (memory, the driver) is no verdict on the video: the next frame tries a new decoder
@@ -674,6 +675,7 @@ void FrameStore::LoaderMain() {
                     if (const ViewportSource* s = FindSource(key.source)) RememberRefusedFile(s->path, e.support);
                 } else {
                     startFailure = e.support;
+                    if (const ViewportSource* s = FindSource(key.source)) file = s->path;
                 }
                 if (const auto it = runtimes_.find(key.source); it != runtimes_.end()) refused = it->second.get();
             }
@@ -681,7 +683,8 @@ void FrameStore::LoaderMain() {
                 std::lock_guard<std::mutex> guard(refused->mutex);
                 refused->decoder.reset();
             }
-            const auto level = SaidOnce(e.what()) ? spdlog::level::warn : spdlog::level::debug;
+            const std::string once = !e.support.Transient() ? std::string(e.what()) : "start|" + (file.empty() ? key.source : RefusedKey(file));
+            const auto level = SaidOnce(once) ? spdlog::level::warn : spdlog::level::debug;
             if (e.support.Transient())
                 Log()->log(level, "'{}': NVDEC did not start now (its frames are asked for again later): {}", key.source, e.what());
             else
@@ -699,11 +702,7 @@ void FrameStore::LoaderMain() {
         }
         ReleaseNvdecAfterLoad(key.source);  // TASK-0076: a pending release, or a task running
         if (result.decodedOriginal) RetryStartFailures(key.source);  // TASK-0076: NVDEC works again - the frames a start failure left out come again
-        for (auto& l : result.loaded) Publish(std::move(l));
-        if (startFailure) {  // after the publish: a retry (another loader, a scrub) now finds both the mark and the missing frame
-            std::lock_guard<std::mutex> lock(mutex_);
-            startFailed_[key.source] = *startFailure;
-        }
+        for (auto& l : result.loaded) Publish(std::move(l), startFailure ? &*startFailure : nullptr);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             inFlight_.erase(key);
@@ -724,7 +723,7 @@ void FrameStore::LoaderMain() {
     }
 }
 
-void FrameStore::Publish(Loaded&& l) {
+void FrameStore::Publish(Loaded&& l, const DecodeSupport* startFailure) {
     if (!l.missing && !l.image.Empty() && !l.staged.texture) {
         // on the loader thread: the texture and the copy of the rows into an upload buffer (Update only records copies)
         l.bytes = l.image.ByteSize();
@@ -754,6 +753,9 @@ void FrameStore::Publish(Loaded&& l) {
         std::lock_guard<std::mutex> lock(mutex_);
         kept_.erase(l.key);
         current = !l.missing && IsCurrentLocked(l.key);
+        // TASK-0076: the mark with its missing frame - one who sees the frame missing (render's shownAt, a retry) sees the mark as well,
+        // and a retry erases both or neither
+        if (startFailure && l.missing) startFailed_[l.key.source] = *startFailure;
         loaded_.push_back(std::move(l));
         if (current) callback = onCurrentLoaded_;
     }

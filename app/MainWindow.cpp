@@ -249,8 +249,10 @@ void MainWindow::buildMenus() {
         for (const char* name : {"source", "result"})
             if (const ViewportSource* s = model_.store().FindSource(name); s && s->proxy.empty())
                 if (const auto d = model_.store().Undecodable(name))
-                    skipped << HumanSourceName(name) + ": " + SourceDecodeText(*d) + resultRewriteAdvice(name, *d);
-        if (!skipped.isEmpty()) QMessageBox::information(this, tr("Прокси для перемотки не строится"), skipped.join("\n\n"));
+                    skipped << tr("%1: прокси для перемотки не строится.").arg(HumanSourceName(name)) + "\n" + SourceDecodeText(*d) +
+                                   resultRewriteAdvice(name, *d);
+        // (the title says no more than its lines: another video's proxy may be building in the background meanwhile)
+        if (!skipped.isEmpty()) QMessageBox::information(this, tr("Прокси для перемотки"), skipped.join("\n\n"));
     });
     view->addAction(tr("Удалить прокси для перемотки"), this, [this] {
         // TASK-0076: a video this machine cannot decode is shown only from its proxy, and it is not built again here

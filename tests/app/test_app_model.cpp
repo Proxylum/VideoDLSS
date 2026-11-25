@@ -7565,10 +7565,24 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
                                                 transcode +
                                                 QString::fromUtf8(" или откройте его на компьютере с видеокартой, которая декодирует AV1 (например, RTX 30 и новее)."));
     // frames smaller than the sequence's (a frame size override): VideoDecoder's Resized
-    const DecodeSupport resized = RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::Resized, "a frame of 160x96, after 3 frames");
+    const DecodeSupport resized = RefusedDecode(Av1StreamInfo("yuv420p", 8), DecodeBlock::Resized, "a frame of 160x96, at frame 3");
     CHECK(SourceDecodeText(resized) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть кадры меньше размера, заявленного в файле "
                                                          "(320×192), а такие AV1 эта версия программы не декодирует. Что сделать: ") +
                                            transcode + ".");
+    // TASK-0076: no AV1 in NVDEC and an odd height known: said too - no GPU takes it in this build
+    {
+        VideoStreamInfo noAv1OddInfo = Av1StreamInfo("yuv420p", 8);
+        noAv1OddInfo.height = noAv1OddInfo.codedHeight = 191;
+        const DecodeSupport noAv1Odd = JudgeDecode(noAv1OddInfo, &noAv1);
+        REQUIRE(noAv1Odd.block == DecodeBlock::NoAv1);
+        CHECK(SourceDecodeText(noAv1Odd) ==
+              QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: видеокарта NVIDIA GeForce GTX 1080 не декодирует AV1 8 бит, а другого "
+                                "декодера AV1 в этой версии программы нет; к тому же высота его кадра в файле нечётная (320×191), а такой AV1 эта версия "
+                                "программы не декодирует ни на какой видеокарте. Что сделать: ") +
+                  transcode +
+                  QString::fromUtf8(" или в кадр с чётными сторонами — такой откроет компьютер с видеокартой, которая декодирует AV1 (например, RTX 30 и новее)."));
+        CHECK_FALSE(SourceDecodeText(JudgeDecode(Av1StreamInfo("yuv420p", 8), &noAv1)).contains(QString::fromUtf8("нечётная")));  // even: as before
+    }
     // TASK-0076: an odd frame height (FFmpeg's NVDEC gives its chroma a row off): of the video, and of a part of it
     VideoStreamInfo oddInfo = Av1StreamInfo("yuv420p", 8);
     oddInfo.height = oddInfo.codedHeight = 191;
@@ -7577,7 +7591,7 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
     CHECK(SourceDecodeText(odd) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: высота его кадра в файле нечётная (320×191), а такой AV1 "
                                                      "видеокарта в этой версии программы выдаёт со сдвинутым цветом, другого же декодера AV1 нет. Что "
                                                      "сделать: перекодируйте ролик в H.264 или HEVC другой программой или в кадр с чётными сторонами."));
-    DecodeSupport oddPart = RefusedDecode(oddInfo, DecodeBlock::OddHeight, "after 16 frames");
+    DecodeSupport oddPart = RefusedDecode(oddInfo, DecodeBlock::OddHeight, "at frame 16");
     oddPart.part = true;
     CHECK(SourceDecodeText(oddPart) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть, где высота кадра в файле нечётная "
                                                          "(320×191), а такой AV1 видеокарта в этой версии программы выдаёт со сдвинутым цветом, другого же "
@@ -8535,12 +8549,12 @@ TEST_CASE("The main window's menu item that builds the scrubbing proxies says in
     const DecodeSupport ofResult = CheckDecodeSupport(VideoDecoder(result, VideoDecoder::Probe()).Info());
     REQUIRE(ofSource.block == DecodeBlock::NoAv1);
     REQUIRE(ofResult.block == DecodeBlock::NoAv1);
-    const QString sourceWhy = HumanSourceName("source") + ": " + SourceDecodeText(ofSource);
-    const QString resultWhy = HumanSourceName("result") + ": " + SourceDecodeText(ofResult);
+    const QString sourceWhy = HumanSourceName("source") + QString::fromUtf8(": прокси для перемотки не строится.\n") + SourceDecodeText(ofSource);
+    const QString resultWhy = HumanSourceName("result") + QString::fromUtf8(": прокси для перемотки не строится.\n") + SourceDecodeText(ofResult);
     const QString advice =
         QString::fromUtf8("\nРезультат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».");
     CHECK(shownAfterBuild(both) == QStringList{sourceWhy + "\n\n" + resultWhy});  // the source not decodable either: no run to advise
-    CHECK(boxes.titles == QStringList{QString::fromUtf8("Прокси для перемотки не строится")});
+    CHECK(boxes.titles == QStringList{QString::fromUtf8("Прокси для перемотки")});
     CHECK_FALSE(boxes.texts.join("").contains(QString::fromUtf8("Кодирование")));
     CHECK(shownAfterBuild(ffv1Source) == QStringList{resultWhy + advice});  // the result alone: the source decodes - a run can write it again
     CHECK(boxes.texts.join("").contains(QString::fromUtf8("«Кодирование»")));
@@ -8878,7 +8892,7 @@ TEST_CASE("AppModel: the viewport's refusal of an AV1 source is no verdict on a 
     REQUIRE(model.planError().isEmpty());
     fake.emplace("later-frame");
     model.store().SetSources(model.store().Sources());  // the decoders open again under the stand-in
-    model.setTime(20.0 / 24.0);  // a fresh decoder walks there from frame 0: a few frames, then NVDEC refuses - the stream's verdict
+    model.setTime(20.0 / 24.0);  // a fresh decoder walks from frame 0 (within FrameStore's kWalkLimit) and NVDEC refuses after a few frames
     Pump(
         [&] {
             model.store().Update();
@@ -9783,7 +9797,7 @@ TEST_CASE("ProjectPanel's source row of a part refused for an odd frame height n
     if (clip.empty()) SKIP(why);
     // a part of 320x191 after the probe's 320x192 (VideoDecoder::ReceiveFrame's refusal: the probe's layout, the part's size)
     const VideoStreamInfo probe = VideoDecoder(clip, VideoDecoder::Probe()).Info();
-    DecodeSupport odd = RefusedDecode(StreamPartInfo(probe, "", 320, 191), DecodeBlock::OddHeight, "after 16 frames");
+    DecodeSupport odd = RefusedDecode(StreamPartInfo(probe, "", 320, 191), DecodeBlock::OddHeight, "at frame 16");
     odd.part = true;
     REQUIRE(FrameStore::RememberRefusedFile(clip, odd));
     {
@@ -9816,7 +9830,7 @@ TEST_CASE("ProjectPanel's source row of a part refused for an odd frame height n
     REQUIRE(unknownProbe.pixelFormat == "unknown");
     // an odd height met at the first frame, as ReceiveFrame says it of a stream whose layout the probe did not learn: the stream's own
     // height (the probe's size is the container's), no part
-    const DecodeSupport oddUnknown = RefusedDecode(StreamPartInfo(unknownProbe, "", 320, 191), DecodeBlock::OddHeight, "the first frame");
+    const DecodeSupport oddUnknown = RefusedDecode(StreamPartInfo(unknownProbe, "", 320, 191), DecodeBlock::OddHeight, "on the first frame");
     REQUIRE_FALSE(oddUnknown.part);
     REQUIRE(FrameStore::RememberRefusedFile(unknownOdd, oddUnknown));
     // a part refused for its frame size with the layout learned there (VideoDecoder::CheckDecode's: yuv420p)

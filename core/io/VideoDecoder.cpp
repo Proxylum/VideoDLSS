@@ -39,13 +39,25 @@ namespace {
 // AVCodecContext::opaque of a hardware-only decoder (TASK-0076): get_format must not fall back to a software format it does not have
 int kHardwareOnly = 1;
 
+// TASK-0076: a hardware-only decoder refused in get_format - av1dec's own words that follow («Your platform doesn't support hardware
+// accelerated AV1 decoding», «Failed to get pixel format») go to debug: the refusal is reported with its reason (CheckDecode), and they
+// would contradict a start failure. nvdec.c's words before it (cuvidCreateDecoder failing) stay; the context is not fed again (refused_)
+AVPixelFormat RefuseQuietly(AVCodecContext* ctx) {
+    ctx->log_level_offset = AV_LOG_DEBUG - AV_LOG_ERROR;
+    return AV_PIX_FMT_NONE;
+}
+
 AVPixelFormat GetHwFormat(AVCodecContext* ctx, const AVPixelFormat* formats) {
     const bool hardwareOnly = ctx->opaque == &kHardwareOnly;
-    if (hardwareOnly && FakeNvdecRefusesFrames()) return AV_PIX_FMT_NONE;  // DLSSVID_FAKE_NVDEC_AV1=first-frame | query-fails | start-fails (tests)
-    // the height as shown, else as coded: H.264 / HEVC code it aligned (191 as 192) and crop it - their last chroma row would be lost on
-    // the way to the host (FFmpeg copies height / 2 chroma rows)
-    const int height = NvdecJudgedHeight(ctx->height, ctx->coded_height);
+    if (hardwareOnly && FakeNvdecRefusesFrames()) return RefuseQuietly(ctx);  // DLSSVID_FAKE_NVDEC_AV1=first-frame | query-fails | start-fails (tests)
+    // the height as shown, else as coded: H.264 codes it aligned (191 as 192) and crops it - its last chroma row (4:2:0) would be lost on
+    // the way to the host (FFmpeg copies height / 2 chroma rows); a layout NvdecOddHeightSafe takes (HEVC 4:4:4) is not judged
+    const AVPixelFormat* last = formats;  // the software format, as FFmpeg's ff_get_format reads it
+    while (*last != AV_PIX_FMT_NONE && *(last + 1) != AV_PIX_FMT_NONE) ++last;
+    int height = NvdecJudgedHeight(ctx->height, ctx->coded_height);
+    if (height % 2 == 1 && NvdecOddHeightSafe(ctx->codec_id, *last)) height = 0;
     const AVPixelFormat f = PickNvdecFormat(formats, hardwareOnly, height);
+    if (hardwareOnly && f == AV_PIX_FMT_NONE) return RefuseQuietly(ctx);
     bool cudaOffered = false;  // a codec NVDEC does not decode (ProRes) is no odd height's fault
     for (const AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; ++p) cudaOffered = cudaOffered || *p == AV_PIX_FMT_CUDA;
     if (f != AV_PIX_FMT_CUDA && !hardwareOnly) {
@@ -609,9 +621,11 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     hwOnly_ = HardwareOnlyDecoder(decoder);
     probe_ = options.probe;
     sliceThreadsOnly_ = options.sliceThreadsOnly;
-    if (options.hwaccel == HwAccel::Cuda && !hwOnly_ && vs->codecpar->height % 2 == 1 && HasNvdecHwaccel(decoder)) {
+    if (options.hwaccel == HwAccel::Cuda && !hwOnly_ && vs->codecpar->height % 2 == 1 && HasNvdecHwaccel(decoder) &&
+        !NvdecOddHeightSafe(decoder->id, static_cast<AVPixelFormat>(vs->codecpar->format))) {
         // TASK-0076: an odd height (VP9 1920x803, H.264 cropped to 191 rows): FFmpeg's NVDEC gives its chroma wrong - software from the
         // open (with its threads; no CUDA device held), not from get_format (one thread). GetHwFormat still guards a size met later
+        // (HEVC 4:4:4 of an odd height stays on NVDEC: NvdecOddHeightSafe)
         Log()->log(options.probe ? spdlog::level::debug : spdlog::level::info,
                    "{}: an odd height ({}): FFmpeg's NVDEC gives its chroma wrong, decoding in software", url, vs->codecpar->height);
     } else if (options.hwaccel == HwAccel::Cuda) {

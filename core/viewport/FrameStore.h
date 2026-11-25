@@ -245,7 +245,8 @@ private:
     // Decodes the target (and keeps wanted frames on the way) with `dec`; false: dropped before decoding (not wanted).
     bool DecodeTo(VideoDecoder& dec, const Key& key, int64_t walkLimit, std::vector<CpuFrame>& kept, bool& missing);
     Loaded LoadPass(const Key& key, const ViewportSource& src, SourceRuntime& rt);
-    void Publish(Loaded&& loaded);   // into loaded_ (and the current-frame callback)
+    // into loaded_ (and the current-frame callback); a missing frame of a start failure (TASK-0076) marks it in the same critical section
+    void Publish(Loaded&& loaded, const DecodeSupport* startFailure = nullptr);
     bool Wanted(const Key& key) const;  // needed by the viewport and not resident / known-missing
     bool WantedLocked(const Key& key) const;
     bool IsCurrentLocked(const Key& key) const;  // the needed frame of its source at the current time (mutex_ held)

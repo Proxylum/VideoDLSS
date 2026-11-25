@@ -70,6 +70,12 @@ bool HardwareOnlyDecoder(const AVCodec* codec) {
     return codec && codec->id == AV_CODEC_ID_AV1 && std::string(codec->name) == "av1" && HasNvdecHwaccel(codec);
 }
 
+bool NvdecOddHeightSafe(AVCodecID codec, AVPixelFormat softwareFormat) {
+    const AVPixFmtDescriptor* d = softwareFormat == AV_PIX_FMT_NONE ? nullptr : av_pix_fmt_desc_get(softwareFormat);
+    return (codec == AV_CODEC_ID_H264 || codec == AV_CODEC_ID_HEVC) && d && !(d->flags & AV_PIX_FMT_FLAG_HWACCEL) && d->nb_components >= 3 &&
+           d->log2_chroma_h == 0;
+}
+
 AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly, int judgedHeight) {
     const AVPixelFormat* last = formats;  // the software format, as FFmpeg's ff_get_format reads it
     while (*last != AV_PIX_FMT_NONE && *(last + 1) != AV_PIX_FMT_NONE) ++last;
@@ -86,8 +92,16 @@ namespace {
 
 std::string Depth(int bitDepth) { return std::to_string(bitDepth) + "-bit"; }
 
-std::string Layout(const DecodeSupport& s) {  // «10-bit 4:4:4 (yuv444p10le)», «8-bit monochrome / other (gray)»
-    const std::string chroma = s.chroma == "420" ? "4:2:0" : s.chroma == "422" ? "4:2:2" : s.chroma == "444" ? "4:4:4" : "monochrome / other";
+std::string Layout(const DecodeSupport& s) {  // «10-bit 4:4:4 (yuv444p10le)», «8-bit monochrome (gray)», «8-bit RGB (gbrp)»
+    std::string chroma = s.chroma == "420" ? "4:2:0" : s.chroma == "422" ? "4:2:2" : s.chroma == "444" ? "4:4:4" : "";
+    if (chroma.empty()) {  // «other» told apart by the format, as the GUI's DecodeLayoutText does
+        const std::string kind = LayoutKindOf(s.pixelFormat);
+        chroma = kind == "rgb"       ? "RGB"
+                 : kind == "gray"    ? "monochrome"
+                 : kind == "palette" ? "palette"
+                 : kind.size() == 3  ? std::string(1, kind[0]) + ":" + kind[1] + ":" + kind[2]
+                                     : "monochrome / other";
+    }
     return Depth(s.bitDepth) + " " + chroma + " (" + s.pixelFormat + ")";
 }
 
@@ -108,6 +122,9 @@ std::string RefusalText(const DecodeSupport& s) {
                        (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
             return "the GPU '" + s.caps.gpu + "' has no NVDEC AV1 decoder for " + Depth(s.bitDepth) +
                    " 4:2:0 (for example, GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder" +
+                   (s.height % 2 == 1 ? "; its frame height (" + std::to_string(s.width) + "x" + std::to_string(s.height) +
+                                            ", the frame as stored) is odd too, which this build refuses on any GPU"
+                                      : std::string()) +
                    (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::Size:
             return codec + " " + std::to_string(s.width) + "x" + std::to_string(s.height) + " (the frame as stored) is outside what NVDEC of '" + s.caps.gpu +
@@ -375,7 +392,9 @@ bool FakeNvdecRefusesLater() { return FakeValue() == "later-frame"; }
 std::string DescribeDecode(const DecodeSupport& s) {
     if (!s.hardwareOnly) {
         if (!s.nvdecCodec) return s.why + "; NVDEC does not decode this codec";
-        if (s.height % 2 == 1)  // as VideoDecoder decides it (an odd height: software also with --hwaccel cuda)
+        const AVCodecDescriptor* codec = avcodec_descriptor_get_by_name(s.codec.c_str());
+        // as VideoDecoder decides it (an odd height: software also with --hwaccel cuda - unless NVDEC gives it right)
+        if (s.height % 2 == 1 && !NvdecOddHeightSafe(codec ? codec->id : AV_CODEC_ID_NONE, av_get_pix_fmt(s.pixelFormat.c_str())))
             return s.why + "; not NVDEC even with --hwaccel cuda: an odd frame height (" + std::to_string(s.width) + "x" + std::to_string(s.height) +
                    ", the frame as stored) - FFmpeg's NVDEC gives its chroma wrong";
         return s.why + "; NVDEC with --hwaccel cuda when the GPU decodes this layout";

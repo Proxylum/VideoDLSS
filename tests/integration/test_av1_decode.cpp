@@ -144,10 +144,13 @@ CliRun RunAll(const std::vector<std::string>& args, const std::filesystem::path&
     return r;
 }
 
-// FFmpeg's words of the failure before TASK-0076 - none of them may show again
+// FFmpeg's words of a refused AV1 decode - ENOSYS before TASK-0076, and av1dec's own after a get_format that chose nothing («Your platform
+// doesn't support hardware accelerated AV1 decoding», «Failed to get pixel format»: VideoDecoder lowers them to debug) - none may show;
+// the refusal says it with its reason
 void CheckNoEnosys(const std::string& out) {
     CHECK_THAT(out, !ContainsSubstring("Function not implemented"));
     CHECK_THAT(out, !ContainsSubstring("hardware accelerated AV1"));
+    CHECK_THAT(out, !ContainsSubstring("Failed to get pixel format"));
 }
 
 // VideoDecoder's get_format took CUDA from av1dec's list at once: FFmpeg did not have to strike the D3D formats offered before it (each
@@ -1048,7 +1051,7 @@ TEST_CASE("NVDEC refusing the first frame: render and process say why, nothing i
         CHECK(rd.code != 0);
         CHECK_THAT(rd.out, ContainsSubstring("render: 'source': " + kFirstFrameReason));
         CHECK_THAT(rd.out, !ContainsSubstring("has none of the requested sources"));
-        CHECK_THAT(rd.out, !ContainsSubstring("Function not implemented"));
+        CheckNoEnosys(rd.out);
         CHECK_FALSE(std::filesystem::exists(png));
     }
     // process: the check before the run cannot tell (the driver said nothing) - the decoder's refusal on the first frame ends it, the
@@ -1059,7 +1062,7 @@ TEST_CASE("NVDEC refusing the first frame: render and process say why, nothing i
         INFO(pt.out);
         CHECK(pt.code != 0);
         CHECK_THAT(pt.out, ContainsSubstring(clip.string() + ": " + kFirstFrameReason));
-        CHECK_THAT(pt.out, !ContainsSubstring("Function not implemented"));
+        CheckNoEnosys(pt.out);
         CHECK_FALSE(std::filesystem::exists(result));
         CHECK_FALSE(AnyPartFile(dir));
     }
@@ -1372,6 +1375,7 @@ TEST_CASE("BuildProxy and dlssvid proxy: NVDEC refusing the first frame leaves n
         INFO(r.out);
         CHECK(r.code == 0);  // the other videos and the render go on
         CHECK_THAT(r.out, ContainsSubstring(said));
+        CheckNoEnosys(r.out);
         CHECK_FALSE(std::filesystem::exists(ProxyDir(passes) / "source.building.mkv"));
         CHECK_FALSE(ValidProxy(clip, passes, "source"));
     }
@@ -1381,6 +1385,7 @@ TEST_CASE("BuildProxy and dlssvid proxy: NVDEC refusing the first frame leaves n
     INFO(rd.out);
     CHECK(rd.code != 0);
     CHECK_THAT(rd.out, ContainsSubstring("render: 'source': " + kFirstFrameReason));
+    CheckNoEnosys(rd.out);
     CHECK_FALSE(std::filesystem::exists(png));
 }
 
@@ -1975,6 +1980,7 @@ TEST_CASE("dlssvid proxy --check and --force keep a proxy built earlier for a vi
         CHECK(force.code == 0);
         CHECK_THAT(force.out, ContainsSubstring(std::string("source: proxy not rebuilt, ") + words + " (the proxy built earlier stays: " + proxy + "): "));
         CHECK_THAT(force.out, ContainsSubstring("(on the first frame)"));
+        CheckNoEnosys(force.out);
         CHECK_THAT(force.out, !ContainsSubstring("source: no proxy"));
         stays();
     }
@@ -2000,6 +2006,7 @@ TEST_CASE("dlssvid render and render --bench: NVDEC refusing or not starting on 
         INFO(rd.out);
         CHECK(rd.code != 0);
         CHECK_THAT(rd.out, ContainsSubstring(std::string("render: 'source': ") + words));
+        CheckNoEnosys(rd.out);
         CHECK_FALSE(std::filesystem::exists(json));  // nothing timed
     }
     // a grid with the result (FFV1 decodes): measured / rendered - the source's cells empty, and said
@@ -2017,6 +2024,7 @@ TEST_CASE("dlssvid render and render --bench: NVDEC refusing or not starting on 
         CHECK(gd.code == 0);
         CHECK(std::filesystem::exists(json));
         CHECK_THAT(gd.out, ContainsSubstring(emptyWords));
+        CheckNoEnosys(gd.out);
     }
     const auto image = dir / "grid.png";
     for (const auto& a : {std::string("--frame"), std::string("2"), std::string("-o"), image.string()}) png.push_back(a);
@@ -2026,6 +2034,7 @@ TEST_CASE("dlssvid render and render --bench: NVDEC refusing or not starting on 
         CHECK(pg.code == 0);
         CHECK(std::filesystem::exists(image));
         CHECK_THAT(pg.out, ContainsSubstring(emptyWords));
+        CheckNoEnosys(pg.out);
     }
 }
 
@@ -2279,7 +2288,7 @@ TEST_CASE("NVDEC refusing a frame after a few decoded ones (later-frame) is the 
         FakeNvdecEnv fake("later-frame");
         s.store->SetSources(Project::Create(clip, dir / "none").Sources());
         CHECK_FALSE(s.store->FindSource("source")->undecodable);  // the driver takes it
-        // a fresh decoder walks to frame 20 from frame 0 (within kSequentialSeekFrames, no seek): 0, 1, 2, then the refusal
+        // a fresh decoder walks to frame 20 from frame 0 (within FrameStore's kWalkLimit, no seek): 0, 1, 2, then the refusal
         CHECK(s.Settle(20) == FrameStore::Status::Missing);
         const auto marked = s.store->Undecodable("source");
         REQUIRE(marked);
@@ -2399,6 +2408,7 @@ TEST_CASE("NVDEC not starting now (start-fails, device-fails): render tries once
             // the loader's log: a start failure is no verdict
             CHECK_THAT(rd.out, ContainsSubstring("'source': NVDEC did not start now (its frames are asked for again later): "));  // the path as render made it absolute
             CHECK_THAT(rd.out, !ContainsSubstring("cannot be decoded here"));
+            CheckNoEnosys(rd.out);
             CHECK_FALSE(std::filesystem::exists(png));
         }
         const auto passes = dir / (std::string(c.fake) + "_passes");
@@ -2409,6 +2419,7 @@ TEST_CASE("NVDEC not starting now (start-fails, device-fails): render tries once
             CHECK(px.code == 0);  // the other videos and the render go on
             CHECK_THAT(px.out, ContainsSubstring("source: no proxy now, NVDEC did not start (run it again later): " + c.reason));
             CHECK_THAT(px.out, !ContainsSubstring("the video cannot be decoded here"));
+            CheckNoEnosys(px.out);
             CHECK_FALSE(ValidProxy(clip, passes, "source"));
             CHECK_FALSE(std::filesystem::exists(ProxyDir(passes) / "source.building.mkv"));
         }
@@ -2523,7 +2534,7 @@ TEST_CASE("FrameStore::RememberRefusedFile with keep: a verdict remembered for t
     REQUIRE_AV1_CLIP(clip, dir, false, 12);
     const VideoStreamInfo info = VideoDecoder(clip, VideoDecoder::Probe()).Info();
     const DecodeSupport loader = RefusedDecode(info, DecodeBlock::NvdecFailed, "on the first frame");    // a loader's own, more exact
-    const DecodeSupport proxy = RefusedDecode(info, DecodeBlock::NvdecFailed, "the proxy build: after 3 frames");  // another process's
+    const DecodeSupport proxy = RefusedDecode(info, DecodeBlock::NvdecFailed, "the proxy build: at frame 3");  // another process's
     auto remembered = [&] {
         const auto s = FrameStore::VideoSource("source", clip);
         REQUIRE(s);
@@ -3216,5 +3227,104 @@ TEST_CASE("A refusal names the frame's place in the stream: after seeks back and
         const auto again = RefusalOfNextFrame(fresh);
         REQUIRE(again);
         CHECK(again->support.why == "NVDEC refused this AV1 stream and this build has no software AV1 decoder (at frame 16)");
+    }
+}
+
+TEST_CASE("NVDEC gives an HEVC 4:4:4 frame of an odd height (cropped from 192) right: bit for bit as the software decode - it stays on NVDEC",
+          "[integration][gpu][nvdec][regression]") {
+    const auto dir = Dir("hevc444_odd_height");
+    if (!HaveNvidia() || !VideoEncoder::EncoderAvailable("hevc_nvenc")) SKIP("no NVIDIA GPU with hevc_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 6;
+    spec.codec = "hevc_nvenc";
+    spec.pixFmt = "yuv444p";
+    std::string why;
+    const auto plain = WriteClipIfSupported(dir / "plain.mkv", spec, &why);
+    if (!plain) SKIP("hevc_nvenc does not support 4:4:4 here: " << why);
+    // its conformance window cut by one row at the bottom (SubHeightC 1 in 4:4:4): shown 320x191, coded 320x192
+    const auto odd = dir / "odd.mkv";
+    if (!WithBitstreamFilter(*plain, odd, "hevc_metadata", {{"crop_bottom", "1"}})) SKIP("no hevc_metadata bitstream filter in this build");
+    const VideoStreamInfo info = VideoDecoder(odd, VideoDecoder::Probe()).Info();
+    REQUIRE(info.height == kH - 1);
+    REQUIRE(info.pixelFormat == "yuv444p");
+    VideoDecoder plainDec(odd);
+    const std::vector<CpuFrame> soft = DecodeAllOf(plainDec);
+    REQUIRE(soft.size() == 6);
+    VideoDecoder::Options cuda;
+    cuda.hwaccel = HwAccel::Cuda;
+    VideoDecoder dec(odd, cuda);
+    CHECK(dec.UsingHwAccel());
+    std::vector<CpuFrame> hard;
+    CpuFrame f;
+    while (dec.NextFrame(f)) hard.push_back(f);
+    CHECK(dec.DecodesOnNvdec());
+    REQUIRE(hard.size() == soft.size());
+    for (size_t i = 0; i < hard.size(); ++i) {
+        INFO("frame " << i);
+        CHECK(hard[i].desc.width == kW);
+        CHECK(hard[i].desc.height == kH - 1);
+        CHECK(hard[i].desc == soft[i].desc);
+        for (size_t p = 0; p < 3; ++p) {
+            INFO("plane " << p);
+            const size_t w = soft[i].desc.PlaneWidth(p), h = soft[i].desc.PlaneHeight(p);
+            int rows = 0;
+            for (size_t r = 0; r < h; ++r) rows += std::memcmp(hard[i].Plane(p) + r * w, soft[i].Plane(p) + r * w, w) == 0;
+            CHECK(rows == static_cast<int>(h));
+        }
+        CHECK((hard[i].data == soft[i].data));
+    }
+    const auto r = RunAll({"info", odd.string()}, dir / "info.log");
+    INFO(r.out);
+    CHECK(r.code == 0);
+    CHECK_THAT(r.out, ContainsSubstring("decode:      software (hevc); NVDEC with --hwaccel cuda when the GPU decodes this layout"));
+}
+
+TEST_CASE("FrameStore: NVDEC not starting for a video is said once per file at warn - not once per place a load met it (a seek elsewhere)",
+          "[integration][viewport][gpu][av1]") {
+    const auto dir = Dir("start_said_once");
+    REQUIRE_AV1_CLIP(clip, dir, false, 64);  // a keyframe every 8: frame 56 is beyond FrameStore's walk from frame 0
+    std::ostringstream text;
+    {
+        DecoderLog capture(text);  // before the store: its loaders log while it lives
+        {
+            Av1Store s(0, 1);
+            FakeNvdecEnv fake("start-fails");
+            s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+            CHECK(s.Load(0) == FrameStore::Status::Missing);   // «on the first frame»
+            CHECK(s.Load(56) == FrameStore::Status::Missing);  // a seek: «at frame 56» - other words, the same file
+            REQUIRE(s.store->StartFailure("source"));
+            s.Settle(56);
+        }
+    }
+    const std::string log = text.str();
+    INFO(log);
+    size_t warned = 0, debugged = 0;
+    for (size_t at = log.find("'source': NVDEC did not start now"); at != std::string::npos; at = log.find("'source': NVDEC did not start now", at + 1)) {
+        const size_t lineStart = log.rfind('\n', at) == std::string::npos ? 0 : log.rfind('\n', at) + 1;
+        const std::string level = log.substr(lineStart, at - lineStart);
+        if (level.rfind("warning", 0) == 0) ++warned;
+        else if (level.rfind("debug", 0) == 0) ++debugged;
+    }
+    CHECK(warned == 1);
+    CHECK(debugged >= 1);  // the later ones, said quietly
+    CHECK_THAT(log, ContainsSubstring("(at frame 56)"));  // the second load did meet another place
+}
+
+TEST_CASE("FrameStore: a start failure is marked with its missing frame - seen at once when the frame is, no poll after", "[integration][viewport][gpu][av1]") {
+    const auto dir = Dir("start_mark_at_once");
+    REQUIRE_AV1_CLIP(clip, dir, false, 8);
+    Av1Store s(0, 1);
+    FakeNvdecEnv fake("start-fails");
+    const auto sources = Project::Create(clip, dir / "none").Sources();
+    for (int i = 0; i < 20; ++i) {
+        INFO("round " << i);
+        s.store->SetSources(sources);  // marks and frames forgotten
+        REQUIRE_FALSE(s.store->StartFailure("source"));
+        s.store->SetCurrentFrame(0, {"source"});
+        s.store->WaitForCurrent();  // returns once the frame is missing
+        REQUIRE(s.store->GetStatus(0, "source") == FrameStore::Status::Missing);
+        CHECK(s.store->StartFailure("source"));  // already: marked in the same critical section
     }
 }

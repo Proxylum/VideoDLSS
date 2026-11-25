@@ -307,6 +307,7 @@ out at the maximum's size, a lower one also with its colours read from the wrong
 out of caution - not seen on a GPU). Frames of an odd height are refused: their colours come a row off. An odd width is decoded: the frame NVDEC hands
 out one column wider (its surface) is cut to the video's own size. With `--hwaccel cuda`, any codec of an odd width has no on-GPU
 frames (the host path, OFA through ABGR), and one with a software decoder and an odd height (VP9 1920x803, H.264 320x191) decodes in software: NVDEC gives its colours wrong
+(not H.264 / HEVC without vertical chroma subsampling - HEVC 4:4:4 of an odd height stays on NVDEC, which gives it right)
 (`dlssvid info` says so in its `decode:` line). `dlssvid scenes` re-derives the cuts from stored scores (or writes the pass off with
 `--threshold 0`) also where the video does not decode here; it refuses only when it would decode. A gray (monochrome) AV1 is refused also when the probe
 did not learn its layout or it starts in a later part. A driver too old for

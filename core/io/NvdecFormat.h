@@ -1,6 +1,7 @@
 #pragma once
 
 extern "C" {
+#include <libavcodec/codec_id.h>
 #include <libavutil/pixfmt.h>
 }
 
@@ -11,15 +12,21 @@ namespace dlssvid {
 // (HardwareOnlyDecoder): it has no software path, choosing nothing fails at once and the failure is reported with its reason.
 // A hardware-only decoder's software format (the list's last, as FFmpeg's ff_get_format reads it) outside Av1NvdecLayout: AV_PIX_FMT_NONE
 // as well - FFmpeg offers CUDA for gray AV1, which this build leaves out; the refusal then names that layout (VideoDecoder::CheckDecode).
-// A codec with a software path whose frame is of an odd height (VP9 1920x803 coded so; H.264 / HEVC 320x191 coded aligned and cropped):
+// A codec with a software path whose frame is of an odd height (VP9 1920x803 coded so; H.264 320x191 coded aligned and cropped):
 // its software format - FFmpeg's NVDEC gives the chroma of such a frame wrong (a row off, or its last row lost on the way to the host);
-// a hardware-only one is refused for it instead.
+// a hardware-only one is refused for it instead. (A layout NvdecOddHeightSafe takes is not judged: GetHwFormat passes 0.)
 // judgedHeight: what NvdecJudgedHeight(ctx->height, ctx->coded_height) gives (the shown height when odd, else the coded one); 0 - not judged
 AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly, int judgedHeight = 0);
 
-// TASK-0076: the height a frame is judged by for NVDEC: the shown one when it is odd (H.264 / HEVC code it aligned and crop it: 191 as
-// 192), else the coded one (VP9 codes it as it is)
+// TASK-0076: the height a frame is judged by for NVDEC: the shown one when it is odd (VP9 codes 803 as it is; H.264 / HEVC code 191
+// aligned as 192 and crop it), else the coded one - even then as well (aligned, or equal to the shown): only an odd shown height decides
 inline int NvdecJudgedHeight(int height, int codedHeight) { return height % 2 == 1 ? height : codedHeight; }
+
+// TASK-0076: an odd shown height FFmpeg 7.1.1's NVDEC gives right - a codec that exports its cropping (H.264, HEVC: the frame mapped at
+// its even coded height, cropped after) in a layout without vertical chroma subsampling (HEVC 4:4:4, 4:2:2: the copy to the host takes
+// every chroma row). Not VP9 / MPEG-4 (no cropping exported: the frame mapped at its odd height, the next plane a row off whatever the
+// layout), nor 4:2:0 (its last chroma row lost on the way to the host), nor gray or a format not known (AV_PIX_FMT_NONE)
+bool NvdecOddHeightSafe(AVCodecID codec, AVPixelFormat softwareFormat);
 
 // TASK-0076: the sample layouts this build decodes AV1 in (on NVDEC): 8 and 10-bit 4:2:0 - JudgeDecode's Layout and get_format both
 inline bool Av1NvdecLayout(AVPixelFormat format) { return format == AV_PIX_FMT_YUV420P || format == AV_PIX_FMT_YUV420P10LE; }
