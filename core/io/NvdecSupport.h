@@ -112,7 +112,7 @@ bool FakeNvdecRefusesLater();
 // (ReceiveFrame: Resized, OddHeight), another process's words (VerdictFromWhy).
 DecodeSupport RefusedDecode(const VideoStreamInfo& info, DecodeBlock block, const std::string& detail);
 
-// One line for `dlssvid info`: «software (h264); NVDEC with --hwaccel cuda when the GPU decodes this layout», «software (prores); NVDEC
+// One line for `dlssvid info`: «software (h264); NVDEC with --hwaccel cuda where FFmpeg offers it for this layout and the GPU decodes it», «software (prores); NVDEC
 // does not decode this codec», «software (vp9); not NVDEC even with --hwaccel cuda: an odd frame height (1920x803, the frame as stored) - …», «NVDEC only (av1: no software AV1 decoder in this build), on '<gpu>', AV1 8-bit 4:2:0 up to WxH» (or
 // «..., on '<gpu>', the sample layout is not known before the first frame» - a layout the probe did not learn, NVDEC taking AV1: the
 // layout and the size are the first frame's to judge; or «..., not checked: <why>»), «unavailable - <why>».

@@ -1177,11 +1177,12 @@ TEST_CASE("FrameStore lets the CUDA device go: a decoder NVDEC refused is closed
         Av1Store s(0, 1);
         s.store->SetSources(Project::Create(clip, dir / "none").Sources());
         s.store->SetHoldNvdec(false);
-        REQUIRE(s.Settle(4) == FrameStore::Status::Ready);  // frames 3, 4, 5: each load closed its decoder after it
+        // the shown frame alone (no prefetch of an NVDEC-only video without a proxy while a task runs): its load closed its decoder after it
+        REQUIRE(s.Load(4) == FrameStore::Status::Ready);
         // a loader closes its decoder after it published the frame: the count settles a moment after the frame shows
         CHECK(Eventually([&] { return s.store->Stats("source").decodedFrames == 0; }));  // the stats count the decoders open: none is
         CHECK(ContextBecomes(false));
-        REQUIRE(s.Settle(9) == FrameStore::Status::Ready);
+        REQUIRE(s.Load(9) == FrameStore::Status::Ready);
         CHECK(ContextBecomes(false));
         s.store->SetHoldNvdec(true);
         REQUIRE(s.Settle(15) == FrameStore::Status::Ready);
@@ -1582,7 +1583,7 @@ TEST_CASE("FrameStore opens the original's decoder again quietly: the log says o
         Av1Store s(0, 1);
         s.store->SetSources(Project::Create(clip, dir / "none").Sources());
         s.store->SetHoldNvdec(false);  // a task runs: every load closes the decoder after it - each frame reopens it
-        for (const int64_t f : {2, 9, 16}) REQUIRE(s.Settle(f) == FrameStore::Status::Ready);
+        for (const int64_t f : {2, 9, 16}) REQUIRE(s.Load(f) == FrameStore::Status::Ready);  // the shown frames alone: no prefetch meanwhile
     }
     const std::string log = text.str();
     const std::string opened = "open " + clip.string() + ": ";
@@ -1638,6 +1639,31 @@ TEST_CASE("FrameStore prefetches no frame of an NVDEC-only video while a task ru
             return true;
         },
         30000));
+}
+
+TEST_CASE("FrameStore prefetches an NVDEC-only video that has a proxy while a task runs - the neighbours come from the proxy",
+          "[integration][viewport][gpu][av1][proxy]") {
+    const auto dir = Dir("held_proxy_prefetch");
+    REQUIRE_AV1_CLIP(clip, dir, false, 64);  // a keyframe every 8: frame 56 is beyond FrameStore's walk from frame 0
+    const auto passes = dir / "passes";
+    BuildProxy(clip, passes, "source");  // where NVDEC decodes AV1 (the proxy is FFV1: software everywhere)
+    REQUIRE(ValidProxy(clip, passes, "source"));
+    Av1Store s(3, 1);  // three frames on either side
+    s.store->SetSources(Project::Create(clip, passes).Sources());
+    const ViewportSource* src = s.store->FindSource("source");
+    REQUIRE(src);
+    REQUIRE(src->hardwareOnly);
+    REQUIRE_FALSE(src->proxy.empty());
+    s.store->SetHoldNvdec(false);  // a task runs: the proxy takes no NVDEC - its prefetch stays
+    REQUIRE(s.Load(56) == FrameStore::Status::Ready);
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            for (const int64_t n : {53, 54, 55, 57, 58, 59})
+                if (s.store->GetStatus(n, "source") != FrameStore::Status::Ready) return false;
+            return true;
+        },
+        20000));
 }
 
 TEST_CASE("The driver not answering for a CUDA error (query-fails), NVDEC refusing the first frame then is a start failure, not a verdict",
@@ -1936,6 +1962,9 @@ TEST_CASE("FrameStore keeps a software decoder open while a task runs and throug
     for (const int64_t f : {2, 9, 16}) {
         INFO("frame " << f);
         REQUIRE(s.Settle(f) == FrameStore::Status::Ready);
+        // its neighbours too: a video with a software path keeps its prefetch while a task runs (only NVDEC-only ones lose it)
+        CHECK(s.store->GetStatus(f - 1, "source") == FrameStore::Status::Ready);
+        CHECK(s.store->GetStatus(f + 1, "source") == FrameStore::Status::Ready);
         std::this_thread::sleep_for(std::chrono::milliseconds(200));  // a loader closing its decoder does it right after the load
         const int64_t now = s.store->Stats("source").decodedFrames;  // the frames of the decoders open
         CHECK(now > decoded);  // the same decoder, going on: none closed and opened anew
@@ -2569,6 +2598,18 @@ TEST_CASE("An AV1 stream of an odd frame height is refused before any frame; a p
         CHECK_FALSE(dec.HoldsCudaDevice());
     }
     {
+        // HwAccel::Cuda: a hardware-only decoder holds the device from the open whatever its height (no software path to take instead),
+        // also once refused for it
+        VideoDecoder::Options cuda;
+        cuda.hwaccel = HwAccel::Cuda;
+        VideoDecoder dec(odd, cuda);
+        CHECK(dec.HoldsCudaDevice());
+        const auto first = RefusalOfNextFrame(dec);
+        REQUIRE(first);
+        CHECK(first->support.block == DecodeBlock::OddHeight);
+        CHECK(dec.HoldsCudaDevice());
+    }
+    {
         const auto source = FrameStore::VideoSource("source", odd);
         REQUIRE(source);
         REQUIRE(source->undecodable);
@@ -3015,7 +3056,7 @@ TEST_CASE("dlssvid info of an MPEG-4 video of an odd height: software even with 
     const auto e = RunAll({"info", even.string()}, dir / "even.log");
     INFO(e.out);
     CHECK(e.code == 0);
-    CHECK_THAT(e.out, ContainsSubstring("decode:      software (mpeg4); NVDEC with --hwaccel cuda when the GPU decodes this layout"));
+    CHECK_THAT(e.out, ContainsSubstring("decode:      software (mpeg4); NVDEC with --hwaccel cuda where FFmpeg offers it for this layout and the GPU decodes it"));
 }
 
 namespace {
@@ -3376,7 +3417,7 @@ TEST_CASE("NVDEC gives an HEVC 4:4:4 frame of an odd height (cropped from 192) r
     const auto r = RunAll({"info", odd.string()}, dir / "info.log");
     INFO(r.out);
     CHECK(r.code == 0);
-    CHECK_THAT(r.out, ContainsSubstring("decode:      software (hevc); NVDEC with --hwaccel cuda when the GPU decodes this layout"));
+    CHECK_THAT(r.out, ContainsSubstring("decode:      software (hevc); NVDEC with --hwaccel cuda where FFmpeg offers it for this layout and the GPU decodes it"));
 }
 
 TEST_CASE("FrameStore: NVDEC not starting for a video is said once per file at warn - not once per place a load met it (a seek elsewhere)",

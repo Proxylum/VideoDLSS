@@ -72,8 +72,8 @@ bool HardwareOnlyDecoder(const AVCodec* codec) {
 
 bool NvdecOddHeightSafe(AVCodecID codec, AVPixelFormat softwareFormat) {
     const AVPixFmtDescriptor* d = softwareFormat == AV_PIX_FMT_NONE ? nullptr : av_pix_fmt_desc_get(softwareFormat);
-    return (codec == AV_CODEC_ID_H264 || codec == AV_CODEC_ID_HEVC) && d && !(d->flags & AV_PIX_FMT_FLAG_HWACCEL) && d->nb_components >= 3 &&
-           d->log2_chroma_h == 0;
+    return codec == AV_CODEC_ID_HEVC && d && !(d->flags & (AV_PIX_FMT_FLAG_HWACCEL | AV_PIX_FMT_FLAG_RGB)) && d->nb_components >= 3 &&
+           d->log2_chroma_w == 0 && d->log2_chroma_h == 0;
 }
 
 AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly, int judgedHeight) {
@@ -402,7 +402,7 @@ std::string DescribeDecode(const DecodeSupport& s) {
         if (s.height % 2 == 1 && !NvdecOddHeightSafe(codec ? codec->id : AV_CODEC_ID_NONE, av_get_pix_fmt(s.pixelFormat.c_str())))
             return s.why + "; not NVDEC even with --hwaccel cuda: an odd frame height (" + std::to_string(s.width) + "x" + std::to_string(s.height) +
                    ", the frame as stored) - FFmpeg's NVDEC gives its chroma wrong";
-        return s.why + "; NVDEC with --hwaccel cuda when the GPU decodes this layout";
+        return s.why + "; NVDEC with --hwaccel cuda where FFmpeg offers it for this layout and the GPU decodes it";
     }
     if (!s.Ok()) return "unavailable - " + s.why;
     return "NVDEC only (" + s.codec + ": no software AV1 decoder in this build), " + s.why;

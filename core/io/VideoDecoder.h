@@ -179,9 +179,9 @@ DisplayOrientation OrientationFromRotateTag(std::string_view tag, std::string* w
 // odd width (any codec on NVDEC: the on-device consumers take even rows; TASK-0076 - an AV1 / VP9 frame comes at its surface's even size
 // and is cut to its own, an H.264 / HEVC one comes cut by FFmpeg).
 // A codec with NVDEC and a software path (h264, hevc, vp9 ...) of an odd height decodes in software also with HwAccel::Cuda (TASK-0076:
-// FFmpeg's NVDEC gives its chroma wrong) - no device then, UsingHwAccel() false; except H.264 / HEVC without vertical chroma subsampling
-// (HEVC 4:4:4 / 4:2:2, NvdecOddHeightSafe): they stay on NVDEC and hold the device, with no GpuFrame (not NV12). A codec without NVDEC
-// (ProRes, FFV1) holds the device whatever its height, as before, and hands out no GpuFrame.
+// FFmpeg's NVDEC gives its chroma wrong) - no device then, UsingHwAccel() false; except HEVC 4:4:4 (NvdecOddHeightSafe): it stays on
+// NVDEC and holds the device, with no GpuFrame (not NV12). A codec without NVDEC (ProRes, FFV1) holds the device whatever its height,
+// as before, and hands out no GpuFrame.
 // A decoder without a software path (this build's AV1, TASK-0076, NvdecSupport.h) decodes on NVDEC whatever the options say: with
 // HwAccel::Cuda the device is created at the open, as for any codec; otherwise on the first NextFrame (StartNvdec reopens codec_ on it) -
 // a Probe() open never creates one. A stream this GPU cannot decode is refused then (or at RequireDecodable) with DecodeUnavailable,
@@ -228,9 +228,9 @@ public:
     bool UsingHwAccel() const { return gpuFrames_; }
     // A frame came from NVDEC (asked for and the codec has it, or a hardware-only decoder past its first frame).
     bool DecodesOnNvdec() const { return nvdecFrames_; }
-    // A CUDA device is held (HwAccel::Cuda at the open - not for an NVDEC codec of an odd height NvdecOddHeightSafe does not take, nor
-    // when the device could not be created -
-    // or StartNvdec - even one NVDEC then refused): closing the decoder lets it go.
+    // A CUDA device is held (HwAccel::Cuda at the open - not for a codec with NVDEC and a software path of an odd height
+    // NvdecOddHeightSafe does not take (it decodes in software), nor when the device could not be created; a hardware-only decoder holds it
+    // whatever its height, also one then refused (OddHeight) - or StartNvdec - even one NVDEC then refused): closing the decoder lets it go.
     bool HoldsCudaDevice() const { return hwDevice_ != nullptr; }
     // TASK-0076: refuses at once (DecodeUnavailable) a stream this machine cannot decode - a command calls it before its heavy preparation
     // (hashing, a model, an NGX feature) instead of learning it on the first frame. A no-op for a decoder with a software path.

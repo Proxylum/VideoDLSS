@@ -7896,6 +7896,28 @@ TEST_CASE("NR preview: the source refused since the preview showed - a current o
             QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
         }
     };
+    const QString staleStatus = QString::fromUtf8("Показано превью для прежних настроек — ") + changedSettings;
+    auto cellSaysStale = [&] {
+        REQUIRE(model.nrPreview());
+        return NrPreviewCellSuffix(*model.nrPreview(), FrameState::Ready, !runner.staleReason().isEmpty()).contains(QString::fromUtf8("устарело"));
+    };
+    auto paramsOf = [&](const char* stage) {
+        for (const auto& st : model.project().stages)
+            if (st.name == stage) return st.params;
+        return nlohmann::json::object();
+    };
+    // a new preview asked for while the source is refused: refused; the cursor moved a frame - the status of the preview shown comes back
+    // with what it was (stale or not) and that a new one cannot come
+    auto startRefusedThenStep = [&](const QString& expected) {
+        Pump([&] { return !runner.housekeeping(); }, 10000);  // a clean-up of the cache running would hold the request for after it
+        REQUIRE_FALSE(runner.housekeeping());
+        CHECK_FALSE(runner.start({PreviewRunner::Kind::Frame, 0}));
+        CHECK(runner.statusText() != expected);  // the refusal's own words meanwhile
+        model.setTime(model.time() + 1.0 / 24);
+        CHECK(runner.statusText() == expected);
+        CHECK(runner.statusRole() == "warn");
+        model.seekToSourceFrame(3);
+    };
     // the GPU loses AV1 while the preview shown is current: it stays current - a new one is what cannot come
     rest();
     {
@@ -7904,9 +7926,32 @@ TEST_CASE("NR preview: the source refused since the preview showed - a current o
         REQUIRE(model.sourceRefusalSaid());
         CHECK(runner.staleReason().isEmpty());
         CHECK(runner.statusText() == refusedStatus);
-        REQUIRE(model.nrPreview());
-        const bool stale = !runner.staleReason().isEmpty();
-        CHECK_FALSE(NrPreviewCellSuffix(*model.nrPreview(), FrameState::Ready, stale).contains(QString::fromUtf8("устарело")));
+        CHECK_FALSE(cellSaysStale());
+        startRefusedThenStep(refusedStatus);
+        // no plan to judge the preview by now: the settings it was made with do. A stage after NR (fg) changed: still current
+        const nlohmann::json fg = paramsOf("fg");
+        model.setStageParam("fg", "backend", fg.value("backend", std::string()) == "blend" ? "dlssg" : "blend");
+        model.refreshPlan();
+        CHECK(runner.staleReason().isEmpty());
+        CHECK(runner.statusText() == refusedStatus);
+        model.setStageParams("fg", fg);
+        model.refreshPlan();
+        // NR's own setting changed: stale - its reason and that a new one cannot come, the cell says «устарело»
+        const nlohmann::json nr = paramsOf("nr");
+        QSignalSpy cell(&model, &AppModel::nrPreviewChanged);
+        model.setStageParam("nr", "intensity", 1.3);
+        model.refreshPlan();
+        CHECK(runner.staleReason() == changedSettings);
+        CHECK(runner.statusText() == staleStatus + QString::fromUtf8(" · новое превью недоступно: исходник не декодируется на этом компьютере"));
+        CHECK(cellSaysStale());
+        CHECK(cell.count() >= 1);  // the cell label told
+        startRefusedThenStep(staleStatus + QString::fromUtf8(" · новое превью недоступно: исходник не декодируется на этом компьютере"));
+        // the value back: current again
+        model.setStageParams("nr", nr);
+        model.refreshPlan();
+        CHECK(runner.staleReason().isEmpty());
+        CHECK(runner.statusText() == refusedStatus);
+        CHECK_FALSE(cellSaysStale());
         rest();
     }
     // the GPU back: the status as the preview showed
@@ -7919,7 +7964,6 @@ TEST_CASE("NR preview: the source refused since the preview showed - a current o
     model.setStageParam("nr", "intensity", 1.3);
     model.refreshPlan();
     REQUIRE(runner.staleReason() == changedSettings);
-    const QString staleStatus = QString::fromUtf8("Показано превью для прежних настроек — ") + changedSettings;
     REQUIRE(runner.statusText() == staleStatus);
     rest();
     {
@@ -7928,9 +7972,8 @@ TEST_CASE("NR preview: the source refused since the preview showed - a current o
         REQUIRE(model.sourceRefusalSaid());
         CHECK(runner.staleReason() == changedSettings);
         CHECK(runner.statusText() == staleStatus + QString::fromUtf8(" · новое превью недоступно: исходник не декодируется на этом компьютере"));
-        REQUIRE(model.nrPreview());
-        const bool stale = !runner.staleReason().isEmpty();
-        CHECK(NrPreviewCellSuffix(*model.nrPreview(), FrameState::Ready, stale).contains(QString::fromUtf8("устарело")));
+        CHECK(cellSaysStale());
+        startRefusedThenStep(staleStatus + QString::fromUtf8(" · новое превью недоступно: исходник не декодируется на этом компьютере"));
         rest();
     }
     // the GPU back: stale, the plain status of it
@@ -7938,8 +7981,7 @@ TEST_CASE("NR preview: the source refused since the preview showed - a current o
     REQUIRE_FALSE(model.sourceRefusalSaid());
     CHECK(runner.staleReason() == changedSettings);
     CHECK(runner.statusText() == staleStatus);
-    REQUIRE(model.nrPreview());
-    CHECK(NrPreviewCellSuffix(*model.nrPreview(), FrameState::Ready, !runner.staleReason().isEmpty()).contains(QString::fromUtf8("устарело")));
+    CHECK(cellSaysStale());
     queue.stopAll(10000);
 }
 
@@ -8508,6 +8550,10 @@ TEST_CASE("AppModel: frames NVDEC could not start for while a task ran come back
     REQUIRE(model.store().StartFailure("source"));
     CHECK(model.planError().isEmpty());  // no verdict: the plan stands
     fake.reset();  // the loaders at rest; the memory would be there again - but nothing asks for those frames until the task ends
+    // the end of the tasks forgets the start failures at once (updateNvdecHold), not only when a load succeeds later
+    model.setTasksRunning(false);
+    CHECK_FALSE(model.store().StartFailure("source"));
+    model.setTasksRunning(true);  // the task runs still: its real end below
     queue.cancel(task);
     Pump([&] { return queue.finished(task); }, 20000);
     REQUIRE(queue.finished(task));

@@ -307,7 +307,7 @@ out at the maximum's size, a lower one also with its colours read from the wrong
 out of caution - not seen on a GPU). Frames of an odd height are refused: their colours come a row off. An odd width is decoded: the frame NVDEC hands
 out one column wider (its surface) is cut to the video's own size. With `--hwaccel cuda`, any codec of an odd width has no on-GPU
 frames (the host path, OFA through ABGR), and one with a software decoder and an odd height (VP9 1920x803, H.264 320x191) decodes in software: NVDEC gives its colours wrong
-(not H.264 / HEVC without vertical chroma subsampling - HEVC 4:4:4 of an odd height stays on NVDEC, which gives it right)
+(not HEVC 4:4:4 - of an odd height it stays on NVDEC, which gives it right)
 (`dlssvid info` says so in its `decode:` line). `dlssvid scenes` re-derives the cuts from stored scores (or writes the pass off with
 `--threshold 0`) also where the video does not decode here; it refuses only when it would decode. A gray (monochrome) AV1 is refused also when the probe
 did not learn its layout or it starts in a later part. A driver too old for
@@ -318,8 +318,9 @@ viewport cell reads «· видеокарта не начала декодиро
 other sources are shown, when a frame of that video decodes, and when the task is over (not on a pan, a zoom or the wipe); `process` and `render` report the failure. A scrubbing proxy built earlier still shows
 such a source (one copied from another PC is used when the source kept its file times). The GUI's viewport decodes an AV1
 video on NVDEC in its own process; while any task of its queue waits or runs (processing, a stage run alone, a pass export, an
-NR preview) or a stage check is going on, it does not keep that decoder between frames (scrubbing AV1 without a proxy is slower
-then). A recent project's thumbnail that NVDEC could not decode now is made again the next time the start page is rebuilt. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be the one the stages
+NR preview) or a stage check is going on, it does not keep that decoder between frames and loads no frame of an AV1 video without a
+proxy ahead: playing it then shows about a frame every 2 s (a frame not decoded in time is skipped), steps and scrubbing are slower; a
+scrubbing proxy, or the end of the task, lifts it. A recent project's thumbnail that NVDEC could not decode now is made again the next time the start page is rebuilt. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be the one the stages
 run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame|query-fails|start-fails|device-fails|later-frame` stands in for the driver's answer
 (tests, reproducing a support case).
 

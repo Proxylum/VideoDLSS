@@ -14,7 +14,9 @@ namespace dlssvid {
 // as well - FFmpeg offers CUDA for gray AV1, which this build leaves out; the refusal then names that layout (VideoDecoder::CheckDecode).
 // A codec with a software path whose frame is of an odd height (VP9 1920x803 coded so; H.264 320x191 coded aligned and cropped):
 // its software format - FFmpeg's NVDEC gives the chroma of such a frame wrong (a row off, or its last row lost on the way to the host);
-// a hardware-only one is refused for it instead. (A layout NvdecOddHeightSafe takes is not judged: GetHwFormat passes 0.)
+// A hardware-only decoder has no software path: it gets AV_PIX_FMT_CUDA whatever the height (judgedHeight is not read for it); its odd
+// height is refused elsewhere - by JudgeDecode before the GPU, by VideoDecoder::ReceiveFrame on the frame (DecodeBlock::OddHeight).
+// (A layout NvdecOddHeightSafe takes is not judged: GetHwFormat passes 0.)
 // judgedHeight: what NvdecJudgedHeight(ctx->height, ctx->coded_height) gives (the shown height when odd, else the coded one); 0 - not judged
 AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly, int judgedHeight = 0);
 
@@ -22,10 +24,11 @@ AVPixelFormat PickNvdecFormat(const AVPixelFormat* formats, bool hardwareOnly, i
 // aligned as 192 and crop it), else the coded one - even then as well (aligned, or equal to the shown): only an odd shown height decides
 inline int NvdecJudgedHeight(int height, int codedHeight) { return height % 2 == 1 ? height : codedHeight; }
 
-// TASK-0076: an odd shown height FFmpeg 7.1.1's NVDEC gives right - a codec that exports its cropping (H.264, HEVC: the frame mapped at
-// its even coded height, cropped after) in a layout without vertical chroma subsampling (HEVC 4:4:4, 4:2:2: the copy to the host takes
-// every chroma row). Not VP9 / MPEG-4 (no cropping exported: the frame mapped at its odd height, the next plane a row off whatever the
-// layout), nor 4:2:0 (its last chroma row lost on the way to the host), nor gray or a format not known (AV_PIX_FMT_NONE)
+// TASK-0076: an odd shown height FFmpeg 7.1.1's NVDEC gives right - HEVC 4:4:4 only (checked on a GPU, bit for bit with the software
+// decode): HEVC exports its cropping (the frame mapped at its even coded height, cropped after) and nvdec_hevc keeps 4:4:4 a 4:4:4
+// surface (supports_444; the copy to the host takes every chroma row). Not H.264 (nvdec_h264: no 4:4:4 surface - 4:2:2 / 4:4:4 come as
+// NV12), nor HEVC 4:2:2 (hevcdec offers no CUDA for it), nor VP9 / MPEG-4 (no cropping exported: the frame mapped at its odd height,
+// the next plane a row off), nor 4:2:0 (its last chroma row lost on the way to the host), nor RGB, gray or a format not known
 bool NvdecOddHeightSafe(AVCodecID codec, AVPixelFormat softwareFormat);
 
 // TASK-0076: the sample layouts this build decodes AV1 in (on NVDEC): 8 and 10-bit 4:2:0 - JudgeDecode's Layout and get_format both

@@ -1220,7 +1220,7 @@ TEST_CASE("Av1FrameBelowSequence: a frame smaller than its sequence header's max
 }
 
 TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit][av1]") {
-    CHECK(DescribeDecode(JudgeDecode(H264Info(), nullptr)) == "software (h264); NVDEC with --hwaccel cuda when the GPU decodes this layout");
+    CHECK(DescribeDecode(JudgeDecode(H264Info(), nullptr)) == "software (h264); NVDEC with --hwaccel cuda where FFmpeg offers it for this layout and the GPU decodes it");
     CHECK(DescribeDecode(JudgeDecode(Ffv1Info(), nullptr)) == "software (ffv1); NVDEC does not decode this codec");
     const NvdecAv1Caps good = GoodCaps();
     CHECK(DescribeDecode(JudgeDecode(Av1Info(), &good)) == "NVDEC only (av1: no software AV1 decoder in this build), on 'Test GPU', AV1 8-bit 4:2:0 up to 8192x8192");
@@ -1244,7 +1244,7 @@ TEST_CASE("DescribeDecode: the decode line of dlssvid info in its forms", "[unit
           "software (vp9); not NVDEC even with --hwaccel cuda: an odd frame height (1920x803, the frame as stored) - FFmpeg's NVDEC gives its "
           "chroma wrong");
     vp9.height = vp9.codedHeight = 804;
-    CHECK(DescribeDecode(JudgeDecode(vp9, nullptr)) == "software (vp9); NVDEC with --hwaccel cuda when the GPU decodes this layout");
+    CHECK(DescribeDecode(JudgeDecode(vp9, nullptr)) == "software (vp9); NVDEC with --hwaccel cuda where FFmpeg offers it for this layout and the GPU decodes it");
     VideoStreamInfo ffv1Odd = Ffv1Info();  // NVDEC does not decode it at all: that, not the height
     ffv1Odd.height = ffv1Odd.codedHeight = 191;
     CHECK(DescribeDecode(JudgeDecode(ffv1Odd, nullptr)) == "software (ffv1); NVDEC does not decode this codec");
@@ -1399,11 +1399,14 @@ TEST_CASE("LayoutKindOf: the kind a chroma other is told by - a palette, RGB, on
     }
 }
 
-TEST_CASE("NvdecOddHeightSafe: the odd heights FFmpeg's NVDEC gives right - H.264 / HEVC without vertical chroma subsampling; DescribeDecode says it",
-          "[unit][av1]") {
+TEST_CASE("NvdecOddHeightSafe: the odd heights FFmpeg's NVDEC gives right - HEVC 4:4:4 only; DescribeDecode says it", "[unit][av1]") {
     CHECK(NvdecOddHeightSafe(AV_CODEC_ID_HEVC, AV_PIX_FMT_YUV444P));
-    CHECK(NvdecOddHeightSafe(AV_CODEC_ID_HEVC, AV_PIX_FMT_YUV422P10LE));
-    CHECK(NvdecOddHeightSafe(AV_CODEC_ID_H264, AV_PIX_FMT_YUV444P));
+    CHECK(NvdecOddHeightSafe(AV_CODEC_ID_HEVC, AV_PIX_FMT_YUV444P10LE));
+    // FFmpeg 7.1.1: hevcdec offers no CUDA for 4:2:2; nvdec_h264 has no 4:4:4 surface (4:2:2 / 4:4:4 come as NV12)
+    CHECK_FALSE(NvdecOddHeightSafe(AV_CODEC_ID_HEVC, AV_PIX_FMT_YUV422P10LE));
+    CHECK_FALSE(NvdecOddHeightSafe(AV_CODEC_ID_H264, AV_PIX_FMT_YUV444P));
+    CHECK_FALSE(NvdecOddHeightSafe(AV_CODEC_ID_H264, AV_PIX_FMT_YUV422P));
+    CHECK_FALSE(NvdecOddHeightSafe(AV_CODEC_ID_HEVC, AV_PIX_FMT_GBRP));  // RGB
     CHECK_FALSE(NvdecOddHeightSafe(AV_CODEC_ID_HEVC, AV_PIX_FMT_YUV420P));  // its last chroma row lost on the way to the host
     CHECK_FALSE(NvdecOddHeightSafe(AV_CODEC_ID_VP9, AV_PIX_FMT_YUV444P));   // no cropping exported: mapped at its odd height
     CHECK_FALSE(NvdecOddHeightSafe(AV_CODEC_ID_HEVC, AV_PIX_FMT_GRAY8));
@@ -1415,9 +1418,12 @@ TEST_CASE("NvdecOddHeightSafe: the odd heights FFmpeg's NVDEC gives right - H.26
     hevc.pixelFormat = "yuv444p";
     hevc.chroma = "444";
     hevc.height = hevc.codedHeight = 191;
-    CHECK(DescribeDecode(JudgeDecode(hevc, nullptr)) == "software (hevc); NVDEC with --hwaccel cuda when the GPU decodes this layout");
+    CHECK(DescribeDecode(JudgeDecode(hevc, nullptr)) == "software (hevc); NVDEC with --hwaccel cuda where FFmpeg offers it for this layout and the GPU decodes it");
     VideoStreamInfo h264 = H264Info();
     h264.height = h264.codedHeight = 191;
+    CHECK_THAT(DescribeDecode(JudgeDecode(h264, nullptr)), ContainsSubstring("not NVDEC even with --hwaccel cuda: an odd frame height (320x191"));
+    h264.pixelFormat = "yuv444p";  // an H.264 4:4:4 of one neither: NVDEC gives it as NV12
+    h264.chroma = "444";
     CHECK_THAT(DescribeDecode(JudgeDecode(h264, nullptr)), ContainsSubstring("not NVDEC even with --hwaccel cuda: an odd frame height (320x191"));
     hevc.pixelFormat = "yuv420p";
     hevc.chroma = "420";

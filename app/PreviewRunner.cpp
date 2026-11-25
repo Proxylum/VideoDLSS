@@ -58,6 +58,15 @@ nlohmann::json ReadJson(const fs::path& file) {
     }
 }
 
+// TASK-0076: the stages an NR preview is made with - up to NR in the run order (scenes, depth, flow, upscale, nr); fg after it does not
+// change it
+std::vector<StageEntry> NrPreviewStagesOf(const Project& p) {
+    std::vector<StageEntry> out;
+    for (const auto& st : p.stages)
+        if (st.name == "scenes" || st.name == "depth" || st.name == "flow" || st.name == "upscale" || st.name == "nr") out.push_back(st);
+    return out;
+}
+
 }  // namespace
 
 PreviewRunner::PreviewRunner(AppModel& model, TaskQueue& tasks, QObject* parent) : QObject(parent), model_(model), tasks_(tasks) {
@@ -156,10 +165,19 @@ void PreviewRunner::refuse(const QString& text) {
 
 bool PreviewRunner::liftRefusal() {
     if (!refused_) return false;
-    if (model_.nrPreview() && shownJob_ && !stale_.isEmpty()) setStatus(Tr("Показано превью для прежних настроек — %1").arg(stale_), "warn");
-    else if (model_.nrPreview() && shownJob_) setStatus(shownStatus_, "ok", shownTip_);
-    else setStatus({});
+    if (model_.nrPreview() && shownJob_) {
+        refusalShown_ = model_.sourceRefusalSaid();  // TASK-0076: the source still refused - said with the preview shown
+        sayShown();
+    } else {
+        setStatus({});
+    }
     return true;
+}
+
+void PreviewRunner::sayShown() {
+    const QString cannot = refusalShown_ ? Tr(" · новое превью недоступно: исходник не декодируется на этом компьютере") : QString();
+    if (!stale_.isEmpty()) setStatus(Tr("Показано превью для прежних настроек — %1").arg(stale_) + cannot, "warn");
+    else setStatus(shownStatus_ + cannot, refusalShown_ ? "warn" : "ok", shownTip_);  // current (the viewport as it is)
 }
 
 NrPreviewMode PreviewRunner::ModeOf(Request r) const {
@@ -566,6 +584,10 @@ void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, b
     shownJob_ = job;
     shownEntry_ = entry;
     stale_.clear();
+    staleBySnapshot_ = false;
+    refusalShown_ = false;
+    shownStages_ = NrPreviewStagesOf(model_.project());  // TASK-0076: what it is made with (judges it while the source is refused)
+    shownMask_ = model_.controlMask().fingerprint;
     model_.showNrPreview(s, seek);
     QString text;
     const QString took = cached ? Tr("из кэша") : Took(entry.seconds);
@@ -605,22 +627,29 @@ void PreviewRunner::updateStale() {
         setStatus({});
         return;
     }
-    if (model_.sourceRefusalSaid()) {  // TASK-0076: refused since (the viewport met a part NVDEC does not take): the preview shown is still
-        // for these settings - a new one is what cannot come (as appBlock says it); one already stale stays so (its settings changed
-        // before: the reason kept - no plan to judge it again now)
+    if (model_.sourceRefusalSaid()) {  // TASK-0076: refused since (the viewport met a part NVDEC does not take): no plan to judge the preview
+        // by - the settings it was made with judge it (a stage up to NR, the control mask changed since: «настройки изменились»); one
+        // stale by a plan before stays so (its reason kept); a new preview is what cannot come (as appBlock says it)
+        if (stale_.isEmpty() || staleBySnapshot_) {
+            const bool changed = NrPreviewStagesOf(model_.project()) != shownStages_ || model_.controlMask().fingerprint != shownMask_;
+            const QString reason = changed ? Tr("настройки изменились") : QString();
+            if (reason != stale_) {
+                stale_ = reason;
+                staleBySnapshot_ = changed;
+                emit model_.nrPreviewChanged();  // the cell label says «устарело» (or no more)
+            }
+        }
         refusalShown_ = true;
-        const QString cannot = Tr(" · новое превью недоступно: исходник не декодируется на этом компьютере");
-        if (stale_.isEmpty()) setStatus(shownStatus_ + cannot, "warn", shownTip_);
-        else setStatus(Tr("Показано превью для прежних настроек — %1").arg(stale_) + cannot, "warn");
+        sayShown();
         return;
     }
     const NrPreviewJob now = PrepareNrPreview(model_.previewPlan(), shownJob_->mode, shownJob_->first, shownRequest_.seconds, env());
     const QString reason = NrPreviewStaleReason(*shownJob_, now, !model_.planError().isEmpty() && !Decision(model_.previewPlan(), "nr"));
-    if (reason == stale_ && !refusalShown_) return;
+    if (reason == stale_ && !refusalShown_ && !staleBySnapshot_) return;
     refusalShown_ = false;
+    staleBySnapshot_ = false;
     stale_ = reason;
-    if (!stale_.isEmpty()) setStatus(Tr("Показано превью для прежних настроек — %1").arg(stale_), "warn");
-    else setStatus(shownStatus_, "ok", shownTip_);  // the value came back: current again (the viewport as it is)
+    sayShown();  // the value came back: current again
     emit model_.nrPreviewChanged();  // the cell label says «устарело»
 }
 

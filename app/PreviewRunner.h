@@ -118,6 +118,7 @@ private:
     void runPending();
     void show(const NrPreviewEntry& entry, const NrPreviewJob& job, bool cached, bool seek);
     void updateStale();
+    void sayShown();  // the status of the preview shown: stale or not, and (refusalShown_) that a new one cannot come
     void updateUsage();
     void housekeep(std::function<void()> work, std::function<void()> done);
     void calibrate(const NrPreviewJob& job, double seconds, const NrPreviewEntry& entry);
@@ -144,6 +145,11 @@ private:
     Request shownRequest_;
     QString stale_;
     bool refusalShown_ = false;  // TASK-0076: the status says a new preview cannot come (the source refused since it was shown)
+    // TASK-0076: what the preview shown was made with (the stages up to NR, the control mask) - judges it while the source is refused
+    // (no plan then); staleBySnapshot_: stale_ is that judgement's (a plan's reason before the refusal is kept)
+    std::vector<StageEntry> shownStages_;
+    QString shownMask_;
+    bool staleBySnapshot_ = false;
     QString uncachedTip_;  // why the preview shown is not in the cache (another DLL, a folder that could not be renamed)
     QString shownStatus_, shownTip_;  // show()'s status: back when the preview is current again
     QString upstreamNote_;  // «Этапы до улучшения посчитаны за …»: said until the preview after them shows

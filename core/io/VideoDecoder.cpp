@@ -51,7 +51,7 @@ AVPixelFormat GetHwFormat(AVCodecContext* ctx, const AVPixelFormat* formats) {
     const bool hardwareOnly = ctx->opaque == &kHardwareOnly;
     if (hardwareOnly && FakeNvdecRefusesFrames()) return RefuseQuietly(ctx);  // DLSSVID_FAKE_NVDEC_AV1=first-frame | query-fails | start-fails (tests)
     // the height as shown, else as coded: H.264 codes it aligned (191 as 192) and crops it - its last chroma row (4:2:0) would be lost on
-    // the way to the host (FFmpeg copies height / 2 chroma rows); a layout NvdecOddHeightSafe takes (HEVC 4:4:4) is not judged
+    // the way to the host (FFmpeg copies height / 2 chroma rows); HEVC 4:4:4 (NvdecOddHeightSafe) is not judged
     const AVPixelFormat* last = formats;  // the software format, as FFmpeg's ff_get_format reads it
     while (*last != AV_PIX_FMT_NONE && *(last + 1) != AV_PIX_FMT_NONE) ++last;
     int height = NvdecJudgedHeight(ctx->height, ctx->coded_height);
