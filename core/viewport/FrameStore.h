@@ -116,7 +116,9 @@ public:
     // keep: a verdict already remembered for this very file stays (a loader's own, more exact one) - true then too
     static bool RememberRefusedFile(const std::filesystem::path& file, const DecodeSupport& support, bool keep = false);
     // TASK-0076: false - every load of an NVDEC-only video closes its decoder afterwards (a task runs: the viewport does not hold NVDEC
-    // between frames), and such a video without a proxy gets no prefetch (RequeueLocked); true (the default) - kept for the next frame.
+    // between frames), and such a video without a proxy that decodes here gets no prefetch (RequeueLocked; one with a verdict -
+    // undecodable, refused in a load - keeps its window: it opens no decoder, its frames are missing at once); true (the default) - kept
+    // for the next frame.
     // A change asks for the window again (the prefetch comes back after the task)
     void SetHoldNvdec(bool hold);
     // Pass folders with a manifest directly under passesRoot, named by their folder (the texture kind comes from the manifest).

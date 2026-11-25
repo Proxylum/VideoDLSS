@@ -1017,6 +1017,28 @@ TEST_CASE("VerdictFromWhy reads another process's refusal back with its own bloc
         CHECK(whole.height == 191);
         CHECK_FALSE(whole.part);
     }
+    // the words name a part (VideoDecoder::ReceiveFrame's, after frames under another sequence header): a part also where this probe
+    // learned no layout - judged by the part's own words with its format known, by the odd height's words with «?»
+    {
+        FakeNvdecEnv fake("start-fails");  // the driver takes AV1 (no word of this machine's GPU in the verdict)
+        VideoStreamInfo noLayout = probe;
+        noLayout.pixelFormat = "unknown";
+        for (const char* format : {"yuv420p", "?"}) {
+            INFO(format);
+            StreamPart named;
+            named.pixelFormat = format;
+            named.codedWidth = 320;
+            named.codedHeight = 191;
+            const std::string why = RefusedDecode(oddSize, DecodeBlock::OddHeight, "at frame 24" + StreamPartWords(named)).why;
+            REQUIRE_THAT(why, Catch::Matchers::EndsWith(std::string("(at frame 24, on a part of the stream in other parameters (") + format + " 320x191))"));
+            const DecodeSupport v = VerdictFromWhy(noLayout, why, "the proxy build");
+            CheckRefusal(v, DecodeBlock::OddHeight);
+            CHECK(v.part);
+            CHECK(v.width == 320);
+            CHECK(v.height == 191);
+            CHECK_FALSE(v.Transient());
+        }
+    }
     // NVDEC refusing the stream: its detail said as the place's
     const std::string failedWords = RefusedDecode(probe, DecodeBlock::NvdecFailed, "").why;
     const DecodeSupport failed = VerdictFromWhy(probe, RefusedDecode(probe, DecodeBlock::NvdecFailed, "at frame 7").why, "the proxy build");

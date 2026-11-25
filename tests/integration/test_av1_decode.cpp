@@ -1989,6 +1989,7 @@ TEST_CASE("A layout the probe did not learn, refused after frames under another 
         CHECK(refused.support.block == DecodeBlock::OddHeight);
         CHECK(refused.support.part);
         CHECK(refused.support.height == kH - 1);
+        CHECK_THAT(refused.support.why, Catch::Matchers::EndsWith("(at frame 184, on a part of the stream in other parameters (yuv420p 320x191))"));  // read back as a part elsewhere
     }
     // a seek straight into the part: no frame under another sequence header - the stream's layout, learned late (as before)
     {
@@ -2007,6 +2008,7 @@ TEST_CASE("A layout the probe did not learn, refused after frames under another 
         REQUIRE(refused);
         CHECK(refused->support.block == DecodeBlock::OddHeight);
         CHECK_FALSE(refused->support.part);
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 184)"));  // no part: the place alone
     }
 }
 
@@ -2783,7 +2785,8 @@ TEST_CASE("An AV1 stream of an odd frame height is refused before any frame; a p
         CHECK(refused->support.height == kH - 1);
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, StartsWith(oddWords));
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 16)"));
+        // the part named as CheckDecode names one: another process reads it back as a part (VerdictFromWhy)
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 16, on a part of the stream in other parameters (yuv420p 320x191))"));
         CHECK(RefusalOfNextFrame(dec));  // kept
     }
     {
@@ -2795,7 +2798,8 @@ TEST_CASE("An AV1 stream of an odd frame height is refused before any frame; a p
         CHECK(refused->support.block == DecodeBlock::OddHeight);
         CHECK(refused->support.part);
         CHECK(refused->support.height == kH - 1);
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 16)"));  // its place in the stream: the part's first frame
+        // its place in the stream (the part's first frame), the part named
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 16, on a part of the stream in other parameters (yuv420p 320x191))"));
     }
 }
 

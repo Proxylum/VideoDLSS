@@ -9260,6 +9260,25 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
             CHECK_THAT(lines[0], Catch::Matchers::EndsWith(kStartFailedWhy));
         }
     }
+    {
+        // one video (a project without a result), NVDEC not starting for it: the singular
+        const auto [single, singlePasses] = ProxyProject(d, *clip, {}, "single");
+        std::optional<FakeNvdecEnv> fake;  // outlives the model
+        fake.emplace("start-fails");
+        AppModel model(true);
+        QSignalSpy messages(&model, &AppModel::message);
+        model.openProject(Q(single));
+        REQUIRE(model.hasProject());
+        REQUIRE(model.proxyBuilding());
+        Pump([&] { return !model.proxyBuilding(); }, 60000);
+        REQUIRE_FALSE(model.proxyBuilding());
+        const QStringList said = messagesOf(messages);
+        INFO(said.join(" | ").toStdString());
+        CHECK(said.contains(QString::fromUtf8("Прокси для перемотки сейчас не построен (") + HumanSourceName("source") +
+                            QString::fromUtf8("): видеокарта не начала декодировать — постройте его позже (Вид → Построить прокси для перемотки)")));
+        CHECK_FALSE(ValidProxy(*clip, singlePasses, "source"));
+        SettleAny(model, 0, 6);
+    }
     // a verdict in the proxy process alone (the stand-in set while the viewport rests, after its sources were made): before the build
     // (no-av1: the process asks the driver) and on its first frame (first-frame: the driver says nothing in advance, NVDEC refuses - at once,
     // whatever the load: later-frame refuses only once 3 frames came back before the next packet, which a busy GPU may not give)
@@ -9680,6 +9699,7 @@ TEST_CASE("AppModel: a proxy build that ends with an error after a video's verdi
     autoProxy.set(true);
     model.startProxies();
     REQUIRE(model.proxyBuilding());
+    autoProxy.set(false);  // this build alone: the sources set again after it start none (its verdict is what is checked)
     Pump([&] { return !model.proxyBuilding(); }, 60000);
     REQUIRE_FALSE(model.proxyBuilding());
     QStringList said;
@@ -9687,16 +9707,19 @@ TEST_CASE("AppModel: a proxy build that ends with an error after a video's verdi
     INFO("messages: " << said.join(" | ").toStdString());
     const std::string log = capture.Text();
     INFO(log);
-    REQUIRE(log.find("viewport proxy: dlssvid proxy failed (1)") != std::string::npos);  // the process did end with the error
+    auto count = [&](const std::string& what) {
+        size_t n = 0;
+        for (size_t at = log.find(what); at != std::string::npos; at = log.find(what, at + 1)) ++n;
+        return n;
+    };
+    REQUIRE(count("viewport proxy: dlssvid proxy failed (1)") == 1);  // the process did end with the error - this one build
+    CHECK(count("viewport proxy: building ") == 1);                   // no other build after it
     // its verdict on the source read all the same: remembered as the proxy build's, the sources set again say it, and said once
     const auto refused = model.store().Undecodable("source");
     REQUIRE(refused);
     CHECK(refused->block == DecodeBlock::NvdecFailed);
     CHECK_THAT(refused->why, Catch::Matchers::EndsWith("(the proxy build: on the first frame)"));
-    bool saidRefused = false;
-    for (const QString& m : said)
-        saidRefused = saidRefused || m.contains(QString::fromUtf8("Прокси для перемотки не построен (") + HumanSourceName("source") + "): ");
-    CHECK(saidRefused);
+    CHECK(said.contains(QString::fromUtf8("Прокси для перемотки не построен (") + HumanSourceName("source") + QString::fromUtf8("): видео на этом компьютере не декодируется (подробности в логе) — перекодируйте его в H.264 или HEVC другой программой")));  // one video: the singular
     SettleAny(model, 0, 6);
     fake.reset();
 }
@@ -9745,8 +9768,8 @@ TEST_CASE("AppModel: a background proxy build that made one video's proxy and re
     REQUIRE(model.store().Undecodable("source"));
     // one message: the status bar shows the last one only - «готов» would be replaced by the refusal in the same moment
     REQUIRE(said.size() == 1);
-    CHECK(said[0].startsWith(QString::fromUtf8("Прокси для перемотки готов: ") + HumanSourceName("result") + ". "));
-    CHECK(said[0].contains(QString::fromUtf8(". Прокси для перемотки не построен (") + HumanSourceName("source") + "): "));
+    // one video each: the singular
+    CHECK(said[0] == QString::fromUtf8("Прокси для перемотки готов: ") + HumanSourceName("result") + ". " + QString::fromUtf8("Прокси для перемотки не построен (") + HumanSourceName("source") + QString::fromUtf8("): видео на этом компьютере не декодируется (подробности в логе) — перекодируйте его в H.264 или HEVC другой программой"));
     // «готов» in the log too (the status bar's line goes in 5 s): once, of the result alone
     const std::string log = capture.Text();
     INFO(log);

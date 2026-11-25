@@ -343,8 +343,11 @@ DecodeSupport VerdictFromWhy(const VideoStreamInfo& probe, const std::string& wh
         for (const DecodeBlock block : {DecodeBlock::Resized, DecodeBlock::OddHeight})
             if (const auto detail = detailOf(RefusedDecode(sized, block, "").why)) {
                 DecodeSupport s = RefusedDecode(sized, block, withWhere(*detail));
-                // an odd height where the probe's is even: a part (as VideoDecoder::ReceiveFrame marks it)
-                s.part = block == DecodeBlock::OddHeight && probe.pixelFormat != "unknown" && probe.codedHeight % 2 == 0 && probe.codedHeight > 0;
+                // an odd height where the probe's is even, or the words name a part (ReceiveFrame's after frames under another
+                // sequence header - the probe here knowing no layout): a part, as VideoDecoder::ReceiveFrame marks it
+                const auto words = StreamPartOf(why);
+                s.part = block == DecodeBlock::OddHeight &&
+                         ((probe.pixelFormat != "unknown" && probe.codedHeight % 2 == 0 && probe.codedHeight > 0) || (words && !words->learned));
                 return s;
             }
         break;
@@ -972,13 +975,22 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }
     if (hwOnly_ && frameH % 2 == 1) {  // TASK-0076: a part, or a size the probe did not know (OddHeight: the chroma a row off)
-        const std::string frame = PlaceWords(pts);
+        std::string frame = PlaceWords(pts);
         const uint32_t w = static_cast<uint32_t>(frameW), h = static_cast<uint32_t>(frameH);
+        // the probe's height (of the stream, its layout learned) was even, or this decoder decoded frames under another sequence header: a
+        // part in other parameters - said in the words too (as CheckDecode's): another process reads it back (VerdictFromWhy), its probe
+        // knowing nothing of this decoder's sequences
+        const bool part = (info_.pixelFormat != "unknown" && info_.codedHeight % 2 == 0 && info_.codedHeight > 0) || decodedOtherSequence_;
+        if (part) {
+            StreamPart words;
+            words.pixelFormat = codec_->sw_pix_fmt != AV_PIX_FMT_NONE ? av_get_pix_fmt_name(codec_->sw_pix_fmt) : "?";
+            words.codedWidth = w;
+            words.codedHeight = h;
+            frame += StreamPartWords(words);
+        }
         av_frame_unref(frame_);
         DecodeSupport s = RefusedDecode(StreamPartInfo(info_, "", w, h), DecodeBlock::OddHeight, frame);
-        // the probe's height (of the stream, its layout learned) was even, or this decoder decoded frames under another sequence header: a
-        // part in other parameters
-        s.part = (info_.pixelFormat != "unknown" && info_.codedHeight % 2 == 0 && info_.codedHeight > 0) || decodedOtherSequence_;
+        s.part = part;
         refused_ = std::make_shared<const DecodeSupport>(std::move(s));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }
