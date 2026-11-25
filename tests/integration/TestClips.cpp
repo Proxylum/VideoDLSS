@@ -129,6 +129,7 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     vctx->time_base = AVRational{spec.fpsDen, spec.fpsNum};
     vctx->framerate = AVRational{spec.fpsNum, spec.fpsDen};
     if (spec.gop > 0) vctx->gop_size = spec.gop;
+    if (spec.bframes >= 0) vctx->max_b_frames = spec.bframes;
     const AVRational sar = spec.sar.Square() ? AVRational{0, 1} : AVRational{static_cast<int>(spec.sar.num), static_cast<int>(spec.sar.den)};
     if (spec.sarIn != "container") {
         vctx->sample_aspect_ratio = sar;

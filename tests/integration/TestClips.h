@@ -33,6 +33,7 @@ struct ClipSpec {
     // layout (SyntheticFrame(index, desc) or WriteClipWith) and write them as they are — ffv1 and prores_ks keep them.
     std::string pixFmt = "yuv420p";
     int gop = 0;  // keyframe interval of the encoder (0 = its default: 12 for ffv1); 1 = intra only (TASK-0040)
+    int bframes = -1;  // TASK-0076: the encoder's B-frames between references (max_b_frames); -1 = its default
     // The pts of frame i in 1/fps units (empty: i). A gap makes a variable-frame-rate clip (PR-10: the preview refuses to seek into it).
     std::function<int64_t(int64_t)> pts;
     // TASK-0072: how players show the clip - a display matrix on the video stream (av_display_rotation_set clockwise, then

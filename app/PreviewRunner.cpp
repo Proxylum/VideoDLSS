@@ -58,12 +58,12 @@ nlohmann::json ReadJson(const fs::path& file) {
     }
 }
 
-// TASK-0076: the stages an NR preview is made with - up to NR in the run order (scenes, depth, flow, upscale, nr); fg after it does not
-// change it
+// TASK-0076: the stages an NR preview is made with - the enabled ones up to NR in the run order (scenes, depth, flow, upscale, nr): fg
+// after it does not change it, nor a disabled stage's parameters (a preset applied while it is off) - turning one on or off does
 std::vector<StageEntry> NrPreviewStagesOf(const Project& p) {
     std::vector<StageEntry> out;
     for (const auto& st : p.stages)
-        if (st.name == "scenes" || st.name == "depth" || st.name == "flow" || st.name == "upscale" || st.name == "nr") out.push_back(st);
+        if (st.enabled && (st.name == "scenes" || st.name == "depth" || st.name == "flow" || st.name == "upscale" || st.name == "nr")) out.push_back(st);
     return out;
 }
 
@@ -628,7 +628,7 @@ void PreviewRunner::updateStale() {
         return;
     }
     if (model_.sourceRefusalSaid()) {  // TASK-0076: refused since (the viewport met a part NVDEC does not take): no plan to judge the preview
-        // by - the settings it was made with judge it (a stage up to NR, the control mask changed since: «настройки изменились»); one
+        // by - the settings it was made with judge it (an enabled stage up to NR, the control mask changed since: «настройки изменились»); one
         // stale by a plan before stays so (its reason kept); a new preview is what cannot come (as appBlock says it)
         if (stale_.isEmpty() || staleBySnapshot_) {
             const bool changed = NrPreviewStagesOf(model_.project()) != shownStages_ || model_.controlMask().fingerprint != shownMask_;

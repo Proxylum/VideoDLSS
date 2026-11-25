@@ -941,8 +941,9 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         return false;
     }
     CheckDecode(err, "avcodec_receive_frame");
-    // TASK-0076: the frame's own size is codec_'s (av1dec sets it from each frame header); the CUDA frame NVDEC hands out has the size of
-    // its surface (even, the sequence's): a 191-row frame comes as 192 rows
+    // TASK-0076: the size of the current geometry is codec_'s (av1dec sets it from each frame header); the CUDA frame NVDEC hands out of
+    // a codec without exported cropping has the size of its surface (even, the sequence's): a 191-row AV1 frame comes as 192 rows. A
+    // delayed frame of a codec with output delay (H.264 / HEVC after a resolution change) may be of the former geometry
     const int frameW = codec_->width, frameH = codec_->height;
     const int64_t pts = frame_->best_effort_timestamp != AV_NOPTS_VALUE ? frame_->best_effort_timestamp : frame_->pts;
     if (hwOnly_ && Av1FrameBelowSequence(frameW, frameH, nvdecSequence_)) {  // NVDEC gives it wrong (Resized)
@@ -981,12 +982,14 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     AVFrame* src = frame_;
     if (frame_->format == AV_PIX_FMT_CUDA) {
         nvdecFrames_ = true;
-        // TASK-0076: NVDEC's frame comes at its surface's size (even sides: a 853-wide AV1 as 854), the frame's own is codec_'s - cut to
-        // it, as FFmpeg's apply_cropping does for a hardware frame of a codec that exports cropping (the width and height; the pointers
-        // and the pitch stay - the chroma of 853 and 854 is as wide)
-        // (not a frame FFmpeg left cropped on the left or the top - H.264 / HEVC: the cut keeps the top-left corner, it would shift the
-        // picture; such a frame comes as it did before, at its surface's width)
-        if (frameW > 0 && frameH > 0 && frame_->crop_left == 0 && frame_->crop_top == 0 && (frameW < frame_->width || frameH < frame_->height)) {
+        // TASK-0076: NVDEC's frame comes at its surface's size (even sides: a 853-wide AV1 as 854) - the surface's rounding cut off, as
+        // FFmpeg's apply_cropping does for a hardware frame of a codec that exports cropping (the width and height; the pointers and the
+        // pitch stay - the chroma of 853 and 854 is as wide). Only that one row or column: a frame larger by more is of another geometry
+        // (H.264 / HEVC: a delayed frame from before a resolution change, cut by FFmpeg already) and comes as before, at its own size;
+        // nor a frame FFmpeg left cropped on the left or the top (H.264 / HEVC: the cut keeps the top-left corner, it would shift the
+        // picture - it comes as before, at its surface's width)
+        if (frameW > 0 && frameH > 0 && frame_->crop_left == 0 && frame_->crop_top == 0 && (frameW < frame_->width || frameH < frame_->height) &&
+            frame_->width - frameW <= 1 && frame_->height - frameH <= 1) {
             frame_->width = std::min(frame_->width, frameW);
             frame_->height = std::min(frame_->height, frameH);
         }

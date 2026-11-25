@@ -1648,6 +1648,7 @@ TEST_CASE("FrameStore prefetches an NVDEC-only video that has a proxy while a ta
     const auto passes = dir / "passes";
     BuildProxy(clip, passes, "source");  // where NVDEC decodes AV1 (the proxy is FFV1: software everywhere)
     REQUIRE(ValidProxy(clip, passes, "source"));
+    LiveLog log;  // before the store: its loaders log while it lives
     Av1Store s(3, 1);  // three frames on either side
     s.store->SetSources(Project::Create(clip, passes).Sources());
     const ViewportSource* src = s.store->FindSource("source");
@@ -1655,6 +1656,7 @@ TEST_CASE("FrameStore prefetches an NVDEC-only video that has a proxy while a ta
     REQUIRE(src->hardwareOnly);
     REQUIRE_FALSE(src->proxy.empty());
     s.store->SetHoldNvdec(false);  // a task runs: the proxy takes no NVDEC - its prefetch stays
+    const size_t mark = log.Text().size();
     REQUIRE(s.Load(56) == FrameStore::Status::Ready);
     CHECK(Eventually(
         [&] {
@@ -1664,6 +1666,11 @@ TEST_CASE("FrameStore prefetches an NVDEC-only video that has a proxy while a ta
             return true;
         },
         20000));
+    // all of them from the proxy: the original's NVDEC decoder never opened while the task ran
+    const std::string since = log.Text().substr(mark);
+    INFO(since);
+    CHECK(CountOf(since, "open " + clip.string() + ": ") == 0);
+    CHECK(s.store->Stats("source").proxyLoads > 0);
 }
 
 TEST_CASE("The driver not answering for a CUDA error (query-fails), NVDEC refusing the first frame then is a start failure, not a verdict",
@@ -3418,6 +3425,59 @@ TEST_CASE("NVDEC gives an HEVC 4:4:4 frame of an odd height (cropped from 192) r
     INFO(r.out);
     CHECK(r.code == 0);
     CHECK_THAT(r.out, ContainsSubstring("decode:      software (hevc); NVDEC with --hwaccel cuda where FFmpeg offers it for this layout and the GPU decodes it"));
+}
+
+TEST_CASE("NVDEC gives the delayed frames from before an H.264 resolution change at their own size - none cut to the new geometry",
+          "[integration][gpu][nvdec][regression]") {
+    const auto dir = Dir("h264_resolution_change");
+    if (!HaveNvidia() || !VideoEncoder::EncoderAvailable("h264_nvenc")) SKIP("no NVIDIA GPU with h264_nvenc");
+    // two raw (Annex B) H.264 streams with B-frames one after the other - 320x240, then 256x144, each with its own SPS and IDR: the
+    // decoder's output delay gives the last frames of the first part after codec_ took the second's size
+    auto part = [&](const char* name, uint32_t w, uint32_t h) {
+        ClipSpec spec;
+        spec.width = w;
+        spec.height = h;
+        spec.frames = 24;
+        spec.gop = 12;
+        spec.bframes = 2;
+        spec.codec = "h264_nvenc";
+        spec.format = "h264";
+        std::string why;
+        const auto clip = WriteClipIfSupported(dir / name, spec, &why);
+        if (!clip) SKIP("h264_nvenc does not write the clip here: " << why);
+        return *clip;
+    };
+    const auto a = part("a.h264", 320, 240);
+    const auto b = part("b.h264", 256, 144);
+    const auto parts = dir / "parts.h264";
+    {
+        std::ofstream out(parts, std::ios::binary);
+        for (const auto& p : {a, b}) {
+            std::ifstream in(p, std::ios::binary);
+            out << in.rdbuf();
+        }
+    }
+    VideoDecoder plain(parts);
+    const std::vector<CpuFrame> soft = DecodeAllOf(plain);
+    VideoDecoder::Options cuda;
+    cuda.hwaccel = HwAccel::Cuda;
+    VideoDecoder dec(parts, cuda);
+    const std::vector<CpuFrame> hard = DecodeAllOf(dec);
+    CHECK(dec.DecodesOnNvdec());
+    REQUIRE(soft.size() == 48);
+    REQUIRE(hard.size() == soft.size());
+    for (size_t n = 0; n < hard.size(); ++n) {
+        INFO("frame " << n);
+        const uint32_t w = n < 24 ? 320 : 256, h = n < 24 ? 240 : 144;
+        CHECK(soft[n].desc.width == w);
+        CHECK(soft[n].desc.height == h);
+        CHECK(hard[n].desc.width == w);  // the first part's frames at their own size under NVDEC too, none cut to 256x144
+        CHECK(hard[n].desc.height == h);
+        if (hard[n].desc.width != soft[n].desc.width || hard[n].desc.height != soft[n].desc.height) continue;
+        int rows = 0;  // the luma as the software decode's (H.264 decodes bit-exactly)
+        for (size_t r = 0; r < h; ++r) rows += std::memcmp(hard[n].Plane(0) + r * w, soft[n].Plane(0) + r * w, w) == 0;
+        CHECK(rows == static_cast<int>(h));
+    }
 }
 
 TEST_CASE("FrameStore: NVDEC not starting for a video is said once per file at warn - not once per place a load met it (a seek elsewhere)",

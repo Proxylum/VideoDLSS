@@ -4831,7 +4831,7 @@ struct PreviewProject {
         Make(WriteClip(dir / "clip.mkv", spec), upscale);
     }
     // TASK-0076: of a video written elsewhere (an AV1 one; Dir(name) empties its folder)
-    PreviewProject(const char* name, const std::filesystem::path& clip) : dir(Dir(name)) { Make(clip, true); }
+    PreviewProject(const char* name, const std::filesystem::path& clip, bool upscale = true) : dir(Dir(name)) { Make(clip, upscale); }
     void Make(const std::filesystem::path& clip, bool upscale) {
         Project p = Project::Create(clip, dir / "passes");
         for (auto& st : p.stages) {
@@ -7867,7 +7867,7 @@ TEST_CASE("NR preview: the source refused since the preview showed - a current o
     const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why, 12);
     if (clip.empty()) SKIP(why);
     AutoProxySetting autoProxy(false);  // no background build decoding on the GPU here
-    PreviewProject m("preview_refused", clip);
+    PreviewProject m("preview_refused", clip, false);  // upscale off: NR reads the colour from the video
     AppModel& model = *m.model;
     REQUIRE(model.sourceDecode().Ok());
     TaskQueue queue;
@@ -7952,6 +7952,33 @@ TEST_CASE("NR preview: the source refused since the preview showed - a current o
         CHECK(runner.staleReason().isEmpty());
         CHECK(runner.statusText() == refusedStatus);
         CHECK_FALSE(cellSaysStale());
+        // a stage before NR (depth, on) changed: stale too; back - current
+        const nlohmann::json depth = paramsOf("depth");
+        REQUIRE(depth.value("backend", std::string()) == "stub");
+        model.setStageParam("depth", "backend", "da3");
+        model.refreshPlan();
+        CHECK(runner.staleReason() == changedSettings);
+        model.setStageParams("depth", depth);
+        model.refreshPlan();
+        CHECK(runner.staleReason().isEmpty());
+        // a stage that is off (upscale): its parameters do not make it (a preset applied while it is off); turning it on does
+        bool upscaleOn = true;
+        for (const auto& st : model.project().stages)
+            if (st.name == "upscale") upscaleOn = st.enabled;
+        REQUIRE_FALSE(upscaleOn);
+        const nlohmann::json upscale = paramsOf("upscale");
+        model.setStageParam("upscale", "scale", 1.5);
+        model.refreshPlan();
+        CHECK(runner.staleReason().isEmpty());
+        CHECK(runner.statusText() == refusedStatus);
+        model.setStageParams("upscale", upscale);
+        model.setStageEnabled("upscale", true);
+        model.refreshPlan();
+        CHECK(runner.staleReason() == changedSettings);
+        model.setStageEnabled("upscale", false);
+        model.refreshPlan();
+        CHECK(runner.staleReason().isEmpty());
+        CHECK(runner.statusText() == refusedStatus);
         rest();
     }
     // the GPU back: the status as the preview showed
@@ -7982,6 +8009,35 @@ TEST_CASE("NR preview: the source refused since the preview showed - a current o
     CHECK(runner.staleReason() == changedSettings);
     CHECK(runner.statusText() == staleStatus);
     CHECK(cellSaysStale());
+    // the control mask imported while the source is refused: the preview was made without it - stale; removed - current again. Last: the
+    // import reads the sources again under the stand-in (the video then stays refused for the viewport)
+    model.setStageParam("nr", "intensity", 1.0);
+    model.refreshPlan();
+    REQUIRE(runner.staleReason().isEmpty());
+    rest();
+    {
+        FakeNvdecEnv lost("no-av1");
+        model.refreshPlan();
+        REQUIRE(model.sourceRefusalSaid());
+        REQUIRE(runner.staleReason().isEmpty());
+        QSignalSpy done(&model, &AppModel::controlMaskFinished);
+        QSignalSpy maskChanged(&model, &AppModel::controlMaskChanged);
+        model.importControlMask(MaskPng(m.dir / "mask.png", 320, 192, false));
+        REQUIRE((!done.isEmpty() || done.wait(20000)));
+        REQUIRE(done.last().at(0).toBool());
+        Pump([&] { return !maskChanged.isEmpty(); }, 10000);
+        REQUIRE(model.sourceRefusalSaid());
+        REQUIRE(model.nrPreview());
+        CHECK(runner.staleReason() == changedSettings);
+        CHECK(runner.statusText() == staleStatus + QString::fromUtf8(" · новое превью недоступно: исходник не декодируется на этом компьютере"));
+        maskChanged.clear();
+        REQUIRE(model.removeControlMask());
+        Pump([&] { return !maskChanged.isEmpty(); }, 10000);
+        REQUIRE(model.nrPreview());
+        CHECK(runner.staleReason().isEmpty());
+        CHECK(runner.statusText() == refusedStatus);
+        rest();
+    }
     queue.stopAll(10000);
 }
 
@@ -8549,12 +8605,32 @@ TEST_CASE("AppModel: frames NVDEC could not start for while a task ran come back
     CHECK(model.frameStateOf("source") == FrameState::Missing);
     REQUIRE(model.store().StartFailure("source"));
     CHECK(model.planError().isEmpty());  // no verdict: the plan stands
-    fake.reset();  // the loaders at rest; the memory would be there again - but nothing asks for those frames until the task ends
-    // the end of the tasks forgets the start failures at once (updateNvdecHold), not only when a load succeeds later
+    // the loaders at rest (no load in flight reads the environment as it changes)
+    auto atRest = [&] {
+        QElapsedTimer t;
+        t.start();
+        auto loading = [&] {
+            for (int64_t f = 0; f < 24; ++f)
+                if (model.store().GetStatus(f, "source") == FrameStore::Status::Loading) return true;
+            return false;
+        };
+        while (loading() && t.elapsed() < 30000) {
+            model.store().Update();
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        }
+        REQUIRE_FALSE(loading());
+    };
+    // the end of the tasks forgets the start failures at once (updateNvdecHold) - still under the stand-in: the frame fails again
     model.setTasksRunning(false);
     CHECK_FALSE(model.store().StartFailure("source"));
-    model.setTasksRunning(true);  // the task runs still: its real end below
-    queue.cancel(task);
+    model.setTasksRunning(true);  // the task runs still
+    SettleAny(model, 12, 12);
+    atRest();
+    REQUIRE(model.store().StartFailure("source"));
+    fake.reset();  // the memory would be there again - but nothing asks for those frames until the task ends
+    Pump([] { return false; }, 300);
+    REQUIRE(model.store().StartFailure("source"));  // not before
+    queue.cancel(task);  // the task's real end (ProjectTasks: syncTasksRunning after taskFinished) brings it back
     Pump([&] { return queue.finished(task); }, 20000);
     REQUIRE(queue.finished(task));
     Pump([&] { return model.store().GetStatus(12, "source") == FrameStore::Status::Ready; }, 20000);  // asked again, loaded
