@@ -537,10 +537,13 @@ void AppModel::startProxies() {
         const QString out = QString::fromUtf8(p->readAll());  // dlssvid writes UTF-8 (TASK-0066)
         p->deleteLater();
         if (proxyProcess_ == p) proxyProcess_ = nullptr;
-        if (status != QProcess::NormalExit || code != 0) {
+        if (status != QProcess::NormalExit) {  // crashed or killed: its output is no account of the videos
             Log()->warn("viewport proxy: dlssvid proxy failed ({}): {}", code, out.right(400).toStdString());
             return;
         }
+        // TASK-0076: an error on one video ends the process with 1 after the lines of the ones before it (a verdict, a proxy built) -
+        // read as a whole run's (BuildMissingProxies goes on after a refusal, not after other errors)
+        if (code != 0) Log()->warn("viewport proxy: dlssvid proxy failed ({}): {}", code, out.right(400).toStdString());
         QStringList ready;
         for (const char* name : {"source", "result"}) {
             const std::filesystem::path video = std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo;
@@ -553,7 +556,7 @@ void AppModel::startProxies() {
         // then what was not built; «готов» in the log too (the status bar's line goes in 5 s)
         QStringList said;
         if (!ready.isEmpty()) {
-            said << tr("Прокси для перемотки готов: %1").arg(ready.join(", "));
+            said << (ready.size() > 1 ? tr("Прокси для перемотки готовы: %1") : tr("Прокси для перемотки готов: %1")).arg(ready.join(", "));
             Log()->info("viewport proxy ready: {}", ready.join(", ").toStdString());
         }
         // TASK-0076: NVDEC refused the video or did not start in the proxy process (its lines: «<name>: no proxy …») - said, not silent
@@ -568,13 +571,17 @@ void AppModel::startProxies() {
         }
         for (const QString& line : out.split('\n'))  // the reasons themselves, whole (not the tail of the output)
             if (line.contains(": no proxy,") || line.contains(": no proxy now")) Log()->warn("viewport proxy: {}", line.trimmed().toStdString());
-        if (!refused.isEmpty())
-            said << tr("Прокси для перемотки не построен (%1): видео на этом компьютере не декодируется (подробности в логе) — перекодируйте его в H.264 "
-                       "или HEVC другой программой")
+        if (!refused.isEmpty())  // (two videos: the plural, as the question of «Удалить прокси» says it)
+            said << (refused.size() > 1 ? tr("Прокси для перемотки не построены (%1): видео на этом компьютере не декодируются (подробности в логе) — "
+                                             "перекодируйте их в H.264 или HEVC другой программой")
+                                        : tr("Прокси для перемотки не построен (%1): видео на этом компьютере не декодируется (подробности в логе) — "
+                                             "перекодируйте его в H.264 или HEVC другой программой"))
                         .arg(refused.join(", "));
         if (!notNow.isEmpty())
-            said << tr("Прокси для перемотки сейчас не построен (%1): видеокарта не начала декодировать — постройте его позже (Вид → Построить прокси "
-                       "для перемотки)")
+            said << (notNow.size() > 1 ? tr("Прокси для перемотки сейчас не построены (%1): видеокарта не начала декодировать — постройте их позже (Вид → "
+                                            "Построить прокси для перемотки)")
+                                       : tr("Прокси для перемотки сейчас не построен (%1): видеокарта не начала декодировать — постройте его позже (Вид → "
+                                            "Построить прокси для перемотки)"))
                         .arg(notNow.join(", "));
         if (!said.isEmpty()) emit message(said.join(". "));
         // a verdict on a file is the viewport's too: the sources set again say it (the plan stops, the viewport and the menus say it, the

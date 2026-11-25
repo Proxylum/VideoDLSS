@@ -9211,10 +9211,13 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
     std::filesystem::copy_file(*clip, result, std::filesystem::copy_options::overwrite_existing);
     const auto [file, passes] = ProxyProject(d, *clip, result, "av1");
     const QString names = HumanSourceName("source") + ", " + HumanSourceName("result");
-    const QString notHere = QString::fromUtf8("Прокси для перемотки не построен (");
-    const QString notNow = QString::fromUtf8("Прокси для перемотки сейчас не построен (");
+    // two videos: the plural (TASK-0076); the prefixes below stand for either number
+    const QString notHere = QString::fromUtf8("Прокси для перемотки не построены (");
+    const QString notNow = QString::fromUtf8("Прокси для перемотки сейчас не построены (");
+    const QString notHereAny = QString::fromUtf8("Прокси для перемотки не построен");
+    const QString notNowAny = QString::fromUtf8("Прокси для перемотки сейчас не построен");
     const QString verdictWords =
-        QString::fromUtf8("): видео на этом компьютере не декодируется (подробности в логе) — перекодируйте его в H.264 или HEVC другой программой");
+        QString::fromUtf8("): видео на этом компьютере не декодируются (подробности в логе) — перекодируйте их в H.264 или HEVC другой программой");
     auto messagesOf = [](const QSignalSpy& spy) {
         QStringList out;
         for (const auto& args : spy) out << args.at(0).toString();
@@ -9244,8 +9247,8 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
         const QStringList said = messagesOf(messages);
         INFO(said.join(" | ").toStdString());
         CHECK(said.contains(notNow + names +
-                            QString::fromUtf8("): видеокарта не начала декодировать — постройте его позже (Вид → Построить прокси для перемотки)")));
-        for (const QString& m : said) CHECK_FALSE(m.startsWith(notHere));  // not a verdict
+                            QString::fromUtf8("): видеокарта не начала декодировать — постройте их позже (Вид → Построить прокси для перемотки)")));
+        for (const QString& m : said) CHECK_FALSE(m.startsWith(notHereAny));  // not a verdict
         CHECK_FALSE(ValidProxy(*clip, passes, "source"));
         CHECK_FALSE(ValidProxy(result, passes, "result"));
         SettleAny(model, 0, 6);
@@ -9281,7 +9284,7 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
         const QStringList said = messagesOf(messages);
         INFO(said.join(" | ").toStdString());
         CHECK(said.contains(notHere + names + verdictWords));
-        for (const QString& m : said) CHECK_FALSE(m.startsWith(notNow));
+        for (const QString& m : said) CHECK_FALSE(m.startsWith(notNowAny));
         CHECK_FALSE(ValidProxy(*clip, passes, "source"));
         const std::string log = capture.Text();
         INFO(log);
@@ -9355,6 +9358,23 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
         SettleAny(model, 0, 6);
         fake.reset();
     }
+    // both videos decodable here (the files written since the verdicts) and without a proxy: one build makes both - «готовы», one message
+    {
+        RemoveProxy(passes, "source");
+        RemoveProxy(passes, "result");
+        AppModel model(true);
+        QSignalSpy messages(&model, &AppModel::message);
+        model.openProject(Q(file));
+        REQUIRE(model.hasProject());
+        REQUIRE(model.proxyBuilding());
+        Pump([&] { return !model.proxyBuilding(); }, 60000);
+        REQUIRE_FALSE(model.proxyBuilding());
+        const QStringList said = messagesOf(messages);
+        INFO(said.join(" | ").toStdString());
+        CHECK(ValidProxy(*clip, passes, "source"));
+        CHECK(ValidProxy(result, passes, "result"));
+        CHECK(said.contains(QString::fromUtf8("Прокси для перемотки готовы: ") + names));
+    }
     // a video that decodes and needs no proxy (keyframes at most 8 frames apart): the process says «source: no proxy needed» - nothing of it
     ClipSpec plain;
     plain.frames = 8;
@@ -9371,8 +9391,8 @@ TEST_CASE("AppModel: a background proxy build NVDEC did not serve says so - not 
     const QStringList said = messagesOf(messages);
     INFO(said.join(" | ").toStdString());
     for (const QString& m : said) {
-        CHECK_FALSE(m.startsWith(notHere));
-        CHECK_FALSE(m.startsWith(notNow));
+        CHECK_FALSE(m.startsWith(notHereAny));
+        CHECK_FALSE(m.startsWith(notNowAny));
     }
 }
 
@@ -9623,6 +9643,62 @@ TEST_CASE("AppModel: the viewport's refusal is heard once per file as it is - th
     INFO("planError: " << model.planError().toStdString());
     CHECK(model.planError() == SourceDecodeText(refused));
     CHECK(model.sourceDecode().block == refused.block);
+}
+
+TEST_CASE("AppModel: a proxy build that ends with an error after a video's verdict still takes that verdict - remembered and said",
+          "[app][gpu][av1][proxy][regression]") {
+    App();
+    const auto d = Dir("av1_proxy_error_after_verdict");
+    AutoProxySetting autoProxy(false);
+    {
+        D3D12Device dev;
+        if (dev.IsWarp() || !dev.IsNvidia() || !VideoEncoder::EncoderAvailable("av1_nvenc")) SKIP("no NVIDIA GPU with av1_nvenc");
+    }
+    ClipSpec spec;
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 24;
+    spec.gop = 16;  // a proxy is needed
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto clip = WriteClipIfSupported(d / "clip.mp4", spec, &why);
+    if (!clip) SKIP(why);
+    // the result: no video at all - the proxy process meets it after the source and ends with 1 (BuildMissingProxies goes on after a
+    // refusal, not after other errors): the source's verdict line stands in an output that ends in an error
+    const auto result = d / "result.mp4";
+    std::ofstream(result, std::ios::binary) << "not a video";
+    const auto [file, passes] = ProxyProject(d, *clip, result, "error_after");
+    std::optional<FakeNvdecEnv> fake;  // outlives the model: its loaders never read the environment as it changes
+    LogCapture capture;  // before the model: the sinks are not changed while its loaders log
+    AppModel model(true);
+    QSignalSpy messages(&model, &AppModel::message);
+    model.openProject(Q(file));
+    REQUIRE(model.hasProject());
+    SettleFrames(model, 0, 6);  // the loaders at rest
+    REQUIRE_FALSE(model.store().Undecodable("source"));
+    fake.emplace("first-frame");  // the proxy process (it inherits the stand-in): NVDEC refuses the source's first frame - a verdict
+    autoProxy.set(true);
+    model.startProxies();
+    REQUIRE(model.proxyBuilding());
+    Pump([&] { return !model.proxyBuilding(); }, 60000);
+    REQUIRE_FALSE(model.proxyBuilding());
+    QStringList said;
+    for (const auto& m : messages) said << m[0].toString();
+    INFO("messages: " << said.join(" | ").toStdString());
+    const std::string log = capture.Text();
+    INFO(log);
+    REQUIRE(log.find("viewport proxy: dlssvid proxy failed (1)") != std::string::npos);  // the process did end with the error
+    // its verdict on the source read all the same: remembered as the proxy build's, the sources set again say it, and said once
+    const auto refused = model.store().Undecodable("source");
+    REQUIRE(refused);
+    CHECK(refused->block == DecodeBlock::NvdecFailed);
+    CHECK_THAT(refused->why, Catch::Matchers::EndsWith("(the proxy build: on the first frame)"));
+    bool saidRefused = false;
+    for (const QString& m : said)
+        saidRefused = saidRefused || m.contains(QString::fromUtf8("Прокси для перемотки не построен (") + HumanSourceName("source") + "): ");
+    CHECK(saidRefused);
+    SettleAny(model, 0, 6);
+    fake.reset();
 }
 
 TEST_CASE("AppModel: a background proxy build that made one video's proxy and refused the other's says both in one message - the ready one first",

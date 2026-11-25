@@ -318,7 +318,7 @@ viewport cell reads «· видеокарта не начала декодиро
 other sources are shown, when a frame of that video decodes, and when the task is over (not on a pan, a zoom or the wipe); `process` and `render` report the failure. A scrubbing proxy built earlier still shows
 such a source (one copied from another PC is used when the source kept its file times). The GUI's viewport decodes an AV1
 video on NVDEC in its own process; while any task of its queue waits or runs (processing, a stage run alone, a pass export, an
-NR preview) or a stage check is going on, it does not keep that decoder between frames and loads no frame of an AV1 video without a
+NR preview) or a stage check is going on, it does not keep that decoder between frames and loads no frame of an AV1 video it decodes without a
 proxy ahead: playing it then shows about a frame every 2 s (a frame not decoded in time is skipped), steps and scrubbing are slower; a
 scrubbing proxy, or the end of the task, lifts it. A recent project's thumbnail that NVDEC could not decode now is made again the next time the start page is rebuilt. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be the one the stages
 run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame|query-fails|start-fails|device-fails|later-frame` stands in for the driver's answer

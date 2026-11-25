@@ -933,7 +933,8 @@ TEST_CASE("FrameStore shows a video this machine cannot decode through its proxy
     REQUIRE(ref.size() == 24);
     const ColorInfo ci = ColorInfoFromStream(VideoDecoder(clip, VideoDecoder::Probe()).Info());
     const auto passes = dir / "passes";
-    BuildProxy(clip, passes, "source");  // made here, where NVDEC decodes AV1 (the proxy is FFV1: software everywhere)
+    BuildProxy(clip, passes, "source");  // made here, where NVDEC decodes AV1 (the proxy's codec - ProxyCodecFor: MagicYUV for this 8-bit clip -
+                                         // decodes in software everywhere)
     REQUIRE(ValidProxy(clip, passes, "source"));
     {
         FakeNvdecEnv fake("no-av1");
@@ -1641,12 +1642,54 @@ TEST_CASE("FrameStore prefetches no frame of an NVDEC-only video while a task ru
         30000));
 }
 
+TEST_CASE("FrameStore keeps the window of a video refused here while a task runs - its frames are missing at once, none left queued",
+          "[integration][viewport][gpu][av1]") {
+    const auto dir = Dir("held_refused_window");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    auto missingAround = [](Av1Store& s) {  // the neighbours of frame 10 marked missing (not «Queued»: loadable, not asked for)
+        return Eventually(
+            [&] {
+                s.store->Update();
+                for (const int64_t n : {9, 11})
+                    if (s.store->GetStatus(n, "source") != FrameStore::Status::Missing) return false;
+                return true;
+            },
+            10000);
+    };
+    {
+        // refused by the probe (the driver's answer: no AV1 here): no decoder opens for it - its window is asked for and missing at once
+        FakeNvdecEnv fake("no-av1");  // before the store: its loaders read it while the store lives
+        Av1Store s(3, 1);
+        s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+        const ViewportSource* src = s.store->FindSource("source");
+        REQUIRE(src);
+        REQUIRE(src->undecodable);
+        REQUIRE(src->proxy.empty());
+        s.store->SetHoldNvdec(false);  // a task runs
+        REQUIRE(s.Load(10) == FrameStore::Status::Missing);
+        CHECK(missingAround(s));
+    }
+    {
+        // refused by a loader (NVDEC refusing the first frame: a verdict met in a load, not by the probe): the same once it is met
+        FakeNvdecEnv fake("first-frame");
+        Av1Store s(3, 1);
+        s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+        REQUIRE_FALSE(s.store->FindSource("source")->undecodable);  // the driver said nothing in advance
+        s.store->SetHoldNvdec(false);
+        REQUIRE(s.Load(10) == FrameStore::Status::Missing);
+        REQUIRE(s.store->Undecodable("source"));
+        REQUIRE(s.Load(10) == FrameStore::Status::Missing);  // asked for again (the cursor): the window with it
+        CHECK(missingAround(s));
+    }
+}
+
 TEST_CASE("FrameStore prefetches an NVDEC-only video that has a proxy while a task runs - the neighbours come from the proxy",
           "[integration][viewport][gpu][av1][proxy]") {
     const auto dir = Dir("held_proxy_prefetch");
     REQUIRE_AV1_CLIP(clip, dir, false, 64);  // a keyframe every 8: frame 56 is beyond FrameStore's walk from frame 0
     const auto passes = dir / "passes";
-    BuildProxy(clip, passes, "source");  // where NVDEC decodes AV1 (the proxy is FFV1: software everywhere)
+    BuildProxy(clip, passes, "source");  // where NVDEC decodes AV1 (the proxy's codec - ProxyCodecFor: MagicYUV for this 8-bit clip - decodes in
+                                         // software everywhere)
     REQUIRE(ValidProxy(clip, passes, "source"));
     LiveLog log;  // before the store: its loaders log while it lives
     Av1Store s(3, 1);  // three frames on either side

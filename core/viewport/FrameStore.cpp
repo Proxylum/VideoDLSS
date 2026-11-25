@@ -546,10 +546,12 @@ void FrameStore::RequeueLocked() {
     };
     // TASK-0076: while a task runs (SetHoldNvdec(false)) a video decoding on NVDEC only, without a proxy, gets its shown frame only:
     // each of its loads opens a decoder (the CUDA device, a walk from the keyframe) and closes it after - no prefetch paid for that, on
-    // the GPU the run has
+    // the GPU the run has. A video refused here opens no decoder: its window stays (its frames are missing at once - playback goes on)
     const auto spanOf = [&](const std::string& name) {
         const ViewportSource* s = FindSource(name);
-        return !holdNvdec_ && s && s->isVideo && s->hardwareOnly && s->proxy.empty() ? 0 : SpanOf(name);
+        return !holdNvdec_ && s && s->isVideo && s->hardwareOnly && s->proxy.empty() && !s->undecodable && !refusedInLoad_.count(name)
+                   ? 0
+                   : SpanOf(name);
     };
     int maxSpan = 0;
     for (const auto& name : needed_) maxSpan = std::max(maxSpan, spanOf(name));
