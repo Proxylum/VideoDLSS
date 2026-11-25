@@ -816,12 +816,25 @@ TEST_CASE("JudgeDecode: an odd frame height is refused after the layout and the 
     // a machine that could not decode it anyway says why first: no CUDA, no NVDEC, no AV1 (an even height would not help there)
     CheckRefusal(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &noCuda), DecodeBlock::NoCuda);
     CheckRefusal(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &noNvdec), DecodeBlock::NoNvdec);
+    // their reasons say the odd height too: the GPU or the driver mended alone would not open it (the size the probe learned)
+    for (const NvdecAv1Caps* caps : {&noCuda, &noNvdec}) {
+        INFO((caps == &noCuda ? "no CUDA" : "no NVDEC"));
+        const std::string even = JudgeDecode(Av1Info("yuv420p", 8, 320, 192), caps).why;
+        CHECK_THAT(even, !ContainsSubstring("odd"));  // an even one: as before
+        CHECK(JudgeDecode(Av1Info("yuv420p", 8, 320, 191), caps).why ==
+              even + "; its frame height (320x191, the frame as stored) is odd too, which this build refuses on any GPU");
+        // a layout the probe did not learn: the size is the container's - the height not said
+        CHECK(JudgeDecode(Av1Info("unknown", 8, 320, 191), caps).why == JudgeDecode(Av1Info("unknown"), caps).why);
+        CHECK_THAT(JudgeDecode(Av1Info("unknown", 8, 320, 191), caps).why, !ContainsSubstring("odd"));
+    }
     const DecodeSupport noAv1Odd = JudgeDecode(Av1Info("yuv420p", 8, 320, 191), &noAv1);
     CheckRefusal(noAv1Odd, DecodeBlock::NoAv1);
     CHECK(noAv1Odd.height == 191);
     // the odd height said too: no GPU takes it in this build - another computer alone would not help
     CHECK_THAT(noAv1Odd.why, ContainsSubstring("; its frame height (320x191, the frame as stored) is odd too, which this build refuses on any GPU"));
     CHECK_THAT(JudgeDecode(Av1Info("yuv420p", 8, 320, 192), &noAv1).why, !ContainsSubstring("odd"));  // an even one: as before
+    // a layout the probe did not learn: the size is the container's - the height not said
+    CHECK(JudgeDecode(Av1Info("unknown", 8, 320, 191), &noAv1).why == JudgeDecode(Av1Info("unknown"), &noAv1).why);
     // no answer (not asked, or none), or a GPU that decodes AV1: the odd height
     for (const NvdecAv1Caps* caps : {static_cast<const NvdecAv1Caps*>(nullptr), static_cast<const NvdecAv1Caps*>(&unchecked), &good}) {
         INFO((caps ? (caps->checked ? "good caps" : "unchecked caps") : "no caps"));

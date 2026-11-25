@@ -690,6 +690,44 @@ struct DecoderLog {
     DecoderLog& operator=(const DecoderLog&) = delete;
 };
 
+// The process's log ("<level> <message>", every level) under the sink's own mutex: a case reads it (Text()) while a store's loaders
+// may still log from their threads. Made before the store: the logger's sinks are not changed while it logs
+class LiveLogSink : public spdlog::sinks::base_sink<std::mutex> {
+public:
+    std::string Text() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return text_;
+    }
+
+protected:
+    void sink_it_(const spdlog::details::log_msg& msg) override {
+        spdlog::memory_buf_t formatted;
+        formatter_->format(msg, formatted);
+        text_.append(formatted.data(), formatted.size());
+    }
+    void flush_() override {}
+
+private:
+    std::string text_;
+};
+struct LiveLog {
+    std::shared_ptr<LiveLogSink> sink = std::make_shared<LiveLogSink>();
+    spdlog::level::level_enum level = Log()->level();
+    LiveLog() {
+        sink->set_pattern("%l %v");
+        Log()->set_level(spdlog::level::debug);
+        Log()->sinks().push_back(sink);
+    }
+    ~LiveLog() {
+        auto& sinks = Log()->sinks();
+        sinks.erase(std::remove(sinks.begin(), sinks.end(), sink), sinks.end());
+        Log()->set_level(level);
+    }
+    std::string Text() const { return sink->Text(); }
+    LiveLog(const LiveLog&) = delete;
+    LiveLog& operator=(const LiveLog&) = delete;
+};
+
 size_t CountOf(const std::string& text, const std::string& what) {
     size_t n = 0;
     for (size_t at = text.find(what); at != std::string::npos; at = text.find(what, at + 1)) ++n;
@@ -1391,6 +1429,7 @@ TEST_CASE("BuildProxy and dlssvid proxy: NVDEC refusing the first frame leaves n
 
 TEST_CASE("SaysUnsupported: only NVENC's words for a missing encoder skip a GPU test; anything else fails it", "[integration][av1]") {
     for (const char* skip : {"[av1_nvenc @ 02] Codec not supported", "[hevc_nvenc @ 03] 10 bit encode not supported",
+                             "[hevc_nvenc @ 04] YUV444P not supported",
                              "open av1_nvenc (yuv420p) failed: Function not implemented\nCODEC NOT SUPPORTED"}) {
         INFO(skip);
         CHECK(SaysUnsupported(skip));
@@ -1558,6 +1597,47 @@ TEST_CASE("FrameStore opens the original's decoder again quietly: the log says o
     const std::string onNvdec = clip.string() + ": av1 decodes on NVDEC only";  // VideoDecoder::StartNvdec, at each decoder's start
     CHECK(count("info " + onNvdec) == 1);
     CHECK(count("debug " + onNvdec) >= 2);
+}
+
+TEST_CASE("FrameStore prefetches no frame of an NVDEC-only video while a task runs - the shown frame alone opens a decoder; the neighbours come after",
+          "[integration][viewport][gpu][av1]") {
+    const auto dir = Dir("held_no_prefetch");
+    REQUIRE_AV1_CLIP(clip, dir, false, 64);  // a keyframe every 8: frame 56 is beyond FrameStore's walk from frame 0
+    LiveLog log;  // before the store: its loaders log while it lives
+    Av1Store s(3, 1);  // three frames on either side - while the decoders are held
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    const ViewportSource* src = s.store->FindSource("source");
+    REQUIRE(src);
+    REQUIRE(src->hardwareOnly);
+    REQUIRE(src->proxy.empty());
+    s.store->SetHoldNvdec(false);  // a task runs: each load opens a decoder (the CUDA device, a walk from the keyframe) and closes it after
+    const size_t mark = log.Text().size();
+    REQUIRE(s.Load(56) == FrameStore::Status::Ready);
+    const std::vector<int64_t> around = {53, 54, 55, 57, 58, 59};
+    auto anyAround = [&] {
+        s.store->Update();
+        for (const int64_t n : around) {
+            const FrameStore::Status st = s.store->GetStatus(n, "source");
+            if (st == FrameStore::Status::Ready || st == FrameStore::Status::Loading) return true;
+        }
+        return false;
+    };
+    CHECK_FALSE(Eventually(anyAround, 1500));  // none of them is loaded meanwhile
+    {
+        const std::string since = log.Text().substr(mark);
+        INFO(since);
+        CHECK(CountOf(since, "open " + clip.string() + ": ") == 1);  // the shown frame's decoder alone
+    }
+    // the task over: the prefetch comes back at once - no frame asked for again
+    s.store->SetHoldNvdec(true);
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            for (const int64_t n : around)
+                if (s.store->GetStatus(n, "source") != FrameStore::Status::Ready) return false;
+            return true;
+        },
+        30000));
 }
 
 TEST_CASE("The driver not answering for a CUDA error (query-fails), NVDEC refusing the first frame then is a start failure, not a verdict",
@@ -1733,6 +1813,7 @@ TEST_CASE("A part of the stream NVDEC does not take (12-bit after 8-bit) is refu
     const std::string part = "on a part of the stream in other parameters (yuv420p12le 320x192))";
     // decoded from the start: the first part's frames, then the part's own verdict - its layout - after them
     {
+        FfmpegLogCapture ffmpeg;  // av1dec's words after a refused format go to debug (RefuseQuietly): the refusal says why itself
         VideoDecoder dec(parts);
         CpuFrame f;
         int frames = 0;
@@ -1751,12 +1832,15 @@ TEST_CASE("A part of the stream NVDEC does not take (12-bit after 8-bit) is refu
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring(layout));
         CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 16, " + part));  // the part's first frame
+        CHECK_THAT(ffmpeg.Text(), !ContainsSubstring("hardware accelerated AV1"));
+        CHECK_THAT(ffmpeg.Text(), !ContainsSubstring("Failed to get pixel format"));
     }
     // a decoder whose first frame is in that part (a seek): the same verdict on its first frame - also where NVDEC would not start (the
     // stand-in): a part the GPU does not take is no start failure
     for (const char* value : {static_cast<const char*>(nullptr), "start-fails"}) {
         INFO((value ? value : "no stand-in"));
         FakeNvdecEnv fake(value);
+        FfmpegLogCapture ffmpeg;
         VideoDecoder dec(parts);
         REQUIRE(dec.SeekToKeyframeBefore(20));
         const auto refused = RefusalOfNextFrame(dec);
@@ -1766,6 +1850,8 @@ TEST_CASE("A part of the stream NVDEC does not take (12-bit after 8-bit) is refu
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring(layout));
         CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 16, " + part));  // its place in the stream, the same
+        CHECK_THAT(ffmpeg.Text(), !ContainsSubstring("hardware accelerated AV1"));
+        CHECK_THAT(ffmpeg.Text(), !ContainsSubstring("Failed to get pixel format"));
     }
 }
 
@@ -1927,6 +2013,7 @@ TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: tak
     for (const char* value : {static_cast<const char*>(nullptr), "start-fails"}) {
         INFO((value ? value : "no stand-in"));
         FakeNvdecEnv fake(value);
+        FfmpegLogCapture ffmpeg;  // av1dec's words after a refused format go to debug (RefuseQuietly)
         VideoDecoder dec(twelve);
         REQUIRE(dec.SeekToKeyframeBefore(170));
         const auto refused = RefusalOfNextFrame(dec);
@@ -1936,6 +2023,8 @@ TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: tak
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here"));
         CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p12le - " + learned));
+        CHECK_THAT(ffmpeg.Text(), !ContainsSubstring("hardware accelerated AV1"));
+        CHECK_THAT(ffmpeg.Text(), !ContainsSubstring("Failed to get pixel format"));
     }
 }
 
@@ -3257,8 +3346,17 @@ TEST_CASE("NVDEC gives an HEVC 4:4:4 frame of an odd height (cropped from 192) r
     VideoDecoder dec(odd, cuda);
     CHECK(dec.UsingHwAccel());
     std::vector<CpuFrame> hard;
-    CpuFrame f;
-    while (dec.NextFrame(f)) hard.push_back(f);
+    std::string said;
+    {
+        FfmpegLogCapture ffmpeg;
+        CpuFrame f;
+        while (dec.NextFrame(f)) hard.push_back(f);
+        said = ffmpeg.Text();
+    }
+    // an NVDEC without HEVC 4:4:4 (the driver's answer, nvdec.c): FFmpeg decodes in software - not this case. Nothing else skips: a fall
+    // back to software for any other reason (the odd height judged against it) fails
+    if (!dec.DecodesOnNvdec() && said.find("Hardware is lacking required capabilities") != std::string::npos)
+        SKIP("this GPU's NVDEC does not decode HEVC 4:4:4: " << said);
     CHECK(dec.DecodesOnNvdec());
     REQUIRE(hard.size() == soft.size());
     for (size_t i = 0; i < hard.size(); ++i) {
@@ -3285,17 +3383,26 @@ TEST_CASE("FrameStore: NVDEC not starting for a video is said once per file at w
           "[integration][viewport][gpu][av1]") {
     const auto dir = Dir("start_said_once");
     REQUIRE_AV1_CLIP(clip, dir, false, 64);  // a keyframe every 8: frame 56 is beyond FrameStore's walk from frame 0
+    const auto copy = dir / ("copy" + clip.extension().string());  // another file, the same source name
+    std::filesystem::copy_file(clip, copy, std::filesystem::copy_options::overwrite_existing);
     std::ostringstream text;
     {
         DecoderLog capture(text);  // before the store: its loaders log while it lives
         {
+            FakeNvdecEnv fake("start-fails");  // before the store: its loaders read it while the store lives
             Av1Store s(0, 1);
-            FakeNvdecEnv fake("start-fails");
             s.store->SetSources(Project::Create(clip, dir / "none").Sources());
             CHECK(s.Load(0) == FrameStore::Status::Missing);   // «on the first frame»
             CHECK(s.Load(56) == FrameStore::Status::Missing);  // a seek: «at frame 56» - other words, the same file
             REQUIRE(s.store->StartFailure("source"));
             s.Settle(56);
+            // the copy under the same name: its own file - said at warn; the first file again: said before - quietly
+            s.store->SetSources(Project::Create(copy, dir / "none_copy").Sources());
+            CHECK(s.Load(0) == FrameStore::Status::Missing);
+            s.Settle(0);
+            s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+            CHECK(s.Load(0) == FrameStore::Status::Missing);
+            s.Settle(0);
         }
     }
     const std::string log = text.str();
@@ -3307,16 +3414,16 @@ TEST_CASE("FrameStore: NVDEC not starting for a video is said once per file at w
         if (level.rfind("warning", 0) == 0) ++warned;
         else if (level.rfind("debug", 0) == 0) ++debugged;
     }
-    CHECK(warned == 1);
-    CHECK(debugged >= 1);  // the later ones, said quietly
+    CHECK(warned == 2);    // the file and its copy, once each
+    CHECK(debugged >= 2);  // the later ones (a seek, the first file again), said quietly
     CHECK_THAT(log, ContainsSubstring("(at frame 56)"));  // the second load did meet another place
 }
 
 TEST_CASE("FrameStore: a start failure is marked with its missing frame - seen at once when the frame is, no poll after", "[integration][viewport][gpu][av1]") {
     const auto dir = Dir("start_mark_at_once");
     REQUIRE_AV1_CLIP(clip, dir, false, 8);
+    FakeNvdecEnv fake("start-fails");  // before the store: its loaders read it while the store lives
     Av1Store s(0, 1);
-    FakeNvdecEnv fake("start-fails");
     const auto sources = Project::Create(clip, dir / "none").Sources();
     for (int i = 0; i < 20; ++i) {
         INFO("round " << i);

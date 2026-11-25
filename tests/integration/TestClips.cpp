@@ -359,12 +359,12 @@ std::string FfmpegLogCapture::Text() const {
 }
 
 bool SaysUnsupported(const std::string& text) {
-    // NVENC's own words (libavcodec/nvenc.c, FFmpeg 7.1) for a GPU without the encoder or its depth - nothing else: a refused parameter
+    // NVENC's own words (libavcodec/nvenc.c, FFmpeg 7.1) for a GPU without the encoder, its depth or 4:4:4 - nothing else: a refused parameter
     // («unsupported param»), an invalid spec, a test's own error and «No capable devices found» (said for a session that failed to open
     // now - out of memory, a busy GPU - as well) are failures, not a missing capability; no NVIDIA GPU at all is skipped before (HaveNvidia)
     std::string lower = text;
     for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    for (const char* words : {"codec not supported", "10 bit encode not supported"})
+    for (const char* words : {"codec not supported", "10 bit encode not supported", "yuv444p not supported"})
         if (lower.find(words) != std::string::npos) return true;
     return false;
 }

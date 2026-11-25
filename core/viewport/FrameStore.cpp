@@ -417,6 +417,12 @@ std::optional<DecodeSupport> FrameStore::StartFailure(const std::string& name) c
     return std::nullopt;
 }
 
+void FrameStore::SetHoldNvdec(bool hold) {
+    if (holdNvdec_.exchange(hold) == hold) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    RequeueLocked();
+}
+
 void FrameStore::ReleaseNvdecDecoders() {
     std::vector<SourceRuntime*> runtimes;  // the videos that decode on NVDEC only
     {
@@ -538,11 +544,18 @@ void FrameStore::RequeueLocked() {
         queue_.push_back(k);
         queued_.insert(k);
     };
+    // TASK-0076: while a task runs (SetHoldNvdec(false)) a video decoding on NVDEC only, without a proxy, gets its shown frame only:
+    // each of its loads opens a decoder (the CUDA device, a walk from the keyframe) and closes it after - no prefetch paid for that, on
+    // the GPU the run has
+    const auto spanOf = [&](const std::string& name) {
+        const ViewportSource* s = FindSource(name);
+        return !holdNvdec_ && s && s->isVideo && s->hardwareOnly && s->proxy.empty() ? 0 : SpanOf(name);
+    };
     int maxSpan = 0;
-    for (const auto& name : needed_) maxSpan = std::max(maxSpan, SpanOf(name));
+    for (const auto& name : needed_) maxSpan = std::max(maxSpan, spanOf(name));
     for (int d = 0; d <= maxSpan; ++d)
         for (const auto& name : needed_) {
-            if (d > SpanOf(name)) continue;
+            if (d > spanOf(name)) continue;
             const int64_t f0 = KeyFrame(name, currentTime_);  // a static source: its one frame; the neighbours are outside it
             push(name, f0 + d);
             if (d > 0 && f0 - d >= 0) push(name, f0 - d);

@@ -605,9 +605,19 @@ void PreviewRunner::updateStale() {
         setStatus({});
         return;
     }
+    if (model_.sourceRefusalSaid()) {  // TASK-0076: refused since (the viewport met a part NVDEC does not take): the preview shown is still
+        // for these settings - a new one is what cannot come (as appBlock says it); one already stale stays so (its settings changed
+        // before: the reason kept - no plan to judge it again now)
+        refusalShown_ = true;
+        const QString cannot = Tr(" · новое превью недоступно: исходник не декодируется на этом компьютере");
+        if (stale_.isEmpty()) setStatus(shownStatus_ + cannot, "warn", shownTip_);
+        else setStatus(Tr("Показано превью для прежних настроек — %1").arg(stale_) + cannot, "warn");
+        return;
+    }
     const NrPreviewJob now = PrepareNrPreview(model_.previewPlan(), shownJob_->mode, shownJob_->first, shownRequest_.seconds, env());
     const QString reason = NrPreviewStaleReason(*shownJob_, now, !model_.planError().isEmpty() && !Decision(model_.previewPlan(), "nr"));
-    if (reason == stale_) return;
+    if (reason == stale_ && !refusalShown_) return;
+    refusalShown_ = false;
     stale_ = reason;
     if (!stale_.isEmpty()) setStatus(Tr("Показано превью для прежних настроек — %1").arg(stale_), "warn");
     else setStatus(shownStatus_, "ok", shownTip_);  // the value came back: current again (the viewport as it is)

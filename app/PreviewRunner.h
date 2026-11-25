@@ -143,6 +143,7 @@ private:
     std::optional<NrPreviewEntry> shownEntry_;
     Request shownRequest_;
     QString stale_;
+    bool refusalShown_ = false;  // TASK-0076: the status says a new preview cannot come (the source refused since it was shown)
     QString uncachedTip_;  // why the preview shown is not in the cache (another DLL, a folder that could not be renamed)
     QString shownStatus_, shownTip_;  // show()'s status: back when the preview is current again
     QString upstreamNote_;  // «Этапы до улучшения посчитаны за …»: said until the preview after them shows

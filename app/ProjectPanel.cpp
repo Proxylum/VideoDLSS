@@ -549,7 +549,10 @@ void ProjectPanel::refresh() {
     for (const auto& e : out.stages)
         if (e.stage == "encode") enc = &e;
     const QString result = p.resultVideo.empty() ? tr("результат") : QString::fromStdWString(p.resultVideo.filename().wstring());
-    encodeState_->setText(hasSource ? tr("пересчёт · %1 · %2 обновится").arg(enc ? FormatDuration(enc->seconds) : "—").arg(result) : QString());
+    // TASK-0076: a source this machine cannot decode - no «обновится»: no run starts (as the stages' cards say)
+    encodeState_->setText(!hasSource                    ? QString()
+                          : model_.sourceRefusalSaid() ? SourceRefusedShortText()
+                                                       : tr("пересчёт · %1 · %2 обновится").arg(enc ? FormatDuration(enc->seconds) : "—").arg(result));
     refreshVersions();
     updating_ = false;
 }

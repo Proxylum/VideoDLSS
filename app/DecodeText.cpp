@@ -23,6 +23,22 @@ QString DecodeLayoutText(int bitDepth, const std::string& chroma, const std::str
     return Tr("%1 бит, монохромный или особый формат").arg(bitDepth);
 }
 
+namespace {
+
+// TASK-0076: a refusal before the odd height (no CUDA, no NVDEC) of a video whose odd height is known (the probe learned its layout: its
+// size is the stream's, not the container's): no GPU takes it in this build - said, the advice is not the GPU or the driver alone
+bool OddKnown(const DecodeSupport& s) { return !s.part && s.pixelFormat != "unknown" && s.height % 2 == 1; }
+
+QString OddTooText(const DecodeSupport& s) {
+    return Tr("; к тому же высота его кадра в файле нечётная (%1×%2), а такой AV1 эта версия программы не декодирует ни на какой видеокарте")
+        .arg(s.width)
+        .arg(s.height);
+}
+
+}  // namespace
+
+QString SourceRefusedShortText() { return Tr("не запустить: исходник не декодируется на этом компьютере"); }
+
 // docs/ux-guidelines.md: what happened, why, what to do - in Russian; the core's English reason goes to the log only. «не декодируется на
 // этом компьютере», not «не открыть»: the project is open, the video is listed and may even be shown from its scrubbing proxy
 QString SourceDecodeText(const DecodeSupport& s) {
@@ -38,11 +54,19 @@ QString SourceDecodeText(const DecodeSupport& s) {
                       "видеокарта, и только 8 и 10 бит 4:2:0. Что сделать: %2.")
                 .arg(LayoutText(s), transcode);
         case DecodeBlock::NoCuda:
+            if (OddKnown(s))  // the GPU or the driver mended, it is refused for its odd height: not that advice
+                return Tr("Видео AV1 не декодируется на этом компьютере: в этой версии программы AV1 декодирует только видеокарта NVIDIA, а она "
+                          "сейчас недоступна для программы%1. Что сделать: %2; подробности — в логе.")
+                    .arg(OddTooText(s), transcode);
             return Tr("Видео AV1 не декодируется на этом компьютере: в этой версии программы AV1 декодирует только видеокарта NVIDIA, а она сейчас "
                       "недоступна для программы. Что сделать: проверьте, что видеокарта NVIDIA включена и драйвер NVIDIA установлен, и перезапустите "
                       "программу или %1; подробности — в логе.")
                 .arg(transcode);
         case DecodeBlock::NoNvdec:
+            if (OddKnown(s))
+                return Tr("Видео AV1 не декодируется на этом компьютере: в драйвере NVIDIA не нашёлся видеодекодер (NVDEC), а другого декодера AV1 "
+                          "в этой версии программы нет%1. Что сделать: %2.")
+                    .arg(OddTooText(s), transcode);
             return Tr("Видео AV1 не декодируется на этом компьютере: в драйвере NVIDIA не нашёлся видеодекодер (NVDEC), а другого декодера AV1 в этой "
                       "версии программы нет. Что сделать: переустановите или обновите драйвер NVIDIA и перезапустите программу или %1.")
                 .arg(transcode);

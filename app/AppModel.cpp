@@ -1300,7 +1300,7 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
         if (s.name == stage) d = &s;
     if (!d) {
         // TASK-0076: the source's refusal is said once, under «Что получится» - a card gets a short line, not the whole paragraph
-        st.state = sourceRefusalSaid()   ? tr("не запустить: исходник не декодируется на этом компьютере")
+        st.state = sourceRefusalSaid()   ? SourceRefusedShortText()
                    : planError_.isEmpty() ? tr("—")
                                           : planError_;
         return st;

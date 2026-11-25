@@ -91,7 +91,8 @@ public:
 private:
     std::string text_;
 };
-// NVENC saying this GPU lacks the encoder or its depth: «Codec not supported», «10 bit encode not supported» (libavcodec/nvenc.c).
+// NVENC saying this GPU lacks the encoder, its depth or 4:4:4: «Codec not supported», «10 bit encode not supported», «YUV444P not
+// supported» (libavcodec/nvenc.c).
 // Nothing else: «No capable devices found» (also a session not opened now), «unsupported param», an invalid spec, a test's own
 // error are failures.
 bool SaysUnsupported(const std::string& text);

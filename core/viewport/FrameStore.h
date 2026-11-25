@@ -116,8 +116,9 @@ public:
     // keep: a verdict already remembered for this very file stays (a loader's own, more exact one) - true then too
     static bool RememberRefusedFile(const std::filesystem::path& file, const DecodeSupport& support, bool keep = false);
     // TASK-0076: false - every load of an NVDEC-only video closes its decoder afterwards (a task runs: the viewport does not hold NVDEC
-    // between frames); true (the default) - kept for the next frame
-    void SetHoldNvdec(bool hold) { holdNvdec_ = hold; }
+    // between frames), and such a video without a proxy gets no prefetch (RequeueLocked); true (the default) - kept for the next frame.
+    // A change asks for the window again (the prefetch comes back after the task)
+    void SetHoldNvdec(bool hold);
     // Pass folders with a manifest directly under passesRoot, named by their folder (the texture kind comes from the manifest).
     static std::vector<ViewportSource> DiscoverPasses(const std::filesystem::path& passesRoot);
     // Previous versions under <pass>.v/ as sources named "<pass>@<id>" (stage 9: compare versions with the wipe).

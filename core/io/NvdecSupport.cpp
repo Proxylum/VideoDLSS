@@ -107,14 +107,21 @@ std::string Layout(const DecodeSupport& s) {  // «10-bit 4:4:4 (yuv444p10le)»,
 
 std::string RefusalText(const DecodeSupport& s) {
     const std::string codec = "AV1";
+    // TASK-0076: a refusal before the odd height (no CUDA, no NVDEC, no AV1 in it) of a stream whose odd height is known says it too: no
+    // GPU takes it in this build (the size of a layout the probe did not learn is the container's - not said)
+    const std::string oddToo = s.pixelFormat != "unknown" && s.height % 2 == 1
+                                   ? "; its frame height (" + std::to_string(s.width) + "x" + std::to_string(s.height) +
+                                         ", the frame as stored) is odd too, which this build refuses on any GPU"
+                                   : std::string();
     switch (s.block) {
         case DecodeBlock::Layout:
             return codec + " " + Layout(s) + " cannot be decoded here - this build has no software AV1 decoder and decodes AV1 on NVDEC only as 8 or 10-bit 4:2:0";
         case DecodeBlock::NoCuda:
-            return codec + " decodes only on an NVIDIA GPU (NVDEC) in this build - there is no software AV1 decoder - and CUDA is unavailable: " + s.caps.why;
+            return codec + " decodes only on an NVIDIA GPU (NVDEC) in this build - there is no software AV1 decoder - and CUDA is unavailable: " + s.caps.why +
+                   oddToo;
         case DecodeBlock::NoNvdec:
             return codec + " decodes only on NVDEC in this build - there is no software AV1 decoder - and the NVIDIA driver's video decoder is unavailable: " +
-                   s.caps.why;
+                   s.caps.why + oddToo;
         case DecodeBlock::NoAv1:
             if (s.pixelFormat == "unknown")  // asked for 8 bits: the stream's own depth is not known before the first frame
                 return "the GPU '" + s.caps.gpu + "' has no NVDEC AV1 decoder (asked for 8-bit 4:2:0 - the stream's layout is not known before the "
@@ -122,9 +129,7 @@ std::string RefusalText(const DecodeSupport& s) {
                        (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
             return "the GPU '" + s.caps.gpu + "' has no NVDEC AV1 decoder for " + Depth(s.bitDepth) +
                    " 4:2:0 (for example, GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder" +
-                   (s.height % 2 == 1 ? "; its frame height (" + std::to_string(s.width) + "x" + std::to_string(s.height) +
-                                            ", the frame as stored) is odd too, which this build refuses on any GPU"
-                                      : std::string()) +
+                   oddToo +
                    (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
         case DecodeBlock::Size:
             return codec + " " + std::to_string(s.width) + "x" + std::to_string(s.height) + " (the frame as stored) is outside what NVDEC of '" + s.caps.gpu +

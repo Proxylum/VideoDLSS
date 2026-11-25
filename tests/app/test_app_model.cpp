@@ -4828,7 +4828,11 @@ struct PreviewProject {
         spec.frames = frames;
         spec.width = 48;
         spec.height = 32;
-        const auto clip = WriteClip(dir / "clip.mkv", spec);
+        Make(WriteClip(dir / "clip.mkv", spec), upscale);
+    }
+    // TASK-0076: of a video written elsewhere (an AV1 one; Dir(name) empties its folder)
+    PreviewProject(const char* name, const std::filesystem::path& clip) : dir(Dir(name)) { Make(clip, true); }
+    void Make(const std::filesystem::path& clip, bool upscale) {
         Project p = Project::Create(clip, dir / "passes");
         for (auto& st : p.stages) {
             if (st.name == "depth" || st.name == "flow" || st.name == "nr") st.params["backend"] = "stub";
@@ -7462,6 +7466,19 @@ struct LogCapture {
 QString StreamTip(const AppModel& model, const char* how) {
     return QString::fromUtf8("Поток: ") + DecodeLayoutText(model.sourceInfo().bitDepth, model.sourceInfo().chroma) + "; " + QString::fromUtf8(how);
 }
+
+// ProjectPanel's «Кодирование» card (role «card-dashed», its title): its state line, the card's one «warn» label
+QString EncodeStateOf(const QWidget& panel) {
+    for (const QWidget* card : panel.findChildren<QWidget*>()) {
+        if (card->property("role").toByteArray() != "card-dashed") continue;
+        bool encode = false;
+        for (const QLabel* l : card->findChildren<QLabel*>()) encode = encode || l->text() == QString::fromUtf8("Кодирование");
+        if (!encode) continue;
+        for (const QLabel* l : card->findChildren<QLabel*>())
+            if (l->property("role").toByteArray() == "warn") return l->text();
+    }
+    return "<no encode card>";
+}
 }  // namespace
 
 TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here and what to do; a video that decodes has no text", "[app][av1]") {
@@ -7582,6 +7599,38 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
                   transcode +
                   QString::fromUtf8(" или в кадр с чётными сторонами — такой откроет компьютер с видеокартой, которая декодирует AV1 (например, RTX 30 и новее)."));
         CHECK_FALSE(SourceDecodeText(JudgeDecode(Av1StreamInfo("yuv420p", 8), &noAv1)).contains(QString::fromUtf8("нечётная")));  // even: as before
+    }
+    // TASK-0076: no CUDA, or no NVDEC, and an odd height known: said too - the GPU or the driver mended would not open it, so that advice
+    // is not given; the even ones (nc, nn above) as before
+    {
+        VideoStreamInfo oddKnown = Av1StreamInfo("yuv420p", 8);
+        oddKnown.height = oddKnown.codedHeight = 191;
+        const QString oddToo = QString::fromUtf8("; к тому же высота его кадра в файле нечётная (320×191), а такой AV1 эта версия программы не декодирует "
+                                                 "ни на какой видеокарте");
+        const DecodeSupport ncOdd = JudgeDecode(oddKnown, &noCuda);
+        REQUIRE(ncOdd.block == DecodeBlock::NoCuda);
+        CHECK(SourceDecodeText(ncOdd) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в этой версии программы AV1 декодирует только "
+                                                           "видеокарта NVIDIA, а она сейчас недоступна для программы") +
+                                             oddToo + QString::fromUtf8(". Что сделать: ") + transcode + QString::fromUtf8("; подробности — в логе."));
+        CHECK(SourceDecodeText(ncOdd).contains(QString::fromUtf8("нечётная (320×191)")));
+        CHECK_FALSE(SourceDecodeText(ncOdd).contains(QString::fromUtf8("драйвер")));  // no «проверьте … драйвер NVIDIA установлен»
+        const DecodeSupport nnOdd = JudgeDecode(oddKnown, &noNvdec);
+        REQUIRE(nnOdd.block == DecodeBlock::NoNvdec);
+        CHECK(SourceDecodeText(nnOdd) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в драйвере NVIDIA не нашёлся "
+                                                           "видеодекодер (NVDEC), а другого декодера AV1 в этой версии программы нет") +
+                                             oddToo + QString::fromUtf8(". Что сделать: ") + transcode + ".");
+        CHECK(SourceDecodeText(nnOdd).contains(QString::fromUtf8("нечётная (320×191)")));
+        CHECK_FALSE(SourceDecodeText(nnOdd).contains(QString::fromUtf8("обновите драйвер")));  // the advice: only to transcode
+        // a layout the probe did not learn: the size is the container's - the height not said, the texts as for an even one
+        VideoStreamInfo unknownOdd = Av1StreamInfo("unknown", 8);
+        unknownOdd.height = unknownOdd.codedHeight = 191;
+        CHECK(SourceDecodeText(JudgeDecode(unknownOdd, &noAv1)) == SourceDecodeText(unknownNoAv1));
+        for (const NvdecAv1Caps* caps : {&noCuda, &noNvdec}) {
+            INFO((caps == &noCuda ? "no CUDA" : "no NVDEC"));
+            const QString text = SourceDecodeText(JudgeDecode(unknownOdd, caps));
+            CHECK(text == SourceDecodeText(JudgeDecode(Av1StreamInfo("unknown", 8), caps)));
+            CHECK_FALSE(text.contains(QString::fromUtf8("нечётная")));
+        }
     }
     // TASK-0076: an odd frame height (FFmpeg's NVDEC gives its chroma a row off): of the video, and of a part of it
     VideoStreamInfo oddInfo = Av1StreamInfo("yuv420p", 8);
@@ -7715,6 +7764,7 @@ TEST_CASE("AppModel opens an AV1 video as any other; without NVDEC AV1 the plan 
         REQUIRE(process);
         CHECK(process->isEnabled());
         CHECK(process->text().startsWith(QString::fromUtf8("Обработать · ")));  // what it would run
+        CHECK(EncodeStateOf(panel).contains(QString::fromUtf8("обновится")));  // the encode card: the result a run would rewrite
         for (QPushButton* b : RunAloneButtons(panel)) CHECK(b->isEnabled());
         const QLabel* frameLine = panel.findChild<QLabel*>("sourceFrame");
         REQUIRE(frameLine);
@@ -7770,6 +7820,9 @@ TEST_CASE("AppModel opens an AV1 video as any other; without NVDEC AV1 the plan 
         REQUIRE(process);
         CHECK_FALSE(process->isEnabled());
         CHECK(process->text() == QString::fromUtf8("Обработать"));  // no «· N стадий»: nothing can run on this source
+        // the «Кодирование» card: no «пересчёт · … обновится» - no run starts; the short line the stage cards have
+        CHECK(EncodeStateOf(panel) == SourceRefusedShortText());
+        CHECK(SourceRefusedShortText() == QString::fromUtf8("не запустить: исходник не декодируется на этом компьютере"));
         const QLabel* frameLine = panel.findChild<QLabel*>("sourceFrame");
         REQUIRE(frameLine);
         CHECK(frameLine->toolTip() == StreamTip(model, "на этом компьютере не декодируется"));  // not «декодируется как yuv420p»
@@ -7804,6 +7857,90 @@ TEST_CASE("AppModel opens an AV1 video as any other; without NVDEC AV1 the plan 
         CHECK(model.planError() == SourceDecodeText(expected));
         queue.stopAll(10000);
     }
+}
+
+TEST_CASE("NR preview: the source refused since the preview showed - a current one stays current, a stale one stale; the status says a new one cannot come",
+          "[app][preview][gpu][av1]") {
+    App();
+    const auto d = Dir("preview_refused_clip");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why, 12);
+    if (clip.empty()) SKIP(why);
+    AutoProxySetting autoProxy(false);  // no background build decoding on the GPU here
+    PreviewProject m("preview_refused", clip);
+    AppModel& model = *m.model;
+    REQUIRE(model.sourceDecode().Ok());
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    model.seekToSourceFrame(3);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    Pump([&] { return model.nrPreview().has_value() && !runner.running(); }, 60000);
+    REQUIRE(model.nrPreview());
+    REQUIRE(runner.staleReason().isEmpty());
+    const QString shown = runner.statusText();
+    REQUIRE(shown.startsWith(QString::fromUtf8("Показано превью кадра 3")));
+    const QString refusedStatus = shown + QString::fromUtf8(" · новое превью недоступно: исходник не декодируется на этом компьютере");
+    const QString changedSettings = QString::fromUtf8("настройки изменились");
+    // the stand-in comes and goes only while the viewport's loaders are at rest: they read the environment as it changes
+    auto rest = [&] {
+        model.store().WaitForCurrent();
+        QElapsedTimer t;
+        t.start();
+        auto loading = [&] {
+            for (int64_t f = 0; f < 12; ++f)
+                if (model.store().GetStatus(f, "source") == FrameStore::Status::Loading) return true;
+            return false;
+        };
+        while (loading() && t.elapsed() < 30000) {
+            model.store().Update();
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        }
+    };
+    // the GPU loses AV1 while the preview shown is current: it stays current - a new one is what cannot come
+    rest();
+    {
+        FakeNvdecEnv lost("no-av1");
+        model.refreshPlan();
+        REQUIRE(model.sourceRefusalSaid());
+        CHECK(runner.staleReason().isEmpty());
+        CHECK(runner.statusText() == refusedStatus);
+        REQUIRE(model.nrPreview());
+        const bool stale = !runner.staleReason().isEmpty();
+        CHECK_FALSE(NrPreviewCellSuffix(*model.nrPreview(), FrameState::Ready, stale).contains(QString::fromUtf8("устарело")));
+        rest();
+    }
+    // the GPU back: the status as the preview showed
+    model.refreshPlan();
+    REQUIRE_FALSE(model.sourceRefusalSaid());
+    CHECK(runner.staleReason().isEmpty());
+    CHECK(runner.statusText() == shown);
+    // a setting changed (stale), then the GPU loses AV1: it stays stale - the status says its reason and that a new one cannot come,
+    // the cell keeps «устарело»
+    model.setStageParam("nr", "intensity", 1.3);
+    model.refreshPlan();
+    REQUIRE(runner.staleReason() == changedSettings);
+    const QString staleStatus = QString::fromUtf8("Показано превью для прежних настроек — ") + changedSettings;
+    REQUIRE(runner.statusText() == staleStatus);
+    rest();
+    {
+        FakeNvdecEnv lost("no-av1");
+        model.refreshPlan();
+        REQUIRE(model.sourceRefusalSaid());
+        CHECK(runner.staleReason() == changedSettings);
+        CHECK(runner.statusText() == staleStatus + QString::fromUtf8(" · новое превью недоступно: исходник не декодируется на этом компьютере"));
+        REQUIRE(model.nrPreview());
+        const bool stale = !runner.staleReason().isEmpty();
+        CHECK(NrPreviewCellSuffix(*model.nrPreview(), FrameState::Ready, stale).contains(QString::fromUtf8("устарело")));
+        rest();
+    }
+    // the GPU back: stale, the plain status of it
+    model.refreshPlan();
+    REQUIRE_FALSE(model.sourceRefusalSaid());
+    CHECK(runner.staleReason() == changedSettings);
+    CHECK(runner.statusText() == staleStatus);
+    REQUIRE(model.nrPreview());
+    CHECK(NrPreviewCellSuffix(*model.nrPreview(), FrameState::Ready, !runner.staleReason().isEmpty()).contains(QString::fromUtf8("устарело")));
+    queue.stopAll(10000);
 }
 
 TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport becomes the plan's verdict; Process and Ctrl+Return stay off",
@@ -8064,7 +8201,7 @@ TEST_CASE("While a task or a preview runs the viewport does not hold NVDEC betwe
     REQUIRE(task >= 0);
     CHECK(ContextBecomes(false));
     model.setTime(0.8);
-    SettleFrames(model, 19, 23);
+    SettleFrames(model, 19, 19);  // the shown frame: while a task runs, an NVDEC-only video without a proxy gets no prefetch
     CHECK(ContextBecomes(false));
     queue.cancel(task);
     Pump([&] { return queue.finished(task); }, 20000);
@@ -8366,7 +8503,7 @@ TEST_CASE("AppModel: frames NVDEC could not start for while a task ran come back
     REQUIRE(task >= 0);
     fake.emplace("start-fails");  // NVDEC does not start meanwhile (out of memory)
     model.setTime(0.5);
-    SettleAny(model, 6, 18);
+    SettleAny(model, 12, 12);  // the shown frame alone is asked for while a task runs (no prefetch of an NVDEC-only video)
     CHECK(model.frameStateOf("source") == FrameState::Missing);
     REQUIRE(model.store().StartFailure("source"));
     CHECK(model.planError().isEmpty());  // no verdict: the plan stands
@@ -10177,7 +10314,7 @@ TEST_CASE("A task queued while a stage check runs keeps the viewport off NVDEC: 
     // NVDEC does not start meanwhile (start-fails): the frames of another time left out - a start failure
     fake.emplace("start-fails");
     model.setTime(0.5);
-    SettleAny(model, 6, 18);
+    SettleAny(model, 12, 12);  // the shown frame alone is asked for while the check runs (no prefetch of an NVDEC-only video)
     REQUIRE(model.store().StartFailure("source"));
     const size_t logged = capture.Text().size();  // the start failures before the task are in the text too
     const int task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});  // a run of the project: the check goes, the run holds the GPU
@@ -10189,7 +10326,7 @@ TEST_CASE("A task queued while a stage check runs keeps the viewport off NVDEC: 
             return false;
         },
         800);
-    SettleAny(model, 6, 18);
+    SettleAny(model, 12, 12);
     const std::string log = capture.Text().substr(logged);
     INFO(log);
     size_t tries = 0;
