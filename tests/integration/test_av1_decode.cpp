@@ -1699,7 +1699,8 @@ TEST_CASE("A part of the stream in other parameters the GPU takes is judged as t
         CHECK(refused->support.block == DecodeBlock::NvdecStartFailed);
         CHECK(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring("other parameters"));
-        CHECK_THAT(refused->support.why, ContainsSubstring("(on the first frame, on a part of the stream in other parameters (yuv420p 384x224))"));
+        // the frame's place in the stream (the keyframe 16 the seek landed on), not this decoder's count
+        CHECK_THAT(refused->support.why, ContainsSubstring("(at frame 16, on a part of the stream in other parameters (yuv420p 384x224))"));
     }
 }
 
@@ -1744,8 +1745,7 @@ TEST_CASE("A part of the stream NVDEC does not take (12-bit after 8-bit) is refu
         CHECK(refused->support.bitDepth == 12);  // that part's
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring(layout));
-        CHECK_THAT(refused->support.why, ContainsSubstring(" (after "));
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith(part));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 16, " + part));  // the part's first frame
     }
     // a decoder whose first frame is in that part (a seek): the same verdict on its first frame - also where NVDEC would not start (the
     // stand-in): a part the GPU does not take is no start failure
@@ -1760,7 +1760,7 @@ TEST_CASE("A part of the stream NVDEC does not take (12-bit after 8-bit) is refu
         CHECK(refused->support.part);
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring(layout));
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(on the first frame, " + part));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 16, " + part));  // its place in the stream, the same
     }
 }
 
@@ -1905,7 +1905,7 @@ TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: tak
         REQUIRE(refused);
         CHECK(refused->support.block == DecodeBlock::NvdecStartFailed);
         CHECK(refused->support.Transient());
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(on the first frame, in yuv420p - " + learned));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p - " + learned));
     }
     {
         // the driver not answering (first-frame): no word of it taking the stream - NVDEC's refusal stands as the stream's verdict
@@ -1916,7 +1916,7 @@ TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: tak
         REQUIRE(refused);
         CHECK(refused->support.block == DecodeBlock::NvdecFailed);
         CHECK_FALSE(refused->support.Transient());
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(on the first frame, in yuv420p - " + learned));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p - " + learned));
     }
     // 12-bit: a layout the GPU does not take - its own verdict, whatever the stand-in
     for (const char* value : {static_cast<const char*>(nullptr), "start-fails"}) {
@@ -1930,7 +1930,7 @@ TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: tak
         CHECK_FALSE(refused->support.part);  // the stream's own layout, learned late
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here"));
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(on the first frame, in yuv420p12le - " + learned));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p12le - " + learned));
     }
 }
 
@@ -2084,7 +2084,7 @@ TEST_CASE("A stream whose sequence header changes (another size, another depth) 
         // said once, at info: another sequence header after the frames of the first
         const std::string log = text.str();
         INFO(log);
-        CHECK(CountOf(log, "info " + j.file.string() + ": another AV1 sequence header after 16 frames - its own NVDEC decoder") == 1);
+        CHECK(CountOf(log, "info " + j.file.string() + ": another AV1 sequence header (at frame 16) - its own NVDEC decoder") == 1);
         CHECK(CountOf(log, "another AV1 sequence header") == 1);
         // one decoder seeking into the second part, back into the first, forward again: each frame of its part
         VideoDecoder seeker(j.file);
@@ -2118,7 +2118,7 @@ TEST_CASE("A stream whose sequence header changes (another size, another depth) 
         REQUIRE(refused);
         CHECK(refused->support.block == DecodeBlock::NvdecStartFailed);
         CHECK(refused->support.Transient());
-        CHECK_THAT(refused->support.why, ContainsSubstring("(after 16 frames, on a part of the stream in other parameters (yuv420p 384x224))"));
+        CHECK_THAT(refused->support.why, ContainsSubstring("(at frame 16, on a part of the stream in other parameters (yuv420p 384x224))"));
     }
 }
 
@@ -2247,7 +2247,7 @@ TEST_CASE("NVDEC refusing a frame after a few decoded ones (later-frame) is the 
           "[integration][viewport][gpu][av1][regression]") {
     const auto dir = Dir("later_frame");
     REQUIRE_AV1_CLIP(clip, dir, false, 24);
-    const std::string afterFrames = "NVDEC refused this AV1 stream and this build has no software AV1 decoder (after ";
+    const std::string atFrame = "NVDEC refused this AV1 stream and this build has no software AV1 decoder (at frame ";
     {
         std::optional<FakeNvdecEnv> fake;
         fake.emplace("later-frame");
@@ -2267,8 +2267,8 @@ TEST_CASE("NVDEC refusing a frame after a few decoded ones (later-frame) is the 
         CHECK(dec.DecodesOnNvdec());  // NVDEC did start: the refusal is the stream's
         CHECK(refused->support.block == DecodeBlock::NvdecFailed);
         CHECK_FALSE(refused->support.Transient());
-        CHECK_THAT(refused->support.why, StartsWith(afterFrames));
-        CHECK_THAT(refused->support.why, ContainsSubstring(std::to_string(decoded) + " frames)"));
+        // decoded from frame 0: the frame refused is the next one in the stream - its index, as many as came before it
+        CHECK(refused->support.why == atFrame + std::to_string(decoded) + ")");
         fake.reset();
         const auto again = RefusalOfNextFrame(dec);  // kept
         REQUIRE(again);
@@ -2279,11 +2279,12 @@ TEST_CASE("NVDEC refusing a frame after a few decoded ones (later-frame) is the 
         FakeNvdecEnv fake("later-frame");
         s.store->SetSources(Project::Create(clip, dir / "none").Sources());
         CHECK_FALSE(s.store->FindSource("source")->undecodable);  // the driver takes it
-        CHECK(s.Settle(20) == FrameStore::Status::Missing);  // a walk from the keyframe 16: three frames, then the refusal
+        // a fresh decoder walks to frame 20 from frame 0 (within kSequentialSeekFrames, no seek): 0, 1, 2, then the refusal
+        CHECK(s.Settle(20) == FrameStore::Status::Missing);
         const auto marked = s.store->Undecodable("source");
         REQUIRE(marked);
         CHECK(marked->block == DecodeBlock::NvdecFailed);
-        CHECK_THAT(marked->why, StartsWith(afterFrames));
+        CHECK(marked->why == atFrame + "3)");  // the frame refused, by its place in the stream
         CHECK_FALSE(s.store->StartFailure("source"));
     }
     // remembered for the file: a new source of it is undecodable at once, whatever the stand-in now
@@ -2500,7 +2501,7 @@ TEST_CASE("An AV1 stream of an odd frame height is refused before any frame; a p
         CHECK(refused->support.height == kH - 1);
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, StartsWith(oddWords));
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(after 16 frames)"));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 16)"));
         CHECK(RefusalOfNextFrame(dec));  // kept
     }
     {
@@ -2512,7 +2513,7 @@ TEST_CASE("An AV1 stream of an odd frame height is refused before any frame; a p
         CHECK(refused->support.block == DecodeBlock::OddHeight);
         CHECK(refused->support.part);
         CHECK(refused->support.height == kH - 1);
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(the first frame)"));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 16)"));  // its place in the stream: the part's first frame
     }
 }
 
@@ -2788,7 +2789,7 @@ TEST_CASE("An AV1 stream whose layout the probe did not learn: the container's o
         CHECK(refused->support.block == DecodeBlock::OddHeight);
         CHECK(refused->support.height == kH - 1);
         CHECK_FALSE(refused->support.part);  // the stream's own height: the probe knew no layout of it
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(the first frame)"));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168)"));  // the keyframe the seek landed on
     }
 }
 
@@ -3178,5 +3179,42 @@ TEST_CASE("NVDEC: an H.264 stream cropped at the top (its SPS) with --hwaccel cu
         }
         CHECK(luma == static_cast<int>(kH));
         CHECK(chroma == static_cast<int>(kH));
+    }
+}
+
+TEST_CASE("A refusal names the frame's place in the stream: after seeks back and forth, the index of the frame refused - not the frames this decoder decoded",
+          "[integration][gpu][av1][regression]") {
+    const auto dir = Dir("refusal_place");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);  // a keyframe every 8 frames
+    std::optional<FakeNvdecEnv> fake;
+    VideoDecoder dec(clip);
+    CpuFrame f;
+    // a walk back and forth: frames decoded here and there - more than any index the refusal below may name
+    for (const int64_t target : {10, 2, 13, 5}) {
+        INFO("seek to " << target);
+        REQUIRE(dec.SeekToFrame(target));
+        REQUIRE(dec.NextFrame(f));
+        REQUIRE(f.index == target);
+    }
+    // the driver refusing the stream's frames from now on (later-frame: at the next packet, past the 3 frames it lets through): a seek
+    // back to the keyframe before frame 17 - the keyframe 16 is refused
+    fake.emplace("later-frame");
+    REQUIRE(dec.SeekToKeyframeBefore(17));
+    const auto refused = RefusalOfNextFrame(dec);
+    fake.reset();
+    REQUIRE(refused);
+    CHECK(refused->support.block == DecodeBlock::NvdecFailed);
+    CHECK(refused->support.why == "NVDEC refused this AV1 stream and this build has no software AV1 decoder (at frame 16)");
+    CHECK_THAT(refused->support.why, !ContainsSubstring("after"));
+    CHECK_THAT(refused->support.why, !ContainsSubstring("first frame"));
+    // a fresh decoder, three frames from the start, then that seek: the same place (not «at frame 3», its count)
+    {
+        FakeNvdecEnv lateFake("later-frame");
+        VideoDecoder fresh(clip);
+        for (int i = 0; i < 3; ++i) REQUIRE(fresh.NextFrame(f));  // the 3 frames the stand-in lets through
+        REQUIRE(fresh.SeekToKeyframeBefore(17));
+        const auto again = RefusalOfNextFrame(fresh);
+        REQUIRE(again);
+        CHECK(again->support.why == "NVDEC refused this AV1 stream and this build has no software AV1 decoder (at frame 16)");
     }
 }

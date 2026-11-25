@@ -267,7 +267,11 @@ private:
     Rational IndexRate() const { return indexRate_.num > 0 && indexRate_.den > 0 ? indexRate_ : info_.frameRate; }
     AVCodecContext* OpenCodec(AVBufferRef* device) const;  // a codec context for the video stream: on `device`, else software threads
     void StartNvdec();  // a hardware-only decoder before its first packet: check the GPU, create the device, reopen codec_ on it
-    void CheckDecode(int err, const char* what);  // CheckAv, with ENOSYS of a hardware-only decoder as the refusal it is (kept: refused_)
+    // CheckAv, with ENOSYS of a hardware-only decoder as the refusal it is (kept: refused_); pts - of the packet just sent, if any
+    void CheckDecode(int err, const char* what, std::optional<int64_t> pts = std::nullopt);
+    // TASK-0076: where in the stream a refused frame is, in a refusal's words: «on the first frame», «at frame N» (0-based, as --frame),
+    // «on the first frame after a seek» (no index known) - by its pts after a seek, else the next index; not framesDecoded_
+    std::string PlaceWords(std::optional<int64_t> pts) const;
     void FollowSequenceHeader();  // TASK-0076: packet_ starts another coded video sequence - codec_ opened again on NVDEC for it
     bool ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu);
     int64_t IndexFromPts(int64_t pts) const;

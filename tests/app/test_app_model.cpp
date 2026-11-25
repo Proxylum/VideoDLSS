@@ -8170,12 +8170,22 @@ TEST_CASE("The main window's cell says a video cannot be decoded here, and its t
         CHECK(cell->toolTip().contains("\n" + HumanSourceName("source") + ": " + SourceDecodeText(expected)));
         CHECK_FALSE(cell->toolTip().contains(QString::fromUtf8("Видео AV1 не декодируется на этом компьютере")));  // not a verdict
     }
-    // a proxy made where NVDEC decodes AV1 (the project's passes next to the video): the frames show, the tooltip says what that means
-    BuildProxy(clip, d / "clip_passes", "source");
-    REQUIRE(ValidProxy(clip, d / "clip_passes", "source"));
+    // a proxy made where NVDEC decodes AV1 (the project's passes next to the video): the frames show, the tooltip says what that means.
+    // A copy of its own: the process remembers NVDEC refusing clip.mp4 above (first-frame) - its verdict would stand whatever the stand-in;
+    // this one's comes from the stand-in (no AV1 in NVDEC: the probe's)
+    const auto proxied = d / "proxied.mp4";
+    std::filesystem::copy_file(clip, proxied);
+    REQUIRE_FALSE(FrameStore::VideoSource("source", proxied)->undecodable);  // nothing remembered for the copy
+    BuildProxy(proxied, d / "proxied_passes", "source");
+    REQUIRE(ValidProxy(proxied, d / "proxied_passes", "source"));
     FakeNvdecEnv env("no-av1");
+    {
+        const auto verdict = FrameStore::VideoSource("source", proxied)->undecodable;  // what the window's store gets for it
+        REQUIRE(verdict);
+        CHECK(verdict->block == DecodeBlock::NoAv1);
+    }
     MainWindow window(true);
-    window.openPath(Q(clip));
+    window.openPath(Q(proxied));
     const QString viaProxy =
         "\n" + HumanSourceName("source") + QString::fromUtf8(": показан по прокси перемотки; само видео на этом компьютере не декодируется, обработать его нельзя");
     QLabel* cell = nullptr;
@@ -8868,7 +8878,7 @@ TEST_CASE("AppModel: the viewport's refusal of an AV1 source is no verdict on a 
     REQUIRE(model.planError().isEmpty());
     fake.emplace("later-frame");
     model.store().SetSources(model.store().Sources());  // the decoders open again under the stand-in
-    model.setTime(20.0 / 24.0);  // a walk from the keyframe 16: a few frames, then NVDEC refuses - the stream's verdict
+    model.setTime(20.0 / 24.0);  // a fresh decoder walks there from frame 0: a few frames, then NVDEC refuses - the stream's verdict
     Pump(
         [&] {
             model.store().Update();

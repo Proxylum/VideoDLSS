@@ -32,7 +32,7 @@ enum class DecodeBlock {
     // an odd frame height: NVDEC's surfaces are even and FFmpeg 7.1.1's nvdec.c maps the chroma by the frame's own height - a chroma
     // row off (the Video Codec SDK aligns that offset by 2)
     OddHeight,
-    NvdecFailed,  // NVDEC was asked and refused a frame - the first one, or a later one (why: on the first frame / after N frames)
+    NvdecFailed,  // NVDEC was asked and refused a frame - the first one, or a later one (why: on the first frame / at frame N - its place in the stream)
     // a frame smaller than its sequence's maximum (an AV1 frame size override, a resize within a sequence): FFmpeg 7.1.1's NVDEC makes its
     // surfaces for the maximum and hands the frame out at that size, a lower one also with the chroma mapped by its own height (nvdec.c) -
     // width / height are the sequence's maximum, caps.why names the frame
@@ -114,7 +114,8 @@ DecodeSupport RefusedDecode(const VideoStreamInfo& info, DecodeBlock block, cons
 
 // One line for `dlssvid info`: «software (h264); NVDEC with --hwaccel cuda when the GPU decodes this layout», «software (prores); NVDEC
 // does not decode this codec», «software (vp9); not NVDEC even with --hwaccel cuda: an odd frame height (1920x803, the frame as stored) - …», «NVDEC only (av1: no software AV1 decoder in this build), on '<gpu>', AV1 8-bit 4:2:0 up to WxH» (or
-// «..., not checked: <why>»), «unavailable - <why>».
+// «..., on '<gpu>', the sample layout is not known before the first frame» - a layout the probe did not learn, NVDEC taking AV1: the
+// layout and the size are the first frame's to judge; or «..., not checked: <why>»), «unavailable - <why>».
 std::string DescribeDecode(const DecodeSupport& support);
 
 // The refusal of a stream that cannot be decoded here: CheckDecodeSupport (RequireDecodable, StartNvdec, process), the CUDA device not

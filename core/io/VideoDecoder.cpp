@@ -797,25 +797,36 @@ void VideoDecoder::FollowSequenceHeader() {
         // last one has given every frame of the packets it got: av1dec returns a temporal unit's frame as it decodes it
         // (said when this decoder has decoded under the last one: an av1C that differs from the first packet's changes nothing seen)
         const bool news = !probe_ && instanceFrames_ > 0;
+        const std::string place = PlaceWords(packet_->pts != AV_NOPTS_VALUE ? packet_->pts : packet_->dts);
         AVCodecContext* reopened = OpenCodec(hwDevice_);
         avcodec_free_context(&codec_);
         codec_ = reopened;
         instanceFrames_ = 0;
-        Log()->log(news ? spdlog::level::info : spdlog::level::debug, "{}: another AV1 sequence header after {} frames - its own NVDEC decoder", url_,
-                   framesDecoded_);
+        Log()->log(news ? spdlog::level::info : spdlog::level::debug, "{}: another AV1 sequence header ({}) - its own NVDEC decoder", url_, place);
     }
     nvdecSequence_.assign(sequence);
 }
 
-void VideoDecoder::CheckDecode(int err, const char* what) {
+std::string VideoDecoder::PlaceWords(std::optional<int64_t> pts) const {
+    int64_t index = -1;
+    const Rational rate = IndexRate();
+    if (seeked_ && pts && *pts != AV_NOPTS_VALUE && rate.num > 0 && info_.timeBase.num > 0) index = IndexFromPts(*pts);  // as ReceiveFrame counts
+    else if (PositionKnown()) index = nextIndex_;
+    if (index == 0) return "on the first frame";
+    if (index > 0) return "at frame " + std::to_string(index);
+    return "on the first frame after a seek";
+}
+
+void VideoDecoder::CheckDecode(int err, const char* what, std::optional<int64_t> pts) {
     if (err >= 0) return;
     if (hwOnly_ && err == AVERROR(ENOSYS)) {  // av1dec without a working hwaccel: every frame header would fail the same way - kept (this
         // decoder must not be fed again). The driver having said it takes the stream, NVDEC did not start (memory, the driver): a new
         // decoder may succeed - the refusal is transient
         // (only on this decoder's first frame: frames decoded by it, NVDEC did start - a later refusal is the stream's; a new sequence
         // header in other parameters has a decoder of its own, FollowSequenceHeader)
-        // («on the first frame» is this decoder's first: one that started with a seek may meet a later part of the stream. av1dec has
-        // parsed its sequence header by now: other parameters than the probe's - a part NVDEC does not take, the stream's verdict)
+        // (the words name the frame's place in the stream, PlaceWords - not this decoder's count: one that started with a seek may meet a
+        // later part of the stream at its first frame. av1dec has parsed its sequence header by now: other parameters than the probe's -
+        // a part NVDEC does not take, the stream's verdict)
         const char* swFmt = codec_->sw_pix_fmt != AV_PIX_FMT_NONE ? av_get_pix_fmt_name(codec_->sw_pix_fmt) : nullptr;
         const bool otherPart = (swFmt && info_.pixelFormat != "unknown" && info_.pixelFormat != swFmt) ||
                                (codec_->width > 0 && static_cast<uint32_t>(codec_->width) != info_.codedWidth) ||
@@ -823,7 +834,7 @@ void VideoDecoder::CheckDecode(int err, const char* what) {
         // the layout the probe did not learn is known now (av1dec parsed the sequence header before it asked for a format): judged as a
         // probe's would be - its own reason, or (the driver taking it) NVDEC not starting
         const bool learnedNow = swFmt && info_.pixelFormat == "unknown";
-        std::string when = framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "on the first frame";
+        std::string when = PlaceWords(pts);
         bool transient = nvdecStartTransient_;
         if (otherPart || learnedNow) {  // the part judged against the GPU as the probe was: refused - that verdict with its reason; taken - as for the probe
             StreamPart part;
@@ -884,8 +895,9 @@ bool VideoDecoder::NextFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         }
         CheckAv(err, "av_read_frame");
         if (packet_->stream_index == videoStream_ && hwOnly_ && framesDecoded_ >= 3 && FakeNvdecRefusesLater()) {  // DLSSVID_FAKE_NVDEC_AV1=later-frame
+            const int64_t pts = packet_->pts != AV_NOPTS_VALUE ? packet_->pts : packet_->dts;
             av_packet_unref(packet_);
-            CheckDecode(AVERROR(ENOSYS), "avcodec_send_packet");
+            CheckDecode(AVERROR(ENOSYS), "avcodec_send_packet", pts);
         }
         if (packet_->stream_index == videoStream_) {
             if (hwOnly_) {
@@ -896,9 +908,10 @@ bool VideoDecoder::NextFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
                     throw;
                 }
             }
+            const int64_t sentPts = packet_->pts != AV_NOPTS_VALUE ? packet_->pts : packet_->dts;
             const int sent = avcodec_send_packet(codec_, packet_);
             if (sent < 0) av_packet_unref(packet_);
-            CheckDecode(sent, "avcodec_send_packet");
+            CheckDecode(sent, "avcodec_send_packet", sentPts);
         } else if (packet_->stream_index == audioStream_ && audioSink_) {
             audioSink_(packet_);
         }
@@ -917,16 +930,16 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     // TASK-0076: the frame's own size is codec_'s (av1dec sets it from each frame header); the CUDA frame NVDEC hands out has the size of
     // its surface (even, the sequence's): a 191-row frame comes as 192 rows
     const int frameW = codec_->width, frameH = codec_->height;
+    const int64_t pts = frame_->best_effort_timestamp != AV_NOPTS_VALUE ? frame_->best_effort_timestamp : frame_->pts;
     if (hwOnly_ && Av1FrameBelowSequence(frameW, frameH, nvdecSequence_)) {  // NVDEC gives it wrong (Resized)
         const auto key = Av1SequenceKeyOf(nvdecSequence_);
-        const std::string frame = "a frame of " + std::to_string(frameW) + "x" + std::to_string(frameH) +
-                                  (framesDecoded_ > 0 ? ", after " + std::to_string(framesDecoded_) + " frames" : ", the first one");
+        const std::string frame = "a frame of " + std::to_string(frameW) + "x" + std::to_string(frameH) + ", " + PlaceWords(pts);
         av_frame_unref(frame_);
         refused_ = std::make_shared<const DecodeSupport>(RefusedDecode(StreamPartInfo(info_, "", key->maxWidth, key->maxHeight), DecodeBlock::Resized, frame));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }
     if (hwOnly_ && frameH % 2 == 1) {  // TASK-0076: a part, or a size the probe did not know (OddHeight: the chroma a row off)
-        const std::string frame = framesDecoded_ > 0 ? "after " + std::to_string(framesDecoded_) + " frames" : "the first frame";
+        const std::string frame = PlaceWords(pts);
         const uint32_t w = static_cast<uint32_t>(frameW), h = static_cast<uint32_t>(frameH);
         av_frame_unref(frame_);
         DecodeSupport s = RefusedDecode(StreamPartInfo(info_, "", w, h), DecodeBlock::OddHeight, frame);
@@ -936,7 +949,6 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }
 
-    const int64_t pts = frame_->best_effort_timestamp != AV_NOPTS_VALUE ? frame_->best_effort_timestamp : frame_->pts;
     int64_t index = nextIndex_;
     if (seeked_ && pts != AV_NOPTS_VALUE) index = IndexFromPts(pts);
     nextIndex_ = index + 1;
