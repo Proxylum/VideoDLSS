@@ -124,9 +124,9 @@ std::string RefusalText(const DecodeSupport& s) {
             return codec + " decodes only on NVDEC in this build - there is no software AV1 decoder - and the NVIDIA driver's video decoder is unavailable: " +
                    s.caps.why + oddToo;
         case DecodeBlock::NoAv1:
-            if (s.pixelFormat == "unknown")  // asked for 8 bits: the stream's own depth is not known before the first frame
-                return "the GPU '" + s.caps.gpu + "' has no NVDEC AV1 decoder (asked for 8-bit 4:2:0 - the stream's layout is not known before the "
-                       "first frame; for example, GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder" +
+            if (s.pixelFormat == "unknown")  // asked for 8 bits: the probe did not learn the stream's own depth (no decoder starts here)
+                return "the GPU '" + s.caps.gpu + "' has no NVDEC AV1 decoder (asked for 8-bit 4:2:0 - the probe did not learn the stream's "
+                       "layout; for example, GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder" +
                        (s.caps.why.empty() ? std::string() : " (" + s.caps.why + ")");
             return "the GPU '" + s.caps.gpu + "' has no NVDEC AV1 decoder for " + Depth(s.bitDepth) +
                    " 4:2:0 (for example, GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder" +

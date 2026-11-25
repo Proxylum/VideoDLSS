@@ -7774,6 +7774,34 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
                                                             "для видеокарты NVIDIA GeForce RTX 4090 — она берёт не больше 239 блоков 16×16, а другого декодера AV1 "
                                                             "в этой версии программы нет. Что сделать: перекодируйте ролик другой программой в H.264 или HEVC "
                                                             "либо в кадр поменьше."));
+    // TASK-0076: a part of an odd height (the decoder's - known): said in the part's words; the advice - a frame with even sides, not
+    // another computer alone (the even parts above as before)
+    {
+        const VideoStreamInfo whole = Av1StreamInfo("yuv420p", 8);
+        NvdecAv1Caps narrow = limits;
+        narrow.maxWidth = 256;
+        DecodeSupport sizePart = JudgeDecode(StreamPartInfo(whole, "yuv420p", 320, 191), &narrow);
+        REQUIRE(sizePart.block == DecodeBlock::Size);
+        sizePart.part = true;
+        const QString sizeText = SourceDecodeText(sizePart);
+        INFO(sizeText.toStdString());
+        CHECK(sizeText.contains(QString::fromUtf8("в нём есть часть, где кадр в файле 320×191 больше")));
+        CHECK(sizeText.contains(QString::fromUtf8("; к тому же высота кадра в этой части нечётная (320×191), а такой AV1 эта версия программы не "
+                                                  "декодирует ни на какой видеокарте. ")));
+        CHECK(sizeText.contains(QString::fromUtf8("либо в кадр поменьше с чётными сторонами.")));
+        CHECK_FALSE(sizeText.contains(QString::fromUtf8("его кадра в файле")));  // the part's words, not the whole video's
+        DecodeSupport noAv1Part = JudgeDecode(StreamPartInfo(whole, "yuv420p10le", 320, 191), &noAv1);
+        REQUIRE(noAv1Part.block == DecodeBlock::NoAv1);
+        noAv1Part.part = true;
+        CHECK(SourceDecodeText(noAv1Part) ==
+              QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: в нём есть часть AV1 10 бит, а такой AV1 видеокарта NVIDIA GeForce GTX 1080 "
+                                "не декодирует, и другого декодера AV1 в этой версии программы нет; к тому же высота кадра в этой части нечётная "
+                                "(320×191), а такой AV1 эта версия программы не декодирует ни на какой видеокарте. Что сделать: ") +
+                  transcode +
+                  QString::fromUtf8(" или в кадр с чётными сторонами — такой откроет компьютер с видеокартой, которая декодирует AV1 10 бит (например, RTX 30 "
+                                    "и новее)."));
+        CHECK_FALSE(SourceDecodeText(noAv1Part).contains(QString::fromUtf8("откройте его на компьютере")));
+    }
     const QString failedText = QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: видеокарта отказалась его декодировать, а другого декодера AV1 в этой версии программы "
                                                  "нет. Что сделать: обновите драйвер NVIDIA и перезапустите программу или ") +
                                transcode + ".";
@@ -7975,14 +8003,21 @@ TEST_CASE("NR preview: the source refused since the preview showed - a current o
         CHECK(runner.statusText() == refusedStatus);
         CHECK_FALSE(cellSaysStale());
         startRefusedThenStep(refusedStatus);
-        // no plan to judge the preview by now: the settings it was made with do. A stage after NR (fg) changed: still current
+        // no plan to judge the preview by now: the settings it was made with do. A stage after NR (fg, off in this project) turned on, then
+        // its parameter changed: still current
+        model.setStageEnabled("fg", true);
+        model.refreshPlan();
+        CHECK(runner.staleReason().isEmpty());
+        CHECK(runner.statusText() == refusedStatus);
         const nlohmann::json fg = paramsOf("fg");
         model.setStageParam("fg", "backend", fg.value("backend", std::string()) == "blend" ? "dlssg" : "blend");
         model.refreshPlan();
         CHECK(runner.staleReason().isEmpty());
         CHECK(runner.statusText() == refusedStatus);
         model.setStageParams("fg", fg);
+        model.setStageEnabled("fg", false);
         model.refreshPlan();
+        CHECK(runner.staleReason().isEmpty());
         // NR's own setting changed: stale - its reason and that a new one cannot come, the cell says «устарело»
         const nlohmann::json nr = paramsOf("nr");
         QSignalSpy cell(&model, &AppModel::nrPreviewChanged);
@@ -8696,7 +8731,9 @@ TEST_CASE("AppModel: frames NVDEC could not start for while a task ran come back
     REQUIRE(model.hasProject());
     SettleFrames(model, 0, 6);
     QSignalSpy sources(&model, &AppModel::sourcesChanged);
-    const int task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});  // the run holds the GPU's memory
+    // the run holds the GPU's memory - longer than any wait below (a loaded machine: its own end under the stand-in would retry there);
+    // cancelled at its end
+    const int task = queue.enqueue("t", "ping", {"-n", "180", "127.0.0.1"});
     REQUIRE(task >= 0);
     fake.emplace("start-fails");  // NVDEC does not start meanwhile (out of memory)
     model.setTime(0.5);
@@ -8716,6 +8753,7 @@ TEST_CASE("AppModel: frames NVDEC could not start for while a task ran come back
     fake.reset();  // the memory would be there again - but nothing asks for those frames until the task ends
     Pump([] { return false; }, 300);
     REQUIRE(model.store().StartFailure("source"));  // not before
+    REQUIRE_FALSE(queue.finished(task));  // still running: its end comes now
     queue.cancel(task);  // the task's real end (ProjectTasks: syncTasksRunning after taskFinished) brings it back
     Pump([&] { return queue.finished(task); }, 20000);
     REQUIRE(queue.finished(task));

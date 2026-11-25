@@ -2093,6 +2093,18 @@ TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: tak
         CHECK_THAT(info.out, ContainsSubstring("samples:     not known before the first frame (the probe did not learn the pixel format)"));
         CHECK_THAT(info.out, !ContainsSubstring("decoded as"));
     }
+    // refused here (no CUDA, no AV1 in NVDEC): no decoder starts - no first frame to learn the layout from; the decode line says why
+    for (const char* value : {"no-cuda", "no-av1"}) {
+        INFO(value);
+        FakeNvdecEnv fake(value);
+        const auto info = RunAll({"info", plain.string()}, dir / (std::string("info_") + value + ".log"));
+        INFO(info.out);
+        CHECK(info.code == 0);
+        CHECK_THAT(info.out, ContainsSubstring("samples:     not known (the probe did not learn the pixel format; not decoded here, see decode)"));
+        CHECK_THAT(info.out, !ContainsSubstring("before the first frame"));  // the samples line, nor NoAv1's words on the decode line
+        CHECK_THAT(info.out, ContainsSubstring("decode:      unavailable - "));
+        CHECK_THAT(info.out, !ContainsSubstring("decoded as"));
+    }
     const std::string learned = "a layout the probe did not learn)";
     {
         // the stand-in aside: NVDEC decodes it from there

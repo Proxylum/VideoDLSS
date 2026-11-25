@@ -239,8 +239,8 @@ TEST_CASE("JudgeDecode: the layout is judged before NVDEC is asked; an unknown l
         CheckRefusal(JudgeDecode(Av1Info("unknown"), &noAv1), DecodeBlock::NoAv1);
         // the depth asked about is the probe's default, not the stream's: said so
         CHECK(JudgeDecode(Av1Info("unknown"), &noAv1).why ==
-              "the GPU 'Test GPU' has no NVDEC AV1 decoder (asked for 8-bit 4:2:0 - the stream's layout is not known before the first frame; for "
-              "example, GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder");
+              "the GPU 'Test GPU' has no NVDEC AV1 decoder (asked for 8-bit 4:2:0 - the probe did not learn the stream's layout; for example, "
+              "GeForce RTX 30 series and newer have one), and this build has no software AV1 decoder");
         const DecodeSupport s = JudgeDecode(Av1Info("unknown"), &good);
         CHECK(s.Ok());
         CHECK_FALSE(s.verified);

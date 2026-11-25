@@ -25,12 +25,15 @@ QString DecodeLayoutText(int bitDepth, const std::string& chroma, const std::str
 
 namespace {
 
-// TASK-0076: a refusal before the odd height (no CUDA, no NVDEC) of a video whose odd height is known (the probe learned its layout: its
-// size is the stream's, not the container's): no GPU takes it in this build - said, the advice is not the GPU or the driver alone
-bool OddKnown(const DecodeSupport& s) { return !s.part && s.pixelFormat != "unknown" && s.height % 2 == 1; }
+// TASK-0076: a refusal before the odd height (no CUDA, no NVDEC, no AV1, a size outside the GPU's limits) of a video or a part whose odd
+// height is known (a layout the probe learned: its size is the stream's, not the container's; a part's is the decoder's): no GPU takes
+// it in this build - said (as RefusalText's oddToo), the advice is not the GPU or the driver alone
+bool OddKnown(const DecodeSupport& s) { return s.pixelFormat != "unknown" && s.height % 2 == 1; }
 
 QString OddTooText(const DecodeSupport& s) {
-    return Tr("; к тому же высота его кадра в файле нечётная (%1×%2), а такой AV1 эта версия программы не декодирует ни на какой видеокарте")
+    return (s.part ? Tr("; к тому же высота кадра в этой части нечётная (%1×%2), а такой AV1 эта версия программы не декодирует ни на какой "
+                        "видеокарте")
+                   : Tr("; к тому же высота его кадра в файле нечётная (%1×%2), а такой AV1 эта версия программы не декодирует ни на какой видеокарте"))
         .arg(s.width)
         .arg(s.height);
 }
@@ -76,6 +79,13 @@ QString SourceDecodeText(const DecodeSupport& s) {
                           "программы нет. Что сделать: %2 или откройте его на компьютере с видеокартой, которая декодирует AV1 (например, RTX 30 и "
                           "новее).")
                     .arg(gpu, transcode);
+            if (s.part && OddKnown(s))  // the part's odd height too: another GPU alone would not take it
+                return Tr("Видео AV1 не декодируется на этом компьютере: в нём есть часть AV1 %2 бит, а такой AV1 видеокарта %1 не декодирует, и "
+                          "другого декодера AV1 в этой версии программы нет%3. Что сделать: %4 или в кадр с чётными сторонами — такой откроет "
+                          "компьютер с видеокартой, которая декодирует AV1 %2 бит (например, RTX 30 и новее).")
+                    .arg(gpu)
+                    .arg(s.bitDepth)
+                    .arg(OddTooText(s), transcode);
             if (s.part)
                 return Tr("Видео AV1 не декодируется на этом компьютере: в нём есть часть AV1 %2 бит, а такой AV1 видеокарта %1 не декодирует, и "
                           "другого декодера AV1 в этой версии программы нет. Что сделать: %3 или откройте его на компьютере с видеокартой, которая "

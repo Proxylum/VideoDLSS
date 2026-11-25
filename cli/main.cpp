@@ -143,7 +143,9 @@ int CmdInfo(const std::string& input, bool warp) {
     std::printf("video:       %s %ux%u %s (%s, %s range)\n", i.codecName.c_str(), i.width, i.height, i.pixelFormat.c_str(),
                 std::string(ToString(ci.matrix)).c_str(), std::string(ToString(ci.range)).c_str());
     const DecodeSupport decode = CheckDecodeSupport(i);  // TASK-0076: software, or NVDEC only (AV1) and whether it takes it
-    if (i.pixelFormat == "unknown")  // TASK-0076: bitDepth / chroma / decoded are defaults then, not the stream's
+    if (i.pixelFormat == "unknown" && decode.hardwareOnly && !decode.Ok())  // TASK-0076: no decoder starts here - no first frame to learn it
+        std::printf("samples:     not known (the probe did not learn the pixel format; not decoded here, see decode)\n");
+    else if (i.pixelFormat == "unknown")  // TASK-0076: bitDepth / chroma / decoded are defaults then, not the stream's
         std::printf("samples:     not known before the first frame (the probe did not learn the pixel format)\n");
     else if (decode.hardwareOnly && !decode.Ok())  // TASK-0076: not decoded here - no «decoded as» (see decode:)
         std::printf("samples:     %d-bit %s (not decoded here, see decode)\n", i.bitDepth, i.chroma.c_str());
