@@ -8407,18 +8407,26 @@ TEST_CASE("While a task or a preview runs the viewport does not hold NVDEC betwe
     model.openVideo(Q(clip));
     REQUIRE(model.hasProject());
     REQUIRE(model.proxyBuilding());
-    // a preview starts (at once, from an idle queue): the proxy build goes on - it is not the viewport's NVDEC
+    // nothing runs: the viewport's frames, NVDEC held between them
+    SettleFrames(model, 0, 6);
+    CHECK(ContextBecomes(true));
+    // a preview starts (at once, from an idle queue): NVDEC let go at once; the proxy build goes on - it is not the viewport's NVDEC.
+    // The preview runs longer than any wait below (cancelled)
     bool previewOn = false;
     QObject::connect(&queue, &TaskQueue::previewStarted, &queue, [&](int) { previewOn = true; });
-    const int preview = queue.enqueue("p", "ping", {"-n", "30", "127.0.0.1"}, {}, TaskQueue::Lane::Preview);
+    const int preview = queue.enqueue("p", "ping", {"-n", "180", "127.0.0.1"}, {}, TaskQueue::Lane::Preview);
     REQUIRE(preview >= 0);
     REQUIRE(previewOn);
     CHECK(model.proxyBuilding());
+    CHECK(ContextBecomes(false));
     model.cancelProxies();  // the frames below come from NVDEC, not from a proxy
     autoProxy.set(false);
-    // while the preview runs, the viewport shows frames and lets NVDEC go after each
-    SettleFrames(model, 0, 6);
+    // while the preview runs, the viewport shows a frame outside those loaded (the shown one alone: no prefetch of an NVDEC-only video
+    // without a proxy) and lets NVDEC go after it
+    model.setTime(0.3);  // frame 7
+    SettleFrames(model, 7, 7);
     CHECK(model.frameStateOf("source") == FrameState::Ready);
+    REQUIRE_FALSE(queue.finished(preview));
     CHECK(ContextBecomes(false));
     // the preview ends (its end is asked of the queue on the next turn of the event loop): the viewport holds NVDEC between frames again
     queue.cancel(preview);
@@ -8428,12 +8436,15 @@ TEST_CASE("While a task or a preview runs the viewport does not hold NVDEC betwe
     model.setTime(0.5);
     SettleFrames(model, 6, 18);
     CHECK(ContextBecomes(true));
-    // a task queued (the run, a stage alone): NVDEC let go at once, and after every frame while it runs
-    const int task = queue.enqueue("t", "ping", {"-n", "30", "127.0.0.1"});
+    // a task queued (the run, a stage alone; longer than any wait below - cancelled): NVDEC let go at once, and after every frame while
+    // it runs
+    const int task = queue.enqueue("t", "ping", {"-n", "180", "127.0.0.1"});
     REQUIRE(task >= 0);
+    REQUIRE_FALSE(queue.finished(task));
     CHECK(ContextBecomes(false));
     model.setTime(0.8);
     SettleFrames(model, 19, 19);  // the shown frame: while a task runs, an NVDEC-only video without a proxy gets no prefetch
+    REQUIRE_FALSE(queue.finished(task));
     CHECK(ContextBecomes(false));
     queue.cancel(task);
     Pump([&] { return queue.finished(task); }, 20000);
@@ -8597,7 +8608,7 @@ TEST_CASE("AppModel: NVDEC failing to start although the driver takes the source
     model.openVideo(Q(clip));
     REQUIRE(model.hasProject());
     model.store().WaitForCurrent();
-    // the loader records the start failure after it published the missing frame: the window's loads over first
+    // the window's loads over
     SettleAny(model, 0, 6);
     model.store().Update();
     model.notifyFramesUpdated();  // the viewport's poll

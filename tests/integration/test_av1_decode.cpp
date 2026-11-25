@@ -3030,6 +3030,36 @@ TEST_CASE("An AV1 stream whose layout the probe did not learn: the container's o
         CHECK_FALSE(refused->support.part);  // the stream's own height: the probe knew no layout of it
         CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168)"));  // the keyframe the seek landed on
     }
+    // NVDEC refusing the first frame (the stand-in): judged when av1dec learned the layout (CheckDecode) - the IVF header's size is no
+    // evidence of a part (the probe learned no layout): the stream's own layout, learned late, also where that size (192) differs
+    for (const auto& file : {evenHeader, oddHeader}) {
+        INFO(file.filename().string());
+        FakeNvdecEnv fake("start-fails");
+        VideoDecoder dec(file);
+        REQUIRE(dec.SeekToKeyframeBefore(170));
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK((refused->support.block == DecodeBlock::NvdecStartFailed || refused->support.block == DecodeBlock::OddHeight));
+        CHECK_FALSE(refused->support.part);
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p - a layout the probe did not learn)"));
+    }
+    // 12-bit of 191 rows in its sequence headers, the IVF header 192, no stand-in: the layout's verdict, the stream's own
+    const auto twelve = RepeatIvf(*a, 13, dir / "unknown_odd12.ivf", [](int i, const std::string& u) {
+        const std::string part = TwelveBitTemporalUnit(ShorterFrameTemporalUnit(u, 1));
+        return i < kFirstHeader ? WithoutSequenceHeaders(part) : part;
+    });
+    {
+        const VideoStreamInfo info = VideoDecoder(twelve, VideoDecoder::Probe()).Info();
+        REQUIRE(info.pixelFormat == "unknown");
+        REQUIRE(info.codedHeight == kH);
+        VideoDecoder dec(twelve);
+        REQUIRE(dec.SeekToKeyframeBefore(170));
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::Layout);
+        CHECK_FALSE(refused->support.part);
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p12le - a layout the probe did not learn)"));
+    }
 }
 
 TEST_CASE("dlssvid process --project P -i <an AV1 video not decodable here> refuses it before hashing it: the reason, no word of P's source (also --plan)",

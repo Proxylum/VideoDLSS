@@ -846,10 +846,13 @@ void VideoDecoder::CheckDecode(int err, const char* what, std::optional<int64_t>
         // the layout the probe did not learn is known now (av1dec parsed the sequence header before it asked for a format): judged as a
         // probe's would be - its own reason, or (the driver taking it) NVDEC not starting
         const bool learnedNow = swFmt && info_.pixelFormat == "unknown";
-        // (a layout learned now after frames under another sequence header: that part's, not the stream's - decodedOtherSequence_)
-        const bool otherPart = (swFmt && info_.pixelFormat != "unknown" && info_.pixelFormat != swFmt) ||
-                               (codec_->width > 0 && static_cast<uint32_t>(codec_->width) != info_.codedWidth) ||
-                               (codec_->height > 0 && static_cast<uint32_t>(codec_->height) != info_.codedHeight) || (learnedNow && decodedOtherSequence_);
+        // (the probe's layout and size compared only when it learned the layout - its size is the container's otherwise, no evidence of
+        // a part; a layout learned now after frames under another sequence header is that part's, not the stream's - decodedOtherSequence_)
+        const bool probeKnown = info_.pixelFormat != "unknown";
+        const bool otherPart = (probeKnown && ((swFmt && info_.pixelFormat != swFmt) ||
+                                               (codec_->width > 0 && static_cast<uint32_t>(codec_->width) != info_.codedWidth) ||
+                                               (codec_->height > 0 && static_cast<uint32_t>(codec_->height) != info_.codedHeight))) ||
+                               (learnedNow && decodedOtherSequence_);
         std::string when = PlaceWords(pts);
         bool transient = nvdecStartTransient_;
         if (otherPart || learnedNow) {  // the part judged against the GPU as the probe was: refused - that verdict with its reason; taken - as for the probe
