@@ -3957,12 +3957,20 @@ TEST_CASE("A long plain tooltip is shown as a paragraph that wraps (the theme's 
     ask();
     REQUIRE(QToolTip::isVisible());
     INFO(QToolTip::text().toStdString());
-    CHECK(QToolTip::text().startsWith("<p>"));
+    CHECK(QToolTip::text().startsWith("<p style='white-space:pre-wrap'>"));
     CHECK(QToolTip::text().endsWith("</p>"));
     CHECK(QToolTip::text().contains("5 &lt; 6."));
     CHECK(QToolTip::text().contains("<br>"));
     CHECK_FALSE(QToolTip::text().contains('\n'));
     CHECK(label->toolTip() == longTip);  // the widget's own text stays plain
+    // the spaces kept (a pass chip sets its fields apart by two): pre-wrap, not collapsed to one
+    QString spaced = QString::fromUtf8("поле a  b");
+    while (spaced.size() < 200) spaced += QString::fromUtf8(" слово");
+    label->setToolTip(spaced);
+    ask();
+    REQUIRE(QToolTip::isVisible());
+    CHECK(QToolTip::text().contains("white-space:pre-wrap"));
+    CHECK(QToolTip::text().contains("a  b"));
     // 50 characters: as it is (Qt's own tooltip)
     const QString shortTip = QString(50, QChar('a'));
     label->setToolTip(shortTip);
@@ -8237,6 +8245,46 @@ TEST_CASE("NR preview: one computed while NR's setting changed and the source wa
     queue.stopAll(10000);
 }
 
+TEST_CASE("A stage card's run button of a source the viewport refused, gone since, says the plan's error - not the refusal kept for it",
+          "[app][gpu][av1]") {
+    App();
+    const auto d = Dir("av1_card_gone");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    if (clip.empty()) SKIP(why);
+    AutoProxySetting autoProxy(false);
+    // the viewport's verdict on the file (NVDEC refused its first frame - in a loader or the proxy build): remembered for it
+    const DecodeSupport refused = RefusedDecode(VideoDecoder(clip, VideoDecoder::Probe()).Info(), DecodeBlock::NvdecFailed, "on the first frame");
+    REQUIRE(FrameStore::RememberRefusedFile(clip, refused));
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    REQUIRE(model.hasProject());
+    REQUIRE(model.sourceDecode().block == DecodeBlock::NvdecFailed);
+    REQUIRE(model.sourceRefusalSaid());
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    std::vector<QPushButton*> runs = RunAloneButtons(panel);
+    REQUIRE(runs.size() >= 4);
+    for (QPushButton* b : runs) {
+        CHECK_FALSE(b->isEnabled());
+        CHECK(b->toolTip() == SourceDecodeText(model.sourceDecode()));  // the refusal, as the plan says it
+    }
+    // the file gone: the plan says «видео не найдено», the viewport's verdict stays (keepViewportVerdict) - the button says the plan's
+    std::filesystem::rename(clip, d / "gone.mp4");
+    model.refreshPlan();
+    REQUIRE(model.planError() == QString::fromUtf8("видео не найдено"));
+    REQUIRE_FALSE(model.sourceDecode().Ok());
+    REQUIRE_FALSE(model.sourceRefusalSaid());
+    panel.refresh();
+    runs = RunAloneButtons(panel);
+    REQUIRE(runs.size() >= 4);
+    for (QPushButton* b : runs) {
+        CHECK_FALSE(b->isEnabled());
+        CHECK(b->toolTip() == QString::fromUtf8("Не запустить: видео не найдено"));
+    }
+}
+
 TEST_CASE("AppModel: NVDEC refusing the source's first frame in the viewport becomes the plan's verdict; Process and Ctrl+Return stay off",
           "[app][gpu][av1]") {
     App();
@@ -8409,10 +8457,10 @@ TEST_CASE("AppModel: the viewport's refusal when the plan stops before the sourc
     const std::vector<QPushButton*> runs = RunAloneButtons(panel);
     CHECK(runs.size() >= 4);
     for (QPushButton* b : runs) {
-        CHECK_FALSE(b->isEnabled());
-        CHECK(b->toolTip() == SourceDecodeText(refused));
+        CHECK_FALSE(b->isEnabled());  // off by the verdict kept
+        CHECK(b->toolTip() == QString::fromUtf8("Не запустить: видео не найдено"));  // the plan's error said (TASK-0076, review round 33)
     }
-    // the plan's error is not the refusal: the cards and the preview say that error, not «не декодируется» (the stage runs say the verdict)
+    // the plan's error is not the refusal: the cards, the preview and the stage runs say that error, not «не декодируется»
     CHECK_FALSE(model.sourceRefusalSaid());
     int cards = 0;
     for (const auto& st : model.project().stages) {
@@ -8435,7 +8483,7 @@ TEST_CASE("AppModel: the viewport's refusal when the plan stops before the sourc
     panel.refresh();
     for (QPushButton* b : RunAloneButtons(panel)) {
         CHECK_FALSE(b->isEnabled());
-        CHECK(b->toolTip() == SourceDecodeText(refused));
+        CHECK(b->toolTip() == QString::fromUtf8("Не запустить: видео не найдено"));
     }
     // another file on that path (it does not probe): not the file the viewport refused - no AV1 verdict, the probe's error said
     std::ofstream(source, std::ios::binary) << "not a video";
@@ -8460,7 +8508,7 @@ TEST_CASE("While a task or a preview runs the viewport does not hold NVDEC betwe
     if (*before) SKIP("the primary CUDA context is held by an earlier case in this process: run this case alone");
     const auto d = Dir("av1_hold");
     std::string why;
-    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why);
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why, 240, 240);  // one keyframe: a proxy is needed - its build runs a while
     if (clip.empty()) SKIP(why);
     AutoProxySetting autoProxy(true);  // the background proxy build of the AV1 source starts with the project
     AppModel model(true);
@@ -8476,13 +8524,18 @@ TEST_CASE("While a task or a preview runs the viewport does not hold NVDEC betwe
     // The preview runs longer than any wait below (cancelled)
     bool previewOn = false;
     QObject::connect(&queue, &TaskQueue::previewStarted, &queue, [&](int) { previewOn = true; });
+    const bool building = model.proxyBuilding();  // right before the preview: the build of a proxy needed runs still
+    REQUIRE(building);
     const int preview = queue.enqueue("p", "ping", {"-n", "180", "127.0.0.1"}, {}, TaskQueue::Lane::Preview);
     REQUIRE(preview >= 0);
     REQUIRE(previewOn);
-    CHECK(model.proxyBuilding());
+    CHECK(model.proxyBuilding() == building);  // not stopped by the preview
     CHECK(ContextBecomes(false));
-    model.cancelProxies();  // the frames below come from NVDEC, not from a proxy
+    // stopped here, and a proxy it may have finished meanwhile removed: the frames below come from NVDEC, not from a proxy
+    model.cancelProxies();
     autoProxy.set(false);
+    RemoveProxy(model.project().passesRoot, "source");
+    model.reloadSources();
     // while the preview runs, the viewport shows a frame outside those loaded (the shown one alone: no prefetch of an NVDEC-only video
     // without a proxy) and lets NVDEC go after it
     model.setTime(0.3);  // frame 7
@@ -8540,12 +8593,14 @@ TEST_CASE("A stage check holds NVDEC away from the viewport while it runs; one t
         model.cancelProxies();
         SKIP("DLSS-G cannot be checked here: " << model.availability("fg").text.toStdString());
     }
+    // the viewport's decoder holds NVDEC before the check (no event loop runs here: the proxy build's end is not heard meanwhile)
+    CHECK(ContextBecomes(true));
     // a check starts (its program a short process of our own: what it says is not the point): the proxy build goes on
     model.setCheckProgramForTests("ping");
     model.checkStage("fg");
     REQUIRE(model.checkRunning());
     CHECK(model.proxyBuilding());
-    model.cancelProxies();  // the frames below come from NVDEC, not from a proxy
+    model.cancelProxies();  // stopped here: the frames below come from NVDEC, not from a proxy it would make
     autoProxy.set(false);
     CHECK(ContextBecomes(false));  // the viewport's decoder let go for the check
     // cancelled (a task came): the viewport holds NVDEC between frames again
@@ -9597,6 +9652,7 @@ TEST_CASE("AppModel: a background proxy build that made one video's proxy and re
     const auto result = d / "result.ivf";
     std::filesystem::copy_file(*a, result);
     const auto [file, passes] = ProxyProject(d, parts, result, "mixed");
+    LogCapture capture;  // before the model: the sinks are not changed while its loaders log
     AppModel model(true);
     QSignalSpy messages(&model, &AppModel::message);
     model.openProject(Q(file));
@@ -9615,6 +9671,17 @@ TEST_CASE("AppModel: a background proxy build that made one video's proxy and re
     REQUIRE(said.size() == 1);
     CHECK(said[0].startsWith(QString::fromUtf8("Прокси для перемотки готов: ") + HumanSourceName("result") + ". "));
     CHECK(said[0].contains(QString::fromUtf8(". Прокси для перемотки не построен (") + HumanSourceName("source") + "): "));
+    // «готов» in the log too (the status bar's line goes in 5 s): once, of the result alone
+    const std::string log = capture.Text();
+    INFO(log);
+    std::vector<std::string> readyLines;
+    std::istringstream lines(log);
+    for (std::string line; std::getline(lines, line);) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.rfind("info viewport proxy ready: ", 0) == 0) readyLines.push_back(line);
+    }
+    REQUIRE(readyLines.size() == 1);
+    CHECK(readyLines[0] == "info viewport proxy ready: " + HumanSourceName("result").toStdString());
 }
 
 TEST_CASE("AppModel: a background proxy build that met a part of the stream the GPU does not take (12-bit) remembers that part's verdict - the layout, not a refusal of NVDEC",

@@ -777,8 +777,10 @@ void StageCard::refresh() {
     if (controlRow_) controlRow_->refresh(busy || model_.controlMaskBusy(), NrBypassParams(effective));
     // a queued standalone run waits behind a task; an import would read the folder; TASK-0076: a source this machine cannot decode
     run_->setEnabled(!model_.controlMaskBusy() && model_.sourceDecode().Ok());
-    run_->setToolTip(model_.sourceDecode().Ok() ? tr("Только эта стадия как процесс dlssvid %1").arg(QString::fromStdString(stage_))
-                                                 : SourceDecodeText(model_.sourceDecode()));
+    // (the refusal said only when the plan's error is it - a file gone since keeps the viewport's verdict, the plan says «видео не найдено»)
+    run_->setToolTip(model_.sourceDecode().Ok()    ? tr("Только эта стадия как процесс dlssvid %1").arg(QString::fromStdString(stage_))
+                     : model_.sourceRefusalSaid() ? SourceDecodeText(model_.sourceDecode())
+                                                  : tr("Не запустить: %1").arg(model_.planError()));
     updating_ = false;
 }
 

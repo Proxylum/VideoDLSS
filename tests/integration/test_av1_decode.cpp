@@ -3202,6 +3202,25 @@ std::map<std::string, std::string> FilesOf(const std::filesystem::path& dir) {
 }
 }  // namespace
 
+TEST_CASE("dlssvid scenes of a video with a software decoder lists the pass history once - a broken version folder is said once",
+          "[integration][cli][scenes]") {
+    const auto dir = Dir("scenes_history_once");
+    ClipSpec plain;
+    plain.frames = 8;
+    plain.width = 64;
+    plain.height = 48;
+    const auto clip = WriteClip(dir / "clip.mkv", plain);  // FFV1: a software decoder, nothing refused before the scores are looked for
+    const auto out = dir / "out";
+    const auto broken = out / "scenes.v" / "20260101T000000";
+    std::filesystem::create_directories(broken);
+    std::ofstream(broken / "manifest.json") << "{";  // a version folder whose manifest does not read
+    const auto r = RunAll({"scenes", "-i", clip.string(), "-o", out.string()}, dir / "scenes.log");
+    INFO(r.out);
+    CHECK(r.code == 0);
+    CHECK_THAT(r.out, ContainsSubstring("20260101T000000 skipped: "));
+    CHECK(CountOf(r.out, "passes: version folder ") == 1);  // FindSceneScores' listing alone - not also one before the decode
+}
+
 TEST_CASE("dlssvid scenes without NVDEC AV1 refuses only when it decodes: --threshold 0 and stored scores go on; --reanalyze and no scores refuse before the pass is kept as a version",
           "[integration][cli][gpu][av1]") {
     const auto dir = Dir("scenes_no_av1");

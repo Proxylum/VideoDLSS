@@ -71,7 +71,9 @@ public:
         const QString tip = w->toolTip();
         if (tip.size() <= kLong || Qt::mightBeRichText(tip)) return false;  // a short one, a rich one, none (the parent's): Qt's own
         const auto* help = static_cast<QHelpEvent*>(event);
-        QToolTip::showText(help->globalPos(), "<p>" + tip.toHtmlEscaped().replace('\n', "<br>") + "</p>", w, QRect(), w->toolTipDuration());
+        // pre-wrap: the spaces kept (a pass chip sets its fields apart by two), the lines wrapped to the tooltip's width
+        QToolTip::showText(help->globalPos(), "<p style='white-space:pre-wrap'>" + tip.toHtmlEscaped().replace('\n', "<br>") + "</p>", w, QRect(),
+                           w->toolTipDuration());
         return true;
     }
 };

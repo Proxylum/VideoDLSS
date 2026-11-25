@@ -39,7 +39,8 @@ int CmdScenes(const ScenesCommands::Args& a) {
     // scores, nor to write the pass off (--threshold 0)
     const bool decodes = a.threshold > 0.0;
     // no stored scores to re-derive from (--reanalyze, or no scenes pass in the root at all): it will decode - refused before the hash
-    if (decodes && (a.reanalyze || ListPassVersions(a.output, kScenesPass).empty())) decoder.RequireDecodable();
+    // (a decoder with a software path refuses nothing: its history is not listed here - FindSceneScores lists it below)
+    if (decodes && decoder.Info().hardwareOnly && (a.reanalyze || ListPassVersions(a.output, kScenesPass).empty())) decoder.RequireDecodable();
     const auto& info = decoder.Info();
     ScenesStageOptions o;
     o.threshold = a.threshold;
