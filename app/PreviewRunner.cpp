@@ -408,6 +408,7 @@ bool PreviewRunner::start(Request r) {
         return false;
     }
     job_ = job;
+    jobMade_ = {NrPreviewStagesOf(model_.project()), model_.controlMask().fingerprint};  // TASK-0076: what it is made with
     jobRequest_ = r;
     taskId_ = id;
     jobGeneration_ = model_.generation();
@@ -544,7 +545,7 @@ void PreviewRunner::onFinished(int id, bool ok) {
         uncachedTip_ = v.cacheable ? Tr("не сохранено в кэш: папку превью не удалось переименовать (занята) — подробности в логе")
                                    : Tr("не сохранено в кэш: у CLI другая nvngx_dlssnr.dll");
         const bool seek = std::abs(model_.time() - jobCursor_) < 1e-9 && !model_.playing();  // the cursor was not moved meanwhile
-        show(entry, job, false, seek);
+        show(entry, job, false, seek, &jobMade_);
         updateStale();  // a setting changed while it ran: shown as a preview of the earlier settings
         Log()->info("nr preview: shown {} in {:.2f} s ({})", entry.key, seconds, entry.cacheable ? "cached" : "not cached");
     }
@@ -570,7 +571,8 @@ void PreviewRunner::runPending() {
     autoStart_ = false;
 }
 
-void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, bool cached, bool seek) {
+void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, bool cached, bool seek,
+                         const std::pair<std::vector<StageEntry>, QString>* made) {
     AppModel::NrPreviewShown s;
     s.dir = entry.dir;
     s.root = job.root;
@@ -586,8 +588,9 @@ void PreviewRunner::show(const NrPreviewEntry& entry, const NrPreviewJob& job, b
     stale_.clear();
     staleBySnapshot_ = false;
     refusalShown_ = false;
-    shownStages_ = NrPreviewStagesOf(model_.project());  // TASK-0076: what it is made with (judges it while the source is refused)
-    shownMask_ = model_.controlMask().fingerprint;
+    // TASK-0076: what it is made with (judges it while the source is refused): a run's request, else (the cache) the settings now
+    shownStages_ = made ? made->first : NrPreviewStagesOf(model_.project());
+    shownMask_ = made ? made->second : model_.controlMask().fingerprint;
     model_.showNrPreview(s, seek);
     QString text;
     const QString took = cached ? Tr("из кэша") : Took(entry.seconds);

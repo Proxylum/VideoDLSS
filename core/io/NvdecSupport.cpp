@@ -107,7 +107,8 @@ std::string Layout(const DecodeSupport& s) {  // «10-bit 4:4:4 (yuv444p10le)»,
 
 std::string RefusalText(const DecodeSupport& s) {
     const std::string codec = "AV1";
-    // TASK-0076: a refusal before the odd height (no CUDA, no NVDEC, no AV1 in it) of a stream whose odd height is known says it too: no
+    // TASK-0076: a refusal before the odd height (no CUDA, no NVDEC, no AV1 in it, a size outside the GPU's limits) of a stream whose odd
+    // height is known says it too: no
     // GPU takes it in this build (the size of a layout the probe did not learn is the container's - not said)
     const std::string oddToo = s.pixelFormat != "unknown" && s.height % 2 == 1
                                    ? "; its frame height (" + std::to_string(s.width) + "x" + std::to_string(s.height) +
@@ -135,7 +136,7 @@ std::string RefusalText(const DecodeSupport& s) {
             return codec + " " + std::to_string(s.width) + "x" + std::to_string(s.height) + " (the frame as stored) is outside what NVDEC of '" + s.caps.gpu +
                    "' decodes (" + std::to_string(s.caps.minWidth) + "x" + std::to_string(s.caps.minHeight) + " to " + std::to_string(s.caps.maxWidth) + "x" +
                    std::to_string(s.caps.maxHeight) + ", at most " + std::to_string(s.caps.maxMacroblocks) +
-                   " macroblocks), and this build has no software AV1 decoder";
+                   " macroblocks), and this build has no software AV1 decoder" + oddToo;
         case DecodeBlock::OddHeight:
             return codec + " " + std::to_string(s.width) + "x" + std::to_string(s.height) +
                    " (the frame as stored) has an odd frame height - FFmpeg's NVDEC reads the chroma of such a frame a row off (its surfaces are "

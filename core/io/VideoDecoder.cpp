@@ -811,6 +811,7 @@ void VideoDecoder::FollowSequenceHeader() {
         // last one has given every frame of the packets it got: av1dec returns a temporal unit's frame as it decodes it
         // (said when this decoder has decoded under the last one: an av1C that differs from the first packet's changes nothing seen)
         const bool news = !probe_ && instanceFrames_ > 0;
+        if (instanceFrames_ > 0) decodedOtherSequence_ = true;
         const std::string place = PlaceWords(packet_->pts != AV_NOPTS_VALUE ? packet_->pts : packet_->dts);
         AVCodecContext* reopened = OpenCodec(hwDevice_);
         avcodec_free_context(&codec_);
@@ -842,12 +843,13 @@ void VideoDecoder::CheckDecode(int err, const char* what, std::optional<int64_t>
         // later part of the stream at its first frame. av1dec has parsed its sequence header by now: other parameters than the probe's -
         // a part NVDEC does not take, the stream's verdict)
         const char* swFmt = codec_->sw_pix_fmt != AV_PIX_FMT_NONE ? av_get_pix_fmt_name(codec_->sw_pix_fmt) : nullptr;
-        const bool otherPart = (swFmt && info_.pixelFormat != "unknown" && info_.pixelFormat != swFmt) ||
-                               (codec_->width > 0 && static_cast<uint32_t>(codec_->width) != info_.codedWidth) ||
-                               (codec_->height > 0 && static_cast<uint32_t>(codec_->height) != info_.codedHeight);
         // the layout the probe did not learn is known now (av1dec parsed the sequence header before it asked for a format): judged as a
         // probe's would be - its own reason, or (the driver taking it) NVDEC not starting
         const bool learnedNow = swFmt && info_.pixelFormat == "unknown";
+        // (a layout learned now after frames under another sequence header: that part's, not the stream's - decodedOtherSequence_)
+        const bool otherPart = (swFmt && info_.pixelFormat != "unknown" && info_.pixelFormat != swFmt) ||
+                               (codec_->width > 0 && static_cast<uint32_t>(codec_->width) != info_.codedWidth) ||
+                               (codec_->height > 0 && static_cast<uint32_t>(codec_->height) != info_.codedHeight) || (learnedNow && decodedOtherSequence_);
         std::string when = PlaceWords(pts);
         bool transient = nvdecStartTransient_;
         if (otherPart || learnedNow) {  // the part judged against the GPU as the probe was: refused - that verdict with its reason; taken - as for the probe
@@ -958,8 +960,9 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         const uint32_t w = static_cast<uint32_t>(frameW), h = static_cast<uint32_t>(frameH);
         av_frame_unref(frame_);
         DecodeSupport s = RefusedDecode(StreamPartInfo(info_, "", w, h), DecodeBlock::OddHeight, frame);
-        // the probe's height (of the stream, its layout learned) was even: a part in other parameters
-        s.part = info_.pixelFormat != "unknown" && info_.codedHeight % 2 == 0 && info_.codedHeight > 0;
+        // the probe's height (of the stream, its layout learned) was even, or this decoder decoded frames under another sequence header: a
+        // part in other parameters
+        s.part = (info_.pixelFormat != "unknown" && info_.codedHeight % 2 == 0 && info_.codedHeight > 0) || decodedOtherSequence_;
         refused_ = std::make_shared<const DecodeSupport>(std::move(s));
         throw DecodeUnavailable(*refused_, url_ + ": " + refused_->why);
     }

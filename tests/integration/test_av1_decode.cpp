@@ -1888,6 +1888,85 @@ TEST_CASE("A part of the stream NVDEC does not take (12-bit after 8-bit) is refu
     }
 }
 
+TEST_CASE("A layout the probe did not learn, refused after frames under another sequence header, is a part; a seek straight into it is not",
+          "[integration][gpu][av1][regression]") {
+    const auto dir = Dir("unknown_then_part");
+    if (!HaveAv1Encoder()) SKIP("no NVIDIA GPU with av1_nvenc");
+    ClipSpec spec;
+    spec.width = kW;
+    spec.height = kH;
+    spec.frames = 16;
+    spec.gop = 8;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto a = WriteClipIfSupported(dir / "a.ivf", spec, &why);
+    if (!a) SKIP("av1_nvenc does not support the clip here: " << why);
+    // as unknown.ivf: no sequence header before frame 160 - the probe does not learn the layout; 8-bit 4:2:0 from there, and from the
+    // keyframe 184 a part with its own sequence header - 12-bit 4:2:0 of the same size, or 8-bit of 191 rows
+    constexpr int kFirstHeader = 160;
+    constexpr int kPart = 184;
+    const auto twelve = RepeatIvf(*a, 13, dir / "unknown_part12.ivf", [](int i, const std::string& u) {
+        return i < kFirstHeader ? WithoutSequenceHeaders(u) : i < kPart ? u : TwelveBitTemporalUnit(u);
+    });
+    const auto odd = RepeatIvf(*a, 13, dir / "unknown_part_odd.ivf", [](int i, const std::string& u) {
+        return i < kFirstHeader ? WithoutSequenceHeaders(u) : i < kPart ? u : ShorterFrameTemporalUnit(u, 1);
+    });
+    for (const auto& file : {twelve, odd}) {
+        INFO(file.filename().string());
+        REQUIRE(VideoDecoder(file, VideoDecoder::Probe()).Info().pixelFormat == "unknown");
+    }
+    // decoded from the first sequence header on: the 8-bit frames, then the part - refused as a part (frames under another sequence
+    // header came first), in the part's own words
+    auto decodedThrough = [&](const std::filesystem::path& file) {
+        VideoDecoder dec(file);
+        REQUIRE(dec.SeekToKeyframeBefore(kFirstHeader + 2));  // the keyframe at or before 162: 160
+        CpuFrame f;
+        int frames = 0;
+        std::optional<DecodeUnavailable> refused;
+        try {
+            while (dec.NextFrame(f)) ++frames;
+            FAIL("the part decoded: " << frames << " frames");
+        } catch (const DecodeUnavailable& e) {
+            refused = e;
+        }
+        REQUIRE(refused);
+        CHECK(frames == kPart - kFirstHeader);
+        return *refused;
+    };
+    {
+        const DecodeUnavailable refused = decodedThrough(twelve);
+        CHECK(refused.support.block == DecodeBlock::Layout);
+        CHECK(refused.support.part);
+        CHECK(refused.support.bitDepth == 12);
+        CHECK_THAT(refused.support.why, ContainsSubstring("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here"));
+        CHECK_THAT(refused.support.why, Catch::Matchers::EndsWith("(at frame 184, on a part of the stream in other parameters (yuv420p12le 320x192))"));
+    }
+    {
+        const DecodeUnavailable refused = decodedThrough(odd);
+        CHECK(refused.support.block == DecodeBlock::OddHeight);
+        CHECK(refused.support.part);
+        CHECK(refused.support.height == kH - 1);
+    }
+    // a seek straight into the part: no frame under another sequence header - the stream's layout, learned late (as before)
+    {
+        VideoDecoder dec(twelve);
+        REQUIRE(dec.SeekToKeyframeBefore(kPart + 6));
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::Layout);
+        CHECK_FALSE(refused->support.part);
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 184, in yuv420p12le - a layout the probe did not learn)"));
+    }
+    {
+        VideoDecoder dec(odd);
+        REQUIRE(dec.SeekToKeyframeBefore(kPart + 6));
+        const auto refused = RefusalOfNextFrame(dec);
+        REQUIRE(refused);
+        CHECK(refused->support.block == DecodeBlock::OddHeight);
+        CHECK_FALSE(refused->support.part);
+    }
+}
+
 TEST_CASE("dlssvid render --bench on videos this machine cannot decode says why before it times anything; a source that shows still measures",
           "[integration][cli][gpu][av1]") {
     const auto dir = Dir("bench_refused");

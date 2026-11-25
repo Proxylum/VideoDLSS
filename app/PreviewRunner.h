@@ -116,7 +116,8 @@ private:
     void onFinished(int id, bool ok);
     void onOutput(int id, const QString& line);
     void runPending();
-    void show(const NrPreviewEntry& entry, const NrPreviewJob& job, bool cached, bool seek);
+    // made: the settings it was asked with (a run - the request's, TASK-0076); null - the project's now (a cache hit: the same)
+    void show(const NrPreviewEntry& entry, const NrPreviewJob& job, bool cached, bool seek, const std::pair<std::vector<StageEntry>, QString>* made = nullptr);
     void updateStale();
     void sayShown();  // the status of the preview shown: stale or not, and (refusalShown_) that a new one cannot come
     void updateUsage();
@@ -128,6 +129,7 @@ private:
     TaskQueue& tasks_;
     // the preview being computed
     std::optional<NrPreviewJob> job_;
+    std::pair<std::vector<StageEntry>, QString> jobMade_;  // TASK-0076: its stages up to NR and control mask at the request (show's snapshot)
     Request jobRequest_;
     int taskId_ = -1;
     uint64_t jobGeneration_ = 0;

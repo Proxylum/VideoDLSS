@@ -7405,6 +7405,24 @@ void SettleAny(AppModel& model, int64_t from, int64_t to) {
     REQUIRE(settled());
 }
 
+// TASK-0076: no load of the source's frames 0..frames-1 in flight - a stand-in of the driver (FakeNvdecEnv) comes and goes only then:
+// the loaders read the environment as it changes
+void LoadersAtRest(AppModel& model, int64_t frames) {
+    model.store().WaitForCurrent();
+    QElapsedTimer t;
+    t.start();
+    auto loading = [&] {
+        for (int64_t f = 0; f < frames; ++f)
+            if (model.store().GetStatus(f, "source") == FrameStore::Status::Loading) return true;
+        return false;
+    };
+    while (loading() && t.elapsed() < 30000) {
+        model.store().Update();
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+    REQUIRE_FALSE(loading());
+}
+
 // NVDEC not starting on the first frame (DLSSVID_FAKE_NVDEC_AV1=start-fails): the end of the reason
 const char* const kStartFailedWhy = "this build has no software AV1 decoder (on the first frame)";
 
@@ -7574,6 +7592,48 @@ TEST_CASE("SourceDecodeText says in Russian why a video cannot be decoded here a
                                                         "перекодируйте ролик другой программой в H.264 или HEVC либо в кадр поменьше."));
     limits.maxMacroblocks = 240;
     CHECK(JudgeDecode(Av1StreamInfo("yuv420p", 8), &limits).Ok());
+    // TASK-0076: a size outside the GPU's limits and an odd height known: both said - a smaller frame advised with even sides
+    {
+        VideoStreamInfo oddSize = Av1StreamInfo("yuv420p", 8);
+        oddSize.height = oddSize.codedHeight = 191;
+        const QString oddToo = QString::fromUtf8("; к тому же высота его кадра в файле нечётная (320×191), а такой AV1 эта версия программы не декодирует "
+                                                 "ни на какой видеокарте");
+        NvdecAv1Caps odd = limits;
+        odd.maxWidth = 256;  // larger
+        const DecodeSupport largerOdd = JudgeDecode(oddSize, &odd);
+        REQUIRE(largerOdd.block == DecodeBlock::Size);
+        CHECK(SourceDecodeText(largerOdd) == QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: кадр в файле 320×191 больше, чем декодирует "
+                                                               "видеокарта NVIDIA GeForce RTX 4090 (от 64×64 до 256×8192), а другого декодера AV1 в этой "
+                                                               "версии программы нет") +
+                                                 oddToo +
+                                                 QString::fromUtf8(". Что сделать: перекодируйте ролик другой программой в H.264 или HEVC либо в кадр "
+                                                                   "поменьше с чётными сторонами."));
+        odd.maxWidth = 8192;
+        odd.maxMacroblocks = 200;  // the sides fit, the 16x16 blocks do not
+        const DecodeSupport blocksOdd = JudgeDecode(oddSize, &odd);
+        REQUIRE(blocksOdd.block == DecodeBlock::Size);
+        CHECK(SourceDecodeText(blocksOdd).contains(QString::fromUtf8("слишком велик")));
+        CHECK(SourceDecodeText(blocksOdd).contains(QString::fromUtf8("нечётная (320×191)")));
+        CHECK(SourceDecodeText(blocksOdd).contains(QString::fromUtf8("либо в кадр поменьше с чётными сторонами.")));
+        odd.maxMacroblocks = 262144;
+        odd.minWidth = 400;  // smaller: the advice to transcode alone, the odd height said
+        const DecodeSupport smallerOdd = JudgeDecode(oddSize, &odd);
+        REQUIRE(smallerOdd.block == DecodeBlock::Size);
+        CHECK(SourceDecodeText(smallerOdd).contains(QString::fromUtf8("меньше, чем декодирует")));
+        CHECK(SourceDecodeText(smallerOdd).contains(oddToo + QString::fromUtf8(". Что сделать: перекодируйте ролик в H.264 или HEVC другой программой.")));
+        odd.minWidth = 64;
+        odd.minHeight = 200;  // 191 below it, 320 above the width's 256: outside the limits
+        odd.maxWidth = 256;
+        const DecodeSupport mixedOdd = JudgeDecode(oddSize, &odd);
+        REQUIRE(mixedOdd.block == DecodeBlock::Size);
+        CHECK(SourceDecodeText(mixedOdd).contains(QString::fromUtf8("вне пределов")));
+        CHECK(SourceDecodeText(mixedOdd).contains(oddToo + QString::fromUtf8(". Что сделать: ")));
+        // a layout the probe did not learn (a verdict of its size from elsewhere): the container's height - not said
+        DecodeSupport unknownOdd = largerOdd;
+        unknownOdd.pixelFormat = "unknown";
+        CHECK_FALSE(SourceDecodeText(unknownOdd).contains(QString::fromUtf8("нечётная")));
+        CHECK_FALSE(SourceDecodeText(unknownOdd).contains(QString::fromUtf8("с чётными сторонами")));
+    }
     // TASK-0076: no AV1 in NVDEC for a stream whose layout is not known in advance: no depth said (the 8 bits asked about are a default)
     const DecodeSupport unknownNoAv1 = JudgeDecode(Av1StreamInfo("unknown", 8), &noAv1);
     REQUIRE(unknownNoAv1.block == DecodeBlock::NoAv1);
@@ -7882,20 +7942,7 @@ TEST_CASE("NR preview: the source refused since the preview showed - a current o
     const QString refusedStatus = shown + QString::fromUtf8(" · новое превью недоступно: исходник не декодируется на этом компьютере");
     const QString changedSettings = QString::fromUtf8("настройки изменились");
     // the stand-in comes and goes only while the viewport's loaders are at rest: they read the environment as it changes
-    auto rest = [&] {
-        model.store().WaitForCurrent();
-        QElapsedTimer t;
-        t.start();
-        auto loading = [&] {
-            for (int64_t f = 0; f < 12; ++f)
-                if (model.store().GetStatus(f, "source") == FrameStore::Status::Loading) return true;
-            return false;
-        };
-        while (loading() && t.elapsed() < 30000) {
-            model.store().Update();
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-        }
-    };
+    auto rest = [&] { LoadersAtRest(model, 12); };
     const QString staleStatus = QString::fromUtf8("Показано превью для прежних настроек — ") + changedSettings;
     auto cellSaysStale = [&] {
         REQUIRE(model.nrPreview());
@@ -8037,6 +8084,58 @@ TEST_CASE("NR preview: the source refused since the preview showed - a current o
         CHECK(runner.staleReason().isEmpty());
         CHECK(runner.statusText() == refusedStatus);
         rest();
+    }
+    queue.stopAll(10000);
+}
+
+TEST_CASE("NR preview: one computed while NR's setting changed and the source was refused meanwhile is judged by the settings it was asked with",
+          "[app][preview][gpu][av1]") {
+    App();
+    const auto d = Dir("preview_made_clip");
+    std::string why;
+    const std::filesystem::path clip = Av1AppClip(d / "clip.mp4", &why, 12);
+    if (clip.empty()) SKIP(why);
+    AutoProxySetting autoProxy(false);  // no background build decoding on the GPU here
+    PreviewProject m("preview_made", clip);
+    AppModel& model = *m.model;
+    REQUIRE(model.sourceDecode().Ok());
+    TaskQueue queue;
+    PreviewRunner runner(model, queue);
+    const Manifest sr = Manifest::Load(m.root() / "color_sr");
+    runner.setCommandForTests([&](const NrPreviewJob& job) {  // the run's output written at once (no NR here), the run itself held some 2 s
+        PassWriter w(job.workDir / "color_nr", Manifest::ForPass(PassKind::ColorNr, sr.width, sr.height, FileFormat::Exr));
+        for (int64_t f = job.first; f < job.first + job.frames; ++f) w.WriteFrame(f, MakePassImage(PassKind::ColorNr, sr.width, sr.height));
+        w.Finish();
+        const nlohmann::json stats = {{"frames", job.warmup + job.frames}, {"frames_written", job.frames}, {"warmup_frames", job.warmup},
+                                      {"ms_per_frame_wall", 10.0}, {"control_mask", nullptr}};
+        std::ofstream(job.workDir / "nr.json") << nlohmann::json{{"stats", stats}, {"diagnostics", nlohmann::json::object()}}.dump();
+        return std::pair<QString, QStringList>{"cmd", {"/c", "ping", "-n", "3", "127.0.0.1"}};
+    });
+    nlohmann::json nr;
+    for (const auto& st : model.project().stages)
+        if (st.name == "nr") nr = st.params;
+    model.seekToSourceFrame(3);
+    REQUIRE(runner.start({PreviewRunner::Kind::Frame, 0}));
+    REQUIRE(runner.running());
+    // while it runs: NR's setting changed, then the GPU loses AV1 (the stand-in comes while the viewport's loaders are at rest)
+    model.setStageParam("nr", "intensity", 1.3);
+    LoadersAtRest(model, 12);
+    {
+        FakeNvdecEnv lost("no-av1");
+        model.refreshPlan();
+        REQUIRE(model.sourceRefusalSaid());
+        Pump([&] { return model.nrPreview().has_value() && !runner.running(); }, 20000);
+        REQUIRE(model.nrPreview());
+        // made with 1.0, shown while the source is refused (no plan to judge it by): stale by the settings it was asked with
+        CHECK(runner.staleReason() == QString::fromUtf8("настройки изменились"));
+        CHECK(runner.statusText().startsWith(QString::fromUtf8("Показано превью для прежних настроек")));
+        CHECK(runner.statusText().contains(QString::fromUtf8("новое превью недоступно")));
+        // the value back: current
+        model.setStageParams("nr", nr);
+        model.refreshPlan();
+        CHECK(runner.staleReason().isEmpty());
+        CHECK(runner.statusText().startsWith(QString::fromUtf8("Показано превью кадра 3")));
+        LoadersAtRest(model, 12);
     }
     queue.stopAll(10000);
 }
@@ -8606,20 +8705,7 @@ TEST_CASE("AppModel: frames NVDEC could not start for while a task ran come back
     REQUIRE(model.store().StartFailure("source"));
     CHECK(model.planError().isEmpty());  // no verdict: the plan stands
     // the loaders at rest (no load in flight reads the environment as it changes)
-    auto atRest = [&] {
-        QElapsedTimer t;
-        t.start();
-        auto loading = [&] {
-            for (int64_t f = 0; f < 24; ++f)
-                if (model.store().GetStatus(f, "source") == FrameStore::Status::Loading) return true;
-            return false;
-        };
-        while (loading() && t.elapsed() < 30000) {
-            model.store().Update();
-            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-        }
-        REQUIRE_FALSE(loading());
-    };
+    auto atRest = [&] { LoadersAtRest(model, 24); };
     // the end of the tasks forgets the start failures at once (updateNvdecHold) - still under the stand-in: the frame fails again
     model.setTasksRunning(false);
     CHECK_FALSE(model.store().StartFailure("source"));

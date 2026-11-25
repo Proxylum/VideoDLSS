@@ -301,6 +301,9 @@ private:
     // key (a repeat that differs in operating_parameters_info only, a video like it joined) goes on with codec_
     std::string nvdecSequence_;
     int64_t instanceFrames_ = 0;  // frames from this codec_ (a start failure is its first frame's)
+    // TASK-0076: this decoder decoded frames under another AV1 sequence header (FollowSequenceHeader opened codec_ again after them): a
+    // refusal now is a part's - also when the probe did not learn the layout (nothing to compare the part's with)
+    bool decodedOtherSequence_ = false;
     AVBufferRef* hwDevice_ = nullptr;
     AVFrame* frame_ = nullptr;
     AVFrame* swFrame_ = nullptr;

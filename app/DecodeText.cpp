@@ -103,29 +103,33 @@ QString SourceDecodeText(const DecodeSupport& s) {
             const bool large = s.width > s.caps.maxWidth || s.height > s.caps.maxHeight;
             // TASK-0076: a part of the video with another frame size (a new sequence header)
             const QString frame = (s.part ? Tr("в нём есть часть, где кадр в файле %1×%2") : Tr("кадр в файле %1×%2")).arg(s.width).arg(s.height);
+            // TASK-0076: its odd height too (Size is judged before it): said, and a smaller frame advised with even sides
+            const QString odd = OddKnown(s) ? OddTooText(s) : QString();
+            const QString smaller = OddKnown(s) ? Tr("либо в кадр поменьше с чётными сторонами") : Tr("либо в кадр поменьше");
             if (!small && !large)  // the macroblock count alone (FFmpeg's test: w * h / 256)
                 return Tr("Видео AV1 не декодируется на этом компьютере: %1 слишком велик для видеокарты %2 — она берёт не больше %3 "
-                          "блоков 16×16, а другого декодера AV1 в этой версии программы нет. Что сделать: перекодируйте ролик другой программой в "
-                          "H.264 или HEVC либо в кадр поменьше.")
+                          "блоков 16×16, а другого декодера AV1 в этой версии программы нет%4. Что сделать: перекодируйте ролик другой программой в "
+                          "H.264 или HEVC %5.")
                     .arg(frame, gpu)
-                    .arg(s.caps.maxMacroblocks);
+                    .arg(s.caps.maxMacroblocks)
+                    .arg(odd, smaller);
             if (small && large)  // one side below the minimum, the other above the maximum
                 return Tr("Видео AV1 не декодируется на этом компьютере: %1 вне пределов, которые декодирует видеокарта %2 (от %3×%4 до "
-                          "%5×%6), а другого декодера AV1 в этой версии программы нет. Что сделать: перекодируйте ролик в H.264 или HEVC другой программой.")
+                          "%5×%6), а другого декодера AV1 в этой версии программы нет%7. Что сделать: перекодируйте ролик в H.264 или HEVC другой программой.")
                     .arg(frame, gpu)
                     .arg(s.caps.minWidth)
                     .arg(s.caps.minHeight)
                     .arg(s.caps.maxWidth)
-                    .arg(s.caps.maxHeight);
+                    .arg(s.caps.maxHeight)
+                    .arg(odd);
             return Tr("Видео AV1 не декодируется на этом компьютере: %1 %2, чем декодирует видеокарта %3 (от %4×%5 до %6×%7), а другого "
-                      "декодера AV1 в этой версии программы нет. Что сделать: %8.")
+                      "декодера AV1 в этой версии программы нет%8. Что сделать: %9.")
                 .arg(frame, small ? Tr("меньше") : Tr("больше"), gpu)
                 .arg(s.caps.minWidth)
                 .arg(s.caps.minHeight)
                 .arg(s.caps.maxWidth)
                 .arg(s.caps.maxHeight)
-                .arg(small ? Tr("перекодируйте ролик в H.264 или HEVC другой программой") : Tr("перекодируйте ролик другой программой в H.264 или HEVC "
-                                                                                              "либо в кадр поменьше"));
+                .arg(odd, small ? Tr("перекодируйте ролик в H.264 или HEVC другой программой") : Tr("перекодируйте ролик другой программой в H.264 или HEVC ") + smaller);
         }
         case DecodeBlock::OddHeight:  // «кадр в файле»: the stored frame - a turned video is shown the other way round (its odd side a width)
             if (s.part)  // a part of the video with another frame size (a new sequence header)
