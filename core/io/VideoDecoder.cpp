@@ -386,7 +386,10 @@ VideoStreamInfo StreamPartInfo(const VideoStreamInfo& info, const std::string& p
 }
 
 std::string StreamPartWords(const StreamPart& part) {
-    if (part.learned) return ", in " + part.pixelFormat + " - a layout the probe did not learn";
+    if (part.learned)
+        return ", in " + part.pixelFormat +
+               (part.codedWidth > 0 && part.codedHeight > 0 ? " " + std::to_string(part.codedWidth) + "x" + std::to_string(part.codedHeight) : std::string()) +
+               " - a layout the probe did not learn";
     return ", on a part of the stream in other parameters (" + part.pixelFormat + " " + std::to_string(part.codedWidth) + "x" + std::to_string(part.codedHeight) +
            ")";
 }
@@ -416,8 +419,18 @@ std::optional<StreamPart> StreamPartOf(const std::string& why) {
         if (in == std::string::npos || learnedAt < in + 5) return std::nullopt;
         StreamPart part;
         part.learned = true;
-        part.pixelFormat = why.substr(in + 5, learnedAt - in - 5);
-        if (part.pixelFormat.empty() || part.pixelFormat.find(' ') != std::string::npos) return std::nullopt;
+        const std::string words = why.substr(in + 5, learnedAt - in - 5);  // «<fmt>» or «<fmt> <w>x<h>»
+        const size_t space = words.find(' ');
+        part.pixelFormat = words.substr(0, space);
+        if (part.pixelFormat.empty()) return std::nullopt;
+        if (space != std::string::npos) {
+            const std::string size = words.substr(space + 1);
+            const size_t x = size.find('x');
+            const auto parse = [](const std::string& s, uint32_t& out) {
+                return !s.empty() && std::from_chars(s.data(), s.data() + s.size(), out).ptr == s.data() + s.size();
+            };
+            if (x == std::string::npos || !parse(size.substr(0, x), part.codedWidth) || !parse(size.substr(x + 1), part.codedHeight)) return std::nullopt;
+        }
         return part;
     }
     return std::nullopt;

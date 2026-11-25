@@ -1955,7 +1955,7 @@ TEST_CASE("A layout the probe did not learn, refused after frames under another 
         REQUIRE(refused);
         CHECK(refused->support.block == DecodeBlock::Layout);
         CHECK_FALSE(refused->support.part);
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 184, in yuv420p12le - a layout the probe did not learn)"));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 184, in yuv420p12le 320x192 - a layout the probe did not learn)"));
     }
     {
         VideoDecoder dec(odd);
@@ -2123,7 +2123,7 @@ TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: tak
         REQUIRE(refused);
         CHECK(refused->support.block == DecodeBlock::NvdecStartFailed);
         CHECK(refused->support.Transient());
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p - " + learned));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p 320x192 - " + learned));
     }
     {
         // the driver not answering (first-frame): no word of it taking the stream - NVDEC's refusal stands as the stream's verdict
@@ -2134,7 +2134,7 @@ TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: tak
         REQUIRE(refused);
         CHECK(refused->support.block == DecodeBlock::NvdecFailed);
         CHECK_FALSE(refused->support.Transient());
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p - " + learned));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p 320x192 - " + learned));
     }
     // 12-bit: a layout the GPU does not take - its own verdict, whatever the stand-in
     for (const char* value : {static_cast<const char*>(nullptr), "start-fails"}) {
@@ -2149,7 +2149,7 @@ TEST_CASE("The layout the probe did not learn is judged when NVDEC meets it: tak
         CHECK_FALSE(refused->support.part);  // the stream's own layout, learned late
         CHECK_FALSE(refused->support.Transient());
         CHECK_THAT(refused->support.why, ContainsSubstring("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here"));
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p12le - " + learned));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p12le 320x192 - " + learned));
         CHECK_THAT(ffmpeg.Text(), !ContainsSubstring("hardware accelerated AV1"));
         CHECK_THAT(ffmpeg.Text(), !ContainsSubstring("Failed to get pixel format"));
     }
@@ -3030,8 +3030,9 @@ TEST_CASE("An AV1 stream whose layout the probe did not learn: the container's o
         CHECK_FALSE(refused->support.part);  // the stream's own height: the probe knew no layout of it
         CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168)"));  // the keyframe the seek landed on
     }
-    // NVDEC refusing the first frame (the stand-in): judged when av1dec learned the layout (CheckDecode) - the IVF header's size is no
-    // evidence of a part (the probe learned no layout): the stream's own layout, learned late, also where that size (192) differs
+    // NVDEC refusing the first frame (the stand-in): CheckDecode judges the layout learned there by the sequence header's size (320x191)
+    // - the odd height, the stream's own: the IVF header's size (the probe's, which learned no layout) is no evidence of a part, also
+    // where it (192) differs
     for (const auto& file : {evenHeader, oddHeader}) {
         INFO(file.filename().string());
         FakeNvdecEnv fake("start-fails");
@@ -3039,9 +3040,12 @@ TEST_CASE("An AV1 stream whose layout the probe did not learn: the container's o
         REQUIRE(dec.SeekToKeyframeBefore(170));
         const auto refused = RefusalOfNextFrame(dec);
         REQUIRE(refused);
-        CHECK((refused->support.block == DecodeBlock::NvdecStartFailed || refused->support.block == DecodeBlock::OddHeight));
+        CHECK(refused->support.block == DecodeBlock::OddHeight);
+        CHECK(refused->support.height == kH - 1);
+        CHECK_FALSE(refused->support.Transient());
         CHECK_FALSE(refused->support.part);
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p - a layout the probe did not learn)"));
+        CHECK_THAT(refused->support.why, StartsWith("AV1 320x191 (the frame as stored) has an odd frame height"));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p 320x191 - a layout the probe did not learn)"));
     }
     // 12-bit of 191 rows in its sequence headers, the IVF header 192, no stand-in: the layout's verdict, the stream's own
     const auto twelve = RepeatIvf(*a, 13, dir / "unknown_odd12.ivf", [](int i, const std::string& u) {
@@ -3058,7 +3062,7 @@ TEST_CASE("An AV1 stream whose layout the probe did not learn: the container's o
         REQUIRE(refused);
         CHECK(refused->support.block == DecodeBlock::Layout);
         CHECK_FALSE(refused->support.part);
-        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p12le - a layout the probe did not learn)"));
+        CHECK_THAT(refused->support.why, Catch::Matchers::EndsWith("(at frame 168, in yuv420p12le 320x191 - a layout the probe did not learn)"));
     }
 }
 

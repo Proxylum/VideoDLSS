@@ -12,6 +12,7 @@
 #include <QMouseEvent>
 #include <QElapsedTimer>
 #include <QFormLayout>
+#include <QHelpEvent>
 #include <QLabel>
 #include <QComboBox>
 #include <QDir>
@@ -30,6 +31,7 @@
 #include <QStatusBar>
 #include <QTest>
 #include <QToolButton>
+#include <QToolTip>
 #include <QPalette>
 #include <QStyle>
 #include <QVBoxLayout>
@@ -146,6 +148,13 @@ QApplication& App() {
     QCoreApplication::setApplicationName(QString("dlssvid-tests-%1").arg(QCoreApplication::applicationPid()));
     // the presets of the tests, not the user's AppData (PR-9): a folder per test process
     PresetStore::SetDir(QString::fromStdWString((std::filesystem::path(DLSSVID_TEST_TMP) / "app" / ("presets-" + std::to_string(QCoreApplication::applicationPid()))).wstring()));
+    // the thumbnails of the recent videos, not the user's cache: a folder per test process - once (a case that sets its own keeps it)
+    static const bool previews = [] {
+        RecentPreviews::SetCacheDir(QString::fromStdWString(
+            (std::filesystem::path(DLSSVID_TEST_TMP) / "app" / ("previews-" + std::to_string(QCoreApplication::applicationPid()))).wstring()));
+        return true;
+    }();
+    (void)previews;
     return app;
 }
 
@@ -3911,10 +3920,63 @@ TEST_CASE("Presets for new projects: one mark - a pipeline preset seeds every st
     QSettings().remove("presets/newProject");
 }
 
+TEST_CASE("A long plain tooltip is shown as a paragraph that wraps (the theme's filter); the widget's toolTip stays plain; a short one is Qt's own",
+          "[app][theme]") {
+    QApplication& app = App();
+    ApplyTheme(app);  // installs the filter once, however often it is applied
+    ApplyTheme(app);
+    // shown at once (no fade or scroll animation: the label is visible as showText returns); the effects as they were after the case
+    struct Effects {
+        bool fade = QApplication::isEffectEnabled(Qt::UI_FadeTooltip), animate = QApplication::isEffectEnabled(Qt::UI_AnimateTooltip);
+        Effects() {
+            QApplication::setEffectEnabled(Qt::UI_FadeTooltip, false);
+            QApplication::setEffectEnabled(Qt::UI_AnimateTooltip, false);
+        }
+        ~Effects() {
+            QApplication::setEffectEnabled(Qt::UI_FadeTooltip, fade);
+            QApplication::setEffectEnabled(Qt::UI_AnimateTooltip, animate);
+        }
+    } effects;
+    QWidget window;
+    window.resize(200, 100);
+    auto* label = new QLabel("x", &window);
+    label->setGeometry(10, 10, 100, 30);
+    window.show();
+    REQUIRE(QTest::qWaitForWindowExposed(&window));
+    auto ask = [&] {  // the tooltip asked for at the label, as the mouse resting on it does
+        QToolTip::hideText();
+        const QPoint at(5, 5);
+        QHelpEvent help(QEvent::ToolTip, at, label->mapToGlobal(at));
+        QApplication::sendEvent(label, &help);
+        QCoreApplication::processEvents();
+    };
+    // 300 characters with a line break and a «<»: escaped, the break kept, a paragraph that wraps
+    QString longTip = QString::fromUtf8("Видео AV1 не декодируется на этом компьютере: кадр 5 < 6.\n");
+    while (longTip.size() < 300) longTip += QString::fromUtf8(" причина");
+    label->setToolTip(longTip);
+    ask();
+    REQUIRE(QToolTip::isVisible());
+    INFO(QToolTip::text().toStdString());
+    CHECK(QToolTip::text().startsWith("<p>"));
+    CHECK(QToolTip::text().endsWith("</p>"));
+    CHECK(QToolTip::text().contains("5 &lt; 6."));
+    CHECK(QToolTip::text().contains("<br>"));
+    CHECK_FALSE(QToolTip::text().contains('\n'));
+    CHECK(label->toolTip() == longTip);  // the widget's own text stays plain
+    // 50 characters: as it is (Qt's own tooltip)
+    const QString shortTip = QString(50, QChar('a'));
+    label->setToolTip(shortTip);
+    ask();
+    REQUIRE(QToolTip::isVisible());
+    CHECK(QToolTip::text() == shortTip);
+    QToolTip::hideText();
+}
+
 TEST_CASE("PresetStore: the folder is the test's; import refuses a preset without nr and renames on a clash; delete clears the new-projects mark", "[app][presets]") {
     App();
     ClearPresets();
     CHECK(PresetStore::Path(PresetStore::Dir()).u8string().find(u8"test-tmp") != std::u8string::npos);  // never the user's AppData
+    CHECK(RecentPreviews::CacheDir().contains("test-tmp"));  // the recent videos' thumbnails neither (TASK-0076)
     const auto d = Dir("presets_store");
     const QString depth = WritePreset(d / "depth.json", CardPresetJson("Глубина", {{"backend", "vda"}}, "depth"));
     CHECK(PresetStore::Import("nr", depth).problems.contains(QString::fromUtf8("В пресете нет настроек «Улучшения».")));
@@ -9506,6 +9568,53 @@ TEST_CASE("AppModel: the viewport's refusal is heard once per file as it is - th
     INFO("planError: " << model.planError().toStdString());
     CHECK(model.planError() == SourceDecodeText(refused));
     CHECK(model.sourceDecode().block == refused.block);
+}
+
+TEST_CASE("AppModel: a background proxy build that made one video's proxy and refused the other's says both in one message - the ready one first",
+          "[app][gpu][av1][proxy]") {
+    App();
+    const auto d = Dir("av1_proxy_one_message");
+    AutoProxySetting autoProxy(true);
+    {
+        D3D12Device dev;
+        if (dev.IsWarp() || !dev.IsNvidia() || !VideoEncoder::EncoderAvailable("av1_nvenc")) SKIP("no NVIDIA GPU with av1_nvenc");
+    }
+    // the source: 8-bit 4:2:0, then a 12-bit part the proxy build meets (refused there); the result: 8-bit throughout (its proxy made);
+    // keyframes 16 frames apart - proxies are needed
+    ClipSpec spec;
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 32;
+    spec.gop = 16;
+    spec.codec = "av1_nvenc";
+    std::string why;
+    const auto a = WriteClipIfSupported(d / "a.ivf", spec, &why);
+    if (!a) SKIP(why);
+    spec.frames = 16;
+    const auto b = WriteClipIfSupported(d / "b.ivf", spec, &why);
+    REQUIRE(b);
+    const auto parts = ConcatIvf(*a, *b, d / "parts.ivf", TwelveBitTemporalUnit);
+    const auto result = d / "result.ivf";
+    std::filesystem::copy_file(*a, result);
+    const auto [file, passes] = ProxyProject(d, parts, result, "mixed");
+    AppModel model(true);
+    QSignalSpy messages(&model, &AppModel::message);
+    model.openProject(Q(file));
+    REQUIRE(model.hasProject());
+    REQUIRE(model.proxyBuilding());
+    Pump([&] { return !model.proxyBuilding(); }, 60000);
+    REQUIRE_FALSE(model.proxyBuilding());
+    QStringList all, said;  // all the model said; those of the proxy build
+    for (const auto& m : messages) all << m[0].toString();
+    for (const QString& m : all)
+        if (m.startsWith(QString::fromUtf8("Прокси для перемотки"))) said << m;
+    INFO("messages: " << all.join(" | ").toStdString());
+    REQUIRE(ValidProxy(result, passes, "result"));
+    REQUIRE(model.store().Undecodable("source"));
+    // one message: the status bar shows the last one only - «готов» would be replaced by the refusal in the same moment
+    REQUIRE(said.size() == 1);
+    CHECK(said[0].startsWith(QString::fromUtf8("Прокси для перемотки готов: ") + HumanSourceName("result") + ". "));
+    CHECK(said[0].contains(QString::fromUtf8(". Прокси для перемотки не построен (") + HumanSourceName("source") + "): "));
 }
 
 TEST_CASE("AppModel: a background proxy build that met a part of the stream the GPU does not take (12-bit) remembers that part's verdict - the layout, not a refusal of NVDEC",

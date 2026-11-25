@@ -76,11 +76,12 @@ struct VideoStreamInfo {
 VideoStreamInfo StreamPartInfo(const VideoStreamInfo& info, const std::string& pixelFormat, uint32_t codedWidth, uint32_t codedHeight);
 
 // TASK-0076: the part a refusal is about, as its why ends: «, on a part of the stream in other parameters (<fmt> <w>x<h>)» (a new
-// sequence header) or «, in <fmt> - a layout the probe did not learn». VideoDecoder writes it; the GUI reads it back from another
-// process's line (the proxy build) to judge the part as the decoder did.
+// sequence header) or «, in <fmt> <w>x<h> - a layout the probe did not learn» (the size the decoder judged it by - the probe's is the
+// container's; read without it as well). VideoDecoder writes it; the GUI reads it back from another process's line (the proxy build)
+// to judge the part as the decoder did.
 struct StreamPart {
     std::string pixelFormat;  // "?" when the decoder did not say
-    uint32_t codedWidth = 0, codedHeight = 0;  // 0 for a learned layout (the probe's size)
+    uint32_t codedWidth = 0, codedHeight = 0;  // 0: not said (a learned layout of the old words - the probe's size then)
     bool learned = false;     // the layout the probe did not learn, not a part in other parameters
 };
 std::string StreamPartWords(const StreamPart& part);

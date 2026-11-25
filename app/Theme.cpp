@@ -7,6 +7,9 @@
 #include <QApplication>
 #include <QComboBox>
 #include <QEvent>
+#include <QHelpEvent>
+#include <QTextDocument>
+#include <QToolTip>
 #include <QFont>
 #include <QPainter>
 #include <QPainterPath>
@@ -51,6 +54,24 @@ public:
         for (QWidget* p = w->parentWidget(); p && !inScrollArea; p = p->parentWidget()) inScrollArea = qobject_cast<QAbstractScrollArea*>(p) != nullptr;
         if (!inScrollArea) return false;
         if (QWidget* parent = w->parentWidget()) QApplication::sendEvent(parent, event);  // the scroll area above gets the wheel
+        return true;
+    }
+};
+
+// TASK-0076: a long plain tooltip (a refusal's paragraph, 300-450 characters) is shown as a paragraph that wraps - Qt wraps a plain one
+// only when it is wider than the screen (on a 3440 px monitor: one line across most of it). The widget's toolTip() stays plain text
+class LongTipWrap final : public QObject {
+public:
+    using QObject::QObject;
+    static constexpr qsizetype kLong = 120;  // characters: shorter tips stay as they are
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() != QEvent::ToolTip) return false;
+        auto* w = qobject_cast<QWidget*>(watched);
+        if (!w) return false;
+        const QString tip = w->toolTip();
+        if (tip.size() <= kLong || Qt::mightBeRichText(tip)) return false;  // a short one, a rich one, none (the parent's): Qt's own
+        const auto* help = static_cast<QHelpEvent*>(event);
+        QToolTip::showText(help->globalPos(), "<p>" + tip.toHtmlEscaped().replace('\n', "<br>") + "</p>", w, QRect(), w->toolTipDuration());
         return true;
     }
 };
@@ -239,6 +260,11 @@ void ApplyTheme(QApplication& app) {
     app.setFont(font);
     app.setStyleSheet(ThemeStyleSheet());
     InstallWheelGuard(app);
+    static LongTipWrap* tips = nullptr;  // TASK-0076: once per application
+    if (!tips) {
+        tips = new LongTipWrap(&app);
+        app.installEventFilter(tips);
+    }
 }
 
 void InstallWheelGuard(QApplication& app) {

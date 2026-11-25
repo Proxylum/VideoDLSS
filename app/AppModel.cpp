@@ -549,7 +549,13 @@ void AppModel::startProxies() {
                 ready << HumanSourceName(name);
             }
         }
-        if (!ready.isEmpty()) emit message(tr("Прокси для перемотки готов: %1").arg(ready.join(", ")));
+        // TASK-0076: one message for the build - the status bar shows the last one only (each replaces the one before): «готов» first,
+        // then what was not built; «готов» in the log too (the status bar's line goes in 5 s)
+        QStringList said;
+        if (!ready.isEmpty()) {
+            said << tr("Прокси для перемотки готов: %1").arg(ready.join(", "));
+            Log()->info("viewport proxy ready: {}", ready.join(", ").toStdString());
+        }
         // TASK-0076: NVDEC refused the video or did not start in the proxy process (its lines: «<name>: no proxy …») - said, not silent
         QStringList refused, notNow;
         for (const char* name : {"source", "result"}) {
@@ -562,7 +568,6 @@ void AppModel::startProxies() {
         }
         for (const QString& line : out.split('\n'))  // the reasons themselves, whole (not the tail of the output)
             if (line.contains(": no proxy,") || line.contains(": no proxy now")) Log()->warn("viewport proxy: {}", line.trimmed().toStdString());
-        QStringList said;
         if (!refused.isEmpty())
             said << tr("Прокси для перемотки не построен (%1): видео на этом компьютере не декодируется (подробности в логе) — перекодируйте его в H.264 "
                        "или HEVC другой программой")
@@ -571,7 +576,7 @@ void AppModel::startProxies() {
             said << tr("Прокси для перемотки сейчас не построен (%1): видеокарта не начала декодировать — постройте его позже (Вид → Построить прокси "
                        "для перемотки)")
                         .arg(notNow.join(", "));
-        if (!said.isEmpty()) emit message(said.join("; "));
+        if (!said.isEmpty()) emit message(said.join(". "));
         // a verdict on a file is the viewport's too: the sources set again say it (the plan stops, the viewport and the menus say it, the
         // background build does not try it again). The driver's answer this process gets as well (no AV1 on this GPU, the size): the sources
         // find it themselves; NVDEC refusing the stream there: remembered with the file's size and time as a loader's refusal is

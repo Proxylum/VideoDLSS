@@ -724,10 +724,18 @@ TEST_CASE("StreamPartWords / StreamPartOf: the part a refusal names, written and
     StreamPart learned;
     learned.pixelFormat = "yuv420p12le";
     learned.learned = true;
-    CHECK(StreamPartWords(learned) == ", in yuv420p12le - a layout the probe did not learn");
+    CHECK(StreamPartWords(learned) == ", in yuv420p12le - a layout the probe did not learn");  // no size: the old words
     const auto learnedBack = StreamPartOf("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here (on the first frame" + StreamPartWords(learned) + ")");
     REQUIRE(learnedBack);
-    CHECK(same(*learnedBack, learned));
+    CHECK(same(*learnedBack, learned));  // learned, the size 0 (not said)
+    // with the decoder's size (VideoDecoder::CheckDecode: the probe's is the container's), read back with it
+    StreamPart learnedSized = learned;
+    learnedSized.codedWidth = 320;
+    learnedSized.codedHeight = 191;
+    CHECK(StreamPartWords(learnedSized) == ", in yuv420p12le 320x191 - a layout the probe did not learn");
+    const auto sizedBack = StreamPartOf("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here (on the first frame" + StreamPartWords(learnedSized) + ")");
+    REQUIRE(sizedBack);
+    CHECK(same(*sizedBack, learnedSized));
     // no part
     CHECK_FALSE(StreamPartOf(""));
     CHECK_FALSE(StreamPartOf("NVDEC refused this AV1 stream and this build has no software AV1 decoder (at frame 3)"));
@@ -764,6 +772,10 @@ TEST_CASE("StreamPartWords / StreamPartOf: the part a refusal names, written and
     empty.learned = true;
     CHECK_FALSE(StreamPartOf("x (on the first frame" + StreamPartWords(empty) + ")"));
     CHECK_FALSE(StreamPartOf("x (on the first frame, in yuv 420 - a layout the probe did not learn)"));            // not one word
+    for (const char* size : {"320x", "x191", "320", "320y191", "320x19z", "-320x191"}) {  // a size not read whole: nothing
+        INFO(size);
+        CHECK_FALSE(StreamPartOf(std::string("x (on the first frame, in yuv420p ") + size + " - a layout the probe did not learn)"));
+    }
 }
 
 TEST_CASE("A layout the probe did not learn, read back from a refusal: judged before the GPU is asked - 12-bit is the layout's refusal", "[unit][av1]") {
@@ -774,12 +786,19 @@ TEST_CASE("A layout the probe did not learn, read back from a refusal: judged be
     info.pixelFormat = "unknown";
     info.width = info.codedWidth = 320;
     info.height = info.codedHeight = 192;
-    const auto part = StreamPartOf("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here (on the first frame, in yuv420p12le - a layout the probe did not learn)");
+    const auto part = StreamPartOf("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here (on the first frame, in yuv420p12le 384x224 - a layout the probe "
+                                   "did not learn)");
     REQUIRE(part);
     REQUIRE(part->learned);
     const VideoStreamInfo judged = StreamPartInfo(info, part->pixelFormat, part->codedWidth, part->codedHeight);
-    CHECK(judged.codedWidth == 320);  // a learned layout keeps the probe's size
+    CHECK(judged.codedWidth == 384);  // the decoder's size - the probe's is the container's
+    CHECK(judged.codedHeight == 224);
     CHECK(judged.bitDepth == 12);
+    // the old words, without a size: the probe's
+    const auto unsized = StreamPartOf("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here (on the first frame, in yuv420p12le - a layout the probe did not "
+                                      "learn)");
+    REQUIRE(unsized);
+    CHECK(StreamPartInfo(info, unsized->pixelFormat, unsized->codedWidth, unsized->codedHeight).codedWidth == 320);
     const DecodeSupport verdict = CheckDecodeSupport(judged);
     CHECK(verdict.block == DecodeBlock::Layout);
     CHECK_THAT(verdict.why, StartsWith("AV1 12-bit 4:2:0 (yuv420p12le) cannot be decoded here"));
@@ -1050,6 +1069,28 @@ TEST_CASE("VerdictFromWhy under DLSSVID_FAKE_NVDEC_AV1: a part the GPU takes is 
         CheckRefusal(v, DecodeBlock::NvdecFailed);
         CHECK_FALSE(v.part);
         CHECK(v.why == failedWords + " (the proxy build: on the first frame after a seek, on a part of the stream in other parameters (yuv420p 384x224))");
+    }
+    // a layout learned with the decoder's size (VideoDecoder::CheckDecode): judged with that size - a frame outside the GPU's limits is
+    // that verdict, not NVDEC refusing the stream (the probe, which learned no layout, has the container's size)
+    {
+        FakeNvdecEnv fake("start-fails");  // the driver takes AV1 up to 65535x65535
+        VideoStreamInfo unknown = probe;
+        unknown.pixelFormat = "unknown";
+        const DecodeSupport huge = CheckDecodeSupport(Av1Info("yuv420p", 8, 70000, 5000));
+        REQUIRE(huge.block == DecodeBlock::Size);
+        StreamPart big;
+        big.pixelFormat = "yuv420p";
+        big.codedWidth = 70000;
+        big.codedHeight = 5000;
+        big.learned = true;
+        const std::string sizeWhy = huge.why + " (on the first frame" + StreamPartWords(big) + ")";
+        REQUIRE_THAT(sizeWhy, Catch::Matchers::EndsWith("(on the first frame, in yuv420p 70000x5000 - a layout the probe did not learn)"));
+        const DecodeSupport v = VerdictFromWhy(unknown, sizeWhy, "the proxy build");
+        CheckRefusal(v, DecodeBlock::Size);
+        CHECK(v.width == 70000);
+        CHECK(v.height == 5000);
+        CHECK_FALSE(v.part);
+        CHECK(v.why == "the proxy build: " + sizeWhy);
     }
     // a GPU without AV1 (no-av1): the part's verdict - the driver's answer, a part
     FakeNvdecEnv fake("no-av1");
