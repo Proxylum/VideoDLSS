@@ -9,7 +9,8 @@
 
 - HDR-источники, шаг TB-1 (TASK-0078, часть TASK-0075): **программа узнаёт HDR и говорит, что это за файл**; ни один
   записанный файл и ни одно решение плана не меняются:
-  - `dlssvid info` печатает строку `colour:` — класс (HDR PQ, HDR HLG, wide gamut SDR, log curve) и каждый тег с тем, откуда он
+  - `dlssvid info` печатает строку `colour:` — класс (HDR PQ, HDR HLG, wide gamut SDR, log curve, SDR; у базы IPT — «Dolby Vision
+    IPT base», а если запись базу не называет и матрица с кривой не указаны — «Dolby Vision, taken for an IPT base») и каждый тег с тем, откуда он
     взят: контейнер (`colr` в MP4/MOV, Colour в Matroska), поток (VUI HEVC/H.264, sequence header AV1) или первый кадр, если
     он говорит другое (заголовок кадра ProRes, SEI alternative transfer у HEVC: BT.2020 → HLG). Есть строки о мастеринге,
     MaxCLL/MaxFALL, условиях просмотра, Dolby Vision (профиль, уровень, совместимость базы; база IPT — профили 5 и 10.0 —

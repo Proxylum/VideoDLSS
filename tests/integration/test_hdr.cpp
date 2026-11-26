@@ -20,6 +20,11 @@
 #include "io/VideoEncoder.h"
 #include "viewport/FrameStore.h"
 #include "viewport/ViewportProxy.h"
+#include "util/Log.h"
+
+#include <algorithm>
+#include <sstream>
+#include <spdlog/sinks/ostream_sink.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -670,4 +675,37 @@ TEST_CASE("info of a Dolby Vision profile 5 file says its IPT base on the colour
     INFO(info.out);
     CHECK_THAT(info.out, ContainsSubstring("colour:      Dolby Vision IPT base - "));
     CHECK_THAT(info.out, !ContainsSubstring("colour:      SDR"));
+}
+
+TEST_CASE("A reader without the colour look logs the source's colour at debug level only, as tags only", "[integration][hdr]") {
+    const auto dir = Dir("log_no_look");
+    const auto clip = ProResHlg(dir);  // colr 9/9/14, frames 18: without the look its tags say wide gamut
+    std::ostringstream text;
+    {
+        struct LogCapture {
+            std::shared_ptr<spdlog::sinks::ostream_sink_mt> sink;
+            spdlog::level::level_enum level;
+            explicit LogCapture(std::ostringstream& out) : sink(std::make_shared<spdlog::sinks::ostream_sink_mt>(out)), level(Log()->level()) {
+                sink->set_pattern("%l %v");
+                Log()->set_level(spdlog::level::debug);
+                Log()->sinks().push_back(sink);
+            }
+            ~LogCapture() {
+                auto& sinks = Log()->sinks();
+                sinks.erase(std::remove(sinks.begin(), sinks.end(), sink), sinks.end());
+                Log()->set_level(level);
+            }
+        } capture(text);
+        VideoDecoder::Options frames;  // the viewport's first open: not a probe, no look
+        frames.colorProbe = false;
+        VideoDecoder viewport(clip, frames);
+        VideoDecoder task(clip);  // a reader that looks
+    }
+    const std::string log = text.str();
+    INFO(log);
+    CHECK(log.find("info " + clip.string() + ": colour wide") == std::string::npos);
+    CHECK(log.find("debug " + clip.string() + ": colour wide (matrix bt2020nc, primaries bt2020, transfer bt2020-10, range unknown), tags only") !=
+          std::string::npos);
+    CHECK(log.find("info " + clip.string() + ": colour hlg (matrix bt2020nc, primaries bt2020, transfer arib-std-b67, range unknown), first frame read") !=
+          std::string::npos);
 }
