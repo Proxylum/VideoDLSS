@@ -16,6 +16,7 @@ qt_add_library(dlssvid_app STATIC
   ControlMaskRow.h ControlMaskRow.cpp
   ControlMaskText.h ControlMaskText.cpp
   DecodeText.h DecodeText.cpp
+  ColourText.h ColourText.cpp
   SceneCutsView.h SceneCutsView.cpp
   StartPage.h StartPage.cpp
   RecentPreviews.h RecentPreviews.cpp

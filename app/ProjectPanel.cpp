@@ -18,6 +18,7 @@
 #include <map>
 
 #include "AppModel.h"
+#include "ColourText.h"
 #include "ControlMaskText.h"
 #include "DecodeText.h"
 #include "SceneCutsView.h"
@@ -125,21 +126,32 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     sourceFile_ = Value(sourceCard);
     sourceFrame_ = Value(sourceCard);
     sourceFrame_->setObjectName("sourceFrame");
+    sourceColour_ = Value(sourceCard);
+    sourceColour_->setObjectName("sourceColour");
     sourceAudio_ = Value(sourceCard);
     sourcePasses_ = Value(sourceCard);
     sourceHash_ = Value(sourceCard);
-    int row = 1;
-    for (auto [name, value] : std::initializer_list<std::pair<QString, QLabel*>>{
-             {tr("Файл"), sourceFile_}, {tr("Кадр"), sourceFrame_}, {tr("Звук"), sourceAudio_}, {tr("Пассы"), sourcePasses_}, {tr("Хэш"), sourceHash_}}) {
-        sg->addWidget(Muted(name, sourceCard), row, 0, Qt::AlignTop);
+    int row = 1, passesRow = 0;
+    for (auto [name, value] : std::initializer_list<std::pair<QString, QLabel*>>{{tr("Файл"), sourceFile_},
+                                                                                 {tr("Кадр"), sourceFrame_},
+                                                                                 {tr("Цвет"), sourceColour_},
+                                                                                 {tr("Звук"), sourceAudio_},
+                                                                                 {tr("Пассы"), sourcePasses_},
+                                                                                 {tr("Хэш"), sourceHash_}}) {
+        QLabel* label = Muted(name, sourceCard);
+        if (value == sourceColour_) sourceColourName_ = label;
+        if (value == sourcePasses_) passesRow = row;
+        sg->addWidget(label, row, 0, Qt::AlignTop);
         sg->addWidget(value, row, 1);
         ++row;
     }
+    sourceColourName_->setVisible(false);
+    sourceColour_->setVisible(false);
     changePasses_ = new QPushButton(tr("изменить…"), sourceCard);
     SetRole(changePasses_, "small");
     changePasses_->setToolTip(tr("Другая папка для пассов: промежуточные кадры стадий занимают десятки гигабайт"));
     connect(changePasses_, &QPushButton::clicked, this, &ProjectPanel::choosePassesRoot);
-    sg->addWidget(changePasses_, 4, 2, Qt::AlignTop);  // the «Пассы» row
+    sg->addWidget(changePasses_, passesRow, 2, Qt::AlignTop);
     sg->setColumnStretch(1, 1);
     layout->addWidget(sourceCard);
 
@@ -433,6 +445,14 @@ void ProjectPanel::refresh() {
     } else {
         sourceFrame_->setText("—");
         sourceFrame_->setToolTip(QString());
+    }
+    {  // TASK-0078: HDR, wide gamut, Dolby Vision - hidden for an SDR video
+        QString tip;
+        const QString colour = src.width > 0 ? SourceColourText(src.color, &tip) : QString();
+        sourceColour_->setText(colour);
+        sourceColour_->setToolTip(tip);
+        sourceColour_->setVisible(!colour.isEmpty());
+        sourceColourName_->setVisible(!colour.isEmpty());
     }
     sourceAudio_->setText(!hasSource ? "—" : src.audio ? tr("есть — будет скопирован") : tr("нет"));
     sourcePasses_->setText(hasSource ? QString::fromStdWString(p.passesRoot.wstring()) : "—");

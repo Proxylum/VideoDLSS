@@ -1111,6 +1111,7 @@ void AppModel::refreshPlan() {
         sourceInfo_.bitDepth = probe.Info().bitDepth;
         sourceInfo_.chroma = probe.Info().chroma;
         sourceInfo_.pixelFormat = probe.Info().pixelFormat;
+        sourceInfo_.color = probe.Info().color;
         sourceDecode_ = CheckDecodeSupport(probe.Info());
         if (stale) {  // TASK-0076: the file written over - its probe tells a probe's verdict apart (a loader's: once, as above)
             setSourcesAgain(*stale, !probe.Info().hardwareOnly ||

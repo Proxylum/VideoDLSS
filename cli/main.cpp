@@ -153,6 +153,7 @@ int CmdInfo(const std::string& input, bool warp) {
     else
         std::printf("samples:     %d-bit %s, decoded as %s (%s)\n", i.bitDepth, i.chroma.c_str(), i.decoded.Name().c_str(), i.decoded.Describe().c_str());
     std::printf("decode:      %s\n", DescribeDecode(decode).c_str());
+    for (const std::string& line : ColourInfoLines(i.color)) std::printf("%s\n", line.c_str());  // TASK-0078: HDR, Dolby Vision, notes
     if (!i.orientation.Identity())  // TASK-0072: the frames are turned as players show them
         std::printf("orientation: %s (%s), stored %ux%u\n", i.orientation.Describe().c_str(), i.orientationFrom.c_str(), i.codedWidth, i.codedHeight);
     if (!i.sar.Square()) {  // TASK-0073: non-square pixels - the result of process is stretched to square ones

@@ -624,6 +624,14 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     url_ = path.string();
     const std::string& url = url_;
     CheckAv(avformat_open_input(&fmt_, url.c_str(), nullptr, nullptr), "avformat_open_input");
+    // TASK-0078: the tags as the demuxer read them (MP4 / MOV colr, Matroska Colour) - avformat_find_stream_info opens the decoder, and
+    // HEVC's (export_stream_params) writes its VUI over them, unspecified where the VUI says nothing (FFmpeg 7.1.1 hevcdec.c)
+    std::vector<RawTags> containerTags;
+    for (unsigned s = 0; s < fmt_->nb_streams; ++s) {
+        const AVCodecParameters* p = fmt_->streams[s]->codecpar;
+        containerTags.push_back(RawTags{static_cast<int>(p->color_space), static_cast<int>(p->color_primaries), static_cast<int>(p->color_trc),
+                                        static_cast<int>(p->color_range), static_cast<int>(p->chroma_location)});
+    }
     CheckAv(avformat_find_stream_info(fmt_, nullptr), "avformat_find_stream_info");
 
     const AVCodec* decoder = nullptr;
@@ -718,6 +726,7 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     info_.colorRange = static_cast<int>(vs->codecpar->color_range);
     info_.colorPrimaries = static_cast<int>(vs->codecpar->color_primaries);
     info_.colorTrc = static_cast<int>(vs->codecpar->color_trc);
+    ReadColour(options.colorProbe, static_cast<size_t>(videoStream_) < containerTags.size() ? containerTags[static_cast<size_t>(videoStream_)] : RawTags{});
     info_.hasAudio = audioStream_ >= 0;
     if (info_.hasAudio) {
         const AVCodecDescriptor* d = avcodec_descriptor_get(fmt_->streams[audioStream_]->codecpar->codec_id);
@@ -749,6 +758,62 @@ VideoDecoder::~VideoDecoder() {
     avcodec_free_context(&codec_);
     av_buffer_unref(&hwDevice_);
     avformat_close_input(&fmt_);
+}
+
+void VideoDecoder::ReadColour(bool look, const RawTags& container) {
+    // TASK-0078 (HDR TB-1): what the source's colour is, from every layer - nothing the decoder does depends on it
+    const AVStream* vs = fmt_->streams[videoStream_];
+    const AVCodecParameters* par = vs->codecpar;
+    SourceColor& c = info_.color;
+    c.container = container;
+    c.stream = RawTags{static_cast<int>(par->color_space), static_cast<int>(par->color_primaries), static_cast<int>(par->color_trc),
+                       static_cast<int>(par->color_range), static_cast<int>(par->chroma_location)};
+    // the records: the container's (codecpar's coded side data: mdcv / clli / amve / dvcC, Matroska's MasteringMetadata and mapping), then
+    // what the decoder found in its extradata (an HEVC hvcC's SEI: decoded_side_data) where the container said nothing
+    ReadCodedSideData(par->coded_side_data, par->nb_coded_side_data, c.hdr, &c.doviConf);
+    if (c.hdr.mdcv) c.mdcvFrom = TagFrom::Container;
+    if (c.hdr.cll) c.cllFrom = TagFrom::Container;
+    if (c.hdr.amve) c.amveFrom = TagFrom::Container;
+    {
+        HdrStatic fromCodec;
+        ReadFrameSideData(codec_->decoded_side_data, codec_->nb_decoded_side_data, fromCodec);
+        if (!c.hdr.mdcv && fromCodec.mdcv) c.hdr.mdcv = fromCodec.mdcv, c.mdcvFrom = TagFrom::Stream;
+        if (!c.hdr.cll && fromCodec.cll) c.hdr.cll = fromCodec.cll, c.cllFrom = TagFrom::Stream;
+        if (!c.hdr.amve && fromCodec.amve) c.hdr.amve = fromCodec.amve, c.amveFrom = TagFrom::Stream;
+    }
+    TagFrom unused[4];
+    const RawTags hint = MergeTags(RawTags{}, c.stream, c.container, unused);
+    const FirstLook how = look ? NeedsFirstLook(decoder_->name, fmt_->iformat->name, info_.bitDepth, hint) : FirstLook::None;
+    if (how != FirstLook::None && !(how == FirstLook::Decode && hwOnly_)) {
+        const FirstLookColor first = FirstLookCached(url_, how);
+        if (!first.error.empty()) {
+            c.probeError = first.error;
+        } else {
+            c.looked = first.how;
+            if (first.how == FirstLook::Decode) {
+                c.frame = first.tags;
+                c.doviRpu = first.rpu;
+                // the frame carries the stream's records as well (libavcodec copies them into every frame): its own only where they differ
+                if (first.hdr.mdcv && first.hdr.mdcv != c.hdr.mdcv) c.hdr.mdcv = first.hdr.mdcv, c.mdcvFrom = TagFrom::Frame;
+                if (first.hdr.cll && first.hdr.cll != c.hdr.cll) c.hdr.cll = first.hdr.cll, c.cllFrom = TagFrom::Frame;
+                if (first.hdr.amve && first.hdr.amve != c.hdr.amve) c.hdr.amve = first.hdr.amve, c.amveFrom = TagFrom::Frame;
+            }
+            if (first.hdr10Plus) {
+                c.hdr10Plus = true;
+                c.hdr10PlusFrom = first.how == FirstLook::Decode ? TagFrom::Frame : TagFrom::Packet;
+            }
+        }
+    }
+    TagFrom from[4];
+    c.effective = MergeTags(c.frame, c.stream, c.container, from);
+    c.matrixFrom = from[0];
+    c.primariesFrom = from[1];
+    c.trcFrom = from[2];
+    c.rangeFrom = from[3];
+    Classify(c, LayoutKindOf(info_.pixelFormat), decoder_->name);
+    if (!c.legacyPath || c.doviConf || c.doviRpu || !c.hdr.Empty() || !c.probeError.empty())
+        Log()->log(probe_ ? spdlog::level::debug : spdlog::level::info, "{}: colour {} ({}){}", url_, ToString(c.cls), ColourWords(c.effective),
+                   c.looked != FirstLook::None ? ", " + std::string(ToString(c.looked)) + " read" : std::string());
 }
 
 AVCodecContext* VideoDecoder::OpenCodec(AVBufferRef* device) const {
