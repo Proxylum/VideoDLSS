@@ -234,6 +234,25 @@ TEST_CASE("Mastering and light level outside MP4 MOV fields are noted and not wr
     const ProcessPlan plan = PlanProcess(Passthrough(in, dir / "out.mov", "prores_ks"));
     CHECK(HasKey(plan.warnings, "encode.mdcv_unfit"));
     CHECK(HasKey(plan.warnings, "encode.cll_invalid"));
+    {  // MP4 (NVENC's default container) the same, planned on the CPU: neither written nor expected
+        VideoDecoder probe(in, VideoDecoder::Probe());
+        const PassthroughColour mp4 = PlanPassthroughColour(probe.Info(), "hevc_nvenc", {}, "a.mp4", "t");
+        CHECK(HasKey(mp4.encodeNotes, "encode.mdcv_unfit"));
+        CHECK(HasKey(mp4.encodeNotes, "encode.cll_invalid"));
+        CHECK_FALSE(mp4.meta.mdcv);
+        CHECK_FALSE(mp4.meta.cll);
+        REQUIRE(mp4.expect);
+        CHECK_FALSE(mp4.expect->mdcv);
+        CHECK_FALSE(mp4.expect->cll);
+    }
+    {  // MaxFALL alone past 16 bits
+        ClipHdr fall;
+        fall.light = Cll{1000, 70000};
+        VideoDecoder probe(PqFfv1(dir, "fall.mkv", fall), VideoDecoder::Probe());
+        const PassthroughColour mov = PlanPassthroughColour(probe.Info(), "prores_ks", {}, "a.mov", "t");
+        CHECK(HasKey(mov.encodeNotes, "encode.cll_invalid"));
+        CHECK_FALSE(mov.meta.cll);
+    }
     const StreamSummary out = Summarize(dir / "out.mov");
     CHECK_FALSE(out.hdr.mdcv);
     CHECK_FALSE(out.hdr.cll);
@@ -542,11 +561,14 @@ TEST_CASE("CheckEncodedResult names a colour tag or HDR metadata that differs", 
     mastering.mdcv->maxLum = {4000, 1};
     e.color = mastering;
     CHECK_THAT(CheckEncodedResult(file, e), ContainsSubstring("mastering display"));
-    for (int which = 0; which < 3; ++which) {  // a primary, the white point, the halves said
+    for (int which = 0; which < 6; ++which) {  // a primary, the white point (y, x), the halves said, the minimum luminance
         ResultColor m = c;
         if (which == 0) m.mdcv->primaries[1][0].num += 100;
         if (which == 1) m.mdcv->white[1].num += 100;
         if (which == 2) m.mdcv->hasPrimaries = false;
+        if (which == 3) m.mdcv->white[0].num += 100;
+        if (which == 4) m.mdcv->hasLuminance = false;
+        if (which == 5) m.mdcv->minLum = {1, 100};  // 0.01 for 0.0001
         e.color = m;
         INFO("case " << which);
         CHECK(CheckEncodedResult(file, e) == "its mastering display metadata differs from what was written");
