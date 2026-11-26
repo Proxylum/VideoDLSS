@@ -426,3 +426,199 @@ TEST_CASE("info colour lines: none for SDR, the class with each tag's layer, the
     REQUIRE_FALSE(sdrBase.empty());
     CHECK(sdrBase[0].rfind("colour:      SDR - ", 0) == 0);
 }
+
+// ---- review round 1 (TASK-0078) -------------------------------------------------------------------------------------------------
+
+namespace {
+Mdcv Bt2020Display(bool reduced) {  // the same display as MP4 / an SEI writes it (1/50000, 1/10000) and as Matroska's floats read back
+    Mdcv m;
+    if (reduced) {
+        m.primaries[0][0] = {177, 250};
+        m.primaries[0][1] = {73, 250};
+        m.primaries[1][0] = {17, 100};
+        m.primaries[1][1] = {797, 1000};
+        m.primaries[2][0] = {131, 1000};
+        m.primaries[2][1] = {23, 500};
+        m.white[0] = {3127, 10000};
+        m.white[1] = {329, 1000};
+        m.minLum = {1, 10000};
+        m.maxLum = {1000, 1};
+    } else {
+        m.primaries[0][0] = {35400, 50000};
+        m.primaries[0][1] = {14600, 50000};
+        m.primaries[1][0] = {8500, 50000};
+        m.primaries[1][1] = {39850, 50000};
+        m.primaries[2][0] = {6550, 50000};
+        m.primaries[2][1] = {2300, 50000};
+        m.white[0] = {15635, 50000};
+        m.white[1] = {16450, 50000};
+        m.minLum = {1, 10000};
+        m.maxLum = {10000000, 10000};
+    }
+    m.hasPrimaries = m.hasLuminance = true;
+    return m;
+}
+
+FirstLookColor Decoded(RawTags tags) {
+    FirstLookColor f;
+    f.how = FirstLook::Decode;
+    f.tags = tags;
+    return f;
+}
+}  // namespace
+
+TEST_CASE("Reserved tag values are unspecified; a ProRes header's 0 is unknown, not RGB", "[hdr]") {
+    CHECK(WithoutReserved(RawTags{0, 0, 0, 1, 0}, "prores") == RawTags{2, 2, 2, 1, 0});
+    CHECK(WithoutReserved(RawTags{0, 0, 0, 1, 0}, "hevc") == RawTags{0, 2, 2, 1, 0});  // matrix 0 is RGB (GBR) outside ProRes
+    CHECK(WithoutReserved(RawTags{3, 3, 3, 2, 1}, "hevc") == RawTags{2, 2, 2, 2, 1});
+    CHECK(WithoutReserved(RawTags{9, 9, 16, 1, 0}, "prores") == RawTags{9, 9, 16, 1, 0});
+    // FFmpeg's own prores encoder writes 0 for a curve outside its list (bt2020-10): the colr box's 14 stands
+    ColourLayers in;
+    in.container = in.stream = Tags(9, 9, 14);
+    in.first = Decoded(RawTags{9, 9, 0, 1, 0});
+    const SourceColor c = SourceColorOf(in, "422", "prores");
+    CHECK(c.cls == SourceClass::Wide);
+    CHECK(c.effective.trc == 14);
+    CHECK(c.trcFrom == TagFrom::Stream);
+    CHECK(c.notes.empty());
+    // a matrix outside its list (bt2020c -> 0) under PQ: unknown, not an RGB refusal
+    in.container = in.stream = RawTags{};
+    in.first = Decoded(RawTags{0, 9, 16, 1, 0});
+    const SourceColor pq = SourceColorOf(in, "422", "prores");
+    CHECK(pq.cls == SourceClass::Pq);
+    CHECK(pq.refuseAll == ColourRefusal::None);
+    CHECK(pq.Note("source.bt2020_assumed") != nullptr);
+}
+
+TEST_CASE("HDR records are compared by value: Matroska's fractions and an SEI's are the same display", "[hdr]") {
+    CHECK(SameRecord(Bt2020Display(true), Bt2020Display(false)));
+    CHECK_FALSE(Bt2020Display(true) == Bt2020Display(false));  // other fractions
+    Mdcv other = Bt2020Display(false);
+    other.maxLum = {4000, 1};
+    CHECK_FALSE(SameRecord(other, Bt2020Display(true)));
+    Mdcv white = Bt2020Display(false);
+    white.white[0] = {15700, 50000};
+    CHECK_FALSE(SameRecord(white, Bt2020Display(false)));
+    Mdcv lumOnly = Bt2020Display(false);
+    lumOnly.hasPrimaries = false;
+    CHECK_FALSE(SameRecord(lumOnly, Bt2020Display(false)));
+    Mdcv lumOnly2 = Bt2020Display(true);
+    lumOnly2.hasPrimaries = false;
+    lumOnly2.primaries[0][0] = {0, 1};  // primaries not said: not compared
+    CHECK(SameRecord(lumOnly, lumOnly2));
+    CHECK(SameRecord(Amve{{314, 1}, {3127, 10000}, {329, 1000}}, Amve{{3140000, 10000}, {15635, 50000}, {16450, 50000}}));
+    CHECK_FALSE(SameRecord(Amve{{314, 1}, {3127, 10000}, {329, 1000}}, Amve{{315, 1}, {3127, 10000}, {329, 1000}}));
+}
+
+TEST_CASE("SourceColorOf takes the container's records, the codec's where it has none, the frame's where they differ", "[hdr]") {
+    ColourLayers in;
+    in.container = in.stream = Tags(9, 9, 16);
+    in.containerRecords.mdcv = Bt2020Display(true);  // a Matroska source
+    in.containerRecords.cll = Cll{1000, 400};
+    FirstLookColor first = Decoded(Tags(9, 9, 16));
+    first.hdr.mdcv = Bt2020Display(false);  // the SEI's: the same display
+    first.hdr.cll = Cll{1000, 400};
+    in.first = first;
+    SourceColor c = SourceColorOf(in, "420", "hevc");
+    CHECK(c.mdcvFrom == TagFrom::Container);
+    CHECK(c.cllFrom == TagFrom::Container);
+    CHECK(c.hdr.mdcv == Bt2020Display(true));
+    CHECK(c.looked == FirstLook::Decode);
+    // the frame says another display and light: the frame's
+    first.hdr.mdcv->maxLum = {40000000, 10000};
+    first.hdr.cll = Cll{4000, 1000};
+    first.hdr.amve = Amve{{314, 1}, {3127, 10000}, {329, 1000}};
+    in.first = first;
+    c = SourceColorOf(in, "420", "hevc");
+    CHECK(c.mdcvFrom == TagFrom::Frame);
+    CHECK(c.hdr.mdcv->maxLum.Value() == 4000.0);
+    CHECK(c.cllFrom == TagFrom::Frame);
+    CHECK(c.hdr.cll == Cll{4000, 1000});
+    CHECK(c.amveFrom == TagFrom::Frame);  // none in the container
+    // the codec's records (an hvcC's SEI) where the container has none
+    ColourLayers codec;
+    codec.stream = Tags(9, 9, 16);
+    codec.codecRecords.mdcv = Bt2020Display(false);
+    codec.codecRecords.cll = Cll{1000, 400};
+    codec.containerRecords.cll = Cll{800, 300};
+    c = SourceColorOf(codec, "420", "hevc");
+    CHECK(c.mdcvFrom == TagFrom::Stream);
+    CHECK(c.cllFrom == TagFrom::Container);
+    CHECK(c.hdr.cll == Cll{800, 300});
+    CHECK(c.Note("source.no_hdr_metadata") == nullptr);
+    // the RPU and HDR10+ of a decoded frame
+    FirstLookColor dv = Decoded(Tags(9, 9, 16));
+    DoviRpu rpu;
+    rpu.vdrRpuProfile = 1;
+    dv.rpu = rpu;
+    dv.hdr10Plus = true;
+    codec.first = dv;
+    c = SourceColorOf(codec, "420", "hevc");
+    REQUIRE(c.doviRpu);
+    CHECK(c.doviProfile == 8);
+    CHECK(c.Note("source.dv_removed") != nullptr);
+    CHECK(c.hdr10Plus);
+    CHECK(c.hdr10PlusFrom == TagFrom::Frame);
+    // a look that failed: said, with what it was
+    FirstLookColor failed;
+    failed.how = FirstLook::Packet;
+    failed.error = "no video packet";
+    codec.first = failed;
+    c = SourceColorOf(codec, "420", "ffv1");
+    CHECK(c.lookFailed == FirstLook::Packet);
+    CHECK(c.looked == FirstLook::None);
+    REQUIRE(c.Note("source.probe_failed") != nullptr);
+    CHECK(c.Note("source.probe_failed")->detail.rfind("the first video packet could not be read (no video packet)", 0) == 0);
+    failed.how = FirstLook::Decode;
+    codec.first = failed;
+    CHECK(SourceColorOf(codec, "420", "hevc").Note("source.probe_failed")->detail.rfind("the first frame could not be read", 0) == 0);
+}
+
+TEST_CASE("The container is compared with what was taken: HLG from an SEI is no news, a container's other class is", "[hdr]") {
+    // colr 18, VUI 14, the SEI's 18 in the frame: the container agrees with what was taken
+    const SourceColor hevc = Layered(Tags(9, 9, 18), Tags(9, 9, 14), Tags(9, 9, 18));
+    CHECK(hevc.cls == SourceClass::Hlg);
+    CHECK(hevc.notes.empty());
+    // H.264: find_stream_info decodes, the SEI's 18 is in the codec parameters already; colr says the VUI's 14
+    const SourceColor h264 = Layered(RawTags{}, Tags(9, 9, 18), Tags(9, 9, 14), "h264");
+    CHECK(h264.cls == SourceClass::Hlg);
+    CHECK(h264.notes.empty());
+    // the container says PQ, the VUI nothing, the frame HLG: another class - the plan hears it
+    const SourceColor pqOverHlg = Layered(Tags(9, 9, 18), RawTags{2, 2, 2, 1, 0}, Tags(9, 9, 16));
+    CHECK(pqOverHlg.cls == SourceClass::Hlg);
+    REQUIRE(pqOverHlg.Note("source.container_differs") != nullptr);
+    CHECK(pqOverHlg.Note("source.container_differs")->plan);
+    CHECK(pqOverHlg.Note("source.container_differs")->detail.find("transfer smpte2084 / arib-std-b67") != std::string::npos);
+    const std::vector<TagDifference> d = ContainerDifferences(pqOverHlg);
+    REQUIRE(d.size() == 1);
+    CHECK(d[0].field == "transfer");
+    CHECK(d[0].a == 16);
+    CHECK(d[0].b == 18);
+    // a matrix that differs beside the SEI's curve is news
+    const SourceColor matrix = Layered(Tags(1, 9, 18), Tags(9, 9, 14), RawTags{});
+    CHECK(matrix.Note("source.layers_differ") != nullptr);
+}
+
+TEST_CASE("A ProRes without all three tags in its container is looked at", "[hdr]") {
+    const std::string mov = "mov,mp4,m4a,3gp,3g2,mj2";
+    CHECK(NeedsFirstLook("prores", mov, 10, RawTags{2, 2, 2, 0, 0}) == FirstLook::Decode);
+    CHECK(NeedsFirstLook("prores", mov, 10, Tags(1, 1, 2)) == FirstLook::Decode);
+    CHECK(NeedsFirstLook("prores", mov, 10, Tags(2, 1, 1)) == FirstLook::Decode);
+    CHECK(NeedsFirstLook("prores", mov, 10, Tags(1, 1, 1)) == FirstLook::None);
+    CHECK(NeedsFirstLook("ffv1", mov, 10, RawTags{2, 2, 2, 0, 0}) == FirstLook::None);
+}
+
+TEST_CASE("TB-1 says what a source cannot get without refusing it: ICtCp, BT.2020 CL, RGB HDR", "[hdr][cli]") {
+    for (const SourceColor& c : {Classified(14, 9, 16), Classified(10, 9, 14), Classified(0, 9, 16, "rgb"), Classified(1, 9, 1, "rgb")}) {
+        const std::vector<std::string> lines = ColourInfoLines(c);
+        REQUIRE_FALSE(lines.empty());
+        for (const std::string& l : lines) {
+            INFO(l);
+            CHECK(l.find("not supported") == std::string::npos);
+            CHECK(l.find("refused") == std::string::npos);
+        }
+    }
+    CHECK(Classified(14, 9, 16).Note("source.matrix_unsupported")->detail == "matrix ictcp: read as BT.709 / BT.601 - its colours come out wrong when processed");
+    CHECK(Classified(0, 9, 16, "rgb").Note("source.rgb_hdr")->detail ==
+          "an RGB stream of smpte2084 / bt2020: read as 8-bit 4:2:0 SDR through swscale - its colours come out wrong");
+}

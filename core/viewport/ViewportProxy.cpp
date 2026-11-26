@@ -214,6 +214,7 @@ std::filesystem::path BuildProxy(const std::filesystem::path& video, const std::
         VideoDecoder::Options po;
         po.sliceThreadsOnly = true;
         po.indexRate = info.frameRate;
+        po.colorProbe = false;  // TASK-0078: the frames are compared, not the colour
         VideoDecoder check(part, po);
         for (const auto& [index, frame] : samples) {
             CpuFrame got;

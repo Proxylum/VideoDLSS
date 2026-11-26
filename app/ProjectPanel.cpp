@@ -139,7 +139,10 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
                                                                                  {tr("Пассы"), sourcePasses_},
                                                                                  {tr("Хэш"), sourceHash_}}) {
         QLabel* label = Muted(name, sourceCard);
-        if (value == sourceColour_) sourceColourName_ = label;
+        if (value == sourceColour_) {
+            sourceColourName_ = label;
+            label->setObjectName("sourceColourName");
+        }
         if (value == sourcePasses_) passesRow = row;
         sg->addWidget(label, row, 0, Qt::AlignTop);
         sg->addWidget(value, row, 1);

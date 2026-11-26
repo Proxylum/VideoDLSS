@@ -407,7 +407,9 @@ void AppModel::reloadSources() {
     resultFormat_ = FrameDesc{};
     if (!isReleased(project_.resultVideo) && !project_.resultVideo.empty() && std::filesystem::exists(project_.resultVideo)) {
         try {
-            VideoDecoder probe(project_.resultVideo, VideoDecoder::Probe());
+            VideoDecoder::Options options = VideoDecoder::Probe();
+            options.colorProbe = false;  // TASK-0078: the codec, the sound and the layout of the result - not its colour
+            VideoDecoder probe(project_.resultVideo, options);
             resultAudio_ = probe.HasAudio();
             resultCodec_ = probe.Info().codecName;
             resultFormat_ = probe.Info().decoded;

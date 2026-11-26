@@ -459,3 +459,96 @@ TEST_CASE("AV1 colour comes from the codec parameters without a decode", "[integ
     REQUIRE(c.Note("source.av1_stream_metadata") != nullptr);
     CHECK_THAT(c.Note("source.av1_stream_metadata")->detail, ContainsSubstring("the container has none"));
 }
+
+// ---- review round 1 (TASK-0078) -------------------------------------------------------------------------------------------------
+
+TEST_CASE("ProRes colour from the frame header: no colr box, and a header's 0 as unknown", "[integration][hdr]") {
+    const auto dir = Dir("prores_header");
+    // no colr (the encoder's tags unspecified: movenc writes none), the frame header says PQ of BT.2020 with no matrix
+    ClipSpec spec;
+    spec.width = 64;
+    spec.height = 48;
+    spec.frames = 2;
+    spec.codec = "prores_ks";
+    spec.pixFmt = "yuv422p10le";
+    spec.frameColor = [](int64_t) { return RawTags{2, 9, 16, 1, 0}; };
+    const auto bare = WriteClip(dir / "no_colr.mov", spec);
+    REQUIRE(Summarize(bare).container == RawTags{2, 2, 2, Summarize(bare).container.range, Summarize(bare).container.chromaLoc});
+    REQUIRE(FrameColors(bare).at(0).trc == 16);
+    VideoDecoder a(bare, VideoDecoder::Probe());
+    CHECK(a.Info().color.looked == FirstLook::Decode);
+    CHECK(a.Info().color.cls == SourceClass::Pq);
+    CHECK(a.Info().color.trcFrom == TagFrom::Frame);
+    CHECK(a.Info().color.Note("source.bt2020_assumed") != nullptr);
+    // colr 9/9/14, the header's curve 0 (FFmpeg's own prores encoder writes 0 for bt2020-10): the colr box's curve
+    spec.color = Tags(9, 9, 14);
+    spec.frameColor = [](int64_t) { return RawTags{9, 9, 0, 1, 0}; };
+    const auto zero = WriteClip(dir / "trc0.mov", spec);
+    REQUIRE(FrameColors(zero).at(0).trc == 0);
+    VideoDecoder b(zero, VideoDecoder::Probe());
+    CHECK(b.Info().color.cls == SourceClass::Wide);
+    CHECK(b.Info().color.trcFrom == TagFrom::Stream);
+    CHECK(b.Info().color.notes.empty());
+}
+
+TEST_CASE("A first look that fails is said, printed and cached", "[integration][hdr][cache]") {
+    const auto dir = Dir("look_fails");
+    ClipSpec spec;
+    spec.width = 64;
+    spec.height = 48;
+    spec.frames = 2;
+    spec.codec = "prores_ks";
+    spec.pixFmt = "yuv422p10le";
+    spec.color = Tags(9, 9, 14);
+    spec.videoPacket = [](int64_t, const std::string& p) { return p.substr(0, 8); };  // no frame decodes from these
+    const auto clip = WriteClip(dir / "broken.mov", spec);
+    SetOld(clip, std::chrono::minutes(60));
+    const int64_t start = FirstFrameDecodes();
+    {
+        VideoDecoder dec(clip, VideoDecoder::Probe());
+        const SourceColor& c = dec.Info().color;
+        CHECK_FALSE(c.probeError.empty());
+        CHECK(c.lookFailed == FirstLook::Decode);
+        CHECK(c.looked == FirstLook::None);
+        CHECK(c.cls == SourceClass::Wide);  // from the colr box
+        REQUIRE(c.Note("source.probe_failed") != nullptr);
+    }
+    { VideoDecoder again(clip, VideoDecoder::Probe()); CHECK_FALSE(again.Info().color.probeError.empty()); }
+    CHECK(FirstFrameDecodes() == start + 1);  // the failure is an answer too
+    const auto info = RunAll({"info", clip.string()}, dir / "info.log");
+    INFO(info.out);
+    CHECK_THAT(info.out, ContainsSubstring("note:        the first frame could not be read ("));
+}
+
+TEST_CASE("The first look's cache: a time ahead of the clock, the first packet, the least recently used file", "[integration][hdr][cache]") {
+    const auto dir = Dir("cache_more");
+    // a modification time an hour ahead (a camera card's local time): looked at once
+    const auto ahead = ProResHlg(dir);
+    std::filesystem::last_write_time(ahead, std::filesystem::file_time_type::clock::now() + std::chrono::hours(1));
+    const int64_t decodes = FirstFrameDecodes();
+    { VideoDecoder a(ahead, VideoDecoder::Probe()); }
+    { VideoDecoder b(ahead, VideoDecoder::Probe()); }
+    CHECK(FirstFrameDecodes() == decodes + 1);
+    // the first packet of a PQ Matroska is read once; 64 other files later it is the least recently used and gone
+    std::vector<std::filesystem::path> files;
+    ClipSpec spec;
+    spec.width = 64;
+    spec.height = 48;
+    spec.frames = 1;
+    spec.pixFmt = "yuv420p10le";
+    spec.color = Tags(9, 9, 16);
+    for (int i = 0; i <= 64; ++i) {
+        files.push_back(WriteClip(dir / ("pq" + std::to_string(i) + ".mkv"), spec));
+        SetOld(files.back(), std::chrono::minutes(60));
+    }
+    const int64_t peeks = FirstPacketPeeks();
+    { VideoDecoder a(files[0], VideoDecoder::Probe()); CHECK(a.Info().color.looked == FirstLook::Packet); }
+    { VideoDecoder b(files[0], VideoDecoder::Probe()); CHECK(b.Info().color.looked == FirstLook::Packet); }
+    CHECK(FirstPacketPeeks() == peeks + 1);
+    for (int i = 1; i <= 64; ++i) VideoDecoder d(files[static_cast<size_t>(i)], VideoDecoder::Probe());
+    CHECK(FirstPacketPeeks() == peeks + 65);
+    { VideoDecoder last(files[64], VideoDecoder::Probe()); }
+    CHECK(FirstPacketPeeks() == peeks + 65);  // the most recent ones stay
+    { VideoDecoder first(files[0], VideoDecoder::Probe()); }
+    CHECK(FirstPacketPeeks() == peeks + 66);
+}

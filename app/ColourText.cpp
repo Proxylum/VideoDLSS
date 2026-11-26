@@ -31,6 +31,25 @@ QString MatrixText(int matrix) {
     }
 }
 
+QString GamutOrUnsaid(int primaries) {
+    const QString g = GamutText(primaries);
+    return g.isEmpty() ? Tr("не указан") : g;
+}
+
+QString FieldText(std::string_view field) {
+    if (field == "matrix") return Tr("матрица");
+    if (field == "primaries") return Tr("охват");
+    return Tr("кривая");
+}
+
+// «кривая arib-std-b67 / bt2020-10, охват ...» - FFmpeg's names of the values
+QString DifferencesText(const std::vector<TagDifference>& d) {
+    QStringList parts;
+    for (const TagDifference& x : d)
+        parts << QString("%1 %2 / %3").arg(FieldText(x.field), Q(TagValueName(x.field, x.a)), Q(TagValueName(x.field, x.b)));
+    return parts.join(", ");
+}
+
 QString Nits(double v) { return QString::number(std::round(v * 10.0) / 10.0, 'g', 6); }
 
 // «8.4»: profile and the base layer's compatibility, as Dolby Vision's names go
@@ -78,7 +97,7 @@ QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
     if (n.key == "source.bt2020_assumed") return Tr("Матрица или охват не указаны — принят BT.2020");
     if (n.key == "source.trc_unspecified") return Tr("Охват BT.2020 без кривой — принята кривая SDR");
     if (n.key == "source.trc_not_converted") return Tr("Кривая %1 при охвате BT.2020 (лог камеры?) не переводится").arg(Q(TrcName(e.trc)));
-    if (n.key == "source.matrix_2020") return Tr("Матрица BT.2020 при охвате %1 — принят широкий охват").arg(GamutText(e.primaries));
+    if (n.key == "source.matrix_2020") return Tr("Матрица BT.2020 при охвате %1 — принят широкий охват").arg(GamutOrUnsaid(e.primaries));
     if (n.key == "source.av1_stream_metadata")
         return Tr("Метаданные HDR внутри потока AV1 здесь не читаются и в результат не переносятся") +
                (c.hdr.Empty() ? Tr("; в контейнере их нет") : Tr("; в контейнере есть"));
@@ -86,9 +105,12 @@ QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
     if (n.key == "source.hdr10plus") return Tr("Динамические метаданные HDR10+ в результат не переносятся");
     if (n.key == "source.layers_differ")
         return Tr("Кадр или контейнер (%1) и параметры кодека (%2) размечены по-разному").arg(ClassText(c.cls), ClassText(c.rawCls));
-    if (n.key == "source.frame_differs") return Tr("Первый кадр и поток размечены по-разному: %1").arg(Q(n.detail));
-    if (n.key == "source.container_differs") return Tr("Контейнер и поток размечены по-разному, взята разметка потока: %1").arg(Q(n.detail));
-    if (n.key == "source.probe_failed") return Tr("Первый кадр не прочитан — цвет только по тегам потока и контейнера");
+    if (n.key == "source.frame_differs") return Tr("Первый кадр и поток размечены по-разному (кадр / поток): %1").arg(DifferencesText(FrameDifferences(c)));
+    if (n.key == "source.container_differs")
+        return Tr("Контейнер размечен иначе, взяты поток или кадр (контейнер / взято): %1").arg(DifferencesText(ContainerDifferences(c)));
+    if (n.key == "source.probe_failed")
+        return c.lookFailed == FirstLook::Packet ? Tr("Первый видеопакет не прочитан — HDR10+ не проверен, цвет только по тегам потока и контейнера")
+                                                  : Tr("Первый кадр не прочитан — цвет только по тегам потока и контейнера");
     return Q(n.detail);
 }
 
@@ -103,12 +125,14 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
     if (c.refuseAll == ColourRefusal::DolbyVisionIpt) {
         text = Tr("Dolby Vision %1 (база IPT): цвета при обработке будут неверны").arg(DoviName(c));
     } else if (c.refuseAll == ColourRefusal::RgbHdr) {
-        text = Tr("RGB-HDR: читается как 8-битный SDR, цвета будут неверны");
+        text = Tr("RGB-поток HDR / BT.2020: читается как 8-битный SDR, цвета будут неверны");
     } else if (c.refuseProcessing == ColourRefusal::Matrix) {
         text = Tr("%1: цвета при обработке будут неверны").arg(MatrixText(e.matrix));
     } else {
         QStringList parts;
-        parts << (c.cls == SourceClass::Pq && (c.hdr.mdcv || c.hdr.cll) ? Tr("HDR10 (PQ)") : ClassText(c.cls));
+        // HDR10: PQ of BT.2020 (said or assumed) with its static metadata; a P3 or BT.709 master is «HDR (PQ)» with its gamut beside
+        const bool hdr10 = c.cls == SourceClass::Pq && (e.primaries == 9 || e.primaries == 2) && (c.hdr.mdcv || c.hdr.cll);
+        parts << (hdr10 ? Tr("HDR10 (PQ)") : ClassText(c.cls));
         const QString gamut = GamutText(e.primaries);
         if (!gamut.isEmpty() && !(c.cls == SourceClass::Wide && e.primaries == 9)) parts << gamut;  // «BT.2020 SDR» says it already
         else if (c.Hdr()) parts << Tr("BT.2020 (не указан)");

@@ -126,6 +126,7 @@ struct SourceColor {
     ColourRefusal refuseProcessing = ColourRefusal::None;  // processing (stages) refused; passthrough allowed
     ColourRefusal refuseAll = ColourRefusal::None;         // processing and passthrough refused
     FirstLook looked = FirstLook::None;                    // what the first look read (None: not asked or failed)
+    FirstLook lookFailed = FirstLook::None;                // the look that failed (Decode: the first frame; Packet: the first packet)
     std::string probeError;                                // the first look failed: why
     std::vector<ColourNote> notes;
 
@@ -156,8 +157,9 @@ int GuessDoviProfile(const DoviRpu& rpu);
 
 // Whether a source's colour needs a look at its first frame or packet. Decode: h264 / hevc / prores (the colour of a ProRes frame lives
 // in its header, an HEVC SEI changes the transfer) with any hint of HDR or wide gamut in `tags` (the stream's over the container's), a
-// raw elementary stream (demuxer "hevc" / "h264": no container), or a 10-bit HEVC without tags. Packet: PQ in Matroska / WebM (HDR10+
-// rides in a packet's BlockAdditional). None: everything else - SDR 709 / 601 pays nothing.
+// raw elementary stream (demuxer "hevc" / "h264": no container), a 10-bit HEVC without tags, or a ProRes whose stream and container do
+// not say all three (colr is optional; the frame header always says them). Packet: PQ in Matroska / WebM (HDR10+ rides in a packet's
+// BlockAdditional). None: everything else - SDR 709 / 601 with its tags pays nothing.
 FirstLook NeedsFirstLook(std::string_view codec, std::string_view demuxer, int bitDepth, const RawTags& tags);
 
 // What a first look read.
@@ -169,9 +171,47 @@ struct FirstLookColor {
     bool hdr10Plus = false;
     std::string error;  // the look failed (no frame, a decoder error): why
 };
+
+// Reserved values of the tags as unspecified (2): primaries and transfer 0 and 3 (H.273's reserved), matrix 3; for ProRes (`codec`
+// "prores") matrix 0 as well - a ProRes header's 0 is «unknown» (FFmpeg's own `prores` encoder writes it for any value outside its lists),
+// and ProRes is always Y'CbCr.
+RawTags WithoutReserved(const RawTags& t, std::string_view codec);
+
+// Two records of the same display or light, written as different fractions (Matroska's floats through av_d2q, an SEI's 1/50000 and
+// 1/10000): equal at MP4's units - chromaticities to 1/50000, luminance and illuminance to 1/10000 - and with the same flags.
+bool SameRecord(const Mdcv& a, const Mdcv& b);
+bool SameRecord(const Amve& a, const Amve& b);
+
+// What was read of a source, before it is merged: the layers' tags, the records of the container (codecpar's coded side data) and of the
+// codec (its decoded_side_data: an HEVC hvcC's SEI), the Dolby Vision record, the first look when one was asked.
+struct ColourLayers {
+    RawTags container, stream;
+    HdrStatic containerRecords, codecRecords;
+    std::optional<DoviConf> dovi;
+    std::optional<FirstLookColor> first;
+};
+// The source's colour from them: reserved values dropped (WithoutReserved), the tags merged (MergeTags), the records - the container's,
+// the codec's where the container has none, the first frame's where it has one of another value (SameRecord) -, the RPU and HDR10+ of
+// the look, a failed look as probeError / lookFailed; then Classify.
+SourceColor SourceColorOf(const ColourLayers& in, std::string_view layoutKind, std::string_view codec);
+
+// A field two layers say differently: "transfer" (FFmpeg's names of the values), `a` the first layer's value, `b` the second's.
+struct TagDifference {
+    std::string_view field;  // "matrix", "primaries", "transfer"
+    int a = 2, b = 2;
+};
+// The first frame against the stream: fields both say, differently - not an HLG transfer (18) over the SDR curve an HEVC VUI carries with
+// an alternative transfer SEI (1 / 6 / 14 / 15).
+std::vector<TagDifference> FrameDifferences(const SourceColor& c);
+// The container against what was taken from the stream or the frame (fields the container says and another layer decided otherwise;
+// the same HLG exception).
+std::vector<TagDifference> ContainerDifferences(const SourceColor& c);
+// The value a TagDifference names in FFmpeg's words ("arib-std-b67")
+std::string TagValueName(std::string_view field, int value);
 // The first look at a file, once per (absolute path, size, modification time) in this process: a software decode of the first frame
 // (slice threads, at most 64 video packets, then a flush) or a read of the first video packet. Packet is answered by a cached Decode too.
-// A file modified less than 2 s before its look is looked at again (as Sha256FileCached). Failures are answered (error), not thrown.
+// A file modified less than 2 s before its look is looked at again (as Sha256FileCached; a modification time ahead of the clock by more
+// than that counts as settled). Failures are answered (error) and cached, not thrown. At most 64 files, the least recently used dropped.
 FirstLookColor FirstLookCached(const std::filesystem::path& path, FirstLook how);
 int64_t FirstFrameDecodes();  // looks that decoded a frame (tests: the cache)
 int64_t FirstPacketPeeks();   // looks that read a packet
@@ -190,7 +230,8 @@ void ReadFrameSideData(AVFrameSideData* const* sd, int count, HdrStatic& hdr, st
 std::vector<std::string> ColourInfoLines(const SourceColor& c);
 std::string_view ClassWords(SourceClass c);  // "SDR", "HDR PQ", "HDR HLG", "wide gamut SDR", "log curve"
 
-// "matrix bt2020nc, primaries bt2020, transfer smpte2084, range tv" (FFmpeg's names; "unspecified" for 2; numbers FFmpeg has no name for).
+// "matrix bt2020nc, primaries bt2020, transfer smpte2084, range tv" (FFmpeg's names: "unknown" for 2, and for range 0; a number where
+// FFmpeg has no name).
 std::string ColourWords(const RawTags& t);
 std::string MatrixName(int matrix);
 std::string PrimariesName(int primaries);

@@ -12,6 +12,7 @@ extern "C" {
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <map>
 #include <mutex>
@@ -251,18 +252,43 @@ std::string HdrRecordsWords(const HdrStatic& hdr) {
 
 bool SaysSomething(const RawTags& t) { return t.matrix != 2 || t.primaries != 2 || t.trc != 2; }
 
-// The fields of `a` and `b` that both say and differ, in words: "transfer arib-std-b67 / bt2020-10"
-std::string Differences(const RawTags& a, const RawTags& b, bool skipAltTransfer) {
+// HLG (18) taken over the SDR curve an HEVC / H.264 VUI keeps beside an alternative transfer SEI - as it should be, no news
+bool AltTransfer(int said, int taken) { return taken == 18 && (said == 1 || said == 6 || said == 14 || said == 15); }
+
+std::string DifferenceWords(const std::vector<TagDifference>& d) {  // "transfer arib-std-b67 / bt2020-10, primaries ..."
     std::string w;
-    auto add = [&](const std::string& s) { w += (w.empty() ? "" : ", ") + s; };
-    if (a.matrix != 2 && b.matrix != 2 && a.matrix != b.matrix) add("matrix " + MatrixName(a.matrix) + " / " + MatrixName(b.matrix));
-    if (a.primaries != 2 && b.primaries != 2 && a.primaries != b.primaries)
-        add("primaries " + PrimariesName(a.primaries) + " / " + PrimariesName(b.primaries));
-    if (a.trc != 2 && b.trc != 2 && a.trc != b.trc && !skipAltTransfer) add("transfer " + TrcName(a.trc) + " / " + TrcName(b.trc));
+    for (const TagDifference& x : d)
+        w += (w.empty() ? "" : ", ") + std::string(x.field) + " " + TagValueName(x.field, x.a) + " / " + TagValueName(x.field, x.b);
     return w;
 }
 
 }  // namespace
+
+std::string TagValueName(std::string_view field, int value) {
+    if (field == "matrix") return MatrixName(value);
+    if (field == "primaries") return PrimariesName(value);
+    if (field == "transfer") return TrcName(value);
+    return RangeName(value);
+}
+
+std::vector<TagDifference> FrameDifferences(const SourceColor& c) {
+    std::vector<TagDifference> d;
+    const RawTags &f = c.frame, &s = c.stream;
+    if (f.matrix != 2 && s.matrix != 2 && f.matrix != s.matrix) d.push_back({"matrix", f.matrix, s.matrix});
+    if (f.primaries != 2 && s.primaries != 2 && f.primaries != s.primaries) d.push_back({"primaries", f.primaries, s.primaries});
+    if (f.trc != 2 && s.trc != 2 && f.trc != s.trc && !AltTransfer(s.trc, f.trc)) d.push_back({"transfer", f.trc, s.trc});
+    return d;
+}
+
+std::vector<TagDifference> ContainerDifferences(const SourceColor& c) {
+    std::vector<TagDifference> d;
+    const RawTags &k = c.container, &e = c.effective;
+    auto taken = [](TagFrom from) { return from == TagFrom::Stream || from == TagFrom::Frame; };
+    if (k.matrix != 2 && taken(c.matrixFrom) && k.matrix != e.matrix) d.push_back({"matrix", k.matrix, e.matrix});
+    if (k.primaries != 2 && taken(c.primariesFrom) && k.primaries != e.primaries) d.push_back({"primaries", k.primaries, e.primaries});
+    if (k.trc != 2 && taken(c.trcFrom) && k.trc != e.trc && !AltTransfer(k.trc, e.trc)) d.push_back({"transfer", k.trc, e.trc});
+    return d;
+}
 
 void Classify(SourceColor& c, std::string_view layoutKind, std::string_view codec) {
     c.notes.clear();
@@ -357,20 +383,24 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
     if (c.hdr10Plus)
         note("source.hdr10plus", "HDR10+ dynamic metadata (in the " + std::string(ToString(c.hdr10PlusFrom)) + "): not carried into results");
 
-    // the layers
-    const bool altTransfer = c.trcFrom == TagFrom::Frame && c.frame.trc == 18 &&
-                             (c.stream.trc == 1 || c.stream.trc == 6 || c.stream.trc == 14 || c.stream.trc == 15);  // an HEVC SEI: as it should
+    // the layers. HLG from an alternative transfer SEI over the VUI's SDR curve (the matrix and the primaries as the stream says) is no news
+    const bool altTransfer = AltTransfer(c.stream.trc, e.trc) && (c.stream.matrix == 2 || c.stream.matrix == e.matrix) &&
+                             (c.stream.primaries == 2 || c.stream.primaries == e.primaries);
     if (c.cls != c.rawCls && SaysSomething(c.stream) && !altTransfer) {
         note("source.layers_differ", "the frame or the container say " + ColourWords(e) + " (" + std::string(ToString(c.cls)) +
                                          "), the codec parameters " + ColourWords(c.stream) + " (" + std::string(ToString(c.rawCls)) + ")");
-    } else if (const std::string d = Differences(c.frame, c.stream, altTransfer); !d.empty()) {
-        note("source.frame_differs", "the first frame and the stream say " + d, false);
+    } else if (const std::vector<TagDifference> d = FrameDifferences(c); !d.empty()) {
+        note("source.frame_differs", "the first frame and the stream say " + DifferenceWords(d), false);
     }
-    if (const std::string d = Differences(c.container, c.stream, false); !d.empty())
-        note("source.container_differs", "the container and the stream say " + d + " (the stream's taken)",
-             ClassOf(c.container) != ClassOf(c.stream));
+    if (const std::vector<TagDifference> d = ContainerDifferences(c); !d.empty()) {
+        // of consequence when the container alone would have given another class
+        const RawTags k = c.container;
+        const SourceClass containerCls = ClassOf(k.matrix != 2 ? k.matrix : M, k.primaries != 2 ? k.primaries : P, k.trc != 2 ? k.trc : T);
+        note("source.container_differs", "the container says " + DifferenceWords(d) + " taken from the stream or the frame", containerCls != c.cls);
+    }
     if (!c.probeError.empty())
-        note("source.probe_failed", "the first frame could not be read (" + c.probeError + "): the colour comes from the stream and the container only");
+        note("source.probe_failed", std::string(c.lookFailed == FirstLook::Packet ? "the first video packet" : "the first frame") +
+                                        " could not be read (" + c.probeError + "): the colour comes from the stream and the container only");
 
     c.legacyPath = c.cls == SourceClass::Legacy && c.rawCls == SourceClass::Legacy && c.refuseProcessing == ColourRefusal::None &&
                    c.refuseAll == ColourRefusal::None;
@@ -382,6 +412,8 @@ FirstLook NeedsFirstLook(std::string_view codec, std::string_view demuxer, int b
     const bool raw = demuxer == "hevc" || demuxer == "h264";
     if (codec == "h264" || codec == "hevc" || codec == "prores") {
         if (hint || raw || (codec == "hevc" && bitDepth >= 10 && t.matrix == 2 && t.trc == 2)) return FirstLook::Decode;
+        // a ProRes frame header says its colour whatever the container: colr is optional (movenc writes it only when all three are said)
+        if (codec == "prores" && (t.matrix == 2 || t.primaries == 2 || t.trc == 2)) return FirstLook::Decode;
     }
     if (demuxer == "matroska,webm" && t.trc == 16) return FirstLook::Packet;
     return FirstLook::None;
@@ -471,6 +503,79 @@ void ReadFrameSideData(AVFrameSideData* const* sd, int count, HdrStatic& hdr, st
     if (hdr10Plus && av_frame_side_data_get(sd, count, AV_FRAME_DATA_DYNAMIC_HDR_PLUS)) *hdr10Plus = true;
 }
 
+RawTags WithoutReserved(const RawTags& t, std::string_view codec) {
+    RawTags out = t;
+    if (out.primaries == 0 || out.primaries == 3) out.primaries = 2;
+    if (out.trc == 0 || out.trc == 3) out.trc = 2;
+    if (out.matrix == 3 || (out.matrix == 0 && codec == "prores")) out.matrix = 2;
+    return out;
+}
+
+namespace {
+long long Units(const Ratio& r, double per) { return std::llround(r.Value() * per); }
+}  // namespace
+
+bool SameRecord(const Mdcv& a, const Mdcv& b) {
+    if (a.hasPrimaries != b.hasPrimaries || a.hasLuminance != b.hasLuminance) return false;
+    if (a.hasPrimaries) {
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 2; ++j)
+                if (Units(a.primaries[i][j], 50000) != Units(b.primaries[i][j], 50000)) return false;
+        if (Units(a.white[0], 50000) != Units(b.white[0], 50000) || Units(a.white[1], 50000) != Units(b.white[1], 50000)) return false;
+    }
+    return !a.hasLuminance || (Units(a.minLum, 10000) == Units(b.minLum, 10000) && Units(a.maxLum, 10000) == Units(b.maxLum, 10000));
+}
+
+bool SameRecord(const Amve& a, const Amve& b) {
+    return Units(a.illuminance, 10000) == Units(b.illuminance, 10000) && Units(a.lightX, 50000) == Units(b.lightX, 50000) &&
+           Units(a.lightY, 50000) == Units(b.lightY, 50000);
+}
+
+SourceColor SourceColorOf(const ColourLayers& in, std::string_view layoutKind, std::string_view codec) {
+    SourceColor c;
+    c.container = WithoutReserved(in.container, codec);
+    c.stream = WithoutReserved(in.stream, codec);
+    c.doviConf = in.dovi;
+    // the records: the container's, then the codec's (its extradata) where the container has none
+    c.hdr = in.containerRecords;
+    if (c.hdr.mdcv) c.mdcvFrom = TagFrom::Container;
+    if (c.hdr.cll) c.cllFrom = TagFrom::Container;
+    if (c.hdr.amve) c.amveFrom = TagFrom::Container;
+    if (!c.hdr.mdcv && in.codecRecords.mdcv) c.hdr.mdcv = in.codecRecords.mdcv, c.mdcvFrom = TagFrom::Stream;
+    if (!c.hdr.cll && in.codecRecords.cll) c.hdr.cll = in.codecRecords.cll, c.cllFrom = TagFrom::Stream;
+    if (!c.hdr.amve && in.codecRecords.amve) c.hdr.amve = in.codecRecords.amve, c.amveFrom = TagFrom::Stream;
+    if (in.first) {
+        const FirstLookColor& first = *in.first;
+        if (!first.error.empty()) {
+            c.probeError = first.error;
+            c.lookFailed = first.how;
+        } else {
+            c.looked = first.how;
+            if (first.how == FirstLook::Decode) {
+                c.frame = WithoutReserved(first.tags, codec);
+                c.doviRpu = first.rpu;
+                // the frame carries the stream's records as well (libavcodec copies them into every frame), an SEI's in other fractions:
+                // the frame's own only where they say another value
+                if (first.hdr.mdcv && !(c.hdr.mdcv && SameRecord(*first.hdr.mdcv, *c.hdr.mdcv))) c.hdr.mdcv = first.hdr.mdcv, c.mdcvFrom = TagFrom::Frame;
+                if (first.hdr.cll && first.hdr.cll != c.hdr.cll) c.hdr.cll = first.hdr.cll, c.cllFrom = TagFrom::Frame;
+                if (first.hdr.amve && !(c.hdr.amve && SameRecord(*first.hdr.amve, *c.hdr.amve))) c.hdr.amve = first.hdr.amve, c.amveFrom = TagFrom::Frame;
+            }
+            if (first.hdr10Plus) {
+                c.hdr10Plus = true;
+                c.hdr10PlusFrom = first.how == FirstLook::Decode ? TagFrom::Frame : TagFrom::Packet;
+            }
+        }
+    }
+    TagFrom from[4];
+    c.effective = MergeTags(c.frame, c.stream, c.container, from);
+    c.matrixFrom = from[0];
+    c.primariesFrom = from[1];
+    c.trcFrom = from[2];
+    c.rangeFrom = from[3];
+    Classify(c, layoutKind, codec);
+    return c;
+}
+
 // ---- the first look ------------------------------------------------------------------------------------------------------------
 
 namespace {
@@ -528,6 +633,7 @@ FirstLookColor LookOnce(const std::filesystem::path& path, FirstLook how) {
     p.frame = av_frame_alloc();
     if (!p.ctx || !p.frame) Throw("av_frame_alloc failed");
     CheckAv(avcodec_parameters_to_context(p.ctx, p.fmt->streams[vs]->codecpar), "avcodec_parameters_to_context");
+    p.ctx->thread_count = 0;               // libavcodec's choice (its default is 1: no threads at all)
     p.ctx->thread_type = FF_THREAD_SLICE;  // frame threads would hold the first frame back by their count
     CheckAv(avcodec_open2(p.ctx, decoder, nullptr), "avcodec_open2");
     auto receive = [&] {
@@ -583,7 +689,8 @@ FirstLookColor FirstLookCached(const std::filesystem::path& path, FirstLook how)
     const auto mtime = std::filesystem::last_write_time(abs, timeEc);
     if (!ec) ec = sizeEc ? sizeEc : timeEc;  // no key without all three: looked at every time (and the look says why it failed)
     // as Sha256FileCached: a look at a file written just before it says nothing about the next one (the clock tick of the file time)
-    const auto settled = [](const Entry& e) { return e.lookedAt - e.mtime > std::chrono::seconds(2); };
+    // (a time ahead of the clock - a camera card's local time, a NAS whose clock runs fast - was not written in the tick before the look)
+    const auto settled = [](const Entry& e) { return e.lookedAt - e.mtime > std::chrono::seconds(2) || e.mtime - e.lookedAt > std::chrono::seconds(2); };
     if (!ec) {
         std::lock_guard<std::mutex> lock(mutex);
         if (auto it = cache.find(abs.wstring()); it != cache.end() && it->second.size == size && it->second.mtime == mtime && settled(it->second) &&

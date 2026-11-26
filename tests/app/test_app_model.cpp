@@ -10985,7 +10985,10 @@ QString ColourRowOf(const std::filesystem::path& clip, bool* hidden, QString* ti
     ProjectPanel panel(model, queue);
     panel.refresh();
     auto* label = panel.findChild<QLabel*>("sourceColour");
+    auto* name = panel.findChild<QLabel*>("sourceColourName");
     REQUIRE(label);
+    REQUIRE(name);
+    CHECK(name->isHidden() == label->isHidden());  // the row as a whole: no empty «Цвет» under an SDR video
     *hidden = label->isHidden();
     if (tip) *tip = label->toolTip();
     return label->text();
@@ -11046,4 +11049,52 @@ TEST_CASE("Source card colour row is hidden for SDR and names HLG with Dolby Vis
     CHECK(iptText == QString::fromUtf8("Dolby Vision 5 (база IPT): цвета при обработке будут неверны"));
     CHECK_FALSE(iptText.contains(QString::fromUtf8("не поддерживается")));
     CHECK(ColourRowOf(clip("wide.mkv", RawTags{9, 9, 14, 1, 0}), &hidden) == QString::fromUtf8("BT.2020 SDR"));
+}
+
+TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, notes in Russian", "[app][hdr]") {
+    auto of = [](RawTags tags, std::string_view layout = "420", std::function<void(ColourLayers&)> more = {}) {
+        ColourLayers in;
+        in.stream = in.container = tags;
+        if (more) more(in);
+        return SourceColorOf(in, layout, "hevc");
+    };
+    QString tip;
+    // the three a TB-1 source cannot get - said as wrong colours, never as a refusal
+    const QString ictcp = SourceColourText(of(RawTags{14, 9, 16, 1, 0}), &tip);
+    CHECK(ictcp == QString::fromUtf8("ICtCp (BT.2100): цвета при обработке будут неверны"));
+    CHECK(tip.contains(QString::fromUtf8("Матрица ICtCp (BT.2100) читается как BT.709 / BT.601")));
+    CHECK(SourceColourText(of(RawTags{10, 9, 14, 1, 0})) == QString::fromUtf8("BT.2020 CL: цвета при обработке будут неверны"));
+    const QString rgb = SourceColourText(of(RawTags{0, 9, 1, 2, 0}, "rgb"));  // RGB BT.2020 with an SDR curve: no «HDR» claimed
+    CHECK(rgb == QString::fromUtf8("RGB-поток HDR / BT.2020: читается как 8-битный SDR, цвета будут неверны"));
+    for (const QString& t : {ictcp, rgb}) CHECK_FALSE(t.contains(QString::fromUtf8("не поддерживается")));
+    // HDR10 is PQ of BT.2020 with its records; a P3 master is PQ with its gamut
+    const auto withLight = [](ColourLayers& in) { in.containerRecords.cll = Cll{1000, 400}; };
+    CHECK(SourceColourText(of(RawTags{9, 9, 16, 1, 0}, "420", withLight)) == QString::fromUtf8("HDR10 (PQ) · BT.2020 · MaxCLL 1000/400"));
+    CHECK(SourceColourText(of(RawTags{2, 2, 16, 1, 0}, "420", withLight)) == QString::fromUtf8("HDR10 (PQ) · BT.2020 (не указан) · MaxCLL 1000/400"));
+    CHECK(SourceColourText(of(RawTags{9, 12, 16, 1, 0}, "420", withLight)) == QString::fromUtf8("HDR (PQ) · Display P3 · MaxCLL 1000/400"));
+    // a note about an unsaid gamut keeps its words
+    SourceColourText(of(RawTags{9, 2, 1, 1, 0}), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Матрица BT.2020 при охвате не указан — принят широкий охват")));
+    // layers that differ - in Russian, no English sentence
+    ColourLayers layers;
+    layers.stream = RawTags{9, 9, 16, 1, 0};
+    layers.container = RawTags{9, 1, 16, 1, 0};
+    SourceColourText(SourceColorOf(layers, "420", "hevc"), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Контейнер размечен иначе, взяты поток или кадр (контейнер / взято): охват bt709 / bt2020")));
+    CHECK_FALSE(tip.contains(QString::fromUtf8("the container")));
+    FirstLookColor first;
+    first.how = FirstLook::Decode;
+    first.tags = RawTags{9, 12, 16, 1, 0};
+    layers.container = RawTags{};
+    layers.first = first;
+    SourceColourText(SourceColorOf(layers, "420", "hevc"), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Первый кадр и поток размечены по-разному (кадр / поток): охват smpte432 / bt2020")));
+    CHECK_FALSE(tip.contains(QString::fromUtf8("the first frame")));
+    // a failed look names what failed
+    FirstLookColor failed;
+    failed.how = FirstLook::Packet;
+    failed.error = "no video packet";
+    layers.first = failed;
+    SourceColourText(SourceColorOf(layers, "420", "ffv1"), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Первый видеопакет не прочитан")));
 }
