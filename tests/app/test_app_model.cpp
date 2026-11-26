@@ -11025,7 +11025,7 @@ TEST_CASE("Source card colour row is hidden for SDR and names HLG with Dolby Vis
           QString::fromUtf8("HDR HLG · BT.2020 · Dolby Vision 8.4 (будет снят)"));
     CHECK_FALSE(hidden);
     CHECK(tip.contains(QString::fromUtf8("Dolby Vision 8.4 снимается при любой записи")));
-    CHECK(tip.contains(QString::fromUtf8("Обработка пока читает этот ролик как SDR")));
+    CHECK(tip.contains(QString::fromUtf8("Обработка HDR и широкого охвата — в следующей версии; без стадий («только кодирование») ролик пишется как есть, с HDR")));
     CHECK(tip.contains(QString::fromUtf8("кривая arib-std-b67 (поток)")));
 
     ClipHdr pq;
@@ -11046,8 +11046,7 @@ TEST_CASE("Source card colour row is hidden for SDR and names HLG with Dolby Vis
     ipt.rpu = ipt.bl = true;
     dv5.dovi = ipt;
     const QString iptText = ColourRowOf(clip("dv5.mkv", RawTags{2, 2, 2, 2, 0}, dv5), &hidden);
-    CHECK(iptText == QString::fromUtf8("Dolby Vision 5 (база IPT): цвета при обработке будут неверны"));
-    CHECK_FALSE(iptText.contains(QString::fromUtf8("не поддерживается")));
+    CHECK(iptText == QString::fromUtf8("Dolby Vision 5 (база IPT) — не поддерживается"));  // TB-2: the refusal stands
     CHECK(ColourRowOf(clip("wide.mkv", RawTags{9, 9, 14, 1, 0}), &hidden) == QString::fromUtf8("BT.2020 SDR"));
 }
 
@@ -11061,12 +11060,11 @@ TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, n
     QString tip;
     // the three a TB-1 source cannot get - said as wrong colours, never as a refusal
     const QString ictcp = SourceColourText(of(RawTags{14, 9, 16, 1, 0}), &tip);
-    CHECK(ictcp == QString::fromUtf8("ICtCp (BT.2100): цвета при обработке будут неверны"));
+    CHECK(ictcp == QString::fromUtf8("ICtCp (BT.2100) — обработка не поддерживается"));
     CHECK(tip.contains(QString::fromUtf8("Матрица ICtCp (BT.2100) читается как BT.709 / BT.601")));
-    CHECK(SourceColourText(of(RawTags{10, 9, 14, 1, 0})) == QString::fromUtf8("BT.2020 CL: цвета при обработке будут неверны"));
+    CHECK(SourceColourText(of(RawTags{10, 9, 14, 1, 0})) == QString::fromUtf8("BT.2020 CL — обработка не поддерживается"));
     const QString rgb = SourceColourText(of(RawTags{0, 9, 1, 2, 0}, "rgb"));  // RGB BT.2020 with an SDR curve: no «HDR» claimed
-    CHECK(rgb == QString::fromUtf8("RGB-поток HDR / BT.2020: читается как 8-битный SDR, цвета будут неверны"));
-    for (const QString& t : {ictcp, rgb}) CHECK_FALSE(t.contains(QString::fromUtf8("не поддерживается")));
+    CHECK(rgb == QString::fromUtf8("RGB-поток HDR / BT.2020 — не поддерживается"));
     // HDR10 is PQ of BT.2020 with its records; a P3 master is PQ with its gamut
     const auto withLight = [](ColourLayers& in) { in.containerRecords.cll = Cll{1000, 400}; };
     CHECK(SourceColourText(of(RawTags{9, 9, 16, 1, 0}, "420", withLight)) == QString::fromUtf8("HDR10 (PQ) · BT.2020 · MaxCLL 1000/400"));
@@ -11145,7 +11143,7 @@ TEST_CASE("Colour row: Dolby Vision from an RPU, the RGB matrix on YUV, layers o
     };
     CHECK(SourceColourText(withRpu(1, false)) == QString::fromUtf8("HDR (PQ) · BT.2020 · Dolby Vision 8 (будет снят)"));
     CHECK(SourceColourText(withRpu(0, false)) == QString::fromUtf8("HDR (PQ) · BT.2020 · Dolby Vision неизвестного профиля (будет снят)"));
-    CHECK(SourceColourText(withRpu(0, true)) == QString::fromUtf8("Dolby Vision 5 (база IPT): цвета при обработке будут неверны"));
+    CHECK(SourceColourText(withRpu(0, true)) == QString::fromUtf8("Dolby Vision 5 (база IPT) — не поддерживается"));
     {  // a base nobody names, no colour tags: taken for IPT - said so
         ColourLayers in;
         DoviConf d;
@@ -11154,7 +11152,7 @@ TEST_CASE("Colour row: Dolby Vision from an RPU, the RGB matrix on YUV, layers o
         in.dovi = d;
         QString tip;
         CHECK(SourceColourText(SourceColorOf(in, "420", "hevc"), &tip) ==
-              QString::fromUtf8("Dolby Vision 8.3 (база не распознана, принята IPT): цвета при обработке будут неверны"));
+              QString::fromUtf8("Dolby Vision 8.3 (база не распознана, принята IPT) — не поддерживается"));
         CHECK(tip.contains(QString::fromUtf8("База Dolby Vision не распознана, а матрица и кривая не указаны — принята база IPT")));
         // a record that names no base (compatibility 0 of a profile with one): the class from the tags, said as the record's lack
         ColourLayers shortRecord;
@@ -11176,7 +11174,7 @@ TEST_CASE("Colour row: Dolby Vision from an RPU, the RGB matrix on YUV, layers o
     ColourLayers yuv;
     yuv.stream = yuv.container = RawTags{0, 9, 16, 1, 0};
     QString tip;
-    CHECK(SourceColourText(SourceColorOf(yuv, "420", "hevc"), &tip) == QString::fromUtf8("Матрица RGB при YUV-раскладке (HDR / BT.2020): цвета будут неверны"));
+    CHECK(SourceColourText(SourceColorOf(yuv, "420", "hevc"), &tip) == QString::fromUtf8("Матрица RGB при YUV-раскладке (HDR / BT.2020) — не поддерживается"));
     CHECK(tip.contains(QString::fromUtf8("Поток YUV помечен матрицей RGB (0)")));
     CHECK_FALSE(tip.contains(QString::fromUtf8("8-битный")));
     // colr says the BT.2020 matrix, the VUI only BT.709 primaries and curve: both classes as the row says them
@@ -11185,4 +11183,107 @@ TEST_CASE("Colour row: Dolby Vision from an RPU, the RGB matrix on YUV, layers o
     layers.stream = RawTags{2, 1, 1, 1, 0};
     SourceColourText(SourceColorOf(layers, "420", "hevc"), &tip);
     CHECK(tip.contains(QString::fromUtf8("Контейнер (SDR, матрица BT.2020) и параметры кодека (SDR) размечены по-разному")));
+}
+
+// ---- TASK-0079 (HDR step TB-2): the stop in the GUI ------------------------------------------------------------------------------
+
+namespace {
+std::filesystem::path PqClip(const std::filesystem::path& dir, const char* name, RawTags tags) {
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 64;
+    spec.height = 48;
+    spec.pixFmt = "yuv420p10le";
+    spec.color = tags;
+    return WriteClip(dir / name, spec);
+}
+QPushButton* ButtonStarting(QWidget& w, const QString& text) {
+    for (QPushButton* b : w.findChildren<QPushButton*>())
+        if (b->text().startsWith(text)) return b;
+    return nullptr;
+}
+}  // namespace
+
+TEST_CASE("A stopped HDR source gives a Russian plan error and turns off Process, the stage run and the preview", "[app][hdr]") {
+    App();
+    const auto d = Dir("hdr_stop");
+    AppModel model(true);
+    model.openVideo(Q(PqClip(d, "pq.mkv", RawTags{9, 9, 16, 1, 0})));
+    for (const char* s : {"depth", "flow", "nr", "fg", "scenes"}) model.setStageEnabled(s, false);
+    model.setStageEnabled("upscale", true);
+    model.setStageParams("upscale", {{"backend", "bicubic"}});
+    model.refreshPlan();
+    CHECK(model.colourStop() == ColourStop::NotYet);
+    CHECK(model.colourStopSaid());
+    CHECK(model.planError().startsWith(QString::fromUtf8("Обработка ролика HDR (PQ) появится в следующей версии")));
+    CHECK(model.planError().contains(QString::fromUtf8("«Обработать» без стадий («только кодирование») запишет ролик как есть, с HDR")));
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    QPushButton* process = ButtonStarting(panel, QString::fromUtf8("Обработать"));
+    REQUIRE(process);
+    CHECK_FALSE(process->isEnabled());
+    CHECK(process->text() == QString::fromUtf8("Обработать"));
+    QPushButton* run = ButtonStarting(panel, QString::fromUtf8("Запустить отдельно"));
+    REQUIRE(run);
+    CHECK_FALSE(run->isEnabled());
+    PreviewRunner runner(model, queue);
+    CHECK(runner.appBlock(nullptr) == QString::fromUtf8("Превью недоступно: обработка HDR — в следующей версии"));
+}
+
+TEST_CASE("An HDR source with every stage off can be passed through but no stage card runs; a plan note shows the soft label", "[app][hdr]") {
+    App();
+    const auto d = Dir("hdr_passthrough");
+    AppModel model(true);
+    model.openVideo(Q(PqClip(d, "pq.mkv", RawTags{2, 9, 16, 1, 0})));  // no matrix: BT.2020 assumed, the tag filled
+    for (const char* s : {"depth", "flow", "nr", "fg", "scenes", "upscale"}) model.setStageEnabled(s, false);
+    model.refreshPlan();
+    CHECK(model.planError().isEmpty());
+    CHECK(model.colourStop() == ColourStop::NotYet);  // the stop stands with a clean plan
+    CHECK_FALSE(model.colourStopSaid());
+    const QStringList notes = model.planNotes();
+    CHECK(notes.contains(QString::fromUtf8("Матрица или охват не указаны — принят BT.2020")));
+    CHECK(notes.contains(QString::fromUtf8("Неуказанные теги цвета записываются по классу источника (BT.2020), чтобы плееры узнали HDR")));
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    QPushButton* process = ButtonStarting(panel, QString::fromUtf8("Обработать"));
+    REQUIRE(process);
+    CHECK(process->isEnabled());
+    CHECK(process->text() == QString::fromUtf8("Обработать · только кодирование"));
+    auto* label = panel.findChild<QLabel*>("outNotes");
+    REQUIRE(label);
+    CHECK_FALSE(label->isHidden());
+    CHECK(label->text().contains(QString::fromUtf8("принят BT.2020")));
+    QPushButton* run = ButtonStarting(panel, QString::fromUtf8("Запустить отдельно"));
+    REQUIRE(run);
+    CHECK_FALSE(run->isEnabled());
+    CHECK(run->toolTip().contains(QString::fromUtf8("Обработка ролика HDR (PQ) появится в следующей версии")));
+    PreviewRunner runner(model, queue);
+    CHECK(runner.appBlock(nullptr) == QString::fromUtf8("Превью недоступно: обработка HDR — в следующей версии"));
+    // an SDR source: no notes, the label hidden, the run on
+    AppModel sdr(true);
+    sdr.openVideo(Q(PqClip(d, "sdr.mkv", RawTags{1, 1, 1, 1, 0})));
+    for (const char* s : {"depth", "flow", "nr", "fg", "scenes", "upscale"}) sdr.setStageEnabled(s, false);
+    sdr.refreshPlan();
+    CHECK(sdr.planNotes().isEmpty());
+    CHECK(sdr.colourStop() == ColourStop::None);
+    ProjectPanel sdrPanel(sdr, queue);
+    sdrPanel.refresh();
+    CHECK(sdrPanel.findChild<QLabel*>("outNotes")->isHidden());
+}
+
+TEST_CASE("Passthrough notes follow the project's encoder: hevc_nvenc gives no 8-bit warning, h264_nvenc does", "[app][hdr]") {
+    App();
+    const auto d = Dir("hdr_encoder_notes");
+    AppModel model(true);
+    model.openVideo(Q(PqClip(d, "pq.mkv", RawTags{9, 9, 16, 1, 0})));
+    for (const char* s : {"depth", "flow", "nr", "fg", "scenes", "upscale"}) model.setStageEnabled(s, false);
+    const QString eight = QString::fromUtf8("HDR в 8 битах: плавные переходы станут ступеньками — лучше HEVC или AV1 10 бит, или ProRes");
+    model.setEncode("hevc_nvenc", {});
+    model.refreshPlan();
+    CHECK_FALSE(model.planNotes().contains(eight));
+    model.setEncode("h264_nvenc", {});
+    model.refreshPlan();
+    CHECK(model.planNotes().contains(eight));
 }

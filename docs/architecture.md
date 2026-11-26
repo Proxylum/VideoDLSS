@@ -798,6 +798,13 @@ dlssvid process ── ProcessRunner::RunProcess ── depth ─▶ flow ─▶
   8 бит, но замер (TASK-0035, `docs/benchmarks.md` «Разрядность по пассам») этого не подтверждает: пологая 10-битная
   рампа проходит SR, NR и FG с шагом в один 10-битный код, 8-битных ступеней нет — поэтому HDR-режим не включён;
   тест `tests/integration/test_precision.cpp` сторожит это на каждом прогоне с GPU.
+- **HDR-источники (TASK-0075; TB-1 — TASK-0078, TB-2 — TASK-0079).** `VideoStreamInfo::color` (`core/io/SourceColor`) говорит,
+  что за цвет у источника: слои (контейнер до `find_stream_info`, параметры кодека, первый кадр или пакет), класс, Dolby Vision,
+  записи HDR, заметки. `ResolveColor` (`core/convert/ColorPlan`) строит из него план: у SDR на legacy-пути всё как раньше; у
+  остального обработка остановлена (`ColourStop`, роли `Colour/Guide/ResultEncode` бросают `ColourUnsupported`, `Prepare` и
+  команды отказывают до хэша), а сквозной режим пишет эффективные теги и записи (`PlanPassthroughColour`,
+  `core/pipeline/ResultColour`; `VideoEncoder::Options::hdr`, `ContainerColorCapsFor`; сверка — `ResultExpectation::color`).
+  Декодер следит за классом кадров (`ClassChange`). Вьюпорт и миниатюры читают по-прежнему (`View()`).
 - **Ориентация источника (TASK-0072).** Ролик с телефона хранится альбомным с матрицей дисплея (MP4 / MOV `tkhd`,
   проекция Matroska) или, у старых мультиплексоров, с тегом `rotate`; плееры показывают его повёрнутым. `VideoDecoder`
   читает ориентацию при открытии (матрица побеждает тег; `OrientationFromDisplayMatrix` повторяет выбор фильтров ffmpeg:
