@@ -340,7 +340,7 @@ for H.264 / HEVC / ProRes with a hint of HDR or BT.2020 (or a raw `.hevc` / `.h2
 container does not say all three tags - a ProRes frame header always does), and the first packet is read for PQ in Matroska / WebM
 (HDR10+); once per file and modification time in a process.
 
-**HDR sources: passthrough as they are, processing with a later version** (TASK-0079). Processing (any stage, a stage command,
+**HDR sources: passthrough as they are, processing with a later version** (TASK-0079; ICtCp / BT.2020 CL: not processed in later versions either). Processing (any stage, a stage command,
 `export`, the GUI's stage runs and preview) of anything but an SDR source - HDR PQ / HLG, wide gamut, a log curve, the BT.2020 matrix
 under SDR primaries, ICtCp / BT.2020 CL, a file whose layers disagree (SDR frame headers under a PQ `colr`) - is refused before
 anything is hashed, saying what the source is and that `--passthrough` (the GUI's «Обработать · только кодирование», every stage

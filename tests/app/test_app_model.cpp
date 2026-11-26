@@ -11432,6 +11432,9 @@ TEST_CASE("Passthrough notes follow the project's encoder: hevc_nvenc gives no 8
     model.setEncode("h264_nvenc", {});
     model.refreshPlan();
     CHECK(model.planNotes().contains(eight));
+    model.setEncode("hevc_nvenc", {}, OutputFormatRequest{8, "auto"});  // the project's output format reaches the plan
+    model.refreshPlan();
+    CHECK(model.planNotes().contains(eight));
     // a full-range source into ProRes: the range noted in Russian
     AppModel full(true);
     full.openVideo(Q(PqClip(d, "full.mkv", RawTags{9, 9, 16, 2, 0})));

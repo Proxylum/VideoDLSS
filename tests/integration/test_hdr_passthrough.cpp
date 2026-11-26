@@ -206,6 +206,9 @@ TEST_CASE("MKV keeps no light level with MaxFALL 0 and none is expected back", "
     CHECK_FALSE(Summarize(out).hdr.cll);  // matroskadec makes none of MaxCLL alone
     CHECK(Has(r.warnings, "the light level MaxCLL 1000 / MaxFALL 0: matroska's readers keep one only with both values"));
     CHECK(HasKey(PlanProcess(Passthrough(in, out, "ffv1")).warnings, "encode.cll_invalid"));
+    // MaxCLL 0 with a MaxFALL: dropped by matroskadec too - noted
+    hdr.light = Cll{0, 400};
+    CHECK(HasKey(PlanProcess(Passthrough(PqFfv1(dir, "cll0.mov", hdr), dir / "cll0.mkv", "ffv1")).warnings, "encode.cll_invalid"));
     // 0 / 0 (nothing known): no note, published, none in MKV; kept in MOV
     hdr.light = Cll{0, 0};
     const auto zero = PqFfv1(dir, "zero.mov", hdr);
@@ -244,6 +247,43 @@ TEST_CASE("Mastering and light level outside MP4 MOV fields are noted and not wr
         REQUIRE(mp4.expect);
         CHECK_FALSE(mp4.expect->mdcv);
         CHECK_FALSE(mp4.expect->cll);
+    }
+    {  // clli at its edge: 65535 written and read back, 65536 noted and not written
+        for (const auto& [cll, fits] : {std::pair{Cll{65535, 400}, true}, std::pair{Cll{65536, 400}, false}}) {
+            INFO("MaxCLL " << cll.maxCll);
+            ClipHdr h;
+            h.light = cll;
+            const auto name = "cll" + std::to_string(cll.maxCll);
+            const auto src = PqFfv1(dir, (name + ".mkv").c_str(), h);
+            CHECK(HasKey(PlanProcess(Passthrough(src, dir / (name + ".mov"), "prores_ks")).warnings, "encode.cll_invalid") == !fits);
+            CHECK_NOTHROW(RunProcess(Passthrough(src, dir / (name + ".mov"), "prores_ks")));
+            const StreamSummary back = Summarize(dir / (name + ".mov"));
+            CHECK(back.hdr.cll.has_value() == fits);
+            if (fits && back.hdr.cll) CHECK(*back.hdr.cll == cll);
+        }
+    }
+    for (int field = 0; field < 8; ++field) {  // each coordinate of the primaries and the white point past 16 bits, alone
+        INFO("coordinate " << field);
+        Mdcv one = Mastering1000();
+        Ratio& r = field < 6 ? one.primaries[field / 2][field % 2] : one.white[field - 6];
+        r = {131071, 100000};
+        ClipHdr h;
+        h.mastering = one;
+        VideoDecoder probe(PqFfv1(dir, ("coord" + std::to_string(field) + ".mkv").c_str(), h), VideoDecoder::Probe());
+        const PassthroughColour mov = PlanPassthroughColour(probe.Info(), "prores_ks", {}, "a.mov", "t");
+        CHECK(HasKey(mov.encodeNotes, "encode.mdcv_unfit"));
+        CHECK_FALSE(mov.meta.mdcv);
+    }
+    {  // a negative minimum luminance (from a MOV: mov.c reads it so) - outside the u32
+        ClipSpec neg = Small("prores_ks", "yuv422p10le");
+        neg.color = Tags(9, 9, 16);
+        Mdcv m = Mastering1000();
+        m.minLum = {-1, 10000};
+        neg.hdr.mastering = m;
+        VideoDecoder probe(WriteClip(dir / "neg.mov", neg), VideoDecoder::Probe());
+        REQUIRE(probe.Info().color.hdr.mdcv);
+        REQUIRE(probe.Info().color.hdr.mdcv->minLum.Value() < 0);
+        CHECK(HasKey(PlanPassthroughColour(probe.Info(), "prores_ks", {}, "a.mov", "t").encodeNotes, "encode.mdcv_unfit"));
     }
     {  // MaxFALL alone past 16 bits
         ClipHdr fall;
@@ -460,6 +500,24 @@ TEST_CASE("A transfer H.273 leaves undefined (19 in Matroska) reads as unspecifi
     CHECK_FALSE(probe.Info().color.Note("source.layers_differ"));
 }
 
+TEST_CASE("A MOV of a source with an unspecified tag left writes no colr and expects none; it publishes", "[integration][hdr][passthrough][result]") {
+    const auto dir = Dir("no_colr");
+    ClipSpec s = Small("prores_ks", "yuv422p10le");
+    s.color = RawTags{2, 2, 16, 1, 0};
+    s.frameColor = [](int64_t) { return RawTags{2, 2, 1, 1, 0}; };
+    const auto in = WriteClip(dir / "mixed.mkv", s);
+    VideoDecoder probe(in, VideoDecoder::Probe());
+    REQUIRE(probe.Info().color.Note("source.layers_differ"));
+    const PassthroughColour pc = PlanPassthroughColour(probe.Info(), "prores_ks", {}, "a.mov", "t");
+    REQUIRE(pc.expect);
+    CHECK(pc.expect->matrix == 2);
+    CHECK(pc.expect->primaries == 2);
+    CHECK(pc.expect->trc == 2);
+    CHECK_FALSE(pc.expect->checkRange);
+    CHECK_NOTHROW(RunProcess(Passthrough(in, dir / "pt.mov", "prores_ks")));
+    CHECK(std::filesystem::exists(dir / "pt.mov"));
+}
+
 TEST_CASE("Wide gamut SDR and a log curve pass through with their tags and without stale HDR records; into AVI they are refused", "[integration][hdr][passthrough]") {
     const auto dir = Dir("wide_log");
     ClipHdr stale;  // a container's records of an HDR master the SDR grade kept
@@ -473,6 +531,7 @@ TEST_CASE("Wide gamut SDR and a log curve pass through with their tags and witho
         REQUIRE_FALSE(probe.Info().color.Hdr());
         REQUIRE_FALSE(probe.Info().color.legacyPath);
         const auto out = dir / (std::to_string(tags.trc) + "_out.mkv");
+        CHECK_FALSE(HasKey(PlanProcess(Passthrough(in, dir / "o.mp4", "h264_nvenc")).warnings, "encode.hdr_8bit"));  // no HDR to band
         CHECK_NOTHROW(RunProcess(Passthrough(in, out, "ffv1")));
         const StreamSummary s = Summarize(out);
         CHECK(s.colorSpace == 9);
@@ -533,6 +592,17 @@ TEST_CASE("CheckEncodedResult names a colour tag or HDR metadata that differs", 
     hdr.light = Cll{1000, 400};
     const auto file = PqFfv1(dir, "f.mkv", hdr);
     ResultExpectation e{64, 48, -1, false, PixelAspect{}};
+    {  // a file without them
+        const auto bare = PqFfv1(dir, "bare.mkv");
+        ResultColor want;
+        want.mdcv = Mastering1000();
+        e.color = want;
+        CHECK(CheckEncodedResult(bare, e) == "it has no mastering display metadata, it was written");
+        want.mdcv.reset();
+        want.cll = Cll{1000, 400};
+        e.color = want;
+        CHECK(CheckEncodedResult(bare, e) == "it has no content light level, MaxCLL 1000 was written");
+    }
     ResultColor c;
     c.matrix = 9;
     c.primaries = 9;
@@ -758,6 +828,19 @@ TEST_CASE("A mastering display Matroska's reader would drop is noted and not exp
     REQUIRE(Summarize(dir / "zero.mkv").hdr.mdcv);
     CHECK_FALSE(Summarize(dir / "zero.mkv").hdr.mdcv->hasPrimaries);
     CHECK(Summarize(dir / "zero.mkv").hdr.mdcv->hasLuminance);
+    for (int field = 0; field < 8; ++field) {  // each coordinate 0, alone: the primaries' half dropped
+        INFO("coordinate " << field);
+        Mdcv one = Mastering1000();
+        (field < 6 ? one.primaries[field / 2][field % 2] : one.white[field - 6]) = {0, 50000};
+        s.hdr.mastering = one;
+        VideoDecoder probe(WriteClip(dir / ("zero" + std::to_string(field) + ".mov"), s), VideoDecoder::Probe());
+        const PassthroughColour mkv = PlanPassthroughColour(probe.Info(), "ffv1", {}, "a.mkv", "t");
+        CHECK(HasKey(mkv.encodeNotes, "encode.mdcv_invalid"));
+        REQUIRE(mkv.expect);
+        REQUIRE(mkv.expect->mdcv);
+        CHECK_FALSE(mkv.expect->mdcv->hasPrimaries);
+        CHECK(mkv.expect->mdcv->hasLuminance);
+    }
     zero.maxLum = {0, 1};
     s.hdr.mastering = zero;
     const ProcessResult both = RunProcess(Passthrough(WriteClip(dir / "both.mov", s), dir / "both.mkv", "ffv1"));
