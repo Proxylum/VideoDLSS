@@ -788,6 +788,9 @@ void VideoDecoder::ReadColour(bool look, const RawTags& container) {
 }
 
 std::string ClassChangeText(const ColorClassChange& ch) {
+    if (ch.index == 0)  // no first frame was looked at (tags that say nothing of HDR): the reading was wrong from the start
+        return "the frames are " + std::string(ClassWords(ch.to)) + " (" + ColourWords(ch.tags) + ") from the first one, the source was read by its tags as " +
+               std::string(ClassWords(ch.from)) + ": the result is written with that colour - its colours are wrong";
     return "frame " + std::to_string(ch.index) + " and on are " + std::string(ClassWords(ch.to)) + " (" + ColourWords(ch.tags) +
            "), the source was read as " + std::string(ClassWords(ch.from)) +
            ": the frames after the change are written with the source's colour - cut the video there to keep each part right";

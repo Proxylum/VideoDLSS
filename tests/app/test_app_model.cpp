@@ -11069,6 +11069,25 @@ TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, n
     CHECK(ColourStopText(ColourStop::NotYet, log).startsWith(QString::fromUtf8("Обработка ролика с лог-кривой появится в следующей версии")));
     CHECK(ColourStopText(ColourStop::NotYet, log).endsWith(QString::fromUtf8("как есть, с его тегами цвета")));
     CHECK(ColourStopShortText(ColourStop::NotYet, log) == QString::fromUtf8("обработка лог-кривой — в следующей версии"));
+    CHECK(ColourStopText(ColourStop::NoContainerTags, log)
+              .startsWith(QString::fromUtf8("Этот контейнер не хранит теги цвета: ролик с лог-кривой пишется только в .mp4, .mov или .mkv")));
+    CHECK(ColourStopText(ColourStop::NoContainerTags, of(RawTags{9, 1, 1, 1, 0})).contains(QString::fromUtf8("ролик SDR с матрицей BT.2020 пишется")));
+    // a Dolby Vision base nobody names, no matrix nor transfer said: taken for IPT - said as taken, as the source row says it
+    const SourceColor assumed = of(RawTags{2, 2, 2, 1, 0}, "420", [](ColourLayers& in) {
+        DoviConf d;
+        d.profile = 8;
+        d.blCompat = 3;
+        in.dovi = d;
+    });
+    REQUIRE(assumed.iptAssumed);
+    CHECK(ColourStopText(ColourStop::DolbyVisionIpt, assumed).contains(QString::fromUtf8("база не распознана, а матрица и кривая не указаны — принята база IPT")));
+    CHECK_FALSE(ColourStopText(ColourStop::DolbyVisionIpt, assumed).contains(QString::fromUtf8("с базой IPT не поддерживается")));
+    // every encode note has its Russian text (a key renamed in the core would show the English one)
+    for (const char* key : {"encode.tags_filled", "encode.hdr_8bit", "encode.range_lost", "encode.mdcv_lost", "encode.mdcv_invalid", "encode.cll_invalid",
+                            "encode.no_amve"}) {
+        INFO(key);
+        CHECK(PlanNoteText(log, PlanNote{key, "warning", "encode", "english"}) != QString("english"));
+    }
     CHECK(SourceColourText(of(RawTags{10, 9, 14, 1, 0})) == QString::fromUtf8("BT.2020 CL — обработка не поддерживается"));
     const QString rgb = SourceColourText(of(RawTags{0, 9, 1, 2, 0}, "rgb"));  // RGB BT.2020 with an SDR curve: no «HDR» claimed
     CHECK(rgb == QString::fromUtf8("RGB-поток HDR / BT.2020 — не поддерживается"));
@@ -11234,6 +11253,12 @@ TEST_CASE("A stopped HDR source gives a Russian plan error and turns off Process
     QPushButton* run = ButtonStarting(panel, QString::fromUtf8("Запустить отдельно"));
     REQUIRE(run);
     CHECK_FALSE(run->isEnabled());
+    for (QPushButton* b : RunAloneButtons(panel)) CHECK_FALSE(b->isEnabled());
+    StageCard* upscale = CardOf(panel, "upscale");
+    REQUIRE(upscale);
+    emit upscale->runRequested("upscale");  // a press that came before the refresh: nothing queued
+    CHECK_FALSE(queue.mainBusy());
+    CHECK(model.cardState("upscale").state == QString::fromUtf8("обработка HDR — в следующей версии"));
     PreviewRunner runner(model, queue);
     const PreviewRunner::Availability preview = runner.availability({PreviewRunner::Kind::Frame, 0});
     CHECK_FALSE(preview.ok);
@@ -11282,6 +11307,8 @@ TEST_CASE("An HDR source with every stage off can be passed through but no stage
     ProjectPanel sdrPanel(sdr, queue);
     sdrPanel.refresh();
     CHECK(sdrPanel.findChild<QLabel*>("outNotes")->isHidden());
+    CHECK_FALSE(RunAloneButtons(sdrPanel).empty());
+    for (QPushButton* b : RunAloneButtons(sdrPanel)) CHECK(b->isEnabled());
 }
 
 TEST_CASE("A wide gamut SDR source is stopped in its own words: no HDR promised, its filled tags named", "[app][hdr]") {
@@ -11351,6 +11378,9 @@ TEST_CASE("The encode card names the reason a plan was refused: a container with
     REQUIRE(process);
     CHECK_FALSE(process->isEnabled());
     CHECK(dvPanel.findChild<QLabel*>("encodeState")->text() == QString::fromUtf8("цвет источника не поддерживается"));
+    dv.setStageEnabled("upscale", true);  // a stage on: its card's line says the refusal (an off one says it is off)
+    dv.refreshPlan();
+    CHECK(dv.cardState("upscale").state == QString::fromUtf8("цвет источника не поддерживается"));
 }
 
 TEST_CASE("Passthrough notes follow the project's encoder: hevc_nvenc gives no 8-bit warning, h264_nvenc does", "[app][hdr]") {
@@ -11366,4 +11396,11 @@ TEST_CASE("Passthrough notes follow the project's encoder: hevc_nvenc gives no 8
     model.setEncode("h264_nvenc", {});
     model.refreshPlan();
     CHECK(model.planNotes().contains(eight));
+    // a full-range source into ProRes: the range noted in Russian
+    AppModel full(true);
+    full.openVideo(Q(PqClip(d, "full.mkv", RawTags{9, 9, 16, 2, 0})));
+    for (const char* s : {"depth", "flow", "nr", "fg", "scenes", "upscale"}) full.setStageEnabled(s, false);
+    full.setEncode("prores_ks", {});
+    full.refreshPlan();
+    CHECK(full.planNotes().contains(QString::fromUtf8("Полный диапазон: результат его не хранит — плееры и декодеры прочтут ограниченный")));
 }

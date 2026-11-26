@@ -17,6 +17,18 @@ bool PrimariesHold(const Mdcv& m) {
 }
 bool LuminanceHolds(const Mdcv& m) { return m.maxLum.Value() > m.minLum.Value() && m.minLum.Value() >= 0; }
 
+// What MP4 / MOV's boxes hold (movenc: mdcv's coordinates in 16 bits of 1/50000, its luminance in 32 bits of 1/10000; clli in 16 bits):
+// a value outside them is written as its low bits - a record from Matroska's floats in other units (x265's 34000 for 0.68) included
+bool Fits(const Ratio& r, int per, double top) {
+    const double v = r.Value() * per;
+    return v >= 0 && v <= top + 0.5;
+}
+bool MdcvFitsBox(const Mdcv& m) {
+    for (const auto& xy : m.primaries)
+        if (!Fits(xy[0], 50000, 65535) || !Fits(xy[1], 50000, 65535)) return false;
+    return Fits(m.white[0], 50000, 65535) && Fits(m.white[1], 50000, 65535) && Fits(m.maxLum, 10000, 4294967295.0) && Fits(m.minLum, 10000, 4294967295.0);
+}
+
 std::string TagWords(const ColorTags& t) {
     return "matrix " + MatrixName(t.matrix) + ", primaries " + PrimariesName(t.primaries) + ", transfer " + TrcName(t.transfer);
 }
@@ -64,6 +76,7 @@ PassthroughColour PlanPassthroughColour(const VideoStreamInfo& info, const std::
         note("encode.range_lost", "warning", "full range: ProRes keeps no range - decoders will read it as limited");
     else if (pc.tags.range == 2 && !expect.checkRange)
         note("encode.range_lost", "warning", "full range: " + container + " with " + codec + " keeps no range - players will read it as limited");
+    const bool matroska = caps.muxer == "matroska" || caps.muxer == "webm", box = caps.muxer == "mp4" || caps.muxer == "mov";
     if (pc.meta.mdcv) {
         Mdcv m = *pc.meta.mdcv;
         const bool whole = m.hasPrimaries && m.hasLuminance;
@@ -71,8 +84,13 @@ PassthroughColour PlanPassthroughColour(const VideoStreamInfo& info, const std::
             note("encode.mdcv_lost", "warning",
                  "the mastering display says only its " + std::string(m.hasPrimaries ? "primaries" : "luminance") + ": " + container +
                      " writes one only whole - not carried");
+        } else if (caps.mdcv && box && !MdcvFitsBox(m)) {
+            note("encode.mdcv_invalid", "warning",
+                 "the mastering display has a value outside " + container + "'s mdcv fields (a coordinate above 1.31, a luminance below 0 or above "
+                 "429496 cd/m2) - not carried");
+            pc.meta.mdcv.reset();  // not written: the box would hold its low bits
         } else if (caps.mdcv) {
-            if (caps.muxer == "matroska" || caps.muxer == "webm") {
+            if (matroska) {
                 const bool primaries = m.hasPrimaries && !PrimariesHold(m), luminance = m.hasLuminance && !LuminanceHolds(m);
                 if (primaries || luminance)
                     note("encode.mdcv_invalid", "warning",
@@ -84,8 +102,18 @@ PassthroughColour PlanPassthroughColour(const VideoStreamInfo& info, const std::
             if (m.hasPrimaries || m.hasLuminance) expect.mdcv = m;
         }
     }
-    if (pc.meta.cll && caps.cll && !((caps.muxer == "matroska" || caps.muxer == "webm") && (pc.meta.cll->maxCll == 0 || pc.meta.cll->maxFall == 0)))
-        expect.cll = pc.meta.cll;  // (Matroska's reader keeps a light level only when both values are said)
+    if (pc.meta.cll && caps.cll) {
+        const Cll l = *pc.meta.cll;
+        const std::string said = "the light level MaxCLL " + std::to_string(l.maxCll) + " / MaxFALL " + std::to_string(l.maxFall);
+        if (box && (l.maxCll > 65535 || l.maxFall > 65535)) {
+            note("encode.cll_invalid", "warning", said + " does not fit " + container + "'s clli fields (16 bits) - not carried");
+            pc.meta.cll.reset();
+        } else if (matroska && (l.maxCll == 0) != (l.maxFall == 0)) {  // both 0 say nothing: nothing lost
+            note("encode.cll_invalid", "warning", said + ": " + container + "'s readers keep one only with both values - lost on reading");
+        } else if (!(matroska && l.maxCll == 0)) {
+            expect.cll = l;
+        }
+    }
     if (pc.meta.amve) {
         if (!caps.amve)
             note("encode.no_amve", "note", "the ambient viewing environment: " + container + " has no place for it - not carried");

@@ -19,6 +19,7 @@
 #include "stages/nr/INrBackend.h"
 #include "stages/upscale/IUpscaler.h"
 #include "util/Error.h"
+#include "util/Log.h"
 #include "util/Sha256.h"
 
 namespace dlssvid {
@@ -128,6 +129,7 @@ std::string Sha256FileCached(const std::filesystem::path& path) {
     const auto settled = [](const Entry& c) { return c.hashedAt - c.mtime > std::chrono::seconds(2); };
     if (it != cache.end() && it->second.size == size && it->second.mtime == mtime && settled(it->second)) return it->second.hash;
     const auto hashedAt = std::filesystem::file_time_type::clock::now();  // before the read: a write during it counts as after
+    Log()->debug("hashing {} ({} bytes)", abs.string(), size);
     Entry e{size, mtime, hashedAt, Sha256File(abs)};
     cache[abs.wstring()] = e;
     return e.hash;

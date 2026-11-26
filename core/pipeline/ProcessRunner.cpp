@@ -1504,7 +1504,7 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
     }
     // TASK-0074: a colour pass of a stage off is not the result - also not one of a turned source's stored frame (TASK-0072 refused that)
     plan.finalPass = ProjectedFinalPass(state);
-    if (plan.finalPass.empty()) {  // TASK-0079: no colour pass - the source is passed through: what its encoding loses
+    if (plan.finalPass.empty() && options.encode) {  // TASK-0079: no colour pass - the source is passed through: what its encoding loses
         const PassthroughColour pc = PlanPassthroughColour(pr.info, options.codec, options.outputFormat, options.output, "process: " + options.input.string());
         plan.warnings.insert(plan.warnings.end(), pc.encodeNotes.begin(), pc.encodeNotes.end());
     }

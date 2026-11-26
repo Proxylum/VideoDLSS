@@ -351,11 +351,12 @@ mastering display, light level and ambient viewing environment where the contain
 Matroska: MasteringMetadata, MaxCLL / MaxFALL, no ambient viewing environment); the result check reads them back. Notes in the plan
 (`process --plan`), the result and the GUI's output card say what is lost or assumed: Dolby Vision's RPU, HDR10+, 8 bits of HDR
 (banding), a full range ProRes keeps in no container (FFmpeg's decoder says limited) and a MOV of FFV1 or another encoder cannot
-keep, a half mastering display MP4 / MOV cannot write, a mastering half Matroska's readers drop (a coordinate 0, max luminance not
-above min), an ambient viewing environment in Matroska. A Dolby Vision IPT base and RGB HDR are refused in every mode; a non-SDR
+keep, a half mastering display MP4 / MOV cannot write, a mastering display or light level outside MP4 / MOV's fields (not written), a
+mastering half or a light level with one value 0 Matroska's readers drop, an ambient viewing environment in Matroska. A Dolby Vision IPT base and RGB HDR are refused in every mode; a non-SDR
 source into a container without colour tags (AVI, `.m4v`, MPEG-TS) is refused before the file is made (with every stage off, before
 the passes' folder). A video whose frames turn another colour class part way (an SDR part
-joined to a PQ one) is warned of in the result with the frame number. The HDR10 records reach the container only: FFmpeg 7.1.1's
+joined to a PQ one) is warned of in the result with the frame number; frames of another class from the first one (an HDR transfer in
+an SEI under SDR tags) are warned of as read wrong. The HDR10 records reach the container only: FFmpeg 7.1.1's
 NVENC writes no SEI.
 
 Paths may contain any letters: `dlssvid` and `dlssvid-gui` run with UTF-8 as their code page. The CLI prints UTF-8,

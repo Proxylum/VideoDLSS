@@ -176,13 +176,16 @@ QString ColourStopText(ColourStop stop, const SourceColor& c) {
         case ColourStop::Matrix:
             return Tr("Матрица %1: обработка не поддерживается. %2").arg(MatrixText(c.effective.matrix), passthrough);
         case ColourStop::DolbyVisionIpt:
-            return Tr("Dolby Vision %1 с базой IPT не поддерживается: без RPU её цвета неверны — ни обработка, ни запись как есть").arg(DoviName(c));
+            return c.iptAssumed ? Tr("Dolby Vision %1: база не распознана, а матрица и кривая не указаны — принята база IPT; без RPU её цвета неверны — "
+                                     "ни обработка, ни запись как есть")
+                                      .arg(DoviName(c))
+                                : Tr("Dolby Vision %1 с базой IPT не поддерживается: без RPU её цвета неверны — ни обработка, ни запись как есть").arg(DoviName(c));
         case ColourStop::RgbHdr:
             return c.rgbLayout ? Tr("RGB-поток HDR / BT.2020 не поддерживается: он читается как 8-битный SDR — ни обработка, ни запись как есть")
                                : Tr("Поток YUV помечен матрицей RGB: ни одна матрица YUV к нему не подходит — ни обработка, ни запись как есть");
         case ColourStop::NoContainerTags:  // the GUI keeps the project's result extension: it is set with the project (project --result)
             return Tr("Этот контейнер не хранит теги цвета: ролик %1 пишется только в .mp4, .mov или .mkv — укажите такой результат проекта")
-                .arg(ClassText(c.cls, c.effective.primaries));
+                .arg(ClipClassText(c));
     }
     return QString();
 }
@@ -199,7 +202,10 @@ QString PlanNoteText(const SourceColor& c, const PlanNote& n) {
     if (n.key == "encode.range_lost") return Tr("Полный диапазон: результат его не хранит — плееры и декодеры прочтут ограниченный");
     if (n.key == "encode.mdcv_lost") return Tr("Данные мастеринга неполные, а этот контейнер пишет их только целиком — они не перенесутся");
     if (n.key == "encode.mdcv_invalid")
-        return Tr("Часть данных мастеринга неверна (нулевая координата или яркость max не выше min) — читатели этого контейнера её отбросят");
+        return Tr("Данные мастеринга неверны для этого контейнера (нулевая координата, яркость max не выше min или значение вне его полей) — "
+                  "они перенесутся не полностью");
+    if (n.key == "encode.cll_invalid")
+        return Tr("Уровень света (MaxCLL / MaxFALL) с одним нулём или вне полей этого контейнера — он не перенесётся");
     if (n.key == "encode.no_amve") return Tr("Условия просмотра (ambient viewing environment) в этот контейнер не переносятся");
     return Q(n.text);
 }

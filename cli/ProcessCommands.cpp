@@ -5,6 +5,7 @@
 
 #include <cstdio>
 #include <fstream>
+#include <optional>
 #include <sstream>
 
 #include "convert/ColorPlan.h"
@@ -60,6 +61,7 @@ struct FileLayer {
     std::map<std::string, std::string> codecOptions;
     OutputFormatRequest format;
     bool settingsNote = true;
+    std::optional<Project> project;  // TASK-0079: the project, its source's hash taken by the caller after the colour check
 };
 
 bool IsProcessStage(const std::string& name) {
@@ -81,8 +83,12 @@ void BuildStages(const std::string& projectFile, const std::vector<std::string>&
     Project base;
     if (!projectFile.empty()) {
         base = Project::Load(projectFile);
-        o.sourceHash = base.SourceHash();  // the project's cache: no rehash when the file is unchanged
-        if (o.sourceHash.empty()) o.sourceHash = base.sourceHash;  // the file is gone (moved): what the project last saw
+        if (layer) {
+            layer->project = base;  // TASK-0079: hashed after the colour check (ProjectSourceHash)
+        } else {
+            o.sourceHash = base.SourceHash();  // the project's cache: no rehash when the file is unchanged
+            if (o.sourceHash.empty()) o.sourceHash = base.sourceHash;  // the file is gone (moved): what the project last saw
+        }
     } else {
         base.stages = Project::DefaultStages();
     }
@@ -297,6 +303,10 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
             RequireColour(ResolveColor(probe.Info()), a.passthrough || !anyStage ? ColourUse::Passthrough : ColourUse::Process,
                           "process: " + o.input.string());
         }
+    }
+    if (file.project) {  // the project's cache: no rehash when the file is unchanged - after the colour check (TASK-0079)
+        o.sourceHash = file.project->SourceHash();
+        if (o.sourceHash.empty()) o.sourceHash = file.project->sourceHash;  // the file is gone (moved): what the project last saw
     }
     if (!a.input.empty() && !projectInput.empty()) {
         std::error_code ec;

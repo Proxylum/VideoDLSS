@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -116,6 +117,17 @@ bool Has(const std::vector<std::string>& v, const std::string& part) {
     return std::any_of(v.begin(), v.end(), [&](const std::string& s) { return s.find(part) != std::string::npos; });
 }
 
+// every file under `root` (relative), sorted: what a refused run must leave as it was
+std::vector<std::string> FilesUnder(const std::filesystem::path& root) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    if (!std::filesystem::exists(root, ec)) return out;
+    for (const auto& e : std::filesystem::recursive_directory_iterator(root))
+        if (e.is_regular_file()) out.push_back(std::filesystem::relative(e.path(), root).generic_string());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 bool HasKey(const std::vector<PlanNote>& v, const std::string& key) {
     return std::any_of(v.begin(), v.end(), [&](const PlanNote& n) { return n.key == key; });
 }
@@ -187,9 +199,30 @@ TEST_CASE("MKV keeps no light level with MaxFALL 0 and none is expected back", "
     const auto in = PqFfv1(dir, "in.mov", hdr);  // MOV keeps it
     REQUIRE(Summarize(in).hdr.cll);
     const auto out = dir / "out.mkv";
-    CHECK_NOTHROW(RunProcess(Passthrough(in, out, "ffv1")));
+    ProcessResult r;
+    CHECK_NOTHROW(r = RunProcess(Passthrough(in, out, "ffv1")));
     CHECK(std::filesystem::exists(out));
     CHECK_FALSE(Summarize(out).hdr.cll);  // matroskadec makes none of MaxCLL alone
+    CHECK(Has(r.warnings, "the light level MaxCLL 1000 / MaxFALL 0: matroska's readers keep one only with both values"));
+}
+
+TEST_CASE("Mastering and light level outside MP4 MOV fields are noted and not written; the publish holds", "[integration][hdr][passthrough][result]") {
+    const auto dir = Dir("box_fields");
+    ClipHdr hdr;
+    Mdcv units = Mastering1000();
+    units.primaries[0][0] = {34000, 1};  // x265's units in Matroska's floats: 34000 for 0.68
+    hdr.mastering = units;
+    hdr.light = Cll{70000, 400};
+    const auto in = PqFfv1(dir, "in.mkv", hdr);
+    REQUIRE(Summarize(in).hdr.mdcv);
+    REQUIRE(Summarize(in).hdr.cll);
+    const ProcessResult r = RunProcess(Passthrough(in, dir / "out.mov", "prores_ks"));
+    CHECK(Has(r.warnings, "a value outside mov's mdcv fields"));
+    CHECK(Has(r.warnings, "does not fit mov's clli fields"));
+    const StreamSummary out = Summarize(dir / "out.mov");
+    CHECK_FALSE(out.hdr.mdcv);
+    CHECK_FALSE(out.hdr.cll);
+    CHECK(out.colorTrc == 16);
 }
 
 TEST_CASE("HDR passthrough into AVI or M4V is refused before any file is made; SDR into AVI publishes as before", "[integration][hdr][process]") {
@@ -233,6 +266,12 @@ TEST_CASE("Processing a PQ source is refused before hashing: process upscale dep
     const auto dir = Dir("refused");
     const auto pq = PqFfv1(dir, "pq.mkv");
     const std::string p = pq.string();
+    // a scenes pass of an SDR clip in the root the PQ run is pointed at: kept where it is (not retired to the history)
+    ClipSpec sdr = Small("ffv1", "yuv420p");
+    const auto sdrClip = WriteClip(dir / "sdr.mkv", sdr);
+    REQUIRE(RunAll({"scenes", "-i", sdrClip.string(), "-o", (dir / "sc").string()}, dir / "scenes_sdr.log").code == 0);
+    const std::vector<std::string> scenesBefore = FilesUnder(dir / "sc");
+    REQUIRE_FALSE(scenesBefore.empty());
     struct Case {
         std::vector<std::string> args;
         std::string where;
@@ -255,11 +294,11 @@ TEST_CASE("Processing a PQ source is refused before hashing: process upscale dep
         CHECK(run.code != 0);
         CHECK_THAT(run.out, ContainsSubstring(c.where + p + ": processing of HDR PQ"));
         CHECK_THAT(run.out, ContainsSubstring("passthrough (no stages) writes it as it is"));
+        if (c.args[0] != "scenes" && c.args[0] != "process") CHECK(FilesUnder(c.args[4]).empty());  // no pass, no part file
     }
     CHECK_FALSE(std::filesystem::exists(dir / "r.mkv"));
+    CHECK(FilesUnder(dir / "sc") == scenesBefore);
     // a project of an SDR video run with -i on the PQ one: refused before -i is hashed («is not the source of the project» is said after it)
-    ClipSpec sdr = Small("ffv1", "yuv420p");
-    const auto sdrClip = WriteClip(dir / "sdr.mkv", sdr);
     const auto project = dir / "p.dlssvid.json";
     Project::Create(sdrClip, dir / "passes").Save(project);
     const auto withInput = RunAll({"process", "--project", project.string(), "-i", p, "--warp", "--codec", "ffv1", "--stages", "upscale", "--param",
@@ -270,6 +309,28 @@ TEST_CASE("Processing a PQ source is refused before hashing: process upscale dep
     CHECK_THAT(withInput.out, ContainsSubstring("processing of HDR PQ"));
     CHECK_THAT(withInput.out, !ContainsSubstring("is not the source of the project"));
     CHECK_FALSE(std::filesystem::exists(dir / "pr.mkv"));
+}
+
+TEST_CASE("process --project of a PQ source refuses before the project's source is hashed; an SDR one is hashed", "[integration][hdr][process][cli]") {
+    const auto dir = Dir("project_hash");
+    const auto pq = PqFfv1(dir, "pq.mkv");
+    Project::Create(pq, dir / "passes").Save(dir / "pq.dlssvid.json");  // no hash stored, the default stages on
+    const auto refused = RunAll({"-v", "process", "--project", (dir / "pq.dlssvid.json").string(), "--warp", "--stages", "upscale", "--param",
+                                 "upscale.backend=bicubic"},
+                                dir / "pq.log");
+    {
+        INFO(refused.out);
+        CHECK(refused.code != 0);
+        CHECK_THAT(refused.out, ContainsSubstring("processing of HDR PQ"));
+        CHECK_THAT(refused.out, !ContainsSubstring("hashing"));
+    }
+    ClipSpec s = Small("ffv1", "yuv420p");
+    Project::Create(WriteClip(dir / "sdr.mkv", s), dir / "passes2").Save(dir / "sdr.dlssvid.json");
+    const auto sdr = RunAll({"-v", "process", "--project", (dir / "sdr.dlssvid.json").string(), "--warp", "--plan", "--stages", "upscale", "--param",
+                             "upscale.backend=bicubic"},
+                            dir / "sdr.log");
+    INFO(sdr.out);
+    CHECK_THAT(sdr.out, ContainsSubstring("hashing"));  // the log line the check above looks for
 }
 
 TEST_CASE("process --plan --passthrough refuses Dolby Vision 5 and prints the source notes of PQ", "[integration][hdr][process][cli]") {
@@ -349,6 +410,26 @@ TEST_CASE("CheckEncodedResult names a colour tag or HDR metadata that differs", 
     amve.amve = Amve{{314, 1}, {3127, 10000}, {329, 1000}};
     e.color = amve;
     CHECK_THAT(CheckEncodedResult(file, e), ContainsSubstring("ambient viewing environment"));
+    ResultColor matrix = c;
+    matrix.matrix = 1;
+    e.color = matrix;
+    CHECK(CheckEncodedResult(file, e) == "its matrix is bt2020nc, bt709 was written");
+    // a MOV with its amve: one value off is named
+    const auto hlg = HlgProRes(dir, "hlg.mov");
+    ResultColor ambient;
+    ambient.matrix = ambient.primaries = 9;
+    ambient.trc = 14;  // the colr's
+    ambient.amve = Amve{{3140000, 10000}, {15635, 50000}, {16450, 50000}};
+    ResultExpectation m{64, 48, -1, false, PixelAspect{}};
+    m.color = ambient;
+    CHECK(CheckEncodedResult(hlg, m).empty());
+    for (int field = 0; field < 3; ++field) {
+        ResultColor off = ambient;
+        (field == 0 ? off.amve->illuminance : field == 1 ? off.amve->lightX : off.amve->lightY).num += 100;
+        m.color = off;
+        INFO("field " << field);
+        CHECK(CheckEncodedResult(hlg, m) == "its ambient viewing environment differs from what was written");
+    }
 }
 
 TEST_CASE("Legacy ProRes and FFV1 results in MOV and MKV with tags 1/1/1 2/2/2 matrix only and full range publish as before", "[integration][result][regression]") {
@@ -420,6 +501,13 @@ TEST_CASE("The source passed through with every stage off keeps the passthrough 
     CHECK(Has(r.warnings, "the result is tagged"));
     CHECK(std::count_if(r.warnings.begin(), r.warnings.end(), [](const std::string& w) { return w.find("BT.2020 assumed") != std::string::npos; }) == 1);
     CHECK(Summarize(o.output).colorSpace == 9);  // filled
+    // no encode (--no-encode): no container to refuse, no encode notes - as the run
+    ProcessOptions noEncode = o;
+    noEncode.output = dir / "none.avi";
+    noEncode.encode = false;
+    const ProcessPlan quiet = PlanProcess(noEncode);
+    CHECK_FALSE(HasKey(quiet.warnings, "encode.tags_filled"));
+    CHECK(HasKey(quiet.warnings, "source.bt2020_assumed"));
     // into AVI: refused before the passes' folder is made (and the source hashed)
     o.output = dir / "avi.avi";
     CHECK_THROWS_AS(RunProcess(o), ColourUnsupported);
@@ -483,6 +571,20 @@ TEST_CASE("A mastering display Matroska's reader would drop is noted and not exp
     REQUIRE(out.hdr.mdcv);
     CHECK(out.hdr.mdcv->hasPrimaries);
     CHECK_FALSE(out.hdr.mdcv->hasLuminance);
+    // a zero coordinate: the primaries dropped, the luminance kept; both at once
+    Mdcv zero = Mastering1000();
+    zero.primaries[1][0] = {0, 50000};
+    s.hdr.mastering = zero;
+    const ProcessResult z = RunProcess(Passthrough(WriteClip(dir / "zero.mov", s), dir / "zero.mkv", "ffv1"));
+    CHECK(Has(z.warnings, "primaries do not hold"));
+    REQUIRE(Summarize(dir / "zero.mkv").hdr.mdcv);
+    CHECK_FALSE(Summarize(dir / "zero.mkv").hdr.mdcv->hasPrimaries);
+    CHECK(Summarize(dir / "zero.mkv").hdr.mdcv->hasLuminance);
+    zero.maxLum = {0, 1};
+    s.hdr.mastering = zero;
+    const ProcessResult both = RunProcess(Passthrough(WriteClip(dir / "both.mov", s), dir / "both.mkv", "ffv1"));
+    CHECK(Has(both.warnings, "primaries and luminance do not hold"));
+    CHECK_FALSE(Summarize(dir / "both.mkv").hdr.mdcv);
     // full range into ProRes in MKV: the container says full, FFmpeg's ProRes decoder says limited
     const auto full = PqFfv1(dir, "full.mkv", {}, Tags(9, 9, 16, 2));
     const ProcessResult p = RunProcess(Passthrough(full, dir / "full_prores.mkv", "prores_ks"));
@@ -551,6 +653,12 @@ TEST_CASE("dlssvid info of a PQ video exits 0, says HDR10 records go to the cont
     INFO(info.out);
     CHECK(info.code == 0);
     CHECK_THAT(info.out, ContainsSubstring("processing:  not yet - processing of HDR PQ"));
+    const auto compare = RunAll({"compare", "--ref", pq.string(), "--test", pq.string(), "--frames", "2"}, dir / "compare.log");
+    {
+        INFO(compare.out);
+        CHECK(compare.code == 0);
+        CHECK_THAT(compare.out, !ContainsSubstring("processing of HDR"));
+    }
     CHECK_THAT(info.out, ContainsSubstring("hdr note:    the HDR10 records go to the container only"));
     ClipSpec dv = Small();
     DoviConf p5;
@@ -718,12 +826,32 @@ bool HaveNvenc(const char* codec) {
     D3D12Device dev;
     return !dev.IsWarp() && dev.IsNvidia() && VideoEncoder::EncoderAvailable(codec);
 }
+
+// RunProcess; nullopt when NVENC says this GPU lacks the encoder (av1_nvenc before Ada) - that codec skipped, any other failure fails
+std::optional<ProcessResult> RunIfSupported(const ProcessOptions& o) {
+    FfmpegLogCapture log;
+    try {
+        return RunProcess(o);
+    } catch (const std::exception& e) {
+        if (!SaysUnsupported(log.Text()) && !SaysUnsupported(e.what())) throw;
+        WARN(o.codec << " is not supported on this GPU: " << e.what());
+        return std::nullopt;
+    }
+}
+
+// an NVENC clip of 320x192 (NVENC's minimum is above 64x48); nullopt when NVENC refuses it here
+std::optional<std::filesystem::path> NvencClip(const std::filesystem::path& file, ClipSpec spec, std::string* why) {
+    spec.codec = "hevc_nvenc";
+    spec.width = 320;
+    spec.height = 192;
+    return WriteClipIfSupported(file, spec, why);
+}
 }  // namespace
 
 TEST_CASE("NVENC passthrough of PQ and HLG writes VUI 9/16/9 and 9/18/9, colr mdcv clli and amve in MP4", "[integration][hdr][gpu][formats]") {
     const auto dir = Dir("nvenc");
     for (const char* codec : {"hevc_nvenc", "av1_nvenc"}) {
-        if (!HaveNvenc(codec)) SKIP(std::string("no NVIDIA GPU with ") + codec);
+        if (!HaveNvenc(codec)) continue;
         INFO(codec);
         ClipHdr hdr;
         hdr.mastering = Mastering1000();
@@ -735,8 +863,9 @@ TEST_CASE("NVENC passthrough of PQ and HLG writes VUI 9/16/9 and 9/18/9, colr md
         s.hdr = hdr;
         const auto pq = WriteClip(dir / (std::string(codec) + "_pq.mkv"), s);
         const auto out = dir / (std::string(codec) + "_pq.mp4");
-        const ProcessResult r = RunProcess(Passthrough(pq, out, codec));
-        CHECK(r.framesOut == 4);
+        const std::optional<ProcessResult> r = RunIfSupported(Passthrough(pq, out, codec));
+        if (!r) continue;
+        CHECK(r->framesOut == 4);
         const StreamSummary got = Summarize(out);
         CHECK(got.colorSpace == 9);
         CHECK(got.colorPrimaries == 9);
@@ -762,6 +891,66 @@ TEST_CASE("NVENC passthrough of PQ and HLG writes VUI 9/16/9 and 9/18/9, colr md
     CHECK(got.hdr.amve->illuminance.Value() == 314.0);
 }
 
+TEST_CASE("HEVC HLG with the transfer in an SEI passes through tagged trc 18; under a BT.709 VUI it warns from the first frame", "[integration][hdr][gpu][passthrough]") {
+    if (!HaveNvenc("hevc_nvenc")) SKIP("no NVIDIA GPU with hevc_nvenc");
+    const auto dir = Dir("hevc_sei");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.pixFmt = "p010le";
+    spec.color = Tags(9, 9, 14);
+    spec.videoPacket = [](int64_t, const std::string& au) { return WithNalBeforeSlice(au, AlternativeTransferSei(18)); };
+    std::string why;
+    const auto hlg = NvencClip(dir / "hlg_sei.mp4", spec, &why);
+    if (!hlg) SKIP("NVENC does not write the clip here: " << why);
+    VideoDecoder probe(*hlg, VideoDecoder::Probe());
+    REQUIRE(probe.Info().color.cls == SourceClass::Hlg);
+    const ProcessResult r = RunProcess(Passthrough(*hlg, dir / "out.mkv", "ffv1"));
+    CHECK(Summarize(dir / "out.mkv").colorTrc == 18);
+    CHECK_FALSE(Has(r.warnings, "from the first one"));
+    // 8-bit, VUI 1/1/1: nothing in the tags says HDR, no first frame is looked at - the frames are HLG from the start
+    spec.pixFmt = "yuv420p";
+    spec.color = Tags(1, 1, 1);
+    const auto sdrVui = NvencClip(dir / "sdr_vui.mp4", spec, &why);
+    if (!sdrVui) SKIP("NVENC does not write the clip here: " << why);
+    VideoDecoder p709(*sdrVui, VideoDecoder::Probe());
+    REQUIRE(p709.Info().color.cls == SourceClass::Legacy);
+    const ProcessResult w = RunProcess(Passthrough(*sdrVui, dir / "out709.mkv", "ffv1"));
+    CHECK(Has(w.warnings, "the frames are HDR HLG"));
+    CHECK(Has(w.warnings, "from the first one"));
+    CHECK_FALSE(Has(w.warnings, "cut the video"));
+}
+
+TEST_CASE("Raw HEVC of SDR then PQ segments warns at the first PQ frame, decoded in software and by NVDEC; 1/1/1 then 6/6/6 does not", "[integration][hdr][gpu][nvdec]") {
+    if (!HaveNvenc("hevc_nvenc")) SKIP("no NVIDIA GPU with hevc_nvenc");
+    const auto dir = Dir("raw_segments");
+    ClipSpec spec;
+    spec.frames = 6;
+    spec.pixFmt = "p010le";  // one shape: a new SPS of the same size and depth (NVDEC keeps its decoder)
+    std::string why;
+    spec.color = Tags(1, 1, 1);
+    const auto sdr = NvencClip(dir / "sdr.hevc", spec, &why);
+    if (!sdr) SKIP("NVENC does not write the clip here: " << why);
+    spec.color = Tags(9, 9, 16);
+    const auto pq = NvencClip(dir / "pq.hevc", spec, &why);
+    spec.color = Tags(6, 6, 6);
+    const auto bt601 = NvencClip(dir / "601.hevc", spec, &why);
+    REQUIRE(pq);
+    REQUIRE(bt601);
+    const auto turning = ConcatFiles(*sdr, *pq, dir / "turning.hevc");
+    const auto sdrOnly = ConcatFiles(*sdr, *bt601, dir / "sdr_only.hevc");
+    for (const char* hw : {"none", "cuda"}) {
+        INFO("hwaccel " << hw);
+        ProcessOptions o = Passthrough(turning, dir / (std::string("turning_") + hw + ".mkv"), "ffv1");
+        o.hwaccel = hw;
+        const ProcessResult r = RunProcess(o);
+        CHECK(r.framesOut == 12);
+        CHECK(Has(r.warnings, "frame 6 and on are HDR PQ"));
+        ProcessOptions q = Passthrough(sdrOnly, dir / (std::string("sdr_") + hw + ".mkv"), "ffv1");
+        q.hwaccel = hw;
+        CHECK_FALSE(Has(RunProcess(q).warnings, "and on are"));
+    }
+}
+
 TEST_CASE("Legacy h264 hevc and av1 NVENC results in mp4 mov and mkv publish as before", "[integration][result][gpu][regression]") {
     const auto dir = Dir("nvenc_legacy");
     ClipSpec s = Small("ffv1", "yuv420p");
@@ -775,8 +964,9 @@ TEST_CASE("Legacy h264 hevc and av1 NVENC results in mp4 mov and mkv publish as 
             if (std::string(codec) == "av1_nvenc" && std::string(ext) == ".mov") continue;  // MOV takes no AV1
             INFO(codec << ext);
             const auto out = dir / (std::string(codec) + ext);
-            const ProcessResult r = RunProcess(Passthrough(in, out, codec));
-            CHECK(r.warnings.empty());
+            const std::optional<ProcessResult> r = RunIfSupported(Passthrough(in, out, codec));
+            if (!r) break;  // this GPU lacks the encoder
+            CHECK(r->warnings.empty());
             const StreamSummary got = Summarize(out);
             CHECK(got.colorSpace == 1);
             CHECK(got.colorPrimaries == 1);
