@@ -80,6 +80,7 @@ TEST_CASE("ColorInfoFromStream uses metadata or resolution", "[convert][color]")
     i.colorRange = 2;
     CHECK(ColorInfoFromStream(i).range == ColorRange::Full);
     CHECK(ToString(ColorMatrix::Bt601) == "bt601");
+    CHECK(ToString(ColorMatrix::Bt709) == "bt709");  // stage_params.matrix of every SDR manifest
 }
 
 // ---- TASK-0034: any bit depth and chroma layout; the 8-bit 4:2:0 path stays bit-identical ----------------------------
