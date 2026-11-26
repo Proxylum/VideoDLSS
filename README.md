@@ -332,7 +332,7 @@ none and the class follows the tags) and each tag with the layer it was read fro
 MOV `colr`, Matroska Colour; `stream`: the codec parameters - an HEVC / H.264 VUI, an AV1 sequence header; `frame`: the first
 frame where it differs - a ProRes frame header, an HEVC alternative transfer SEI that turns BT.2020 into HLG) - and, when present,
 `mastering:`, `light level:` (MaxCLL / MaxFALL), `ambient:`, `dolby vision:` (profile, level, the base layer's compatibility:
-an HDR10, SDR or HLG base keeps its picture and loses the RPU in every output; an IPT base - profiles 5 and 10.0 - comes out in wrong
+an HDR10, SDR or HLG base keeps its picture and loses the RPU in every output; an IPT base - profiles 1, 3, 5 and 10.0, or the matrix ipt-c2 - comes out in wrong
 colours) and `hdr10+:` lines, and notes (BT.2020 assumed for an untagged PQ / HLG, a transfer not converted, layers that disagree).
 The GUI's source card shows a «Цвет» row for such a file. An SDR file with nothing to say (no Dolby Vision, no HDR record, no note)
 prints as before and has no such row. The first frame is decoded for this only

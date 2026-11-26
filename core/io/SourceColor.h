@@ -90,7 +90,7 @@ std::string_view ToString(SourceClass c);  // "sdr", "pq", "hlg", "wide", "log"
 enum class ColourRefusal : uint8_t {
     None,
     Matrix,          // matrix 10 (BT.2020 CL) or 14 (ICtCp): no processing
-    DolbyVisionIpt,  // a Dolby Vision base layer in IPT (profiles 5, 10.0; matrix 15): wrong colours without the RPU anywhere
+    DolbyVisionIpt,  // a Dolby Vision base layer in IPT (profiles 1, 3, 5, 10.0; matrix 15): wrong colours without the RPU anywhere
     RgbHdr,          // an RGB HDR / BT.2020 stream: swscale makes it 8-bit 4:2:0 - wrong anywhere
 };
 std::string_view ToString(ColourRefusal r);  // "", "matrix", "dolby vision ipt", "rgb hdr"
@@ -124,6 +124,7 @@ struct SourceColor {
     SourceClass rawCls = SourceClass::Legacy;  // ClassOf(stream): the fields the legacy path reads
     bool legacyPath = true;                    // cls and rawCls Legacy, nothing refused: read and written as before
     bool rgbLayout = false;                    // the stream's pixel format is RGB (decoded through swscale)
+    int bitDepth = 0;                          // of the stream's samples (0: not known) - «HDR10» is 10 bits
     bool iptAssumed = false;                   // DolbyVisionIpt for a base nobody names, no matrix nor transfer said: taken for IPT, not known
     ColourRefusal refuseProcessing = ColourRefusal::None;  // processing (stages) refused; passthrough allowed
     ColourRefusal refuseAll = ColourRefusal::None;         // processing and passthrough refused

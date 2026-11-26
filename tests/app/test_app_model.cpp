@@ -11072,6 +11072,13 @@ TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, n
     CHECK(SourceColourText(of(RawTags{9, 9, 16, 1, 0}, "420", withLight)) == QString::fromUtf8("HDR10 (PQ) · BT.2020 · MaxCLL 1000/400"));
     CHECK(SourceColourText(of(RawTags{2, 2, 16, 1, 0}, "420", withLight)) == QString::fromUtf8("HDR10 (PQ) · BT.2020 (не указан) · MaxCLL 1000/400"));
     CHECK(SourceColourText(of(RawTags{9, 12, 16, 1, 0}, "420", withLight)) == QString::fromUtf8("HDR (PQ) · Display P3 · MaxCLL 1000/400"));
+    {  // 8-bit PQ is no HDR10
+        SourceColor eight = of(RawTags{9, 9, 16, 1, 0}, "420", withLight);
+        eight.bitDepth = 8;
+        CHECK(SourceColourText(eight) == QString::fromUtf8("HDR (PQ) · BT.2020 · MaxCLL 1000/400"));
+        eight.bitDepth = 10;
+        CHECK(SourceColourText(eight) == QString::fromUtf8("HDR10 (PQ) · BT.2020 · MaxCLL 1000/400"));
+    }
     // a note about an unsaid gamut keeps its words
     SourceColourText(of(RawTags{9, 2, 1, 1, 0}), &tip);
     CHECK(tip.contains(QString::fromUtf8("Матрица BT.2020, охват не указан — принят широкий охват")));

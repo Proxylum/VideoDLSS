@@ -613,6 +613,9 @@ TEST_CASE("The container is compared with what was taken: HLG from an SEI is no 
     CHECK(d[0].a == 16);
     CHECK(d[0].b == 18);
     // a matrix that differs beside the SEI's curve is news
+    // primaries that differ beside the SEI's curve are news too
+    REQUIRE(Layered(Tags(9, 1, 18), Tags(9, 9, 14), RawTags{}).Note("source.layers_differ") != nullptr);
+    CHECK(Layered(Tags(9, 1, 18), Tags(9, 9, 14), RawTags{}).Note("source.layers_differ")->plan);
     const SourceColor matrix = Layered(Tags(1, 9, 18), Tags(9, 9, 14), RawTags{});
     CHECK(matrix.Note("source.layers_differ") != nullptr);
 }
@@ -815,4 +818,12 @@ TEST_CASE("Rows 1-3 exclude each other: a Dolby Vision verdict is not overruled 
     CHECK(rgb.Note("source.rgb_hdr") == nullptr);
     // matrix 15 alone (no record, no RPU) is row 1
     CHECK(Classified(15, 9, 16).refuseAll == ColourRefusal::DolbyVisionIpt);
+    // an RPU decides as a record does: profile 8 guessed - removed; an unknown profile with tags - by the tags
+    const SourceColor rpu8 = WithRpu(15, 9, 16, 1, false);
+    CHECK(rpu8.refuseAll == ColourRefusal::None);
+    CHECK(rpu8.Note("source.dv_removed") != nullptr);
+    CHECK(rpu8.Note("source.dv_ipt") == nullptr);
+    const SourceColor rpu0 = WithRpu(15, 9, 16, 0, false);
+    CHECK(rpu0.refuseAll == ColourRefusal::None);
+    CHECK(rpu0.Note("source.dv_unknown") != nullptr);
 }

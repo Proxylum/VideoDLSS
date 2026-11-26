@@ -184,6 +184,7 @@ TEST_CASE("FFV1 MKV PQ reads MasteringMetadata and MaxCLL without decoding a fra
     CHECK(c.looked == FirstLook::Packet);
     CHECK(c.cls == SourceClass::Pq);
     CHECK(c.effective == RawTags{9, 9, 16, 1, 0});
+    CHECK(c.bitDepth == 10);  // «HDR10» in the card asks it
     CHECK(c.trcFrom == TagFrom::Stream);
     REQUIRE(c.hdr.mdcv);
     CHECK(Near(*c.hdr.mdcv, Mastering1000()));
@@ -692,6 +693,14 @@ TEST_CASE("info of a Dolby Vision profile 5 file says its IPT base on the colour
 TEST_CASE("A reader without the colour look logs the source's colour at debug level only, as tags only", "[integration][hdr]") {
     const auto dir = Dir("log_no_look");
     const auto clip = ProResHlg(dir);  // colr 9/9/14, frames 18: without the look its tags say wide gamut
+    ClipSpec dvSpec;
+    dvSpec.width = 64;
+    dvSpec.height = 48;
+    dvSpec.frames = 2;
+    DoviConf p5;
+    p5.profile = 5;
+    dvSpec.hdr.dovi = p5;
+    const auto dv5 = WriteClip(dir / "dv5.mkv", dvSpec);
     std::ostringstream text;
     {
         struct LogCapture {
@@ -713,6 +722,7 @@ TEST_CASE("A reader without the colour look logs the source's colour at debug le
         VideoDecoder viewport(clip, frames);
         VideoDecoder probe(clip, VideoDecoder::Probe());  // a probe looks and says it at debug level
         VideoDecoder task(clip);  // a reader that looks
+        VideoDecoder refused(dv5);  // a refusal says itself on the colour line
     }
     const std::string log = text.str();
     INFO(log);
@@ -724,6 +734,8 @@ TEST_CASE("A reader without the colour look logs the source's colour at debug le
     size_t infos = 0;
     for (size_t at = log.find("info " + hlg); at != std::string::npos; at = log.find("info " + hlg, at + 1)) ++infos;
     CHECK(infos == 1);  // the task alone
+    CHECK(log.find("info " + dv5.string() + ": colour dolby vision ipt (") != std::string::npos);
+    CHECK(log.find(dv5.string() + ": colour sdr") == std::string::npos);
 }
 
 TEST_CASE("A ProRes colr with matrix 0 does not keep the first frame unread", "[integration][hdr]") {
@@ -744,4 +756,26 @@ TEST_CASE("A ProRes colr with matrix 0 does not keep the first frame unread", "[
     CHECK(dec.Info().color.looked == FirstLook::Decode);
     CHECK(dec.Info().color.cls == SourceClass::Pq);
     CHECK(dec.Info().color.trcFrom == TagFrom::Frame);
+}
+
+TEST_CASE("A hardware-only AV1 PQ in Matroska reads its first packet for HDR10+", "[integration][hdr][gpu]") {
+    const auto dir = Dir("av1_mkv_hdr10plus");
+    ClipSpec spec;
+    spec.codec = "av1_nvenc";
+    spec.color = Tags(9, 9, 16);
+    spec.gop = 8;
+    spec.videoPacketSideData = [](int64_t) {
+        std::vector<std::pair<int, std::string>> sd;
+        sd.emplace_back(AV_PKT_DATA_DYNAMIC_HDR10_PLUS, Hdr10PlusSideData());
+        return sd;
+    };
+    REQUIRE_NVENC(clip, dir / "pq.mkv", spec);
+    const int64_t decodes = FirstFrameDecodes(), peeks = FirstPacketPeeks();
+    VideoDecoder dec(clip, VideoDecoder::Probe());  // AV1 has no software decoder here: a packet is read, no frame decoded
+    const SourceColor& c = dec.Info().color;
+    CHECK(FirstPacketPeeks() == peeks + 1);
+    CHECK(FirstFrameDecodes() == decodes);
+    CHECK(c.looked == FirstLook::Packet);
+    CHECK(c.hdr10Plus);
+    CHECK(c.hdr10PlusFrom == TagFrom::Packet);
 }

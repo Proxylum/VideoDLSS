@@ -776,6 +776,7 @@ void VideoDecoder::ReadColour(bool look, const RawTags& container) {
     const FirstLook how = look ? NeedsFirstLook(codec, fmt_->iformat->name, info_.bitDepth, hint) : FirstLook::None;
     if (how != FirstLook::None && !(how == FirstLook::Decode && hwOnly_)) in.first = FirstLookCached(url_, how);
     info_.color = SourceColorOf(in, LayoutKindOf(info_.pixelFormat), codec);
+    info_.color.bitDepth = info_.pixelFormat == "unknown" ? 0 : info_.bitDepth;
     const SourceColor& c = info_.color;
     // said once per real open of a reader that looked (a probe, or a reader of frames only - the viewport, a thumbnail: tags alone, the
     // first frame unread - at debug level: its class may be another than the one info and the card say)

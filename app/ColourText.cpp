@@ -148,7 +148,8 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
     } else {
         QStringList parts;
         // HDR10: PQ of BT.2020 (said or assumed) with its static metadata; a P3 or BT.709 master is «HDR (PQ)» with its gamut beside
-        const bool hdr10 = c.cls == SourceClass::Pq && (e.primaries == 9 || e.primaries == 2) && (c.hdr.mdcv || c.hdr.cll);
+        const bool hdr10 = c.cls == SourceClass::Pq && (e.primaries == 9 || e.primaries == 2) && (c.hdr.mdcv || c.hdr.cll) &&
+                           (c.bitDepth == 0 || c.bitDepth >= 10);  // 8-bit PQ is no HDR10
         // wide gamut by the matrix alone (BT.2020's matrix under other primaries): said as such, the primaries beside it
         parts << (hdr10 ? Tr("HDR10 (PQ)") : ClassText(c.cls, e.primaries));
         const QString gamut = GamutText(e.primaries);
