@@ -4,15 +4,25 @@
 
 namespace dlssvid {
 
-bool CodecKeepsRange(const std::string& codec) { return codec != "prores_ks" && codec != "ffv1"; }
-
 namespace {
 bool NvencCodec(const std::string& codec) { return codec == "h264_nvenc" || codec == "hevc_nvenc" || codec == "av1_nvenc"; }
+bool ProResCodec(const std::string& codec) { return codec.rfind("prores", 0) == 0; }  // prores_ks, prores_aw, prores
+
+// What Matroska's reader keeps of a mastering display (matroskadec, mkv_parse_video_color): the primaries when every coordinate is above
+// 0, the luminance when max > min >= 0 - a half that does not hold is written and dropped on reading
+bool PrimariesHold(const Mdcv& m) {
+    for (const auto& xy : m.primaries)
+        if (!(xy[0].Value() > 0 && xy[1].Value() > 0)) return false;
+    return m.white[0].Value() > 0 && m.white[1].Value() > 0;
+}
+bool LuminanceHolds(const Mdcv& m) { return m.maxLum.Value() > m.minLum.Value() && m.minLum.Value() >= 0; }
 
 std::string TagWords(const ColorTags& t) {
     return "matrix " + MatrixName(t.matrix) + ", primaries " + PrimariesName(t.primaries) + ", transfer " + TrcName(t.transfer);
 }
 }  // namespace
+
+bool CodecKeepsRange(const std::string& codec) { return NvencCodec(codec); }
 
 PassthroughColour PlanPassthroughColour(const VideoStreamInfo& info, const std::string& codec, const OutputFormatRequest& format,
                                         const std::filesystem::path& output, const std::string& where) {
@@ -48,17 +58,31 @@ PassthroughColour PlanPassthroughColour(const VideoStreamInfo& info, const std::
         expect.trc = pc.tags.transfer;
     }
     expect.range = pc.tags.range;
-    expect.checkRange = caps.range || CodecKeepsRange(codec);
-    if (pc.tags.range == 2 && !expect.checkRange)
+    // the container's range: Matroska's Colour, MP4's colr (written with the three tags only); else the codec's own
+    expect.checkRange = (caps.range && colr) || CodecKeepsRange(codec);
+    if (pc.tags.range == 2 && ProResCodec(codec))  // in any container: FFmpeg's ProRes decoder says limited to every frame
+        note("encode.range_lost", "warning", "full range: ProRes keeps no range - decoders will read it as limited");
+    else if (pc.tags.range == 2 && !expect.checkRange)
         note("encode.range_lost", "warning", "full range: " + container + " with " + codec + " keeps no range - players will read it as limited");
     if (pc.meta.mdcv) {
-        const bool whole = pc.meta.mdcv->hasPrimaries && pc.meta.mdcv->hasLuminance;
-        if (caps.mdcvNeedsBoth && !whole)
+        Mdcv m = *pc.meta.mdcv;
+        const bool whole = m.hasPrimaries && m.hasLuminance;
+        if (caps.mdcvNeedsBoth && !whole) {
             note("encode.mdcv_lost", "warning",
-                 "the mastering display says only its " + std::string(pc.meta.mdcv->hasPrimaries ? "primaries" : "luminance") + ": " + container +
+                 "the mastering display says only its " + std::string(m.hasPrimaries ? "primaries" : "luminance") + ": " + container +
                      " writes one only whole - not carried");
-        else if (caps.mdcv)
-            expect.mdcv = pc.meta.mdcv;
+        } else if (caps.mdcv) {
+            if (caps.muxer == "matroska" || caps.muxer == "webm") {
+                const bool primaries = m.hasPrimaries && !PrimariesHold(m), luminance = m.hasLuminance && !LuminanceHolds(m);
+                if (primaries || luminance)
+                    note("encode.mdcv_invalid", "warning",
+                         "the mastering display's " + std::string(primaries && luminance ? "primaries and luminance do" : primaries ? "primaries do" : "luminance does") +
+                             " not hold (a coordinate 0, or max not above min): " + container + "'s readers drop " + (primaries && luminance ? "them" : "it"));
+                m.hasPrimaries = m.hasPrimaries && !primaries;
+                m.hasLuminance = m.hasLuminance && !luminance;
+            }
+            if (m.hasPrimaries || m.hasLuminance) expect.mdcv = m;
+        }
     }
     if (pc.meta.cll && caps.cll && !((caps.muxer == "matroska" || caps.muxer == "webm") && (pc.meta.cll->maxCll == 0 || pc.meta.cll->maxFall == 0)))
         expect.cll = pc.meta.cll;  // (Matroska's reader keeps a light level only when both values are said)

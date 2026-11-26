@@ -87,6 +87,29 @@ QString ClassText(SourceClass c) {
 }
 
 QString ClassText(SourceClass c, int primaries) { return c == SourceClass::Wide && primaries != 9 ? Tr("SDR, матрица BT.2020") : ClassText(c); }
+
+// TASK-0079: «Обработка ролика …» - the class as it reads after «ролика»
+QString ClipClassText(const SourceColor& c) {
+    if (c.cls == SourceClass::Log) return Tr("с лог-кривой");
+    if (c.cls == SourceClass::Wide && c.effective.primaries != 9) return Tr("SDR с матрицей BT.2020");
+    return ClassText(c.cls, c.effective.primaries);
+}
+
+// what processing waits for (ColourStop::NotYet), by the class: «обработка %1 — в следующей версии»
+QString NotYetText(const SourceColor& c) {
+    if (c.Note("source.layers_differ") || c.cls == SourceClass::Legacy) return Tr("такого ролика");  // layers that disagree
+    switch (c.cls) {
+        case SourceClass::Pq:
+        case SourceClass::Hlg: return Tr("HDR");
+        case SourceClass::Wide: return Tr("широкого охвата");
+        case SourceClass::Log: return Tr("лог-кривой");
+        case SourceClass::Legacy: break;
+    }
+    return Tr("такого ролика");
+}
+
+// passthrough writes the effective tags - and the HDR records of PQ / HLG only
+QString AsItIsText(const SourceColor& c) { return c.Hdr() ? Tr("как есть, с HDR") : Tr("как есть, с его тегами цвета"); }
 }  // namespace
 
 QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
@@ -129,28 +152,27 @@ QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
     return Q(n.detail);
 }
 
-QString ColourStopShortText(ColourStop stop) {
+QString ColourStopShortText(ColourStop stop, const SourceColor& c) {
     switch (stop) {
         case ColourStop::None: return QString();
-        case ColourStop::NotYet: return Tr("обработка HDR — в следующей версии");
+        case ColourStop::NotYet: return Tr("обработка %1 — в следующей версии").arg(NotYetText(c));
         case ColourStop::Matrix: return Tr("обработка этой матрицы не поддерживается");
         case ColourStop::DolbyVisionIpt:
         case ColourStop::RgbHdr: return Tr("цвет источника не поддерживается");
-        case ColourStop::NoContainerTags: return Tr("контейнер не хранит цвет HDR");
+        case ColourStop::NoContainerTags: return Tr("контейнер не хранит теги цвета");
     }
     return QString();
 }
 
 QString ColourStopText(ColourStop stop, const SourceColor& c) {
-    const QString passthrough = Tr("«Обработать» без стадий («только кодирование») запишет ролик как есть, с HDR");
+    const QString passthrough = Tr("«Обработать» без стадий («только кодирование») запишет ролик %1").arg(AsItIsText(c));
     switch (stop) {
         case ColourStop::None: return QString();
         case ColourStop::NotYet:
             if (c.Note("source.layers_differ"))
                 return Tr("Слои ролика размечены по-разному (%1 — %2, параметры кодека — %3): обработка такого ролика появится в следующей версии. %4")
                     .arg(LayersText(c), ClassText(c.cls, c.effective.primaries), ClassText(c.rawCls, c.stream.primaries), passthrough);
-            return Tr("Обработка ролика %1 появится в следующей версии: сейчас его цвета вышли бы неверными. %2")
-                .arg(ClassText(c.cls, c.effective.primaries), passthrough);
+            return Tr("Обработка ролика %1 появится в следующей версии: сейчас его цвета вышли бы неверными. %2").arg(ClipClassText(c), passthrough);
         case ColourStop::Matrix:
             return Tr("Матрица %1: обработка не поддерживается. %2").arg(MatrixText(c.effective.matrix), passthrough);
         case ColourStop::DolbyVisionIpt:
@@ -158,18 +180,26 @@ QString ColourStopText(ColourStop stop, const SourceColor& c) {
         case ColourStop::RgbHdr:
             return c.rgbLayout ? Tr("RGB-поток HDR / BT.2020 не поддерживается: он читается как 8-битный SDR — ни обработка, ни запись как есть")
                                : Tr("Поток YUV помечен матрицей RGB: ни одна матрица YUV к нему не подходит — ни обработка, ни запись как есть");
-        case ColourStop::NoContainerTags:
-            return Tr("Этот контейнер не хранит цвет: ролик %1 сохраните как .mp4, .mov или .mkv").arg(ClassText(c.cls, c.effective.primaries));
+        case ColourStop::NoContainerTags:  // the GUI keeps the project's result extension: it is set with the project (project --result)
+            return Tr("Этот контейнер не хранит теги цвета: ролик %1 пишется только в .mp4, .mov или .mkv — укажите такой результат проекта")
+                .arg(ClassText(c.cls, c.effective.primaries));
     }
     return QString();
 }
 
 QString PlanNoteText(const SourceColor& c, const PlanNote& n) {
     if (n.scope == "source") return ColourNoteText(c, ColourNote{n.key, n.text, true});
-    if (n.key == "encode.tags_filled") return Tr("Неуказанные теги цвета записываются по классу источника (BT.2020), чтобы плееры узнали HDR");
+    if (n.key == "encode.tags_filled") {
+        const ColorTags t = WrittenTags(c);
+        return c.Hdr() ? Tr("Неуказанные теги цвета записываются как BT.2020, чтобы плееры узнали HDR")
+                       : Tr("Неуказанные теги цвета записываются по классу источника: матрица %1, охват %2, кривая %3")
+                             .arg(Q(MatrixName(t.matrix)), Q(PrimariesName(t.primaries)), Q(TrcName(t.transfer)));
+    }
     if (n.key == "encode.hdr_8bit") return Tr("HDR в 8 битах: плавные переходы станут ступеньками — лучше HEVC или AV1 10 бит, или ProRes");
-    if (n.key == "encode.range_lost") return Tr("Полный диапазон: этот контейнер с этим кодеком его не хранит — плееры прочтут ограниченный");
+    if (n.key == "encode.range_lost") return Tr("Полный диапазон: результат его не хранит — плееры и декодеры прочтут ограниченный");
     if (n.key == "encode.mdcv_lost") return Tr("Данные мастеринга неполные, а этот контейнер пишет их только целиком — они не перенесутся");
+    if (n.key == "encode.mdcv_invalid")
+        return Tr("Часть данных мастеринга неверна (нулевая координата или яркость max не выше min) — читатели этого контейнера её отбросят");
     if (n.key == "encode.no_amve") return Tr("Условия просмотра (ambient viewing environment) в этот контейнер не переносятся");
     return Q(n.text);
 }
@@ -213,8 +243,10 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
                           FromText(c.trcFrom), Q(RangeName(e.range)), FromText(c.rangeFrom));
         if (c.refuseAll != ColourRefusal::None)
             lines << Tr("Ни обработка, ни запись как есть: такой ролик эта версия не пишет");
+        else if (c.refuseProcessing == ColourRefusal::Matrix)  // no later version lifts it
+            lines << Tr("Обработка этой матрицы не поддерживается; без стадий («только кодирование») ролик пишется %1").arg(AsItIsText(c));
         else if (!c.legacyPath)
-            lines << Tr("Обработка HDR и широкого охвата — в следующей версии; без стадий («только кодирование») ролик пишется как есть, с HDR");
+            lines << Tr("Обработка %1 — в следующей версии; без стадий («только кодирование») ролик пишется %2").arg(NotYetText(c), AsItIsText(c));
         for (const ColourNote& n : c.notes) lines << ColourNoteText(c, n);
         *tip = lines.join('\n');
     }

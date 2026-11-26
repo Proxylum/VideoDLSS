@@ -1070,6 +1070,7 @@ void AppModel::refreshPlan() {
     sourceDecode_ = {};  // TASK-0076: set again below for the source of this plan
     colourStop_ = colourStopAll_ = ColourStop::None;  // TASK-0079: likewise
     colourStopSaid_ = false;
+    colourStopSaidKind_ = ColourStop::None;
     planTimer_.stop();
     plan_ = ProcessPlan{};
     planNoForce_.reset();
@@ -1185,6 +1186,7 @@ void AppModel::refreshPlan() {
     } catch (const ColourUnsupported& e) {  // TASK-0079: in the GUI's words, with what still works
         planError_ = ColourStopText(e.kind, sourceInfo_.color);
         colourStopSaid_ = true;
+        colourStopSaidKind_ = e.kind;
     } catch (const std::exception& e) {
         planError_ = QString::fromUtf8(e.what());
         keepViewportVerdict();
@@ -1341,7 +1343,7 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     if (!d) {
         // TASK-0076: the source's refusal is said once, under «Что получится» - a card gets a short line, not the whole paragraph
         st.state = sourceRefusalSaid()   ? SourceRefusedShortText()
-                   : colourStopSaid_      ? ColourStopShortText(colourStop_ != ColourStop::None ? colourStop_ : colourStopAll_)  // TASK-0079
+                   : colourStopSaid_      ? ColourStopShortText(colourStop_ != ColourStop::None ? colourStop_ : colourStopAll_, sourceInfo_.color)  // TASK-0079
                    : planError_.isEmpty() ? tr("—")
                                           : planError_;
         return st;

@@ -118,6 +118,7 @@ public:
     ColourStop colourStop() const { return colourStop_; }
     ColourStop colourStopAll() const { return colourStopAll_; }
     bool colourStopSaid() const { return colourStopSaid_; }
+    ColourStop colourStopSaidKind() const { return colourStopSaidKind_; }  // what the plan error said (NoContainerTags: the output, not the stages)
     // TASK-0079: the plan's notes in Russian (the source's, and passing it through what the output loses): a soft label, no blocker
     QStringList planNotes() const;
     // TASK-0076: whether a task or a preview runs or waits (ProjectTasks, from the queue): with a check of the model's, the viewport does
@@ -404,6 +405,7 @@ private:
     DecodeSupport sourceDecode_;
     ColourStop colourStop_ = ColourStop::None, colourStopAll_ = ColourStop::None;  // TASK-0079
     bool colourStopSaid_ = false;
+    ColourStop colourStopSaidKind_ = ColourStop::None;
     bool tasksRunning_ = false, nvdecLetGo_ = false;  // TASK-0076: setTasksRunning, updateNvdecHold
     double retriedAt_ = -1.0;                // TASK-0076: requestFrames tried start failures again at this time ...
     std::vector<std::string> retriedFor_;    // ... for these sources

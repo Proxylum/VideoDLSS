@@ -49,7 +49,8 @@ std::string WhyOf(const ColorPlan& p, const SourceColor& c) {
                 return "the source's layers disagree: " + std::string(LayersWords(c)) + " " + ColourWords(c.effective) + " (" +
                        std::string(ToString(c.cls)) + "), the codec parameters " + ColourWords(c.stream) + " (" + std::string(ToString(c.rawCls)) +
                        ") - processing such a source comes with a later version; passthrough (no stages) writes it as it is";
-            return "processing of " + what + " comes with a later version; passthrough (no stages) writes it as it is, with its HDR";
+            return "processing of " + what + " comes with a later version; passthrough (no stages) writes it as it is, " +
+                   (c.Hdr() ? "with its HDR" : "with its colour tags");
         case ColourStop::NoContainerTags:
         case ColourStop::None: break;
     }

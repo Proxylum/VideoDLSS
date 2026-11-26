@@ -344,14 +344,17 @@ container does not say all three tags - a ProRes frame header always does), and 
 `export`, the GUI's stage runs and preview) of anything but an SDR source - HDR PQ / HLG, wide gamut, a log curve, the BT.2020 matrix
 under SDR primaries, ICtCp / BT.2020 CL, a file whose layers disagree (SDR frame headers under a PQ `colr`) - is refused before
 anything is hashed, saying what the source is and that `--passthrough` (the GUI's «Обработать · только кодирование», every stage
-off) writes it as it is. Passthrough keeps its effective tags - the matrix BT.2020 kept, unspecified matrix / primaries of PQ / HLG
-written as BT.2020 and a missing transfer under BT.2020 primaries as BT.709 (MP4 / MOV write `colr` only with all three) - and its
+off) writes it as it is. Passthrough keeps its effective tags - the matrix BT.2020 kept, an unspecified matrix / primaries of PQ /
+HLG, wide gamut and a log curve written as BT.2020 and a missing transfer of wide gamut as BT.709 (MP4 / MOV write `colr` only with
+all three) - and its
 mastering display, light level and ambient viewing environment where the container has a field (MP4 / MOV: `mdcv`, `clli`, `amve`;
 Matroska: MasteringMetadata, MaxCLL / MaxFALL, no ambient viewing environment); the result check reads them back. Notes in the plan
 (`process --plan`), the result and the GUI's output card say what is lost or assumed: Dolby Vision's RPU, HDR10+, 8 bits of HDR
-(banding), a full range a MOV of ProRes / FFV1 cannot keep, a half mastering display MP4 / MOV cannot write, an ambient viewing
-environment in Matroska. A Dolby Vision IPT base and RGB HDR are refused in every mode; HDR into a container without colour tags
-(AVI, `.m4v`, MPEG-TS) is refused before the file is made. A video whose frames turn another colour class part way (an SDR part
+(banding), a full range ProRes keeps in no container (FFmpeg's decoder says limited) and a MOV of FFV1 or another encoder cannot
+keep, a half mastering display MP4 / MOV cannot write, a mastering half Matroska's readers drop (a coordinate 0, max luminance not
+above min), an ambient viewing environment in Matroska. A Dolby Vision IPT base and RGB HDR are refused in every mode; a non-SDR
+source into a container without colour tags (AVI, `.m4v`, MPEG-TS) is refused before the file is made (with every stage off, before
+the passes' folder). A video whose frames turn another colour class part way (an SDR part
 joined to a PQ one) is warned of in the result with the frame number. The HDR10 records reach the container only: FFmpeg 7.1.1's
 NVENC writes no SEI.
 

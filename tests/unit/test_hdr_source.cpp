@@ -853,6 +853,12 @@ TEST_CASE("Written tags of an HDR passthrough are the effective ones with matrix
     CHECK(same(written(RawTags{9, 9, 2, 1, 0}).first, 9, 9, 1, 1));  // BT.2020 primaries without a transfer: BT.709's curve
     CHECK(same(written(Tags(9, 9, 8)).first, 9, 9, 8, 1));  // a log curve: kept
     CHECK(same(written(Tags(9, 12, 16)).first, 9, 12, 16, 1));  // P3 PQ: its primaries
+    CHECK(same(written(Tags(2, 9, 8)).first, 9, 9, 8, 1));          // a log curve without its matrix: BT.2020's
+    CHECK(written(Tags(2, 9, 8)).second);
+    CHECK(same(written(Tags(9, 2, 2)).first, 9, 9, 1, 1));          // wide by the matrix alone: BT.2020 assumed, BT.709's curve
+    CHECK(same(written(Tags(9, 1, 2)).first, 9, 1, 1, 1));          // the BT.2020 matrix under BT.709 primaries: their curve
+    CHECK(same(written(Tags(14, 9, 16)).first, 14, 9, 16, 1));      // ICtCp: kept as it is
+    CHECK_FALSE(written(Tags(14, 9, 16)).second);
     // mixed signalling (SDR frames over PQ codec parameters): the frames' tags as they are, nothing filled
     CHECK(same(written(Tags(9, 9, 16), Tags(1, 1, 1)).first, 1, 1, 1, 1));
     CHECK_FALSE(written(Tags(9, 9, 16), Tags(1, 1, 1)).second);

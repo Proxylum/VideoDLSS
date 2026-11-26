@@ -19,7 +19,7 @@ struct PassthroughColour {
     ColorTags tags;
     HdrStatic meta;
     std::optional<ResultColor> expect;   // nullopt: an SDR source, checked as before
-    std::vector<PlanNote> encodeNotes;   // scope "encode": encode.tags_filled, encode.hdr_8bit, encode.range_lost, encode.mdcv_lost, encode.no_amve
+    std::vector<PlanNote> encodeNotes;   // scope "encode": encode.tags_filled, encode.hdr_8bit, encode.range_lost, encode.mdcv_lost, encode.mdcv_invalid, encode.no_amve
 };
 
 // Throws ColourUnsupported: a source refused in every mode (a Dolby Vision IPT base, RGB HDR; RequireColour), or a non-SDR class into a
@@ -27,8 +27,8 @@ struct PassthroughColour {
 PassthroughColour PlanPassthroughColour(const VideoStreamInfo& info, const std::string& codec, const OutputFormatRequest& format,
                                         const std::filesystem::path& output, const std::string& where);
 
-// The codec keeps the range in its own bitstream (the NVENC codecs' VUI / sequence header): prores_ks and ffv1 do not - FFmpeg's ProRes
-// header has no range, FFV1 writes none.
+// The codec keeps the range in its own bitstream: the NVENC codecs (their VUI / sequence header) - and no other, an encoder outside the
+// table included (`--codec` takes any): FFmpeg's ProRes header has no range (its decoder says limited to every frame), FFV1 writes none.
 bool CodecKeepsRange(const std::string& codec);
 
 }  // namespace dlssvid

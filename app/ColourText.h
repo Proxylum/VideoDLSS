@@ -18,7 +18,7 @@ QString ColourNoteText(const SourceColor& colour, const ColourNote& note);
 // TASK-0079 (HDR step TB-2): the stop of a source's processing (or of everything) in the plan's words - what the source is, why, what
 // still works («Обработать · только кодирование» writes it as it is) - and the short line of a card or a button.
 QString ColourStopText(ColourStop stop, const SourceColor& colour);
-QString ColourStopShortText(ColourStop stop);
+QString ColourStopShortText(ColourStop stop, const SourceColor& colour);
 // A note of the plan (PlanNote: the source's by ColourNoteText, the encoding's by its key) in Russian.
 QString PlanNoteText(const SourceColor& colour, const PlanNote& note);
 

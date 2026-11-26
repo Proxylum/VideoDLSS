@@ -430,6 +430,9 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     if (a.output.empty()) Throw("nr: -o/--output is required");
     VideoDecoder decoder(a.input);
     const auto& info = decoder.Info();
+    // TASK-0079: the colour this source cannot be processed in - before the hash and the NGX feature, from the passes too (their
+    // frames would be processed in it all the same)
+    RequireColour(ResolveColor(info), ColourUse::Process, "nr: " + a.input);
     // pass folders produced by the earlier stages live under the same root: pick them up unless told otherwise
     auto autoDir = [&](const std::string& given, const char* name) -> std::filesystem::path {
         if (!given.empty()) return given;
@@ -446,10 +449,7 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     // no video decode: otherwise the frames come from the video (RunNr walks it even with the colour pass), so a stream this machine
     // cannot decode is refused here, before hashing it and the NGX feature (TASK-0076)
     const bool fromPass = !o.colorDir.empty() && a.start - std::min(a.warmup, a.start) > 0;
-    if (!fromPass) {
-        decoder.RequireDecodable();
-        RequireColour(ResolveColor(decoder.Info()), ColourUse::Process, "nr: " + a.input);  // TASK-0079: before the hash and the NGX feature
-    }
+    if (!fromPass) decoder.RequireDecodable();
     o.depthDir = autoDir(a.depthDir, "depth_dlss");
     o.mvDir = autoDir(a.mvDir, "mv_dlss");
     o.masksDir = !a.masksDir.empty() ? std::filesystem::path(a.masksDir) : a.noAuto ? std::filesystem::path() : std::filesystem::path(a.output);

@@ -156,9 +156,9 @@ int CmdInfo(const std::string& input, bool warp) {
     for (const std::string& line : ColourInfoLines(i.color)) std::printf("%s\n", line.c_str());  // TASK-0078: HDR, Dolby Vision, notes
     {  // TASK-0079: what this version does with that colour
         const ColorPlan cp = ResolveColor(i);
-        if (cp.all != ColourStop::None) std::printf("processing:  not supported - %s\n", cp.why.c_str());
-        else if (cp.process != ColourStop::None) std::printf("processing:  not yet - %s\n", cp.why.c_str());
-        if (i.color.Hdr() && !i.color.hdr.Empty())
+        if (cp.process == ColourStop::NotYet) std::printf("processing:  not yet - %s\n", cp.why.c_str());
+        else if (cp.process != ColourStop::None) std::printf("processing:  not supported - %s\n", cp.why.c_str());  // a matrix, or every mode
+        if (cp.all == ColourStop::None && i.color.Hdr() && !i.color.hdr.Empty())
             std::printf("hdr note:    the HDR10 records go to the container only when passed through (FFmpeg 7.1.1's NVENC writes no SEI)\n");
     }
     if (!i.orientation.Identity())  // TASK-0072: the frames are turned as players show them

@@ -436,12 +436,17 @@ TEST_CASE("ResolveColor keeps legacy cells as before, stops every other cell and
     // mixed signalling: SDR frames over PQ codec parameters (a ProRes colr) - stopped, not read as SDR
     ColourLayers mixed;
     mixed.stream = mixed.container = RawTags{9, 9, 16, 1, 0};
+    mixed.containerRecords.mdcv = Mdcv{};  // a stale colr's records: not written with the frames' SDR tags
+    mixed.containerRecords.mdcv->maxLum = {1000, 1};
+    mixed.containerRecords.mdcv->hasLuminance = true;
+    mixed.containerRecords.cll = Cll{1000, 400};
     FirstLookColor frame;
     frame.how = FirstLook::Decode;
     frame.tags = RawTags{1, 1, 1, 1, 0};
     mixed.first = frame;
     i.color = SourceColorOf(mixed, "422", "prores");
     REQUIRE(i.color.cls == SourceClass::Legacy);
+    REQUIRE(i.color.hdr.cll);
     const ColorPlan m = ResolveColor(i);
     CHECK(m.process == ColourStop::NotYet);
     CHECK(m.why.find("layers disagree") != std::string::npos);

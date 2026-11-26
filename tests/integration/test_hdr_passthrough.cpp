@@ -3,9 +3,11 @@
 // warned of, an SDR source on the legacy path as before. CPU cases on FFV1 / ProRes (WARP for the passthrough's GPU stage).
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -242,11 +244,13 @@ TEST_CASE("Processing a PQ source is refused before hashing: process upscale dep
         {{"flow", "-i", p, "-o", (dir / "f").string(), "--warp"}, "flow: "},
         {{"fg", "-i", p, "-o", (dir / "fg").string(), "--warp"}, "fg: "},
         {{"nr", "-i", p, "-o", (dir / "nr").string(), "--warp"}, "nr: "},
+        // from a colour pass (--start past the warm-up): the frames would be processed in that colour all the same
+        {{"nr", "-i", p, "-o", (dir / "nr2").string(), "--warp", "--color-dir", (dir / "no_pass").string(), "--start", "1"}, "nr: "},
         {{"scenes", "-i", p, "-o", (dir / "sc").string()}, "scenes: "},
         {{"export", "-i", p, "-o", (dir / "ex").string(), "--range", "0-1"}, "export: "},
     };
     for (const Case& c : cases) {
-        const auto run = RunAll(c.args, dir / (c.args[0] + ".log"));
+        const auto run = RunAll(c.args, dir / (c.args[0] + std::to_string(&c - cases.data()) + ".log"));
         INFO(run.out);
         CHECK(run.code != 0);
         CHECK_THAT(run.out, ContainsSubstring(c.where + p + ": processing of HDR PQ"));
@@ -283,9 +287,24 @@ TEST_CASE("process --plan --passthrough refuses Dolby Vision 5 and prints the so
         CHECK_THAT(refused.out, ContainsSubstring("neither processed nor passed through"));
     }
     const auto pq = PqFfv1(dir, "pq.mkv", {}, RawTags{2, 9, 16, 1, 0});  // no matrix: BT.2020 assumed, no records
-    const auto plan = RunAll({"process", "-i", pq.string(), "-o", (dir / "o.mp4").string(), "--passthrough", "--plan", "--codec", "hevc_nvenc"}, dir / "pq.log");
+    const auto json = dir / "plan.json";
+    const auto plan = RunAll({"process", "-i", pq.string(), "-o", (dir / "o.mp4").string(), "--passthrough", "--plan", "--codec", "hevc_nvenc", "--json",
+                              json.string()},
+                             dir / "pq.log");
     INFO(plan.out);
     CHECK(plan.code == 0);
+    {  // the same notes in the plan's JSON: key, level, scope, text
+        std::ifstream f(json);
+        const nlohmann::json j = nlohmann::json::parse(f);
+        REQUIRE(j.contains("warnings"));
+        bool source = false, encode = false;
+        for (const auto& w : j["warnings"]) {
+            source = source || (w["key"] == "source.bt2020_assumed" && w["level"] == "note" && w["scope"] == "source" && !w["text"].get<std::string>().empty());
+            encode = encode || (w["key"] == "encode.tags_filled" && w["scope"] == "encode");
+        }
+        CHECK(source);
+        CHECK(encode);
+    }
     CHECK_THAT(plan.out, ContainsSubstring("note: source: matrix unspecified under smpte2084: BT.2020 assumed"));
     CHECK_THAT(plan.out, ContainsSubstring("note: source: PQ without mastering display or light level metadata"));
     CHECK_THAT(plan.out, ContainsSubstring("note: encode: the result is tagged matrix bt2020nc"));
@@ -401,6 +420,87 @@ TEST_CASE("The source passed through with every stage off keeps the passthrough 
     CHECK(Has(r.warnings, "the result is tagged"));
     CHECK(std::count_if(r.warnings.begin(), r.warnings.end(), [](const std::string& w) { return w.find("BT.2020 assumed") != std::string::npos; }) == 1);
     CHECK(Summarize(o.output).colorSpace == 9);  // filled
+    // into AVI: refused before the passes' folder is made (and the source hashed)
+    o.output = dir / "avi.avi";
+    CHECK_THROWS_AS(RunProcess(o), ColourUnsupported);
+    CHECK_FALSE(std::filesystem::exists(dir / "avi_passes"));
+    CHECK_FALSE(std::filesystem::exists(dir / "avi.avi"));
+}
+
+TEST_CASE("The passthrough result check is wired: a codec option that rewrites the primaries fails the publish", "[integration][hdr][passthrough][result]") {
+    const auto dir = Dir("wired");
+    const auto pq = PqFfv1(dir, "pq.mkv");
+    ProcessOptions o = Passthrough(pq, dir / "out.mkv", "ffv1");
+    o.codecOptions = {{"color_primaries", "bt709"}};  // an AVCodecContext option: avcodec_open2 sets it over the source's
+    CHECK_THROWS_WITH(RunProcess(o), ContainsSubstring("its primaries is bt709, bt2020 was written"));
+    CHECK_FALSE(std::filesystem::exists(dir / "out.mkv"));
+}
+
+TEST_CASE("What a passthrough expects back per codec and container: tags, range, mastering halves, light level, nothing for SDR", "[integration][hdr][result]") {
+    const auto dir = Dir("expect");
+    ClipHdr hdr;
+    hdr.mastering = Mastering1000();
+    hdr.light = Cll{1000, 400};
+    VideoDecoder probe(PqFfv1(dir, "pq.mkv", hdr), VideoDecoder::Probe());
+    const VideoStreamInfo& info = probe.Info();
+    const PassthroughColour mp4 = PlanPassthroughColour(info, "hevc_nvenc", {}, "a.mp4", "t");
+    REQUIRE(mp4.expect);
+    CHECK(mp4.expect->matrix == 9);
+    CHECK(mp4.expect->primaries == 9);
+    CHECK(mp4.expect->trc == 16);
+    CHECK(mp4.expect->checkRange);
+    REQUIRE(mp4.expect->mdcv);
+    CHECK(mp4.expect->mdcv->hasPrimaries);  // (read back from Matroska's floats: not the ratios written)
+    CHECK(std::llround(mp4.expect->mdcv->maxLum.Value()) == 1000);
+    REQUIRE(mp4.expect->cll);
+    CHECK(*mp4.expect->cll == Cll{1000, 400});
+    const PassthroughColour mov = PlanPassthroughColour(info, "prores_ks", {}, "a.mov", "t");
+    REQUIRE(mov.expect);
+    CHECK_FALSE(mov.expect->checkRange);  // neither MOV nor ProRes keeps a range
+    CHECK(mov.expect->mdcv);
+    CHECK(mov.expect->cll);
+    CHECK_FALSE(PlanPassthroughColour(info, "prores_aw", {}, "a.mov", "t").expect->checkRange);  // an encoder outside the table: no range
+    CHECK(PlanPassthroughColour(info, "ffv1", {}, "a.mkv", "t").expect->checkRange);              // Matroska's Colour keeps it
+    CHECK_FALSE(PlanPassthroughColour(info, "ffv1", {}, "a.mkv", "t").expect->amve);
+    CHECK_FALSE(PlanPassthroughColour(info, "ffv1", {}, "", "t").expect);  // no output named yet: nothing to check
+    VideoDecoder sdr(WriteClip(dir / "sdr.mkv", Small()), VideoDecoder::Probe());
+    CHECK_FALSE(PlanPassthroughColour(sdr.Info(), "ffv1", {}, "a.mkv", "t").expect);  // SDR: checked as before
+}
+
+TEST_CASE("A mastering display Matroska's reader would drop is noted and not expected back; ProRes notes a full range in MKV", "[integration][hdr][passthrough][result]") {
+    const auto dir = Dir("mdcv_invalid");
+    ClipSpec s = Small("prores_ks", "yuv422p10le");
+    s.color = Tags(9, 9, 16);
+    Mdcv m = Mastering1000();
+    m.maxLum = {0, 1};  // max not above min: MP4 / MOV keep it, matroskadec drops the luminance
+    s.hdr.mastering = m;
+    const auto in = WriteClip(dir / "in.mov", s);
+    REQUIRE(Summarize(in).hdr.mdcv);
+    REQUIRE(Summarize(in).hdr.mdcv->hasLuminance);
+    const ProcessResult r = RunProcess(Passthrough(in, dir / "out.mkv", "ffv1"));
+    CHECK(Has(r.warnings, "luminance does not hold"));
+    const StreamSummary out = Summarize(dir / "out.mkv");
+    REQUIRE(out.hdr.mdcv);
+    CHECK(out.hdr.mdcv->hasPrimaries);
+    CHECK_FALSE(out.hdr.mdcv->hasLuminance);
+    // full range into ProRes in MKV: the container says full, FFmpeg's ProRes decoder says limited
+    const auto full = PqFfv1(dir, "full.mkv", {}, Tags(9, 9, 16, 2));
+    const ProcessResult p = RunProcess(Passthrough(full, dir / "full_prores.mkv", "prores_ks"));
+    CHECK(Has(p.warnings, "ProRes keeps no range"));
+}
+
+TEST_CASE("Passthrough of ICtCp PQ FFV1 MKV keeps matrix 14; processing it is not supported", "[integration][hdr][passthrough]") {
+    const auto dir = Dir("ictcp");
+    const auto in = PqFfv1(dir, "ictcp.mkv", {}, Tags(14, 9, 16));
+    VideoDecoder probe(in, VideoDecoder::Probe());
+    REQUIRE(ResolveColor(probe.Info()).process == ColourStop::Matrix);
+    RunProcess(Passthrough(in, dir / "out.mkv", "ffv1"));
+    const StreamSummary s = Summarize(dir / "out.mkv");
+    CHECK(s.colorSpace == 14);
+    CHECK(s.colorTrc == 16);
+    const auto info = RunAll({"info", in.string()}, dir / "info.log");
+    INFO(info.out);
+    CHECK_THAT(info.out, ContainsSubstring("processing:  not supported - matrix ictcp"));
 }
 
 TEST_CASE("Dolby Vision 8.4 FFV1 MKV passes through without its mapping and with a note; 5 is refused", "[integration][hdr][dovi][passthrough]") {
@@ -434,12 +534,12 @@ TEST_CASE("A proxy of an HLG ProRes clip carries the frame's trc 18; an SDR prox
     const StreamSummary s = Summarize(proxy);
     CHECK(s.colorTrc == 18);
     CHECK(s.colorPrimaries == 9);
-    ClipSpec sdr = Small("prores_ks", "yuv422p10le");
-    sdr.color = Tags(1, 1, 1);
-    const auto sdrClip = WriteClip(dir / "sdr.mov", sdr);
+    ClipSpec sdr = Small("ffv1", "yuv420p");
+    sdr.color = RawTags{2, 1, 1, 1, 0};
+    const auto sdrClip = WriteClip(dir / "sdr.mkv", sdr);
     const auto sdrProxy = BuildProxy(sdrClip, dir / "passes2", "source");
     CHECK(Summarize(sdrProxy).colorTrc == 1);
-    CHECK(Summarize(sdrProxy).colorSpace == 1);
+    CHECK(Summarize(sdrProxy).colorSpace == 2);  // not ResultColorTags' BT.601 by the height
 }
 
 TEST_CASE("dlssvid info of a PQ video exits 0, says HDR10 records go to the container only and that processing waits", "[integration][hdr][cli]") {
@@ -461,6 +561,10 @@ TEST_CASE("dlssvid info of a PQ video exits 0, says HDR10 records go to the cont
     CHECK(ipt.code == 0);
     CHECK_THAT(ipt.out, ContainsSubstring("processing:  not supported - a Dolby Vision IPT base layer"));
     CHECK_THAT(ipt.out, ContainsSubstring("IPT base - not supported"));
+    const auto rgb = RunAll({"info", PqFfv1(dir, "rgb_matrix.mkv", hdr, RawTags{0, 9, 16, 1, 0}).string()}, dir / "rgb.log");
+    INFO(rgb.out);
+    CHECK_THAT(rgb.out, ContainsSubstring("processing:  not supported - the RGB matrix on a Y'CbCr stream"));
+    CHECK_THAT(rgb.out, !ContainsSubstring("hdr note:"));
 }
 
 TEST_CASE("A processed legacy source whose frames turn PQ warns in the result with the frame number", "[integration][hdr][process]") {
@@ -521,6 +625,8 @@ TEST_CASE("ProRes MOV with PQ colr and SDR frame headers is stopped for processi
     ClipSpec s = Small("prores_ks", "yuv422p10le");
     s.color = Tags(9, 9, 16);
     s.frameColor = [](int64_t) { return Tags(1, 1, 1); };
+    s.hdr.mastering = Mastering1000();  // a stale colr's records: not written with SDR tags
+    s.hdr.light = Cll{1000, 400};
     const auto in = WriteClip(dir / "mixed.mov", s);
     ProcessOptions o;
     o.input = in;
@@ -542,6 +648,8 @@ TEST_CASE("ProRes MOV with PQ colr and SDR frame headers is stopped for processi
     const ProcessResult r = RunProcess(Passthrough(in, dir / "pt.mov", "prores_ks"));
     CHECK(Has(r.warnings, "the first frame says"));
     CHECK(Summarize(dir / "pt.mov").colorTrc == 1);  // the frames' tags
+    CHECK_FALSE(Summarize(dir / "pt.mov").hdr.mdcv);
+    CHECK_FALSE(Summarize(dir / "pt.mov").hdr.cll);
 }
 
 TEST_CASE("Passthrough notes a mastering display it cannot write and a full range it cannot keep", "[integration][hdr][passthrough][result]") {
@@ -570,10 +678,14 @@ TEST_CASE("Container colour caps by muxer: mp4 and mov keep amve, mkv not, mov n
     CHECK(mp4.range);
     CHECK(mp4.mdcvNeedsBoth);
     CHECK(mp4.amve);
+    CHECK(mp4.mdcv);
+    CHECK(mp4.cll);
     const auto mov = VideoEncoder::ContainerColorCapsFor("a.mov");
     CHECK(mov.tags);
     CHECK_FALSE(mov.range);
     CHECK(mov.amve);
+    CHECK(mov.mdcv);
+    CHECK(mov.cll);
     for (const char* f : {"a.mkv", "a.webm"}) {
         const auto mkv = VideoEncoder::ContainerColorCapsFor(f);
         CHECK(mkv.tags);
@@ -581,13 +693,21 @@ TEST_CASE("Container colour caps by muxer: mp4 and mov keep amve, mkv not, mov n
         CHECK(mkv.range);
         CHECK_FALSE(mkv.mdcvNeedsBoth);
         CHECK_FALSE(mkv.amve);
+        CHECK(mkv.mdcv);
+        CHECK(mkv.cll);
     }
     for (const char* f : {"a.avi", "a.m4v", "a.ts", "a.hevc"}) {
         INFO(f);
-        CHECK_FALSE(VideoEncoder::ContainerColorCapsFor(f).tags);
+        const auto none = VideoEncoder::ContainerColorCapsFor(f);
+        CHECK_FALSE(none.tags);
+        CHECK_FALSE(none.range);
+        CHECK_FALSE(none.mdcv);
+        CHECK_FALSE(none.cll);
     }
     CHECK(CodecKeepsRange("hevc_nvenc"));
+    CHECK(CodecKeepsRange("av1_nvenc"));
     CHECK_FALSE(CodecKeepsRange("prores_ks"));
+    CHECK_FALSE(CodecKeepsRange("prores_aw"));  // an encoder outside the table: its range is not known
     CHECK_FALSE(CodecKeepsRange("ffv1"));
 }
 

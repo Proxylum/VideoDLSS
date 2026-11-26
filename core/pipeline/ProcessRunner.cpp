@@ -911,8 +911,11 @@ Prepared Prepare(const ProcessOptions& options) {
         if (s.enabled) r.wanted[s.name] = s;
     }
     // TASK-0079: a source this version cannot process (HDR, wide gamut, ICtCp ...) - or with no stage on, pass through (an IPT base,
-    // RGB HDR) - is refused before the hash and the stages, with what still works
-    RequireColour(ResolveColor(r.info), r.wanted.empty() ? ColourUse::Passthrough : ColourUse::Process, "process: " + options.input.string());
+    // RGB HDR; a non-SDR source into a container without colour tags) - is refused before the hash and the stages, with what still works
+    if (r.wanted.empty() && options.encode && !options.output.empty())
+        (void)PlanPassthroughColour(r.info, options.codec, options.outputFormat, options.output, "process: " + options.input.string());
+    else
+        RequireColour(ResolveColor(r.info), r.wanted.empty() ? ColourUse::Passthrough : ColourUse::Process, "process: " + options.input.string());
     for (const char* stage : kColourStages)
         if (!r.wanted.count(stage))
             for (const auto& pass : StageFamilyPasses(stage)) r.ctx.switchedOff.insert(pass);

@@ -278,6 +278,7 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     encodeForm->addWidget(encodeAudio_, 1);  // «10 бит 4:2:0 · ≈ 45 Мбит/с · файл ≈ 54 МБ · звук копируется»
     eg->addLayout(encodeForm, 0, 1);
     encodeState_ = new QLabel(encodeCard);
+    encodeState_->setObjectName("encodeState");
     encodeState_->setWordWrap(true);
     SetRole(encodeState_, "warn");
     eg->addWidget(encodeState_, 0, 2, Qt::AlignTop);
@@ -586,8 +587,7 @@ void ProjectPanel::refresh() {
     // TASK-0076: a source this machine cannot decode - no «обновится»: no run starts (as the stages' cards say)
     encodeState_->setText(!hasSource                    ? QString()
                           : model_.sourceRefusalSaid() ? SourceRefusedShortText()
-                          : model_.colourStopSaid()    ? ColourStopShortText(model_.colourStopAll() != ColourStop::None ? model_.colourStopAll()
-                                                                                                                         : model_.colourStop())
+                          : model_.colourStopSaid()    ? ColourStopShortText(model_.colourStopSaidKind(), model_.sourceInfo().color)
                                                        : tr("пересчёт · %1 · %2 обновится").arg(enc ? FormatDuration(enc->seconds) : "—").arg(result));
     refreshVersions();
     updating_ = false;
