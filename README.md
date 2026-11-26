@@ -352,9 +352,10 @@ Matroska: MasteringMetadata, MaxCLL / MaxFALL, no ambient viewing environment); 
 (`process --plan`), the result and the GUI's output card say what is lost or assumed: Dolby Vision's RPU, HDR10+, 8 bits of HDR
 (banding), a full range ProRes keeps in no container (FFmpeg's decoder says limited) and a MOV of FFV1 or another encoder cannot
 keep, a half mastering display MP4 / MOV cannot write, a mastering display or light level outside MP4 / MOV's fields (not written), a
-mastering half or a light level with one value 0 Matroska's readers drop, an ambient viewing environment in Matroska. A Dolby Vision IPT base and RGB HDR are refused in every mode; a non-SDR
-source into a container without colour tags (AVI, `.m4v`, MPEG-TS) is refused before the file is made (with every stage off, before
-the passes' folder). A video whose frames turn another colour class part way (an SDR part
+mastering half or a light level with one value 0 Matroska's readers drop, an ambient viewing environment in Matroska. A Dolby Vision IPT base and RGB HDR are refused in every mode; a source
+whose effective tags (its frames') are HDR PQ / HLG, wide gamut or a log curve into a container without colour tags (AVI, `.m4v`,
+MPEG-TS) is refused before the file is made (with every stage off, before the passes' folder) - SDR frames under HDR codec parameters,
+and ICtCp / BT.2020 CL under SDR primaries, go there as any SDR video. A video whose frames turn another colour class part way (an SDR part
 joined to a PQ one) is warned of in the result with the frame number; frames of another class from the first one (an HDR transfer in
 an SEI under SDR tags) are warned of as read wrong. The HDR10 records reach the container only: FFmpeg 7.1.1's
 NVENC writes no SEI. `dlssvid info` says it too: `processing:` (`not yet` - with a later version, `not supported` - a matrix, or

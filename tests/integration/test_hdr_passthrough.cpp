@@ -143,6 +143,7 @@ TEST_CASE("Passthrough of PQ FFV1 MKV keeps 9/9/16, the samples bit for bit, Mas
     const auto out = dir / "out.mkv";
     const ProcessResult r = RunProcess(Passthrough(in, out, "ffv1"));
     CHECK(r.framesOut == 4);
+    CHECK(r.warnings.empty());  // nothing filled, lost or assumed
     const StreamSummary s = Summarize(out);
     CHECK(s.colorSpace == 9);  // TA wrote 1 (the matrix by height)
     CHECK(s.colorPrimaries == 9);
@@ -161,6 +162,10 @@ TEST_CASE("Passthrough of HLG ProRes MOV keeps trc 18 in colr and in the frame h
     const auto dir = Dir("hlg_mov");
     const auto in = HlgProRes(dir, "in.mov");
     const auto out = dir / "out.mov";
+    {  // nothing filled, lost or assumed: no encode note
+        VideoDecoder probe(in, VideoDecoder::Probe());
+        CHECK(PlanPassthroughColour(probe.Info(), "prores_ks", {}, out, "t").encodeNotes.empty());
+    }
     const ProcessResult r = RunProcess(Passthrough(in, out, "prores_ks"));
     CHECK(r.framesOut == 4);
     const StreamSummary s = Summarize(out);
@@ -953,6 +958,14 @@ TEST_CASE("A proxy of an HLG ProRes clip carries the frame's trc 18; an SDR prox
     const auto sdrProxy = BuildProxy(sdrClip, dir / "passes2", "source");
     CHECK(Summarize(sdrProxy).colorTrc == 1);
     CHECK(Summarize(sdrProxy).colorSpace == 2);  // not ResultColorTags' BT.601 by the height
+    // SDR frame headers under a PQ colr (class SDR, off the legacy path): the frames' tags, not the colr's
+    ClipSpec mixed = Small("prores_ks", "yuv422p10le");
+    mixed.color = Tags(9, 9, 16);
+    mixed.frameColor = [](int64_t) { return Tags(1, 1, 1); };
+    const auto mixedProxy = BuildProxy(WriteClip(dir / "mixed.mov", mixed), dir / "passes3", "source");
+    CHECK(Summarize(mixedProxy).colorTrc == 1);
+    CHECK(Summarize(mixedProxy).colorSpace == 1);
+    CHECK(Summarize(mixedProxy).colorPrimaries == 1);
 }
 
 TEST_CASE("dlssvid info of a PQ video exits 0, says HDR10 records go to the container only and that processing waits", "[integration][hdr][cli]") {
@@ -1027,6 +1040,18 @@ TEST_CASE("A processed legacy source whose frames turn PQ warns in the result wi
     const ProcessResult w = RunProcess(whole);
     REQUIRE(w.framesOut == 4);  // the short pass reused
     CHECK_FALSE(Has(w.warnings, "and on are"));
+    for (const auto& [frames, warns] : {std::pair{6, false}, std::pair{7, true}}) {  // the change at source frame 6: held from 7 frames on
+        INFO("frames " << frames);
+        ProcessOptions p = part;
+        p.output = dir / ("part" + std::to_string(frames) + ".mkv");
+        p.frames = frames;
+        REQUIRE(RunProcess(p).framesOut == frames);
+        ProcessOptions all = p;
+        all.frames = -1;
+        const ProcessResult a = RunProcess(all);
+        REQUIRE(a.framesOut == frames);
+        CHECK(Has(a.warnings, "frame 6 and on are HDR PQ") == warns);
+    }
 }
 
 TEST_CASE("Dolby Vision 8.2 FFV1 MKV processed with bicubic notes the removed mapping in the plan and in the result", "[integration][hdr][dovi][process]") {
@@ -1287,6 +1312,19 @@ TEST_CASE("Raw HEVC of SDR then PQ segments warns at the first PQ frame, decoded
         ProcessOptions q = Passthrough(sdrOnly, dir / (std::string("sdr_") + hw + ".mkv"), "ffv1");
         q.hwaccel = hw;
         CHECK_FALSE(Has(RunProcess(q).warnings, "and on are"));
+    }
+    // PQ then a part whose SPS has no colour description (x265's default): its frames say nothing - read as SDR, not as the first part's PQ
+    spec.color = RawTags{2, 2, 2, 1, 0};
+    const auto bare = NvencClip(dir / "bare.hevc", spec, &why);
+    REQUIRE(bare);
+    const auto pqThenBare = ConcatFiles(*pq, *bare, dir / "pq_bare.hevc");
+    VideoDecoder probe(pqThenBare, VideoDecoder::Probe());
+    REQUIRE(probe.Info().color.cls == SourceClass::Pq);
+    for (const char* hw : {"none", "cuda"}) {
+        INFO("hwaccel " << hw);
+        ProcessOptions o = Passthrough(pqThenBare, dir / (std::string("pq_bare_") + hw + ".mkv"), "ffv1");
+        o.hwaccel = hw;
+        CHECK(Has(RunProcess(o).warnings, "frame 6 and on are SDR"));
     }
 }
 

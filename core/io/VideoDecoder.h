@@ -175,8 +175,9 @@ DisplayOrientation OrientationFromDisplayMatrix(const int32_t matrix[9], std::st
 // The 'rotate' tag of older muxers: degrees clockwise ("90", "-90", "450"); not a whole multiple of 90: the identity, `why` says so.
 DisplayOrientation OrientationFromRotateTag(std::string_view tag, std::string* why = nullptr);
 
-// TASK-0079: the first frame whose colour (its tags; the stream's and the container's where it says none) is of another class than the
-// source's (SourceColor::cls) - a video joined from SDR and HDR parts, a raw stream whose later sequence says another colour.
+// TASK-0079: the first frame whose colour (its tags; the container's where it says none - not the stream's: a later sequence without a
+// colour description says none) is of another class than the source's (SourceColor::cls) - a video joined from SDR and HDR parts, a raw
+// stream whose later sequence says another colour or none.
 struct ColorClassChange {
     int64_t index = -1;  // the frame (0-based, as --frame)
     SourceClass from = SourceClass::Legacy, to = SourceClass::Legacy;

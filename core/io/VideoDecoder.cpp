@@ -1049,9 +1049,12 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     ++framesDecoded_;
     ++instanceFrames_;
     // TASK-0079: the class of each frame's colour against the source's - the class, not the tags (an SDR file's container and VUI often
-    // differ within SDR); the first that differs is kept. From the start only: after a seek the plan's reading of the start says nothing
+    // differ within SDR); the first that differs is kept. From the start only: after a seek the plan's reading of the start says nothing.
+    // The frame's tags over the container's only: the stream's are the first sequence's - a later SPS without a colour description says
+    // none (hevcdec resets the context's), and filling it with the first one's would hide the change; a decoder that keeps no tags of
+    // its own gives the frames the context's, which are the stream's already
     if (watchColour_ && !seeked_ && !classChange_) {
-        const RawTags merged = MergeTags(WithoutReserved(FrameTagsOf(frame_), decoder_->name), info_.color.stream, info_.color.container);
+        const RawTags merged = MergeTags(WithoutReserved(FrameTagsOf(frame_), decoder_->name), RawTags{}, info_.color.container);
         if (const SourceClass k = ClassOf(merged); k != info_.color.cls) classChange_ = ColorClassChange{index, info_.color.cls, k, merged};
     }
     if (!checkedFrameMatrix_) {  // an orientation in the bitstream (SEI) other than the container's: the container's is applied

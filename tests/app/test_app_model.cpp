@@ -11430,6 +11430,7 @@ TEST_CASE("Passthrough notes follow the project's encoder: hevc_nvenc gives no 8
     model.setEncode("hevc_nvenc", {});
     model.refreshPlan();
     CHECK_FALSE(model.planNotes().contains(eight));
+    CHECK_FALSE(model.planNotes().contains(QString::fromUtf8("Неуказанные теги цвета записываются как BT.2020, чтобы плееры узнали HDR")));  // 9/9/16
     model.setEncode("h264_nvenc", {});
     model.refreshPlan();
     CHECK(model.planNotes().contains(eight));
