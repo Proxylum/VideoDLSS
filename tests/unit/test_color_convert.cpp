@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "convert/ColorConvert.h"
+#include "convert/ColorPlan.h"
 
 using namespace dlssvid;
 
@@ -79,6 +80,7 @@ TEST_CASE("ColorInfoFromStream uses metadata or resolution", "[convert][color]")
     i.colorRange = 2;
     CHECK(ColorInfoFromStream(i).range == ColorRange::Full);
     CHECK(ToString(ColorMatrix::Bt601) == "bt601");
+    CHECK(ToString(ColorMatrix::Bt709) == "bt709");  // stage_params.matrix of every SDR manifest
 }
 
 // ---- TASK-0034: any bit depth and chroma layout; the 8-bit 4:2:0 path stays bit-identical ----------------------------
@@ -326,5 +328,126 @@ TEST_CASE("YuvToRgba16f in bands of rows is the same bit for bit whatever the th
             INFO(lay.w << "x" << lay.h << " threads " << threads);
             CHECK(YuvToRgba16f(f, ci, threads).data == one.data);
         }
+    }
+}
+
+// ---- TASK-0075 (HDR, PR TA): the BT.2020 matrix, one ResolveColor for every consumer, YuvToRgb in bands -----------------
+
+namespace {
+
+// ColorTagsFor as it was before ResolveColor (frozen here): the result tags of every SDR source must stay these.
+ColorTags FrozenColorTagsFor(const ColorInfo& ci, const VideoStreamInfo& info) {
+    ColorTags t;
+    t.range = ci.range == ColorRange::Full ? 2 : 1;
+    if (ci.matrix == ColorMatrix::Bt709) t.matrix = 1;
+    else t.matrix = info.colorSpace == 5 ? 5 : 6;
+    t.primaries = info.colorPrimaries;
+    t.transfer = info.colorTrc;
+    return t;
+}
+
+bool Same(const ColorInfo& a, const ColorInfo& b) { return a.matrix == b.matrix && a.range == b.range; }
+bool Same(const ColorTags& a, const ColorTags& b) { return a.range == b.range && a.matrix == b.matrix && a.primaries == b.primaries && a.transfer == b.transfer; }
+
+}  // namespace
+
+// Pure BT.2020 red is (Kr, -Kr / (2 (1 - Kb)), 1/2): Y 294, Cb 387, Cr 960 at 10 bits limited. White (940/512/512) would not
+// tell the matrices apart - Kr and Kb do not enter it.
+TEST_CASE("BT.2020 matrix: pure red at 10 bits limited is Y 294, Cb 387, Cr 960 both ways", "[convert][color][hdr]") {
+    const ColorInfo c2020{ColorMatrix::Bt2020, ColorRange::Limited};
+    CHECK(ToString(ColorMatrix::Bt2020) == "bt2020");
+    const PassImage red = YuvToRgb(Frame16(2, 2, PixelFormat::Yuv444p16, 10, 294, 387, 960), c2020, PixelType::F32);
+    CHECK(std::fabs(red.Get(1, 1, 0) - 1.f) < 1e-3f);
+    CHECK(std::fabs(red.Get(1, 1, 1)) < 1e-3f);
+    CHECK(std::fabs(red.Get(1, 1, 2)) < 1e-3f);
+    PassImage rgb;
+    rgb.Allocate(2, 2, PixelType::F32, {"R", "G", "B"});
+    for (uint32_t y = 0; y < 2; ++y)
+        for (uint32_t x = 0; x < 2; ++x) rgb.Set(x, y, 0, 1.f);
+    CpuFrame yuv;
+    RgbToYuv(rgb, c2020, FrameDesc{0, 0, PixelFormat::Yuv444p16, 10}, yuv);
+    CHECK(yuv.Plane16(0)[3] == 294);
+    CHECK(yuv.Plane16(1)[3] == 387);
+    CHECK(yuv.Plane16(2)[3] == 960);
+    // the result of a BT.2020 conversion is tagged BT.2020 NCL, whatever the source said
+    VideoStreamInfo i;
+    i.colorSpace = 1;
+    CHECK(ResultColorTags(c2020, i).matrix == 9);
+}
+
+// TA moves every consumer onto ResolveColor without changing what any of them reads: for every tag the stream can carry,
+// both ranges and both sides of the 720-line rule, each role is ColorInfoFromStream and the result tags are the old ones.
+TEST_CASE("ResolveColor reads every source as before: every role is ColorInfoFromStream, the result tags the frozen ColorTagsFor", "[convert][color][hdr][regression]") {
+    VideoStreamInfo i;
+    int checked = 0, wrong = 0;
+    for (const uint32_t h : {576u, 1080u})
+        for (int range = 0; range <= 2; ++range)
+            for (int m = 0; m <= 18; ++m)
+                for (int p = 0; p <= 18; ++p)
+                    for (int t = 0; t <= 18; ++t) {
+                        i.width = h * 16 / 9;
+                        i.height = h;
+                        i.codedHeight = h;
+                        i.colorRange = range;
+                        i.colorSpace = m;
+                        i.colorPrimaries = p;
+                        i.colorTrc = t;
+                        const ColorInfo sdr = ColorInfoFromStream(i);
+                        const ColorPlan plan = ResolveColor(i);
+                        const bool ok = Same(plan.colourDecode, sdr) && Same(plan.guideDecode, sdr) && Same(plan.viewDecode, sdr) &&
+                                        Same(plan.resultEncode, sdr) && Same(plan.resultTags, FrozenColorTagsFor(sdr, i));
+                        if (!ok && ++wrong <= 5) {
+                            INFO("height " << h << " range " << range << " matrix " << m << " primaries " << p << " trc " << t);
+                            CHECK(ok);
+                        }
+                        ++checked;
+                    }
+    CHECK(wrong == 0);
+    CHECK(checked == 2 * 3 * 19 * 19 * 19);
+}
+
+// The guides (depth, flow), FG, export, compare and the thumbnails convert with YuvToRgb; in bands of rows it must give the very same
+// values as the single-threaded walk it was, whatever the count - more threads than rows too.
+TEST_CASE("YuvToRgb in bands of rows is the same bit for bit whatever the thread count", "[convert][color][hdr][regression]") {
+    struct Layout {
+        uint32_t w, h;
+        PixelFormat fmt;
+        uint8_t depth;
+    };
+    for (const Layout lay : {Layout{22, 37, PixelFormat::Yuv420p, 8}, Layout{22, 37, PixelFormat::Yuv422p, 8}, Layout{22, 37, PixelFormat::Yuv444p, 8},
+                             Layout{22, 37, PixelFormat::Yuv420p16, 10}, Layout{22, 37, PixelFormat::Yuv422p16, 12}, Layout{22, 37, PixelFormat::Yuv444p16, 10},
+                             Layout{48, 301, PixelFormat::Yuv420p16, 10}}) {
+        CpuFrame f;
+        f.Allocate(FrameDesc{lay.w, lay.h, lay.fmt, lay.depth});
+        uint32_t seed = 4242;
+        const uint32_t maxv = (1u << lay.depth) - 1u;
+        if (f.desc.HighBitDepth()) {
+            auto* p = reinterpret_cast<uint16_t*>(f.data.data());
+            for (size_t k = 0; k < f.data.size() / 2; ++k) p[k] = static_cast<uint16_t>((seed = seed * 1664525u + 1013904223u) >> 16 & maxv);
+        } else {
+            for (auto& b : f.data) b = static_cast<uint8_t>((seed = seed * 1664525u + 1013904223u) >> 24);
+        }
+        for (const ColorInfo ci : {ColorInfo{ColorMatrix::Bt709, ColorRange::Limited}, ColorInfo{ColorMatrix::Bt2020, ColorRange::Full}})
+            for (const PixelType t : {PixelType::F32, PixelType::F16, PixelType::U16, PixelType::U8}) {
+                const PassImage one = YuvToRgb(f, ci, t, 1);
+                for (const int threads : {2, 3, 8, 64, 0}) {
+                    INFO(ToString(lay.fmt) << " " << int(lay.depth) << " bits " << lay.w << "x" << lay.h << " " << ToString(ci.matrix) << " threads " << threads);
+                    CHECK(YuvToRgb(f, ci, t, threads).data == one.data);
+                }
+            }
+    }
+}
+
+// A frame without its data is refused before the bands start: thrown inside a worker thread (or while workers run) it
+// would end the process with std::terminate instead of reaching the caller's catch (thumbnails, stages).
+TEST_CASE("YuvToRgb and YuvToRgba16f refuse a frame without data before converting in bands", "[convert][color][hdr][regression]") {
+    const ColorInfo ci{ColorMatrix::Bt709, ColorRange::Limited};
+    CpuFrame tall;
+    tall.desc = FrameDesc{4, 300, PixelFormat::Yuv420p16, 10};  // >= 256 rows: the automatic count takes several threads too
+    tall.data.resize(16);                                        // short, not empty
+    for (const int threads : {4, 0}) {
+        INFO("threads " << threads);
+        CHECK_THROWS(YuvToRgb(tall, ci, PixelType::F16, threads));
+        CHECK_THROWS(YuvToRgba16f(tall, ci, threads));
     }
 }

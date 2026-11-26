@@ -25,7 +25,14 @@ ColorInfo ColorInfoFromStream(const VideoStreamInfo& info) {
     return c;
 }
 
-std::string_view ToString(ColorMatrix m) { return m == ColorMatrix::Bt709 ? "bt709" : "bt601"; }
+std::string_view ToString(ColorMatrix m) {
+    switch (m) {
+        case ColorMatrix::Bt601: return "bt601";
+        case ColorMatrix::Bt709: return "bt709";
+        case ColorMatrix::Bt2020: return "bt2020";
+    }
+    return "bt709";
+}
 std::string_view ToString(ColorRange r) { return r == ColorRange::Full ? "full" : "limited"; }
 
 namespace {
@@ -51,8 +58,11 @@ YuvCoeffs Coeffs(const ColorInfo& info, int bitDepth) {
     k.yOff = full ? 0.f : static_cast<float>(16 << extra);
     k.cOff = static_cast<float>(128 << extra);
     k.cScale = 1.f / k.cCode;
-    k.kr = info.matrix == ColorMatrix::Bt709 ? 0.2126f : 0.299f;
-    k.kb = info.matrix == ColorMatrix::Bt709 ? 0.0722f : 0.114f;
+    switch (info.matrix) {
+        case ColorMatrix::Bt601: k.kr = 0.299f, k.kb = 0.114f; break;
+        case ColorMatrix::Bt709: k.kr = 0.2126f, k.kb = 0.0722f; break;
+        case ColorMatrix::Bt2020: k.kr = 0.2627f, k.kb = 0.0593f; break;  // ITU-R BT.2020 non-constant luminance
+    }
     k.kg = 1.f - k.kr - k.kb;
     k.crR = 2.f * (1.f - k.kr);
     k.cbB = 2.f * (1.f - k.kb);
@@ -95,6 +105,25 @@ void ForEachRgbOf(const CpuFrame& frame, const ColorInfo& info, Emit emit, uint3
     else ForEachRgb<uint8_t>(frame, k, emit, y0, y1);
 }
 
+// rows(y0, y1) over bands of [0, h) on several threads (0 = auto: half the cores, at most 8, from 256 rows - TASK-0040:
+// 8-12 ms single-threaded at 1080p, a third of the scrubbing budget). Every pixel is computed alone, so the result is the
+// same bit for bit whatever the count; `rows` must not throw (the frame is checked before).
+template <typename Rows>
+void ForEachBand(uint32_t h, int threads, const Rows& rows) {
+    int n = threads > 0 ? threads : (h >= 256 ? std::clamp(static_cast<int>(std::thread::hardware_concurrency()) / 2, 1, 8) : 1);
+    n = std::clamp(n, 1, static_cast<int>(std::max(1u, h)));
+    if (n == 1) {
+        rows(0u, h);
+        return;
+    }
+    std::vector<std::thread> pool;
+    pool.reserve(static_cast<size_t>(n - 1));
+    const auto band = [&](int i) { return static_cast<uint32_t>(static_cast<uint64_t>(h) * static_cast<uint64_t>(i) / static_cast<uint64_t>(n)); };
+    for (int i = 1; i < n; ++i) pool.emplace_back(rows, band(i), band(i + 1));
+    rows(0u, band(1));
+    for (auto& t : pool) t.join();
+}
+
 // 4 floats -> 4 halves (round to nearest even), F16C or the portable routine.
 inline void StoreHalf4(uint16_t* d, float r, float g, float b, float a, bool f16c) {
     if (f16c) {
@@ -110,14 +139,17 @@ inline void StoreHalf4(uint16_t* d, float r, float g, float b, float a, bool f16
 
 }  // namespace
 
-PassImage YuvToRgb(const CpuFrame& frame, const ColorInfo& info, PixelType outType) {
+PassImage YuvToRgb(const CpuFrame& frame, const ColorInfo& info, PixelType outType, int threads) {
     const uint32_t w = frame.desc.width, h = frame.desc.height;
+    if (frame.data.size() < frame.desc.ByteSize()) Throw("YuvToRgb: frame has no data");
     PassImage out = MakePassImage(PassKind::ColorSource, w, h, outType);
     const float scaleOut = outType == PixelType::U16 ? 65535.f : (outType == PixelType::U8 ? 255.f : 1.f);
-    ForEachRgbOf(frame, info, [&](uint32_t x, uint32_t y, float r, float g, float b) {
-        out.Set(x, y, 0, r * scaleOut);
-        out.Set(x, y, 1, g * scaleOut);
-        out.Set(x, y, 2, b * scaleOut);
+    ForEachBand(h, threads, [&](uint32_t y0, uint32_t y1) {
+        ForEachRgbOf(frame, info, [&](uint32_t x, uint32_t y, float r, float g, float b) {
+            out.Set(x, y, 0, r * scaleOut);
+            out.Set(x, y, 1, g * scaleOut);
+            out.Set(x, y, 2, b * scaleOut);
+        }, y0, y1);
     });
     return out;
 }
@@ -138,25 +170,11 @@ PassImage YuvToRgba16f(const CpuFrame& frame, const ColorInfo& info, int threads
     out.Allocate(w, h, PixelType::F16, {"R", "G", "B", "A"});
     const bool f16c = HasF16C();
     uint16_t* dst = out.As<uint16_t>();
-    auto rows = [&](uint32_t y0, uint32_t y1) {
+    ForEachBand(h, threads, [&](uint32_t y0, uint32_t y1) {
         ForEachRgbOf(frame, info, [&](uint32_t x, uint32_t y, float r, float g, float b) {
             StoreHalf4(dst + (static_cast<size_t>(y) * w + x) * 4, r, g, b, 1.f, f16c);
         }, y0, y1);
-    };
-    // bands of rows on several threads (TASK-0040: 8-12 ms single-threaded at 1080p, a third of the scrubbing budget);
-    // every pixel is computed alone, so the result is the same bit for bit whatever the count
-    int n = threads > 0 ? threads : (h >= 256 ? std::clamp(static_cast<int>(std::thread::hardware_concurrency()) / 2, 1, 8) : 1);
-    n = std::clamp(n, 1, static_cast<int>(std::max(1u, h)));
-    if (n == 1) {
-        rows(0, h);
-        return out;
-    }
-    std::vector<std::thread> pool;
-    pool.reserve(static_cast<size_t>(n - 1));
-    const auto band = [&](int i) { return static_cast<uint32_t>(static_cast<uint64_t>(h) * static_cast<uint64_t>(i) / static_cast<uint64_t>(n)); };
-    for (int i = 1; i < n; ++i) pool.emplace_back(rows, band(i), band(i + 1));
-    rows(0, band(1));
-    for (auto& t : pool) t.join();
+    });
     return out;
 }
 

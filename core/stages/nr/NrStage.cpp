@@ -5,6 +5,7 @@
 #include <cmath>
 #include <tuple>
 
+#include "convert/ColorPlan.h"
 #include "gpu/ComputeKernel.h"
 #include "gpu/GpuFrameCache.h"
 #include "pipeline/PassVersions.h"
@@ -640,7 +641,7 @@ namespace {
 
 NrRunResult RunNrFrames(const VideoStreamInfo& info, D3D12Device& device, NrStageOptions options, const std::function<bool(CpuFrame&)>& next,
                         int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params) {
-    options.color = ColorInfoFromStream(info);
+    options.color = ResolveColor(info).colourDecode;
     options.fps = info.frameRate;
     options.sar = ColourPixelAspect(options.colorDir, info.sar, info.width, info.height);  // TASK-0073: of the colour NR reads
     options.uploadToGpu = false;  // single-stage run: nothing reads the slot
