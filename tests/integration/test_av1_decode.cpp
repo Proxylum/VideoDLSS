@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -745,10 +746,18 @@ struct Av1Store {
     D3D12Device dev{D3D12Device::Options{true, false}};
     std::unique_ptr<FrameStore> store;
     ViewportRenderer renderer{dev};
-    explicit Av1Store(int prefetch = 1, int loaderThreads = 0) {
+    // afterLoad / beforePublish: FrameStore::Options::afterLoadForTests / beforePublishForTests (on the loader thread: after a load
+    // published its result and before it is done / before it publishes its result - its missing marks; a video's decoded frames LoadVideo
+    // publishes itself, before beforePublish)
+    // betweenUpdate: FrameStore::Options::betweenUpdateSectionsForTests (on Update's thread, between its two critical sections)
+    explicit Av1Store(int prefetch = 1, int loaderThreads = 0, std::function<void(int64_t, const std::string&)> afterLoad = {},
+                      std::function<void(int64_t, const std::string&)> beforePublish = {}, std::function<void()> betweenUpdate = {}) {
         FrameStore::Options opt;
         opt.prefetch = prefetch;
         opt.loaderThreads = loaderThreads;
+        opt.afterLoadForTests = std::move(afterLoad);
+        opt.beforePublishForTests = std::move(beforePublish);
+        opt.betweenUpdateSectionsForTests = std::move(betweenUpdate);
         store = std::make_unique<FrameStore>(dev, opt);
     }
     // The frame's settled status: WaitForCurrent returns once it is resident or marked missing, and a frame a prefetch marked missing
@@ -1640,6 +1649,746 @@ TEST_CASE("FrameStore prefetches no frame of an NVDEC-only video while a task ru
             return true;
         },
         30000));
+}
+
+namespace {
+// The loads of a store per frame of "source", as FrameStore::Options::afterLoadForTests sees them (each load, also one that published
+// nothing); `onLoad(frame, n)` runs on the loader thread for the n-th load of a frame
+struct LoadCounter {
+    std::mutex mutex;
+    std::map<int64_t, int> loads;
+    std::function<void(int64_t, int)> onLoad;
+    std::function<void(int64_t, const std::string&)> Hook() {
+        return [this](int64_t frame, const std::string& source) {
+            if (source != "source") return;
+            int n = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                n = ++loads[frame];
+            }
+            if (onLoad) onLoad(frame, n);
+        };
+    }
+    int Of(int64_t frame) {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto it = loads.find(frame);
+        return it == loads.end() ? 0 : it->second;
+    }
+};
+
+// Holds a loader thread in a hook until the test lets it go (Hold on the loader, Reached / Release on the test's thread). The gate is
+// declared before the store (the store's hooks use it until its loaders are joined), so its own Release in the destructor comes after
+// that join - a safeguard only: a held loader is let go by a GateGuard declared after the store; without one a failed REQUIRE hangs the
+// join in ~FrameStore
+struct LoaderGate {
+    std::promise<void> reached, released;
+    std::shared_future<void> go = released.get_future().share();
+    std::atomic<bool> held{false}, let{false};
+    void Hold() {
+        if (held.exchange(true)) return;  // once
+        reached.set_value();
+        go.wait();
+    }
+    bool Reached(int ms = 10000) { return reached.get_future().wait_for(std::chrono::milliseconds(ms)) == std::future_status::ready; }
+    void Release() {
+        if (!let.exchange(true)) released.set_value();
+    }
+    ~LoaderGate() { Release(); }
+};
+// Declared right after the store (the gate before it: its hook uses the gate until the loaders are joined): destroyed first - a
+// REQUIRE that fails while a loader is held lets it go before the store's destructor joins it (no hang)
+struct GateGuard {
+    LoaderGate& gate;
+    ~GateGuard() { gate.Release(); }
+};
+}  // namespace
+
+TEST_CASE("FrameStore: a start failure retried while its load is still in flight is loaded again - not left queued with no loader",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("retry_in_flight");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    FakeNvdecEnv fake("start-fails");  // before the store: its loaders read it while the store lives
+    LoadCounter counter;
+    FrameStore* store = nullptr;
+    // the first load of frame 10 has published its missing mark and the start failure, and is not done yet: the GUI thread's retry (a
+    // task's end, AppModel::updateNvdecHold) lands in that window - it forgets the mark; its requeue skips the key in flight
+    std::mutex orderMutex;
+    std::vector<int64_t> order;  // the loads in the order they end
+    counter.onLoad = [&](int64_t frame, int n) {
+        {
+            std::lock_guard<std::mutex> lock(orderMutex);
+            order.push_back(frame);
+        }
+        if (frame == 10 && n == 1) store->RetryStartFailures();
+    };
+    auto ordered = [&] {
+        std::lock_guard<std::mutex> lock(orderMutex);
+        return order;
+    };
+    Av1Store s(0, 1, counter.Hook());
+    store = s.store.get();
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});  // the queue: 10, 11, 9 (one frame each side)
+    // the loader asks for it again when it is done: it loads again (and NVDEC does not start again) - marked missing, not left queued.
+    // Waited for by the order itself (the counter grows before the hook writes it)
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            const auto o = ordered();
+            return std::count(o.begin(), o.end(), int64_t{10}) >= 2 && s.store->GetStatus(10, "source") == FrameStore::Status::Missing;
+        },
+        10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // nothing more comes
+    s.store->Update();
+    CHECK(counter.Of(10) == 2);
+    {
+        // the current frame asked for again goes to the head of the queue - before the prefetch of 11 and 9
+        const auto o = ordered();
+        std::string said;
+        for (const int64_t f : o) said += std::to_string(f) + " ";
+        INFO("loads ended: " << said);
+        REQUIRE(o.size() >= 2);
+        CHECK((o[0] == 10 && o[1] == 10));
+    }
+    CHECK(s.store->GetStatus(10, "source") == FrameStore::Status::Missing);
+    CHECK(s.store->StartFailure("source"));
+}
+
+TEST_CASE("FrameStore: a start failure of a load a retry met in flight is not published - the frame is loaded again and that failure stands",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("stale_start_failure");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    FakeNvdecEnv fake("start-fails");  // before the store
+    LoadCounter counter;
+    LoadCounter before;  // the loads that reached Publish
+    FrameStore* store = nullptr;
+    // frame 10's first load has its start failure and is about to publish it: the GUI thread's retry (a task's end) lands first - that
+    // failure began before the retry (the memory may be free now)
+    before.onLoad = [&](int64_t frame, int n) {
+        if (frame == 10 && n == 1) store->RetryStartFailures();
+    };
+    std::atomic<int> failureAfterFirst{-1};  // StartFailure right after that load published (1: set, 0: none)
+    counter.onLoad = [&](int64_t frame, int n) {
+        if (frame == 10 && n == 1) failureAfterFirst = store->StartFailure("source").has_value() ? 1 : 0;
+    };
+    Av1Store s(0, 1, counter.Hook(), before.Hook());
+    store = s.store.get();
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    // a start failure before (frame 5): the retry has one to forget
+    s.store->SetCurrentFrame(5, {"source"});
+    REQUIRE(Eventually([&] { return counter.Of(5) >= 1 && s.store->StartFailure("source"); }, 10000));
+    s.store->SetCurrentFrame(10, {"source"});
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            return counter.Of(10) >= 2 && s.store->GetStatus(10, "source") == FrameStore::Status::Missing;
+        },
+        10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // nothing more comes
+    s.store->Update();
+    CHECK(counter.Of(10) == 2);  // the stale failure dropped, the frame loaded again - and its own failure published
+    CHECK(failureAfterFirst == 0);  // the stale one never published
+    CHECK(s.store->GetStatus(10, "source") == FrameStore::Status::Missing);
+    CHECK(s.store->StartFailure("source"));
+}
+
+TEST_CASE("FrameStore: a retry before any start failure is recorded still makes the failure of a load in flight stale - loaded again",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("stale_first_failure");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    FakeNvdecEnv fake("start-fails");  // before the store
+    LoadCounter counter;
+    LoadCounter before;
+    FrameStore* store = nullptr;
+    // the very first load fails to start; the retry (a task's end) lands before it publishes - no failure recorded yet
+    std::atomic<int> failureBefore{-1};  // a failure recorded when the retry came (1: yes, 0: none) - checked on the test's thread
+    before.onLoad = [&](int64_t frame, int n) {
+        if (frame == 10 && n == 1) {
+            failureBefore = store->StartFailure("source").has_value() ? 1 : 0;
+            store->RetryStartFailures();
+        }
+    };
+    Av1Store s(0, 1, counter.Hook(), before.Hook());
+    store = s.store.get();
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            return counter.Of(10) >= 2 && s.store->GetStatus(10, "source") == FrameStore::Status::Missing;
+        },
+        10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    s.store->Update();
+    CHECK(failureBefore == 0);  // none recorded when the retry came
+    CHECK(counter.Of(10) == 2);
+    CHECK(s.store->GetStatus(10, "source") == FrameStore::Status::Missing);
+    CHECK(s.store->StartFailure("source"));
+}
+
+TEST_CASE("FrameStore: a retry of another source neither makes this source's start failure in flight stale nor forgets a recorded one",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("retry_other_source");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    FakeNvdecEnv fake("start-fails");  // before the store
+    LoadCounter counter;
+    LoadCounter before;
+    FrameStore* store = nullptr;
+    // RetryStartFailures(source) comes from a loader whose video decoded (another source than this one): only that source's loads in
+    // flight are made stale, only its failures forgotten
+    before.onLoad = [&](int64_t frame, int n) {
+        if (frame == 10 && n == 1) store->RetryStartFailures("other");  // this load's start failure met, not published yet
+    };
+    Av1Store s(0, 1, counter.Hook(), before.Hook());
+    store = s.store.get();
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            return counter.Of(10) >= 1 && s.store->GetStatus(10, "source") == FrameStore::Status::Missing;
+        },
+        10000));
+    CHECK(s.store->StartFailure("source"));  // published by its first load: not stale
+    s.store->RetryStartFailures("other");     // recorded now: another source's retry keeps it
+    CHECK(s.store->StartFailure("source"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    s.store->Update();
+    CHECK(counter.Of(10) == 1);  // never loaded again
+    CHECK(s.store->GetStatus(10, "source") == FrameStore::Status::Missing);
+}
+
+TEST_CASE("FrameStore: a retry between Update's two sections finds the missing marks it took - the frame is loaded again",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("retry_inside_update");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    std::optional<FakeNvdecEnv> fake;  // outlives the store: its loaders never read the environment as it changes
+    fake.emplace("start-fails");
+    LoadCounter counter;
+    FrameStore* store = nullptr;
+    std::atomic<bool> armed{false};
+    Av1Store s(0, 1, counter.Hook(), {}, [&] {
+        if (armed.exchange(false)) store->RetryStartFailures();  // NVDEC works again (a task's end) - inside this Update
+    });
+    store = s.store.get();
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});  // 10 and its neighbours fail to start: their marks published (no Update yet)
+    REQUIRE(Eventually(
+        [&] {
+            for (const int64_t n : {9, 10, 11})
+                if (counter.Of(n) < 1 || s.store->GetStatus(n, "source") != FrameStore::Status::Missing) return false;
+            return true;
+        },
+        10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // the loaders at rest
+    fake.reset();
+    armed = true;
+    s.store->Update();  // the marks taken, then the retry: it forgets them - asked for again
+    CHECK(s.store->GetStatus(10, "source") != FrameStore::Status::Missing);  // not a mark the retry missed
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            return s.store->GetStatus(10, "source") == FrameStore::Status::Ready;
+        },
+        10000));
+    CHECK_FALSE(s.store->StartFailure("source"));
+}
+
+TEST_CASE("FrameStore: a frame asked for again while its load is in flight, published by that load, is not loaded twice",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("asked_published");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    LoadCounter counter;
+    LoaderGate gate;
+    counter.onLoad = [&](int64_t frame, int n) {
+        if (frame == 10 && n == 1) gate.Hold();  // published, its load not done
+    };
+    Av1Store s(0, 1, counter.Hook());
+    GateGuard guard{gate};
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    REQUIRE(gate.Reached());
+    s.store->SetCurrentFrame(10, {"source"});  // the cursor set again: 10 asked for while in flight
+    gate.Release();
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            return s.store->GetStatus(10, "source") == FrameStore::Status::Ready;
+        },
+        10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    s.store->Update();
+    CHECK(counter.Of(10) == 1);  // its load published it: not wanted any more
+}
+
+TEST_CASE("FrameStore::SetSources queues nothing after a load it waits for - its stale start failure asks for the frame, not queued",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("reset_wait_asked");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    FakeNvdecEnv fake("start-fails");  // before the store
+    LoadCounter counter;
+    LoadCounter before;
+    LoaderGate gate;
+    before.onLoad = [&](int64_t frame, int n) {
+        if (frame == 10 && n == 1) gate.Hold();  // its start failure met, not published yet
+    };
+    Av1Store s(0, 1, counter.Hook(), before.Hook());
+    std::thread reset;
+    std::atomic<bool> resetDone{false};
+    std::atomic<bool> resetEntered{false};  // (what the thread touches is declared before the Joiner: it outlives the join)
+    struct Joiner {
+        std::thread& t;
+        ~Joiner() {
+            if (t.joinable()) t.join();
+        }
+    } joiner{reset};
+    GateGuard guard{gate};  // destroyed first: the loader let go, then the thread joined
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    REQUIRE(gate.Reached());
+    reset = std::thread([&] {
+        resetEntered = true;
+        s.store->SetSources({});
+        resetDone = true;
+    });
+    // the reset thread seen about to call SetSources, then given time to reach its wait (inside SetSources it is not observable from
+    // outside): if it took mutex_ only after the release below, the load would be asked for again on the old sources and this case
+    // would fail falsely - a window of the scheduler only
+    REQUIRE(Eventually([&] { return resetEntered.load(); }, 10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK_FALSE(resetDone);  // not done while the load is held (no proof it waits already - see above)
+    // the retry during the wait: 10's failure is stale - Publish drops it and asks for the frame (askedInFlight_); its loader's requeue
+    // after the load is held back by the reset
+    s.store->RetryStartFailures();
+    gate.Release();
+    reset.join();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(counter.Of(10) == 1);  // not loaded again on the old sources
+    for (const int64_t n : {9, 11}) {
+        INFO("frame " << n);
+        CHECK(counter.Of(n) == 0);
+    }
+}
+
+TEST_CASE("FrameStore::SetSources queues nothing of the old sources while it waits for their loads - a retry meanwhile neither",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("reset_wait");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    FakeNvdecEnv fake("start-fails");  // before the store
+    LoadCounter counter;
+    LoaderGate gate;
+    counter.onLoad = [&](int64_t frame, int n) {
+        if (frame == 10 && n == 1) gate.Hold();  // its start failure published, its load not done
+    };
+    Av1Store s(0, 1, counter.Hook());
+    std::thread reset;
+    std::atomic<bool> resetEntered{false};  // (what the thread touches is declared before the Joiner: it outlives the join)
+    struct Joiner {
+        std::thread& t;
+        ~Joiner() {
+            if (t.joinable()) t.join();
+        }
+    } joiner{reset};
+    GateGuard guard{gate};  // destroyed first: the loader let go, then the thread joined
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    REQUIRE(gate.Reached());
+    REQUIRE(s.store->StartFailure("source"));
+    reset = std::thread([&] {
+        resetEntered = true;
+        s.store->SetSources({});  // waits for the load in flight
+    });
+    // the reset thread seen about to call SetSources, then given time to reach its wait (inside SetSources it is not observable from
+    // outside). Had it not taken mutex_ before the retry, the reset would clear the queue the retry rebuilt (the plain order); had it
+    // taken it only after the release below, the loader would ask for 10 again on the old sources and this case would fail falsely -
+    // a window of the scheduler only
+    REQUIRE(Eventually([&] { return resetEntered.load(); }, 10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    s.store->RetryStartFailures();  // during the wait: would ask for the old window again
+    gate.Release();
+    reset.join();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    for (const int64_t n : {9, 11}) {  // never loaded: the old window was not queued again
+        INFO("frame " << n);
+        CHECK(counter.Of(n) == 0);
+    }
+    CHECK(counter.Of(10) == 1);
+}
+
+TEST_CASE("FrameStore: a target dropped by Update and asked for again while its load is in flight is loaded again - not left queued",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("dropped_reasked");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    LoadCounter counter;
+    LoaderGate gate;
+    std::atomic<bool> armed{false};
+    counter.onLoad = [&](int64_t frame, int) {
+        if (frame == 10 && armed) gate.Hold();
+    };
+    Av1Store s(0, 1, counter.Hook());
+    GateGuard guard{gate};
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    REQUIRE(s.Settle(20) == FrameStore::Status::Ready);  // a frame resident far from the target: it stands in there, 10 is no better
+    armed = true;
+    s.store->SetCurrentFrame(10, {"source"});
+    REQUIRE(gate.Reached());  // frame 10 published, its load not done
+    // the time moved far away: Update drops 10 (outside the window, no better stand-in than 20); the time back: 10 asked for again
+    // while its load is still in flight
+    s.store->SetCurrentFrame(20, {"source"});
+    s.store->Update();
+    REQUIRE(s.store->GetStatus(10, "source") != FrameStore::Status::Ready);
+    s.store->SetCurrentFrame(10, {"source"});
+    gate.Release();
+    // (the counter grows after the hook, the frame shows when it is published: both waited for)
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            return s.store->GetStatus(10, "source") == FrameStore::Status::Ready && counter.Of(10) >= 2;
+        },
+        10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(counter.Of(10) == 2);
+}
+
+TEST_CASE("FrameStore: a frame asked for in flight is not queued again outside the window asked for now - a task's start narrows it",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("asked_outside_window");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    FakeNvdecEnv fake("start-fails");  // before the store
+    LoadCounter counter;
+    LoadCounter before;
+    LoaderGate gate;
+    before.onLoad = [&](int64_t frame, int n) {
+        if (frame == 11 && n == 1) gate.Hold();  // the neighbour's load, its start failure not published yet
+    };
+    Av1Store s(0, 1, counter.Hook(), before.Hook());
+    GateGuard guard{gate};
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});  // 10 first, then its neighbour 11 (the window under the hold: one frame each side)
+    REQUIRE(gate.Reached());
+    REQUIRE(s.store->StartFailure("source"));  // 10's
+    // a retry while 11 is in flight (it asks for 11 again), then a task starts: an NVDEC-only video without a proxy gets its shown
+    // frame alone - 11 is outside the window asked for now
+    s.store->RetryStartFailures();
+    s.store->SetHoldNvdec(false);
+    gate.Release();
+    // 11's load over (the one loader then takes the shown frame: asked for again by the retry), and a moment for any load after it
+    CHECK(Eventually([&] { return counter.Of(10) >= 2; }, 10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK(counter.Of(11) == 1);  // not queued again
+}
+
+TEST_CASE("FrameStore: a missing mark Update took is Missing while its load is still closing - not Loading",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("missing_while_closing");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    FakeNvdecEnv fake("start-fails");  // before the store
+    LoadCounter counter;
+    LoaderGate gate;
+    counter.onLoad = [&](int64_t frame, int n) {
+        if (frame == 10 && n == 1) gate.Hold();  // its missing mark published, the load not done
+    };
+    Av1Store s(0, 1, counter.Hook());
+    GateGuard guard{gate};
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    REQUIRE(gate.Reached());
+    s.store->Update();  // the mark goes to missing_ at once
+    CHECK(s.store->GetStatus(10, "source") == FrameStore::Status::Missing);  // while its load is still in flight
+    gate.Release();
+}
+
+TEST_CASE("FrameStore: a non-current frame asked for in flight goes back into the queue after the current one - not ahead of a jump's target",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("requeue_order");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    FakeNvdecEnv fake("start-fails");  // before the store
+    LoadCounter counter;
+    LoadCounter before;
+    LoaderGate neighbour, current;
+    std::mutex orderMutex;
+    std::vector<int64_t> order;  // the loads in the order they end
+    counter.onLoad = [&](int64_t frame, int) {
+        std::lock_guard<std::mutex> lock(orderMutex);
+        order.push_back(frame);
+    };
+    before.onLoad = [&](int64_t frame, int n) {
+        if (frame == 11 && n == 1) neighbour.Hold();  // a prefetch of the window, its start failure not published yet
+        if (frame == 10 && n == 2) current.Hold();    // the shown frame asked for again by the retry: the other loader busy
+    };
+    Av1Store s(1, 2, counter.Hook(), before.Hook());  // two loaders: one current load and one prefetch at a time
+    GateGuard guards[] = {{neighbour}, {current}};
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    REQUIRE(neighbour.Reached());
+    REQUIRE(s.store->StartFailure("source"));  // 10's
+    // a retry while 11 is in flight: 11 asked for again (its start failure stale), 10 queued again - the other loader takes it and is held
+    s.store->RetryStartFailures();
+    REQUIRE(current.Reached());
+    // a jump to 12 with both loaders held: 12 current and queued, 11 still within the window
+    s.store->SetCurrentFrame(12, {"source"});
+    neighbour.Release();  // 11 done: asked for again - queued after 12, not ahead of it
+    // the order itself waited for (the count grows before the hook writes the order: its copy below would miss the last load)
+    CHECK(Eventually([&] {
+        std::lock_guard<std::mutex> lock(orderMutex);
+        return std::count(order.begin(), order.end(), 12) >= 1 && std::count(order.begin(), order.end(), 11) >= 2;
+    }, 10000));
+    current.Release();
+    std::vector<int64_t> ended;
+    {
+        std::lock_guard<std::mutex> lock(orderMutex);
+        ended = order;
+    }
+    std::string said;
+    for (const int64_t f : ended) said += std::to_string(f) + " ";
+    INFO("loads ended: " << said);
+    const auto at12 = std::find(ended.begin(), ended.end(), 12);
+    const auto firstOf11 = std::find(ended.begin(), ended.end(), 11);
+    REQUIRE(at12 != ended.end());
+    REQUIRE(firstOf11 != ended.end());
+    const auto secondOf11 = std::find(std::next(firstOf11), ended.end(), 11);
+    REQUIRE(secondOf11 != ended.end());
+    CHECK(at12 < secondOf11);  // the jump's target first
+}
+
+TEST_CASE("FrameStore: a frame published and waiting for Update is not queued again by a requeue - no load that finds it and publishes nothing",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("requeue_published");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    FakeNvdecEnv fake("start-fails");  // before the store
+    LoadCounter counter;
+    Av1Store s(0, 1, counter.Hook());
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    // the store driven by hand: no Update - the missing marks stay published in loaded_, waiting for it
+    s.store->SetCurrentFrame(10, {"source"});
+    auto loadedOnce = [&] {
+        for (const int64_t n : {9, 10, 11})
+            if (counter.Of(n) < 1 || s.store->GetStatus(n, "source") != FrameStore::Status::Missing) return false;
+        return true;
+    };
+    REQUIRE(Eventually(loadedOnce, 10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // the loader done with them (after its hook)
+    // the window asked for again (a task starts and ends; the cursor set to the same time): the published frames are not queued again
+    s.store->SetHoldNvdec(false);
+    s.store->SetHoldNvdec(true);
+    s.store->SetCurrentFrame(10, {"source"});
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    for (const int64_t n : {9, 10, 11}) {
+        INFO("frame " << n);
+        CHECK(counter.Of(n) == 1);
+        CHECK(s.store->GetStatus(n, "source") == FrameStore::Status::Missing);
+    }
+}
+
+// (a guard of the plain path; the window of Update's upload - uploading_ - is covered by the cases after it, each made deterministic by
+// Update's hook: its first section with a requeue (uploading_window), its second section with a requeue (uploading_second), a load's
+// requeue after it is done - WantedLocked (uploading_wanted), and a free loader's prefetch while the current frame uploads -
+// CurrentPendingLocked (uploading_prefetch), and a queued key whose frame is uploading - LoadOne (uploading_loadone))
+TEST_CASE("FrameStore loads a frame it shows once - a load that publishes it itself is not asked for again", "[integration][viewport][gpu][av1]") {
+    const auto dir = Dir("loaded_once");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    LoadCounter counter;
+    Av1Store s(0, 1, counter.Hook());
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    REQUIRE(s.Settle(10) == FrameStore::Status::Ready);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    for (int i = 0; i < 20; ++i) {  // the uploads over, Update as the viewport calls it
+        s.store->Update();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(counter.Of(10) == 1);
+}
+
+TEST_CASE("FrameStore: a frame Update is uploading is not queued again by a requeue meanwhile - loaded once",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("uploading_window");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    LoadCounter counter;
+    FrameStore* store = nullptr;
+    std::atomic<bool> armed{false};
+    std::atomic<int> statusDuring{-1};  // GetStatus(10) inside Update, between its sections
+    Av1Store s(0, 1, counter.Hook(), {}, [&] {
+        if (!armed.exchange(false)) return;
+        // 10 taken for the upload (uploading_), not resident yet: the cursor set to it again (RequeueLocked) - not queued again
+        statusDuring = static_cast<int>(store->GetStatus(10, "source"));
+        store->SetCurrentFrame(10, {"source"});
+    });
+    store = s.store.get();
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    REQUIRE(Eventually([&] { return counter.Of(9) >= 1 && counter.Of(10) >= 1 && counter.Of(11) >= 1; }, 10000));  // (no Update yet)
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // the loaders at rest
+    armed = true;
+    s.store->Update();  // 10, the current frame, uploaded alone
+    CHECK(statusDuring == static_cast<int>(FrameStore::Status::Loading));
+    CHECK(s.store->GetStatus(10, "source") == FrameStore::Status::Ready);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    s.store->Update();
+    CHECK(counter.Of(10) == 1);
+}
+
+TEST_CASE("FrameStore: frames Update's second section is uploading are Loading and not queued again by a requeue - loaded once",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("uploading_second");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    LoadCounter counter;
+    FrameStore* store = nullptr;
+    std::atomic<bool> armed{false};
+    std::atomic<int> status9{-1}, status11{-1};  // GetStatus inside Update, between its sections
+    Av1Store s(0, 1, counter.Hook(), {}, [&] {
+        if (!armed.exchange(false)) return;
+        // 9 and 11 taken for the upload by the second section (the current frame resident already): not resident yet
+        status9 = static_cast<int>(store->GetStatus(9, "source"));
+        status11 = static_cast<int>(store->GetStatus(11, "source"));
+        store->SetCurrentFrame(10, {"source"});  // a requeue meanwhile: not queued again
+    });
+    store = s.store.get();
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    REQUIRE(Eventually([&] { return counter.Of(9) >= 1 && counter.Of(10) >= 1 && counter.Of(11) >= 1; }, 10000));  // (no Update yet)
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // the loaders at rest
+    s.store->Update();  // the current frame alone
+    REQUIRE(s.store->GetStatus(10, "source") == FrameStore::Status::Ready);
+    armed = true;
+    s.store->Update();  // the window: 9 and 11
+    CHECK(status9 == static_cast<int>(FrameStore::Status::Loading));
+    CHECK(status11 == static_cast<int>(FrameStore::Status::Loading));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    s.store->Update();
+    CHECK(counter.Of(9) == 1);
+    CHECK(counter.Of(11) == 1);
+}
+
+TEST_CASE("FrameStore: a load asked for in flight whose frame Update is uploading is not queued again when it is done - loaded once",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("uploading_wanted");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    LoadCounter counter;
+    LoadCounter before;
+    LoaderGate first, next;
+    std::atomic<bool> holdNext{false}, updateArmed{false}, nextReached{false};
+    counter.onLoad = [&](int64_t frame, int n) {
+        if (frame == 10 && n == 1) first.Hold();  // 10 published, its load not done
+    };
+    before.onLoad = [&](int64_t, int) {
+        if (holdNext.exchange(false)) next.Hold();  // the load after 10's: its final section is over
+    };
+    Av1Store s(0, 1, counter.Hook(), before.Hook(), [&] {
+        if (!updateArmed.exchange(false)) return;
+        // 10 in Update's batch (uploading_): its load let go - its final section finds it asked for, and not wanted (uploading); the
+        // loader then takes the next key (11: LoadVideo has published it already) and is held at its beforePublish - after 10's final
+        // section
+        first.Release();
+        nextReached = next.Reached(10000);
+        next.Release();
+    });
+    GateGuard firstGuard{first};
+    GateGuard nextGuard{next};
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    REQUIRE(first.Reached());
+    s.store->SetCurrentFrame(10, {"source"});  // 10 asked for while in flight (askedInFlight_)
+    holdNext = true;  // (10's own beforePublish is past)
+    updateArmed = true;
+    s.store->Update();  // 10, the current frame, taken for the upload; the hook runs between its sections
+    CHECK(nextReached);
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            return s.store->GetStatus(10, "source") == FrameStore::Status::Ready;
+        },
+        10000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    s.store->Update();
+    CHECK(counter.Of(10) == 1);  // the next load was another frame's, not 10's again
+}
+
+TEST_CASE("FrameStore: a queued frame Update is uploading is no load - nothing decoded or dropped for it",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("uploading_loadone");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    LoadCounter counter;
+    LoadCounter before;
+    // one loader, the queue 10, 11, 9: 10's walk from the keyframe 8 publishes 9 too (kept on the way) - 9 stays in the queue; 11 is
+    // decoded next and held after it published; then the loader takes 9 while Update uploads it
+    LoaderGate a, b;
+    counter.onLoad = [&](int64_t frame, int n) {
+        if (frame == 11 && n == 1) a.Hold();
+    };
+    before.onLoad = [&](int64_t frame, int n) {
+        if (frame == 9 && n == 1) b.Hold();  // the load of 9 is over by then (LoadOne returned)
+    };
+    FrameStore* store = nullptr;
+    std::atomic<bool> armed{false}, reachedB{false};
+    std::atomic<int> status9{-1};
+    Av1Store s(0, 1, counter.Hook(), before.Hook(), [&] {
+        if (!armed.exchange(false)) return;
+        // 9 and 11 taken for the upload (the second section): the loader let go - its next key, 9, is uploading
+        status9 = static_cast<int>(store->GetStatus(9, "source"));
+        a.Release();
+        reachedB = b.Reached(5000);
+        b.Release();
+    });
+    store = s.store.get();
+    GateGuard guards[] = {{a}, {b}};
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    REQUIRE(a.Reached());
+    s.store->Update();  // the current frame alone
+    REQUIRE(s.store->GetStatus(10, "source") == FrameStore::Status::Ready);
+    armed = true;
+    s.store->Update();  // 9 and 11
+    CHECK(status9 == static_cast<int>(FrameStore::Status::Loading));
+    CHECK(reachedB);
+    CHECK(s.store->Stats("source").aborted == 0);  // 9's load found it uploading: no decoder opened for it, nothing dropped
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            return s.store->GetStatus(9, "source") == FrameStore::Status::Ready && s.store->GetStatus(11, "source") == FrameStore::Status::Ready;
+        },
+        10000));
+}
+
+TEST_CASE("FrameStore: a free loader takes the prefetch while Update uploads the current frame - its load still closing is no pending current",
+          "[integration][viewport][gpu][av1][regression]") {
+    const auto dir = Dir("uploading_prefetch");
+    REQUIRE_AV1_CLIP(clip, dir, false, 24);
+    LoadCounter counter;
+    LoadCounter before;
+    // two loaders (one prefetch at a time), a window of three frames each side: the queue is 10, 11, 9, 12, 8, 13, 7. Loader A walks
+    // from the keyframe 8 to 10 and publishes 8 and 9 itself (kept on the way); loader B takes 11 once 10 is published - then 9 (found
+    // published: an empty load), then 12, which nobody decoded on the way
+    LoaderGate holdA, g2, g3;
+    counter.onLoad = [&](int64_t frame, int n) {
+        if (frame == 10 && n == 1) holdA.Hold();  // 10 published, A's load not done (in flight)
+    };
+    before.onLoad = [&](int64_t frame, int n) {
+        if (frame == 11 && n == 1) g2.Hold();  // B with 11
+        if (frame == 12 && n == 1) g3.Hold();  // B with 12: the prefetch went on while 10 uploads
+    };
+    std::atomic<bool> armed{false}, reached{false};
+    Av1Store s(3, 2, counter.Hook(), before.Hook(), [&] {
+        if (!armed.exchange(false)) return;
+        // 10 only in uploading_ now (not in loaded_), A's load of it still in flight: B let go - its next prefetch must not wait for A
+        g2.Release();
+        reached = g3.Reached(5000);
+    });
+    GateGuard guards[] = {{holdA}, {g2}, {g3}};
+    s.store->SetSources(Project::Create(clip, dir / "none").Sources());
+    s.store->SetCurrentFrame(10, {"source"});
+    REQUIRE(holdA.Reached());
+    REQUIRE(g2.Reached());  // B took 11 (Publish(10) woke it)
+    armed = true;
+    s.store->Update();  // 10, the current frame, taken for the upload; the hook runs between the sections
+    CHECK(reached);     // B went on: 10 uploading is no current load pending
+    g3.Release();
+    holdA.Release();
+    CHECK(Eventually(
+        [&] {
+            s.store->Update();
+            return s.store->GetStatus(10, "source") == FrameStore::Status::Ready && s.store->GetStatus(12, "source") == FrameStore::Status::Ready;
+        },
+        10000));
 }
 
 TEST_CASE("FrameStore keeps the window of a video refused here while a task runs - its frames are missing at once, none left queued",

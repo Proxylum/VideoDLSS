@@ -79,6 +79,13 @@ public:
         int prefetch = 6;                             // frames of the fastest source before/after the current time
         int uploadsPerUpdate = 4;
         int loaderThreads = 0;                        // 0 = auto (2..4)
+        // tests (TASK-0076): called on the loader thread before LoaderMain publishes the frames LoadOne returned (a pass's frame, a
+        // missing mark - a start failure's too; a video's decoded frames LoadVideo published itself, earlier) and after (before the load
+        // is marked done) - a race between that and the GUI thread (RetryStartFailures, SetCurrentTime, Update) made deterministic
+        std::function<void(int64_t frame, const std::string& source)> beforePublishForTests;
+        std::function<void(int64_t frame, const std::string& source)> afterLoadForTests;
+        // tests (TASK-0076): called on Update's thread between its two critical sections (the batch taken, not yet resident)
+        std::function<void()> betweenUpdateSectionsForTests;
     };
     // Missing: outside the source or failed to read; Queued: loadable, not requested yet or waiting in the
     // queue; Loading: a loader reads it or it waits for the upload; Ready: resident on the GPU.
@@ -261,6 +268,13 @@ private:
     std::map<Key, Entry>::const_iterator NearestResident(int64_t frame, const std::string& source) const;
     void Evict();
     bool InWindow(const Key& key) const;              // within the prefetch window of its source (mutex_ held)
+    // TASK-0076: the frames of a source RequeueLocked asks for around the current time (its prefetch span, 0 for an NVDEC-only video
+    // without a proxy while a task runs) and whether a key is within them (mutex_ held)
+    int QueueSpanLocked(const std::string& name) const;
+    bool InQueueWindowLocked(const Key& key) const;
+    // TASK-0076: a frame whose load ended without it (aborted, asked for in flight, a kept frame of a load that threw) back into the
+    // queue if it is still wanted, within the window asked for now: a current frame first, another after the current ones (mutex_ held)
+    void RequeueAfterLoadLocked(const Key& key);
     int SpanOf(const std::string& source) const;      // prefetch frames of a source: window seconds × its rate
     double ReferenceLastTime() const;                 // time of the reference's last frame (ExpectedFrames)
     // The frame a source loads and keeps for `time`: FrameAt, or the one frame of a static source (PR-8) - the key of every load,
@@ -272,6 +286,14 @@ private:
     std::vector<ViewportSource> sources_;
     std::map<std::string, DecodeSupport> refusedInLoad_;  // TASK-0076: NVDEC refused a video in a loader (under mutex_; SetSources forgets)
     std::map<std::string, DecodeSupport> startFailed_;    // TASK-0076: NVDEC did not start for a video (under mutex_; SetSources forgets)
+    // TASK-0076 (under mutex_; SetSources forgets): frames RetryStartFailures met in flight - a start failure of such a load began
+    // before the retry and is not published (Publish); frames a requeue (RequeueLocked, RetryStartFailures) wanted while they were in
+    // flight - their loader asks for them again when it is done, if they are still wanted (a frame dropped or forgotten meanwhile);
+    // frames Update took for its upload - published, not resident yet (not loaded again meanwhile)
+    std::set<Key> retriedInFlight_;
+    std::set<Key> askedInFlight_;
+    std::set<Key> uploading_;
+    bool resetting_ = false;  // TASK-0076: SetSources waits for the loads of the old sources - nothing is queued meanwhile (under mutex_)
     std::atomic<bool> holdNvdec_{true};                   // TASK-0076: SetHoldNvdec
     std::map<std::string, std::unique_ptr<SourceRuntime>> runtimes_;
     uint32_t imageW_ = 0, imageH_ = 0;
