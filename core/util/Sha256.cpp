@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "util/Error.h"
+#include "util/Log.h"
 
 #pragma comment(lib, "bcrypt.lib")
 
@@ -60,6 +61,7 @@ std::string Sha256Hex(const void* data, size_t size) {
 }
 
 std::string Sha256File(const std::filesystem::path& path) {
+    Log()->debug("hashing {}", path.string());  // a source of gigabytes takes a while; a refusal comes before it (TASK-0079 tests)
     std::ifstream in(path, std::ios::binary);
     if (!in) Throw("cannot open for hashing: " + path.string());
     Sha256 h;

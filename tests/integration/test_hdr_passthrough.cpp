@@ -186,6 +186,7 @@ TEST_CASE("Passthrough of HLG into MKV notes the missing amve and publishes", "[
     const ProcessResult r = RunProcess(Passthrough(in, out, "ffv1"));
     CHECK(std::filesystem::exists(out));
     CHECK(Has(r.warnings, "ambient viewing environment"));
+    CHECK(HasKey(PlanProcess(Passthrough(in, out, "ffv1")).warnings, "encode.no_amve"));
     const StreamSummary s = Summarize(out);
     CHECK(s.colorTrc == 18);
     CHECK_FALSE(s.hdr.amve);
@@ -204,6 +205,7 @@ TEST_CASE("MKV keeps no light level with MaxFALL 0 and none is expected back", "
     CHECK(std::filesystem::exists(out));
     CHECK_FALSE(Summarize(out).hdr.cll);  // matroskadec makes none of MaxCLL alone
     CHECK(Has(r.warnings, "the light level MaxCLL 1000 / MaxFALL 0: matroska's readers keep one only with both values"));
+    CHECK(HasKey(PlanProcess(Passthrough(in, out, "ffv1")).warnings, "encode.cll_invalid"));
 }
 
 TEST_CASE("Mastering and light level outside MP4 MOV fields are noted and not written; the publish holds", "[integration][hdr][passthrough][result]") {
@@ -219,10 +221,22 @@ TEST_CASE("Mastering and light level outside MP4 MOV fields are noted and not wr
     const ProcessResult r = RunProcess(Passthrough(in, dir / "out.mov", "prores_ks"));
     CHECK(Has(r.warnings, "a value outside mov's mdcv fields"));
     CHECK(Has(r.warnings, "does not fit mov's clli fields"));
+    const ProcessPlan plan = PlanProcess(Passthrough(in, dir / "out.mov", "prores_ks"));
+    CHECK(HasKey(plan.warnings, "encode.mdcv_unfit"));
+    CHECK(HasKey(plan.warnings, "encode.cll_invalid"));
     const StreamSummary out = Summarize(dir / "out.mov");
     CHECK_FALSE(out.hdr.mdcv);
     CHECK_FALSE(out.hdr.cll);
     CHECK(out.colorTrc == 16);
+    // the edge as movenc rounds it: 1.31071 is 65535.5 units, written as 65536 - its low 16 bits 0
+    Mdcv edge = Mastering1000();
+    edge.primaries[0][0] = {131071, 100000};
+    ClipHdr edgeHdr;
+    edgeHdr.mastering = edge;
+    const auto edgeIn = PqFfv1(dir, "edge.mkv", edgeHdr);
+    const ProcessResult e = RunProcess(Passthrough(edgeIn, dir / "edge.mov", "prores_ks"));
+    CHECK(Has(e.warnings, "a value outside mov's mdcv fields"));
+    CHECK_FALSE(Summarize(dir / "edge.mov").hdr.mdcv);
 }
 
 TEST_CASE("HDR passthrough into AVI or M4V is refused before any file is made; SDR into AVI publishes as before", "[integration][hdr][process]") {
@@ -289,8 +303,11 @@ TEST_CASE("Processing a PQ source is refused before hashing: process upscale dep
         {{"export", "-i", p, "-o", (dir / "ex").string(), "--range", "0-1"}, "export: "},
     };
     for (const Case& c : cases) {
-        const auto run = RunAll(c.args, dir / (c.args[0] + std::to_string(&c - cases.data()) + ".log"));
+        std::vector<std::string> verbose = c.args;
+        verbose.insert(verbose.begin(), "-v");  // the debug log says each hash: none before the refusal
+        const auto run = RunAll(verbose, dir / (c.args[0] + std::to_string(&c - cases.data()) + ".log"));
         INFO(run.out);
+        CHECK_THAT(run.out, !ContainsSubstring("hashing"));
         CHECK(run.code != 0);
         CHECK_THAT(run.out, ContainsSubstring(c.where + p + ": processing of HDR PQ"));
         CHECK_THAT(run.out, ContainsSubstring("passthrough (no stages) writes it as it is"));
@@ -331,6 +348,56 @@ TEST_CASE("process --project of a PQ source refuses before the project's source 
                             dir / "sdr.log");
     INFO(sdr.out);
     CHECK_THAT(sdr.out, ContainsSubstring("hashing"));  // the log line the check above looks for
+}
+
+TEST_CASE("process --project of a PQ source with every stage off passes it through, as the GUI's only-encoding run does", "[integration][hdr][process][cli]") {
+    const auto dir = Dir("project_off");
+    const auto pq = PqFfv1(dir, "pq.mkv", {}, RawTags{2, 9, 16, 1, 0});  // no matrix: filled, an encode note
+    Project p = Project::Create(pq, dir / "passes");
+    for (auto& s : p.stages) s.enabled = false;
+    p.resultVideo = dir / "result.mkv";
+    p.Save(dir / "p.dlssvid.json");
+    const auto plan = RunAll({"process", "--project", (dir / "p.dlssvid.json").string(), "--warp", "--codec", "ffv1", "--plan"}, dir / "plan.log");
+    {
+        INFO(plan.out);
+        CHECK(plan.code == 0);
+        CHECK_THAT(plan.out, ContainsSubstring("note: encode: the result is tagged matrix bt2020nc"));
+        CHECK_THAT(plan.out, !ContainsSubstring("processing of HDR"));
+    }
+    const auto run = RunAll({"process", "--project", (dir / "p.dlssvid.json").string(), "--warp", "--codec", "ffv1", "--disable-unavailable"}, dir / "run.log");
+    INFO(run.out);
+    CHECK(run.code == 0);
+    const StreamSummary s = Summarize(dir / "result.mkv");
+    CHECK(s.colorSpace == 9);
+    CHECK(s.colorTrc == 16);
+}
+
+TEST_CASE("Wide gamut SDR and a log curve pass through with their tags and without stale HDR records; into AVI they are refused", "[integration][hdr][passthrough]") {
+    const auto dir = Dir("wide_log");
+    ClipHdr stale;  // a container's records of an HDR master the SDR grade kept
+    stale.mastering = Mastering1000();
+    stale.light = Cll{1000, 400};
+    for (const RawTags tags : {Tags(9, 9, 14), Tags(9, 9, 8)}) {
+        INFO("tags " << tags.matrix << "/" << tags.primaries << "/" << tags.trc);
+        const auto in = PqFfv1(dir, (std::to_string(tags.trc) + ".mkv").c_str(), stale, tags);
+        REQUIRE(Summarize(in).hdr.mdcv);
+        VideoDecoder probe(in, VideoDecoder::Probe());
+        REQUIRE_FALSE(probe.Info().color.Hdr());
+        REQUIRE_FALSE(probe.Info().color.legacyPath);
+        const auto out = dir / (std::to_string(tags.trc) + "_out.mkv");
+        CHECK_NOTHROW(RunProcess(Passthrough(in, out, "ffv1")));
+        const StreamSummary s = Summarize(out);
+        CHECK(s.colorSpace == 9);
+        CHECK(s.colorTrc == tags.trc);
+        CHECK_FALSE(s.hdr.mdcv);
+        CHECK_FALSE(s.hdr.cll);
+        try {
+            RunProcess(Passthrough(in, dir / (std::to_string(tags.trc) + ".avi"), "ffv1"));
+            FAIL("not refused");
+        } catch (const ColourUnsupported& e) {
+            CHECK(e.kind == ColourStop::NoContainerTags);
+        }
+    }
 }
 
 TEST_CASE("process --plan --passthrough refuses Dolby Vision 5 and prints the source notes of PQ", "[integration][hdr][process][cli]") {
@@ -567,6 +634,7 @@ TEST_CASE("A mastering display Matroska's reader would drop is noted and not exp
     REQUIRE(Summarize(in).hdr.mdcv->hasLuminance);
     const ProcessResult r = RunProcess(Passthrough(in, dir / "out.mkv", "ffv1"));
     CHECK(Has(r.warnings, "luminance does not hold"));
+    CHECK(HasKey(PlanProcess(Passthrough(in, dir / "out.mkv", "ffv1")).warnings, "encode.mdcv_invalid"));
     const StreamSummary out = Summarize(dir / "out.mkv");
     REQUIRE(out.hdr.mdcv);
     CHECK(out.hdr.mdcv->hasPrimaries);
@@ -772,10 +840,12 @@ TEST_CASE("Passthrough notes a mastering display it cannot write and a full rang
     REQUIRE(Summarize(partial).hdr.mdcv);
     const ProcessResult a = RunProcess(Passthrough(partial, dir / "lum.mov", "prores_ks"));
     CHECK(Has(a.warnings, "the mastering display says only its luminance"));
+    CHECK(HasKey(PlanProcess(Passthrough(partial, dir / "lum.mov", "prores_ks")).warnings, "encode.mdcv_lost"));
     CHECK_FALSE(Summarize(dir / "lum.mov").hdr.mdcv);
     const auto full = PqFfv1(dir, "full.mkv", {}, Tags(9, 9, 16, 2));
     const ProcessResult b = RunProcess(Passthrough(full, dir / "full.mov", "ffv1"));
     CHECK(Has(b.warnings, "full range"));
+    CHECK(HasKey(PlanProcess(Passthrough(full, dir / "full.mov", "ffv1")).warnings, "encode.range_lost"));
     CHECK(std::filesystem::exists(dir / "full.mov"));
 }
 

@@ -11082,12 +11082,13 @@ TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, n
     REQUIRE(assumed.iptAssumed);
     CHECK(ColourStopText(ColourStop::DolbyVisionIpt, assumed).contains(QString::fromUtf8("база не распознана, а матрица и кривая не указаны — принята база IPT")));
     CHECK_FALSE(ColourStopText(ColourStop::DolbyVisionIpt, assumed).contains(QString::fromUtf8("с базой IPT не поддерживается")));
-    // every encode note has its Russian text (a key renamed in the core would show the English one)
-    for (const char* key : {"encode.tags_filled", "encode.hdr_8bit", "encode.range_lost", "encode.mdcv_lost", "encode.mdcv_invalid", "encode.cll_invalid",
-                            "encode.no_amve"}) {
+    // every encode note has its Russian text (the integration tests tie these keys to the core's notes: HasKey)
+    for (const char* key : {"encode.tags_filled", "encode.hdr_8bit", "encode.range_lost", "encode.mdcv_lost", "encode.mdcv_unfit", "encode.mdcv_invalid",
+                            "encode.cll_invalid", "encode.no_amve"}) {
         INFO(key);
         CHECK(PlanNoteText(log, PlanNote{key, "warning", "encode", "english"}) != QString("english"));
     }
+    CHECK(PlanNoteText(log, PlanNote{"encode.mdcv_unfit", "warning", "encode", ""}).endsWith(QString::fromUtf8("они не перенесутся")));
     CHECK(SourceColourText(of(RawTags{10, 9, 14, 1, 0})) == QString::fromUtf8("BT.2020 CL — обработка не поддерживается"));
     const QString rgb = SourceColourText(of(RawTags{0, 9, 1, 2, 0}, "rgb"));  // RGB BT.2020 with an SDR curve: no «HDR» claimed
     CHECK(rgb == QString::fromUtf8("RGB-поток HDR / BT.2020 — не поддерживается"));

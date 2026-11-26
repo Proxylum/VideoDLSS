@@ -201,9 +201,9 @@ QString PlanNoteText(const SourceColor& c, const PlanNote& n) {
     if (n.key == "encode.hdr_8bit") return Tr("HDR в 8 битах: плавные переходы станут ступеньками — лучше HEVC или AV1 10 бит, или ProRes");
     if (n.key == "encode.range_lost") return Tr("Полный диапазон: результат его не хранит — плееры и декодеры прочтут ограниченный");
     if (n.key == "encode.mdcv_lost") return Tr("Данные мастеринга неполные, а этот контейнер пишет их только целиком — они не перенесутся");
+    if (n.key == "encode.mdcv_unfit") return Tr("Данные мастеринга не помещаются в поля этого контейнера — они не перенесутся");
     if (n.key == "encode.mdcv_invalid")
-        return Tr("Данные мастеринга неверны для этого контейнера (нулевая координата, яркость max не выше min или значение вне его полей) — "
-                  "они перенесутся не полностью");
+        return Tr("В данных мастеринга нулевая координата или яркость max не выше min — читатели этого контейнера отбросят эту часть (или их целиком)");
     if (n.key == "encode.cll_invalid")
         return Tr("Уровень света (MaxCLL / MaxFALL) с одним нулём или вне полей этого контейнера — он не перенесётся");
     if (n.key == "encode.no_amve") return Tr("Условия просмотра (ambient viewing environment) в этот контейнер не переносятся");

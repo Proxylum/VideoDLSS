@@ -918,8 +918,10 @@ TEST_CASE("A stopped ColorPlan throws ColourUnsupported from Colour Guide and Re
     CHECK(p.why.find("with its HDR") != std::string::npos);
     ColourLayers wide;
     wide.stream = wide.container = Tags(9, 9, 1);
+    wide.containerRecords.cll = Cll{1000, 400};  // a stale record of an HDR master: not the SDR grade's
     info.color = SourceColorOf(wide, "420", "hevc");
     const ColorPlan w = ResolveColor(info);
+    CHECK(w.ResultMeta().Empty());
     CHECK(w.process == ColourStop::NotYet);
     CHECK(w.why.find("writes it as it is, with its colour tags") != std::string::npos);
     CHECK(w.why.find("HDR") == std::string::npos);
