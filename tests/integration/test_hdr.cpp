@@ -153,7 +153,11 @@ TEST_CASE("ProRes MOV with colr trc 14 and frames 18 is HLG from the frame, mast
     CHECK(c.primariesFrom == TagFrom::Stream);  // the frame says the same: the stream's
     CHECK(c.matrixFrom == TagFrom::Stream);
     CHECK(c.stream.trc == 14);
-    CHECK(dec.Info().colorTrc == 14);  // the legacy fields as before
+    // the legacy fields as before: the codec parameters, all four
+    CHECK(dec.Info().colorTrc == s.colorTrc);
+    CHECK(dec.Info().colorPrimaries == s.colorPrimaries);
+    CHECK(dec.Info().colorSpace == s.colorSpace);
+    CHECK(dec.Info().colorRange == s.colorRange);
     REQUIRE(c.hdr.mdcv);
     CHECK(*c.hdr.mdcv == Mastering1000());  // mdcv's units: exact
     CHECK(c.mdcvFrom == TagFrom::Container);  // the frame carries the same (libavcodec copies it): the container's
@@ -399,7 +403,11 @@ TEST_CASE("HEVC MP4 with colr 9/16/9 and no colour description in the VUI is PQ 
     CHECK(c.matrixFrom == TagFrom::Container);
     CHECK(c.looked == FirstLook::Decode);
     CHECK(c.Note("source.layers_differ") == nullptr);  // nothing said against it
-    CHECK(dec.Info().colorTrc == 2);  // the legacy fields as before
+    // the legacy fields as before: the codec parameters, all four - not the container's tags that were taken
+    CHECK(dec.Info().colorTrc == s.colorTrc);
+    CHECK(dec.Info().colorPrimaries == s.colorPrimaries);
+    CHECK(dec.Info().colorSpace == s.colorSpace);
+    CHECK(dec.Info().colorRange == s.colorRange);
 }
 
 TEST_CASE("Raw HEVC is probed once and still reads from frame 0", "[integration][hdr][gpu][cache]") {
@@ -487,6 +495,10 @@ TEST_CASE("ProRes colour from the frame header: no colr box, and a header's 0 as
     CHECK(a.Info().color.cls == SourceClass::Pq);
     CHECK(a.Info().color.trcFrom == TagFrom::Frame);
     CHECK(a.Info().color.Note("source.bt2020_assumed") != nullptr);
+    // the legacy fields stay the codec parameters' (no colr: unspecified) - the frame's PQ is not written into them
+    CHECK(a.Info().colorPrimaries == 2);
+    CHECK(a.Info().colorTrc == 2);
+    CHECK(a.Info().colorSpace == 2);
     // colr 9/9/14, the header's curve 0 (FFmpeg's own prores encoder writes 0 for bt2020-10): the colr box's curve
     spec.color = Tags(9, 9, 14);
     spec.frameColor = [](int64_t) { return RawTags{9, 9, 0, 1, 0}; };

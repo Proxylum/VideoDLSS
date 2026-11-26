@@ -360,7 +360,7 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
             note("source.dv_unknown", words + ": the class follows the colour tags; the RPU is dropped in every output");
         }
     }
-    if (M == 15 && !ipt) {
+    if (M == 15 && !c.doviConf && !c.doviRpu) {  // the matrix decides only where no record nor RPU did (the plan's «— | M == 15»)
         ipt = true;
         iptWords = "matrix ipt-c2 (a Dolby Vision IPT base layer)";
     }
@@ -370,14 +370,15 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
     }
 
     // 2. matrix 10 (BT.2020 CL) or 14 (ICtCp): no processing; the class from the rows below
-    if (M == 10 || M == 14) {
+    // rows 2 and 3 only where row 1 did not stop (the first rule that matches wins; row 2's class comes from rows 4-9)
+    if (!ipt && (M == 10 || M == 14)) {
         c.refuseProcessing = ColourRefusal::Matrix;
         note("source.matrix_unsupported", "matrix " + MatrixName(M) + ": read as BT.709 / BT.601 - its colours come out wrong when processed");
     }
     // 3. RGB of HDR or BT.2020: an RGB stream goes through swscale into 8-bit 4:2:0 SDR (VideoDecoder: the swscale path); a Y'CbCr
     // stream tagged with the RGB matrix (0: a chain that kept an RGB source's tag) has no Y'CbCr matrix that fits
     c.rgbLayout = layoutKind == "rgb";
-    if ((c.rgbLayout || M == 0) && (T == 16 || T == 18 || P == 9)) {
+    if (!ipt && (c.rgbLayout || M == 0) && (T == 16 || T == 18 || P == 9)) {
         if (c.refuseAll == ColourRefusal::None) c.refuseAll = ColourRefusal::RgbHdr;
         note("source.rgb_hdr", c.rgbLayout ? "an RGB stream of " + TrcName(T) + " / " + PrimariesName(P) +
                                                  ": read as 8-bit 4:2:0 SDR through swscale - its colours come out wrong"

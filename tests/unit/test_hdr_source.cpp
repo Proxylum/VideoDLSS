@@ -798,3 +798,21 @@ TEST_CASE("The first look's hint drops reserved values: a ProRes colr with matri
     in.container = Tags(9, 9, 16);
     CHECK(LookHint(in, "hevc") == RawTags{9, 9, 16, 1, 0});
 }
+
+TEST_CASE("Rows 1-3 exclude each other: a Dolby Vision verdict is not overruled by matrix 15, 10, 14 or an RGB matrix", "[hdr][dovi]") {
+    // a record of an HDR10 base with matrix 15 in the VUI: the record decides (removed, not IPT)
+    const SourceColor hdr10 = WithDovi(15, 9, 16, 8, 1);
+    CHECK(hdr10.refuseAll == ColourRefusal::None);
+    CHECK(hdr10.Note("source.dv_removed") != nullptr);
+    CHECK(hdr10.Note("source.dv_ipt") == nullptr);
+    // an IPT base with matrix 14 or the RGB matrix: one verdict, one note
+    const SourceColor p5 = WithDovi(14, 9, 16, 5, 0);
+    CHECK(p5.refuseAll == ColourRefusal::DolbyVisionIpt);
+    CHECK(p5.refuseProcessing == ColourRefusal::None);
+    CHECK(p5.Note("source.matrix_unsupported") == nullptr);
+    const SourceColor rgb = WithDovi(0, 9, 16, 5, 0);
+    CHECK(rgb.refuseAll == ColourRefusal::DolbyVisionIpt);
+    CHECK(rgb.Note("source.rgb_hdr") == nullptr);
+    // matrix 15 alone (no record, no RPU) is row 1
+    CHECK(Classified(15, 9, 16).refuseAll == ColourRefusal::DolbyVisionIpt);
+}
