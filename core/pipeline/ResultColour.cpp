@@ -13,13 +13,15 @@ bool NvencCodec(const std::string& codec) { return codec == "h264_nvenc" || code
 bool ProResCodec(const std::string& codec) { return codec.rfind("prores", 0) == 0; }  // prores_ks, prores_aw, prores
 
 // What Matroska's reader keeps of a mastering display (matroskadec, mkv_parse_video_color): the primaries when every coordinate is above
-// 0, the luminance when max > min >= 0 - a half that does not hold is written and dropped on reading
+// 0, the luminance when max > min >= 0 - a half that does not hold is written and dropped on reading. The values as matroskaenc writes
+// them (av_q2d: a zero denominator is inf, 0/0 NaN - a value past INT_MAX in Matroska's floats comes as {1, 0} from av_d2q)
+double Written(const Ratio& r) { return static_cast<double>(r.num) / r.den; }
 bool PrimariesHold(const Mdcv& m) {
     for (const auto& xy : m.primaries)
-        if (!(xy[0].Value() > 0 && xy[1].Value() > 0)) return false;
-    return m.white[0].Value() > 0 && m.white[1].Value() > 0;
+        if (!(Written(xy[0]) > 0 && Written(xy[1]) > 0)) return false;
+    return Written(m.white[0]) > 0 && Written(m.white[1]) > 0;
 }
-bool LuminanceHolds(const Mdcv& m) { return m.maxLum.Value() > m.minLum.Value() && m.minLum.Value() >= 0; }
+bool LuminanceHolds(const Mdcv& m) { return Written(m.maxLum) > Written(m.minLum) && Written(m.minLum) >= 0; }
 
 // What MP4 / MOV's boxes hold (movenc: mdcv's coordinates in 16 bits of 1/50000, its luminance in 32 bits of 1/10000; clli in 16 bits):
 // a value outside them is written as its low bits - a record from Matroska's floats in other units (x265's 34000 for 0.68) included.

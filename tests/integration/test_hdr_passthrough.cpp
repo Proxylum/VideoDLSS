@@ -432,9 +432,13 @@ TEST_CASE("A transfer H.273 leaves undefined (19 in Matroska) reads as unspecifi
     for (const char* ext : {".mkv", ".mov"}) {
         INFO(ext);
         const auto out = dir / (std::string("out") + ext);
-        CHECK_NOTHROW(RunProcess(Passthrough(in, out, "ffv1")));
+        ProcessResult r;
+        CHECK_NOTHROW(r = RunProcess(Passthrough(in, out, "ffv1")));
         CHECK(Summarize(out).colorTrc == 1);  // the wide class's curve filled
+        CHECK_FALSE(Has(r.warnings, "from the first one"));  // the frames' 19 is unspecified too: no class change
+        CHECK_FALSE(Has(r.warnings, "and on are"));
     }
+    CHECK_FALSE(probe.Info().color.Note("source.layers_differ"));
 }
 
 TEST_CASE("Wide gamut SDR and a log curve pass through with their tags and without stale HDR records; into AVI they are refused", "[integration][hdr][passthrough]") {
@@ -737,6 +741,17 @@ TEST_CASE("A mastering display Matroska's reader would drop is noted and not exp
     const ProcessResult both = RunProcess(Passthrough(WriteClip(dir / "both.mov", s), dir / "both.mkv", "ffv1"));
     CHECK(Has(both.warnings, "primaries and luminance do not hold"));
     CHECK_FALSE(Summarize(dir / "both.mkv").hdr.mdcv);
+    // a luminance past INT_MAX in Matroska's floats: {1, 0} from av_d2q, written back as inf - kept by matroskadec, expected, published
+    Mdcv huge = Mastering1000();
+    huge.maxLum = {1, 0};
+    ClipHdr hugeHdr;
+    hugeHdr.mastering = huge;
+    const auto hugeIn = PqFfv1(dir, "huge.mkv", hugeHdr);
+    REQUIRE(Summarize(hugeIn).hdr.mdcv);
+    REQUIRE(Summarize(hugeIn).hdr.mdcv->hasLuminance);
+    ProcessResult hr;
+    CHECK_NOTHROW(hr = RunProcess(Passthrough(hugeIn, dir / "huge_out.mkv", "ffv1")));
+    CHECK_FALSE(Has(hr.warnings, "does not hold"));
     // full range into ProRes in MKV: the container says full, FFmpeg's ProRes decoder says limited
     const auto full = PqFfv1(dir, "full.mkv", {}, Tags(9, 9, 16, 2));
     const ProcessResult p = RunProcess(Passthrough(full, dir / "full_prores.mkv", "prores_ks"));

@@ -332,8 +332,8 @@ none and the class follows the tags) and each tag with the layer it was read fro
 MOV `colr`, Matroska Colour; `stream`: the codec parameters - an HEVC / H.264 VUI, an AV1 sequence header; `frame`: the first
 frame where it differs - a ProRes frame header, an HEVC alternative transfer SEI that turns BT.2020 into HLG) - and, when present,
 `mastering:`, `light level:` (MaxCLL / MaxFALL), `ambient:`, `dolby vision:` (profile, level, the base layer's compatibility:
-an HDR10, SDR or HLG base keeps its picture and loses the RPU in every output; an IPT base - profiles 1, 3, 5 and 10.0, or the matrix ipt-c2 - comes out in wrong
-colours) and `hdr10+:` lines, and notes (BT.2020 assumed for an untagged PQ / HLG, a transfer not converted, layers that disagree).
+an HDR10, SDR or HLG base keeps its picture and loses the RPU in every output; an IPT base - profiles 1, 3, 5 and 10.0, or the matrix ipt-c2 - is not
+supported: its colours are wrong without the RPU) and `hdr10+:` lines, and notes (BT.2020 assumed for an untagged PQ / HLG, a transfer not converted, layers that disagree).
 The GUI's source card shows a «Цвет» row for such a file. An SDR file with nothing to say (no Dolby Vision, no HDR record, no note)
 prints as before and has no such row. The first frame is decoded for this only
 for H.264 / HEVC / ProRes with a hint of HDR or BT.2020 (or a raw `.hevc` / `.h264`, an untagged 10-bit HEVC, a ProRes whose
@@ -357,7 +357,8 @@ source into a container without colour tags (AVI, `.m4v`, MPEG-TS) is refused be
 the passes' folder). A video whose frames turn another colour class part way (an SDR part
 joined to a PQ one) is warned of in the result with the frame number; frames of another class from the first one (an HDR transfer in
 an SEI under SDR tags) are warned of as read wrong. The HDR10 records reach the container only: FFmpeg 7.1.1's
-NVENC writes no SEI.
+NVENC writes no SEI. `dlssvid info` says it too: `processing:` (`not yet` - with a later version, `not supported` - a matrix, or
+refused in every mode) and `hdr note:` (the HDR10 records go to the container only).
 
 Paths may contain any letters: `dlssvid` and `dlssvid-gui` run with UTF-8 as their code page. The CLI prints UTF-8,
 so in a console with the OEM code page (866 on Russian Windows) Cyrillic in its output reads wrong; `chcp 65001` first.
