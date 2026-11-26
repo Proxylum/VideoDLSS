@@ -115,8 +115,8 @@ std::string FieldWords(const char* label, const std::string& value, TagFrom from
 }
 
 std::string Line(const char* label, const std::string& text) {
-    std::string l = std::string(label) + ":";
-    while (l.size() < 13) l += ' ';
+    std::string l = std::string(label) + ": ";
+    while (l.size() < 13) l += ' ';  // the column of info's other lines ("video:       ")
     return l + text;
 }
 
@@ -390,7 +390,7 @@ FirstLook NeedsFirstLook(std::string_view codec, std::string_view demuxer, int b
 // ---- FFmpeg records ------------------------------------------------------------------------------------------------------------
 
 namespace {
-Q QOf(AVRational r) { return Q{r.num, r.den}; }
+Ratio QOf(AVRational r) { return Ratio{r.num, r.den}; }
 
 Mdcv MdcvOf(const AVMasteringDisplayMetadata& m) {
     Mdcv out;
@@ -447,19 +447,18 @@ void ReadCodedSideData(const AVPacketSideData* sd, int count, HdrStatic& hdr, st
 }
 
 void ReadFrameSideData(AVFrameSideData* const* sd, int count, HdrStatic& hdr, std::optional<DoviRpu>* rpu, bool* hdr10Plus) {
-    const AVFrameSideData* const* list = sd;
-    if (const AVFrameSideData* m = av_frame_side_data_get(list, count, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
+    if (const AVFrameSideData* m = av_frame_side_data_get(sd, count, AV_FRAME_DATA_MASTERING_DISPLAY_METADATA);
         m && m->size >= sizeof(AVMasteringDisplayMetadata))
         hdr.mdcv = MdcvOf(*reinterpret_cast<const AVMasteringDisplayMetadata*>(m->data));
-    if (const AVFrameSideData* l = av_frame_side_data_get(list, count, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL); l && l->size >= sizeof(AVContentLightMetadata)) {
+    if (const AVFrameSideData* l = av_frame_side_data_get(sd, count, AV_FRAME_DATA_CONTENT_LIGHT_LEVEL); l && l->size >= sizeof(AVContentLightMetadata)) {
         const auto* c = reinterpret_cast<const AVContentLightMetadata*>(l->data);
         hdr.cll = Cll{c->MaxCLL, c->MaxFALL};
     }
-    if (const AVFrameSideData* a = av_frame_side_data_get(list, count, AV_FRAME_DATA_AMBIENT_VIEWING_ENVIRONMENT);
+    if (const AVFrameSideData* a = av_frame_side_data_get(sd, count, AV_FRAME_DATA_AMBIENT_VIEWING_ENVIRONMENT);
         a && a->size >= sizeof(AVAmbientViewingEnvironment))
         hdr.amve = AmveOf(*reinterpret_cast<const AVAmbientViewingEnvironment*>(a->data));
     if (rpu)
-        if (const AVFrameSideData* d = av_frame_side_data_get(list, count, AV_FRAME_DATA_DOVI_METADATA); d && d->size >= sizeof(AVDOVIMetadata)) {
+        if (const AVFrameSideData* d = av_frame_side_data_get(sd, count, AV_FRAME_DATA_DOVI_METADATA); d && d->size >= sizeof(AVDOVIMetadata)) {
             const AVDOVIRpuDataHeader* h = av_dovi_get_header(reinterpret_cast<const AVDOVIMetadata*>(d->data));
             DoviRpu r;
             r.vdrRpuProfile = h->vdr_rpu_profile;
@@ -469,7 +468,7 @@ void ReadFrameSideData(AVFrameSideData* const* sd, int count, HdrStatic& hdr, st
             r.disableResidual = h->disable_residual_flag != 0;
             *rpu = r;
         }
-    if (hdr10Plus && av_frame_side_data_get(list, count, AV_FRAME_DATA_DYNAMIC_HDR_PLUS)) *hdr10Plus = true;
+    if (hdr10Plus && av_frame_side_data_get(sd, count, AV_FRAME_DATA_DYNAMIC_HDR_PLUS)) *hdr10Plus = true;
 }
 
 // ---- the first look ------------------------------------------------------------------------------------------------------------

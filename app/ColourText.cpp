@@ -35,7 +35,10 @@ QString Nits(double v) { return QString::number(std::round(v * 10.0) / 10.0, 'g'
 
 // «8.4»: profile and the base layer's compatibility, as Dolby Vision's names go
 QString DoviName(const SourceColor& c) {
-    if (c.doviConf) return QString("%1.%2").arg(c.doviConf->profile).arg(c.doviConf->blCompat);
+    if (c.doviConf) {  // the profiles with variants by their base (8.1, 8.4, 10.0); the others by their number (5, 7)
+        const int p = c.doviConf->profile;
+        return p == 8 || p == 9 || p == 10 ? QString("%1.%2").arg(p).arg(c.doviConf->blCompat) : QString::number(p);
+    }
     return c.doviProfile ? QString::number(c.doviProfile) : Tr("неизвестного профиля");
 }
 
@@ -107,7 +110,7 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
         QStringList parts;
         parts << (c.cls == SourceClass::Pq && (c.hdr.mdcv || c.hdr.cll) ? Tr("HDR10 (PQ)") : ClassText(c.cls));
         const QString gamut = GamutText(e.primaries);
-        if (!gamut.isEmpty()) parts << gamut;
+        if (!gamut.isEmpty() && !(c.cls == SourceClass::Wide && e.primaries == 9)) parts << gamut;  // «BT.2020 SDR» says it already
         else if (c.Hdr()) parts << Tr("BT.2020 (не указан)");
         if (c.hdr.mdcv && c.hdr.mdcv->hasLuminance) parts << Tr("мастеринг %1 нит").arg(Nits(c.hdr.mdcv->maxLum.Value()));
         if (c.hdr.cll) parts << QString("MaxCLL %1/%2").arg(c.hdr.cll->maxCll).arg(c.hdr.cll->maxFall);

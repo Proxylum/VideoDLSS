@@ -37,17 +37,17 @@ struct RawTags {
     bool operator==(const RawTags&) const = default;
 };
 
-struct Q {  // AVRational as read (not reduced)
+struct Ratio {  // AVRational as read (not reduced)
     int num = 0;
     int den = 1;
     double Value() const { return den ? static_cast<double>(num) / den : 0.0; }
-    bool operator==(const Q&) const = default;
+    bool operator==(const Ratio&) const = default;
 };
 // AVMasteringDisplayMetadata: the display a PQ / HLG master was graded on.
 struct Mdcv {
-    Q primaries[3][2];  // R, G, B: x, y
-    Q white[2];
-    Q minLum, maxLum;  // cd/m2
+    Ratio primaries[3][2];  // R, G, B: x, y
+    Ratio white[2];
+    Ratio minLum, maxLum;  // cd/m2
     bool hasPrimaries = false, hasLuminance = false;
     bool operator==(const Mdcv&) const = default;
 };
@@ -56,7 +56,7 @@ struct Cll {  // AVContentLightMetadata (cd/m2)
     bool operator==(const Cll&) const = default;
 };
 struct Amve {  // AVAmbientViewingEnvironment
-    Q illuminance, lightX, lightY;
+    Ratio illuminance, lightX, lightY;
     bool operator==(const Amve&) const = default;
 };
 struct HdrStatic {

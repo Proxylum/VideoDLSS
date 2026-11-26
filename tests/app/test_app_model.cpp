@@ -67,6 +67,7 @@
 #include "AppModel.h"
 #include "CompareBar.h"
 #include "ControlMaskRow.h"
+#include "ColourText.h"
 #include "ControlMaskText.h"
 #include "SourceNames.h"
 #include "PlaybackClock.h"
@@ -10971,4 +10972,78 @@ TEST_CASE("AppModel: a source whose layout the probe did not learn, refused for 
         }
     }
     CHECK(sources.count() == 1);
+}
+
+// ---- TASK-0078 (HDR TB-1): the «Цвет» row of the source card --------------------------------------------------------------------
+
+namespace {
+QString ColourRowOf(const std::filesystem::path& clip, bool* hidden, QString* tip = nullptr) {
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    model.refreshPlan();
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    auto* label = panel.findChild<QLabel*>("sourceColour");
+    REQUIRE(label);
+    *hidden = label->isHidden();
+    if (tip) *tip = label->toolTip();
+    return label->text();
+}
+}  // namespace
+
+TEST_CASE("Source card colour row is hidden for SDR and names HLG with Dolby Vision 8.4 and PQ with mastering; an IPT base reads as wrong colours, not a refusal",
+          "[app][hdr]") {
+    App();
+    const auto d = Dir("colour_row");
+    auto clip = [&](const char* name, RawTags tags, ClipHdr hdr = {}) {
+        ClipSpec spec;
+        spec.frames = 2;
+        spec.width = 64;
+        spec.height = 48;
+        spec.pixFmt = "yuv420p10le";
+        spec.color = tags;
+        spec.hdr = hdr;
+        return WriteClip(d / name, spec);
+    };
+    bool hidden = false;
+    QString tip;
+    CHECK(ColourRowOf(clip("sdr.mkv", RawTags{1, 1, 1, 1, 0}), &hidden).isEmpty());
+    CHECK(hidden);
+
+    ClipHdr dv84;
+    DoviConf conf;
+    conf.profile = 8;
+    conf.level = 6;
+    conf.blCompat = 4;
+    conf.rpu = conf.bl = true;
+    dv84.dovi = conf;
+    CHECK(ColourRowOf(clip("hlg_dv84.mkv", RawTags{9, 9, 18, 1, 0}, dv84), &hidden, &tip) ==
+          QString::fromUtf8("HDR HLG · BT.2020 · Dolby Vision 8.4 (будет снят)"));
+    CHECK_FALSE(hidden);
+    CHECK(tip.contains(QString::fromUtf8("Dolby Vision 8.4 снимается при любой записи")));
+    CHECK(tip.contains(QString::fromUtf8("Обработка пока читает этот ролик как SDR")));
+    CHECK(tip.contains(QString::fromUtf8("кривая arib-std-b67 (поток)")));
+
+    ClipHdr pq;
+    Mdcv m;
+    m.maxLum = {1000, 1};
+    m.minLum = {1, 10000};
+    m.hasLuminance = true;
+    pq.mastering = m;
+    pq.light = Cll{1000, 400};
+    CHECK(ColourRowOf(clip("pq.mkv", RawTags{9, 9, 16, 1, 0}, pq), &hidden) ==
+          QString::fromUtf8("HDR10 (PQ) · BT.2020 · мастеринг 1000 нит · MaxCLL 1000/400"));
+    CHECK_FALSE(hidden);
+
+    ClipHdr dv5;
+    DoviConf ipt;
+    ipt.profile = 5;
+    ipt.level = 6;
+    ipt.rpu = ipt.bl = true;
+    dv5.dovi = ipt;
+    const QString iptText = ColourRowOf(clip("dv5.mkv", RawTags{2, 2, 2, 2, 0}, dv5), &hidden);
+    CHECK(iptText == QString::fromUtf8("Dolby Vision 5 (база IPT): цвета при обработке будут неверны"));
+    CHECK_FALSE(iptText.contains(QString::fromUtf8("не поддерживается")));
+    CHECK(ColourRowOf(clip("wide.mkv", RawTags{9, 9, 14, 1, 0}), &hidden) == QString::fromUtf8("BT.2020 SDR"));
 }

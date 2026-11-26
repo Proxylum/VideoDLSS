@@ -29,6 +29,7 @@ add_executable(dlssvid_unit_tests
   unit/test_depth_convert.cpp
   unit/test_mv_convert.cpp
   unit/test_color_convert.cpp
+  unit/test_hdr_source.cpp
   unit/test_depth_preprocess.cpp
   unit/test_depth_postprocess.cpp
   unit/test_depth_models.cpp
@@ -115,6 +116,7 @@ add_executable(dlssvid_integration_tests
   integration/test_process_versions.cpp
   integration/test_cli_pass_versions.cpp
   integration/test_scenes_stage.cpp
+  integration/test_hdr.cpp
 )
 target_link_libraries(dlssvid_integration_tests PRIVATE dlssvid_core Catch2::Catch2WithMain)
 dlssvid_utf8_code_page(dlssvid_integration_tests)  # paths as std::string, as in the CLI and the GUI
