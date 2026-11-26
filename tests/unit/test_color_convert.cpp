@@ -405,7 +405,7 @@ TEST_CASE("ResolveColor reads every source as before: every role is ColorInfoFro
     CHECK(checked == 2 * 3 * 19 * 19 * 19);
 }
 
-// The guides (depth, flow), export and the thumbnails convert with YuvToRgb; in bands of rows it must give the very same
+// The guides (depth, flow), FG, export, compare and the thumbnails convert with YuvToRgb; in bands of rows it must give the very same
 // values as the single-threaded walk it was, whatever the count - more threads than rows too.
 TEST_CASE("YuvToRgb in bands of rows is the same bit for bit whatever the thread count", "[convert][color][hdr][regression]") {
     struct Layout {
@@ -434,5 +434,19 @@ TEST_CASE("YuvToRgb in bands of rows is the same bit for bit whatever the thread
                     CHECK(YuvToRgb(f, ci, t, threads).data == one.data);
                 }
             }
+    }
+}
+
+// A frame without its data is refused before the bands start: thrown inside a worker thread (or while workers run) it
+// would end the process with std::terminate instead of reaching the caller's catch (thumbnails, stages).
+TEST_CASE("YuvToRgb and YuvToRgba16f refuse a frame without data before converting in bands", "[convert][color][hdr][regression]") {
+    const ColorInfo ci{ColorMatrix::Bt709, ColorRange::Limited};
+    CpuFrame tall;
+    tall.desc = FrameDesc{4, 300, PixelFormat::Yuv420p16, 10};  // >= 256 rows: the automatic count takes several threads too
+    tall.data.resize(16);                                        // short, not empty
+    for (const int threads : {4, 0}) {
+        INFO("threads " << threads);
+        CHECK_THROWS(YuvToRgb(tall, ci, PixelType::F16, threads));
+        CHECK_THROWS(YuvToRgba16f(tall, ci, threads));
     }
 }

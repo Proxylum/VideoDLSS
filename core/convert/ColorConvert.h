@@ -38,7 +38,7 @@ PassImage YuvToRgba16f(const CpuFrame& frame, const ColorInfo& info, int threads
 PassImage ToRgba16f(const PassImage& img);
 
 // Inverse of YuvToRgb: display-referred RGB (float [0,1], integers scaled) -> tightly packed YUV of `target`'s
-// format and bit depth (BT.601/709, limited/full range), chroma = mean of each block (2x2 for 4:2:0, 2x1 for
+// format and bit depth (BT.601/709/2020, limited/full range), chroma = mean of each block (2x2 for 4:2:0, 2x1 for
 // 4:2:2, the pixel itself for 4:4:4), rounded to nearest. `target.width/height` are taken from the image.
 void RgbToYuv(const PassImage& rgb, const ColorInfo& info, FrameDesc target, CpuFrame& out);
 // The 8-bit 4:2:0 case (previews, tests).

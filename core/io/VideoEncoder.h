@@ -21,7 +21,7 @@ namespace dlssvid {
 // RGB -> YUV conversion used, the primaries and transfer of the source passed through.
 struct ColorTags {
     int range = 0;      // AVColorRange: 1 limited, 2 full
-    int matrix = 2;     // AVColorSpace: 1 BT.709, 5 / 6 BT.601
+    int matrix = 2;     // AVColorSpace: 1 BT.709, 5 / 6 BT.601, 9 BT.2020 NCL
     int primaries = 2;  // AVColorPrimaries
     int transfer = 2;   // AVColorTransferCharacteristic
 };
