@@ -914,4 +914,13 @@ TEST_CASE("A stopped ColorPlan throws ColourUnsupported from Colour Guide and Re
     CHECK(m.all == ColourStop::None);
     CHECK_NOTHROW(RequireColour(m, ColourUse::Passthrough, "x"));
     CHECK_THROWS_AS(RequireColour(m, ColourUse::Process, "x"), ColourUnsupported);
+    // wide gamut SDR: passthrough keeps its tags - no HDR promised (PQ says it)
+    CHECK(p.why.find("with its HDR") != std::string::npos);
+    ColourLayers wide;
+    wide.stream = wide.container = Tags(9, 9, 1);
+    info.color = SourceColorOf(wide, "420", "hevc");
+    const ColorPlan w = ResolveColor(info);
+    CHECK(w.process == ColourStop::NotYet);
+    CHECK(w.why.find("writes it as it is, with its colour tags") != std::string::npos);
+    CHECK(w.why.find("HDR") == std::string::npos);
 }
