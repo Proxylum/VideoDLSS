@@ -324,6 +324,23 @@ scrubbing proxy, or the end of the task, lifts it. A recent project's thumbnail 
 run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame|query-fails|start-fails|device-fails|later-frame` stands in for the driver's answer
 (tests, reproducing a support case).
 
+**HDR and wide-gamut sources are recognised** (TASK-0078, the first step of HDR support): `dlssvid info` prints a `colour:`
+line - the class (HDR PQ, HDR HLG, wide gamut SDR, log curve, SDR; for an IPT base «Dolby Vision IPT base», or «Dolby Vision,
+taken for an IPT base» when the base is one FFmpeg 7.1.1 does not know - a reserved compatibility, a profile without a base, or an RPU of
+an unknown profile without a record - and no matrix nor transfer is said; a record of compatibility 0 for a profile that has a base names
+none and the class follows the tags) and each tag with the layer it was read from (`container`: MP4 /
+MOV `colr`, Matroska Colour; `stream`: the codec parameters - an HEVC / H.264 VUI, an AV1 sequence header; `frame`: the first
+frame where it differs - a ProRes frame header, an HEVC alternative transfer SEI that turns BT.2020 into HLG) - and, when present,
+`mastering:`, `light level:` (MaxCLL / MaxFALL), `ambient:`, `dolby vision:` (profile, level, the base layer's compatibility:
+an HDR10, SDR or HLG base keeps its picture and loses the RPU in every output; an IPT base - profiles 1, 3, 5 and 10.0, or the matrix ipt-c2 - comes out in wrong
+colours) and `hdr10+:` lines, and notes (BT.2020 assumed for an untagged PQ / HLG, a transfer not converted, layers that disagree).
+The GUI's source card shows a «Цвет» row for such a file. An SDR file with nothing to say (no Dolby Vision, no HDR record, no note)
+prints as before and has no such row. The first frame is decoded for this only
+for H.264 / HEVC / ProRes with a hint of HDR or BT.2020 (or a raw `.hevc` / `.h264`, an untagged 10-bit HEVC, a ProRes whose
+container does not say all three tags - a ProRes frame header always does), and the first packet is read for PQ in Matroska / WebM
+(HDR10+); once per file and modification time in a process. Processing such a source
+still reads it as SDR (its colours come out wrong) - that changes with the next steps.
+
 Paths may contain any letters: `dlssvid` and `dlssvid-gui` run with UTF-8 as their code page. The CLI prints UTF-8,
 so in a console with the OEM code page (866 on Russian Windows) Cyrillic in its output reads wrong; `chcp 65001` first.
 
@@ -536,7 +553,7 @@ PAL 64:45, HDV 1440x1080 at 4:3) is processed on its stored samples and shown st
 target and the 4K cap are of the frame as shown (`--target 1920x1080` gives 1920x1080 as shown), the result of `process` is
 stretched to square pixels when it is encoded (DVD x2: 1706x960; fit into 3840x2160 when the stretch would go beyond),
 passthrough (and a `process` run with upscale, NR and frame generation all off) keeps the stored grid (not resampled) and
-writes its pixel aspect; a pixel aspect that moves no pixel of the frame (14400:14399 of 1694x720) is taken as square; `dlssvid info` prints a `pixels:` line. HDR (PQ / HLG) stays out of scope: such sources are treated as SDR. The NVIDIA
+writes its pixel aspect; a pixel aspect that moves no pixel of the frame (14400:14399 of 1694x720) is taken as square; `dlssvid info` prints a `pixels:` line. HDR (PQ / HLG) sources are recognised (`dlssvid info`, the source card) but still processed as SDR. The NVIDIA
 passes keep the 10-bit gradations too: a shallow 10-bit ramp comes out of DLSS SR, NR and Frame Generation with one-code
 steps, no 8-bit staircase (measured, `docs/benchmarks.md`; the `[precision]` tests watch it).
 

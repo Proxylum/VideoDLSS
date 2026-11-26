@@ -407,7 +407,9 @@ void AppModel::reloadSources() {
     resultFormat_ = FrameDesc{};
     if (!isReleased(project_.resultVideo) && !project_.resultVideo.empty() && std::filesystem::exists(project_.resultVideo)) {
         try {
-            VideoDecoder probe(project_.resultVideo, VideoDecoder::Probe());
+            VideoDecoder::Options options = VideoDecoder::Probe();
+            options.colorProbe = false;  // TASK-0078: the codec, the sound and the layout of the result - not its colour
+            VideoDecoder probe(project_.resultVideo, options);
             resultAudio_ = probe.HasAudio();
             resultCodec_ = probe.Info().codecName;
             resultFormat_ = probe.Info().decoded;
@@ -595,7 +597,9 @@ void AppModel::startProxies() {
                 if (!l.startsWith(head)) continue;
                 const std::filesystem::path video = std::string(name) == "source" ? builtSource : builtResult;
                 try {
-                    VideoDecoder probe(video, VideoDecoder::Probe());
+                    VideoDecoder::Options options = VideoDecoder::Probe();
+                    options.colorProbe = false;  // TASK-0078: whether it decodes here, not its colour
+                    VideoDecoder probe(video, options);
                     if (!probe.Info().hardwareOnly) continue;
                     if (!CheckDecodeSupport(probe.Info()).Ok()) {
                         heardVerdict = true;
@@ -1111,6 +1115,7 @@ void AppModel::refreshPlan() {
         sourceInfo_.bitDepth = probe.Info().bitDepth;
         sourceInfo_.chroma = probe.Info().chroma;
         sourceInfo_.pixelFormat = probe.Info().pixelFormat;
+        sourceInfo_.color = probe.Info().color;
         sourceDecode_ = CheckDecodeSupport(probe.Info());
         if (stale) {  // TASK-0076: the file written over - its probe tells a probe's verdict apart (a loader's: once, as above)
             setSourcesAgain(*stale, !probe.Info().hardwareOnly ||

@@ -57,7 +57,9 @@ fs::path PartialResultPath(const fs::path& output) {
 
 std::string CheckEncodedResult(const fs::path& file, const ResultExpectation& expect) {
     try {
-        VideoDecoder probe(file, VideoDecoder::Probe());
+        VideoDecoder::Options options = VideoDecoder::Probe();
+        options.colorProbe = false;  // TASK-0078: the codec parameters' tags are what is checked; no first frame to read for the colour
+        VideoDecoder probe(file, options);
         const VideoStreamInfo& info = probe.Info();
         // the frames are written upright (TASK-0072): a display matrix on the result would turn them again in a player
         if (!info.orientation.Identity())

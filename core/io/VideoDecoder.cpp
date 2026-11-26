@@ -624,6 +624,14 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     url_ = path.string();
     const std::string& url = url_;
     CheckAv(avformat_open_input(&fmt_, url.c_str(), nullptr, nullptr), "avformat_open_input");
+    // TASK-0078: the tags as the demuxer read them (MP4 / MOV colr, Matroska Colour) - avformat_find_stream_info opens the decoder, and
+    // HEVC's (export_stream_params) writes its VUI over them, unspecified where the VUI says nothing (FFmpeg 7.1.1 hevcdec.c)
+    std::vector<RawTags> containerTags;
+    for (unsigned s = 0; s < fmt_->nb_streams; ++s) {
+        const AVCodecParameters* p = fmt_->streams[s]->codecpar;
+        containerTags.push_back(RawTags{static_cast<int>(p->color_space), static_cast<int>(p->color_primaries), static_cast<int>(p->color_trc),
+                                        static_cast<int>(p->color_range), static_cast<int>(p->chroma_location)});
+    }
     CheckAv(avformat_find_stream_info(fmt_, nullptr), "avformat_find_stream_info");
 
     const AVCodec* decoder = nullptr;
@@ -718,6 +726,7 @@ VideoDecoder::VideoDecoder(const std::filesystem::path& path, const Options& opt
     info_.colorRange = static_cast<int>(vs->codecpar->color_range);
     info_.colorPrimaries = static_cast<int>(vs->codecpar->color_primaries);
     info_.colorTrc = static_cast<int>(vs->codecpar->color_trc);
+    ReadColour(options.colorProbe, static_cast<size_t>(videoStream_) < containerTags.size() ? containerTags[static_cast<size_t>(videoStream_)] : RawTags{});
     info_.hasAudio = audioStream_ >= 0;
     if (info_.hasAudio) {
         const AVCodecDescriptor* d = avcodec_descriptor_get(fmt_->streams[audioStream_]->codecpar->codec_id);
@@ -749,6 +758,32 @@ VideoDecoder::~VideoDecoder() {
     avcodec_free_context(&codec_);
     av_buffer_unref(&hwDevice_);
     avformat_close_input(&fmt_);
+}
+
+void VideoDecoder::ReadColour(bool look, const RawTags& container) {
+    // TASK-0078 (HDR TB-1): what the source's colour is, from every layer - nothing the decoder does depends on it
+    const AVCodecParameters* par = fmt_->streams[videoStream_]->codecpar;
+    ColourLayers in;
+    in.container = container;
+    in.stream = RawTags{static_cast<int>(par->color_space), static_cast<int>(par->color_primaries), static_cast<int>(par->color_trc),
+                        static_cast<int>(par->color_range), static_cast<int>(par->chroma_location)};
+    // the records: the container's (codecpar's coded side data: mdcv / clli / amve / dvcC, Matroska's MasteringMetadata and mapping), and
+    // what the decoder found in its extradata (an HEVC hvcC's SEI: decoded_side_data, beside the container's it was given)
+    ReadCodedSideData(par->coded_side_data, par->nb_coded_side_data, in.containerRecords, &in.dovi);
+    ReadFrameSideData(codec_->decoded_side_data, codec_->nb_decoded_side_data, in.codecRecords);
+    const std::string_view codec = decoder_->name;
+    const RawTags hint = LookHint(in, codec);
+    const FirstLook how = look ? NeedsFirstLook(codec, fmt_->iformat->name, info_.bitDepth, hint) : FirstLook::None;
+    if (how != FirstLook::None && !(how == FirstLook::Decode && hwOnly_)) in.first = FirstLookCached(url_, how);
+    info_.color = SourceColorOf(in, LayoutKindOf(info_.pixelFormat), codec);
+    info_.color.bitDepth = info_.pixelFormat == "unknown" ? 0 : info_.bitDepth;
+    const SourceColor& c = info_.color;
+    // said once per real open of a reader that looked (a probe, or a reader of frames only - the viewport, a thumbnail: tags alone, the
+    // first frame unread - at debug level: its class may be another than the one info and the card say)
+    if (!c.legacyPath || c.doviConf || c.doviRpu || !c.hdr.Empty() || !c.probeError.empty())
+        Log()->log(probe_ || !look ? spdlog::level::debug : spdlog::level::info, "{}: colour {} ({}){}", url_,
+                   c.refuseAll == ColourRefusal::None ? ToString(c.cls) : ToString(c.refuseAll), ColourWords(c.effective),
+                   !look ? std::string(", tags only") : c.looked != FirstLook::None ? ", " + std::string(ToString(c.looked)) + " read" : std::string());
 }
 
 AVCodecContext* VideoDecoder::OpenCodec(AVBufferRef* device) const {

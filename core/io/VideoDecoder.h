@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "gpu/GpuFrame.h"
+#include "io/SourceColor.h"
 #include "pipeline/Frame.h"
 
 struct AVFormatContext;
@@ -62,6 +63,10 @@ struct VideoStreamInfo {
     int colorRange = 0;       // AVColorRange (0 = unspecified, 1 = limited/MPEG, 2 = full/JPEG)
     int colorPrimaries = 2;   // AVColorPrimaries (2 = unspecified)
     int colorTrc = 2;         // AVColorTransferCharacteristic (2 = unspecified)
+    // TASK-0078 (HDR TB-1): the four fields above are the codec parameters after avformat_find_stream_info - the legacy path reads and
+    // writes by them, unchanged. `color` is what the source's colour is: every layer (container, stream, first frame), the HDR records,
+    // Dolby Vision, the class and its notes (io/SourceColor.h). Acted on from TB-2 (ResolveColor); `info` and the source card say it.
+    SourceColor color;
     bool hasAudio = false;
     std::string audioCodecName;
     // TASK-0076: the decoder has no software path (this build's AV1, NvdecSupport.h): the frames come from NVDEC whatever
@@ -206,6 +211,9 @@ public:
         // Frame indices from pts at this rate instead of the stream's (a proxy written at the rate of its original:
         // the container's guess of the rate may differ, the indices must not). {0, 1} = the stream's.
         Rational indexRate{0, 1};
+        // TASK-0078: a look at the first frame (or packet) for the colour where the tags hint at HDR (NeedsFirstLook, cached per file:
+        // FirstLookCached). Off for a reader that needs no colour - the result check, the thumbnails.
+        bool colorProbe = true;
     };
     static Options Probe() {
         Options o;
@@ -270,6 +278,7 @@ public:
 
 private:
     Rational IndexRate() const { return indexRate_.num > 0 && indexRate_.den > 0 ? indexRate_ : info_.frameRate; }
+    void ReadColour(bool look, const RawTags& container);  // TASK-0078: info_.color, once the stream is known and codec_ open
     AVCodecContext* OpenCodec(AVBufferRef* device) const;  // a codec context for the video stream: on `device`, else software threads
     void StartNvdec();  // a hardware-only decoder before its first packet: check the GPU, create the device, reopen codec_ on it
     // CheckAv, with ENOSYS of a hardware-only decoder as the refusal it is (kept: refused_); pts - of the packet just sent, if any

@@ -58,6 +58,8 @@ private:
     TaskQueue& tasks_;
     QLabel* sourceFile_;
     QLabel* sourceFrame_;
+    QLabel* sourceColourName_;  // TASK-0078: the «Цвет» row (hidden for an SDR video with nothing to say: SourceColourText)
+    QLabel* sourceColour_;
     QLabel* sourceAudio_;
     QLabel* sourcePasses_;
     QPushButton* changePasses_;

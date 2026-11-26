@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "io/SourceColor.h"
 #include "passes/Manifest.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/upscale/IUpscaler.h"
@@ -60,6 +61,7 @@ struct SourceInfo {
     // TASK-0073: the proportions of a pixel in the axes of width / height (VideoStreamInfo::sar; codedSar - as stored, as ffprobe says)
     PixelAspect sar, codedSar;
     std::string sarFrom;      // "container" | "bitstream" | ""
+    SourceColor color;        // TASK-0078: what the source's colour is (VideoStreamInfo::color) - the card's «Цвет» row
 };
 
 struct StageEstimate {

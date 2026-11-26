@@ -7,6 +7,10 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/channel_layout.h>
 #include <libavutil/display.h>
+#include <libavutil/ambient_viewing_environment.h>
+#include <libavutil/dovi_meta.h>
+#include <libavutil/hdr_dynamic_metadata.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 }
@@ -88,10 +92,67 @@ CpuFrame SyntheticFrame(int64_t index, const FrameDesc& desc) {
 
 namespace {
 
+std::string ReadAllBytes(const std::filesystem::path& file) {
+    std::ifstream in(file, std::ios::binary);
+    if (!in) throw std::runtime_error("cannot read " + file.string());
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+
 AVPixelFormat EncoderFormatFor(const std::string& pixFmt) {
     const AVPixelFormat f = av_get_pix_fmt(pixFmt.c_str());
     if (f == AV_PIX_FMT_NONE) Throw("test clip pixel format unknown to FFmpeg: " + pixFmt);  // a test's mistake: never read as «unsupported»
     return f;
+}
+
+AVRational R(const Ratio& q) { return AVRational{q.num, q.den}; }
+
+// TASK-0078: the HDR records as the stream's coded side data (the muxers write them from there)
+void AddHdrSideData(AVCodecParameters* par, const ClipHdr& hdr) {
+    auto add = [&](AVPacketSideDataType type, size_t size) {
+        AVPacketSideData* sd = av_packet_side_data_new(&par->coded_side_data, &par->nb_coded_side_data, type, size, 0);
+        if (!sd) Throw("test clip: no room for HDR side data");
+        std::memset(sd->data, 0, size);
+        return sd->data;
+    };
+    if (hdr.mastering) {
+        auto* m = reinterpret_cast<AVMasteringDisplayMetadata*>(add(AV_PKT_DATA_MASTERING_DISPLAY_METADATA, sizeof(AVMasteringDisplayMetadata)));
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 2; ++j) m->display_primaries[i][j] = R(hdr.mastering->primaries[i][j]);
+        m->white_point[0] = R(hdr.mastering->white[0]);
+        m->white_point[1] = R(hdr.mastering->white[1]);
+        m->min_luminance = R(hdr.mastering->minLum);
+        m->max_luminance = R(hdr.mastering->maxLum);
+        m->has_primaries = hdr.mastering->hasPrimaries;
+        m->has_luminance = hdr.mastering->hasLuminance;
+    }
+    if (hdr.light) {
+        auto* c = reinterpret_cast<AVContentLightMetadata*>(add(AV_PKT_DATA_CONTENT_LIGHT_LEVEL, sizeof(AVContentLightMetadata)));
+        c->MaxCLL = hdr.light->maxCll;
+        c->MaxFALL = hdr.light->maxFall;
+    }
+    if (hdr.ambient) {
+        auto* a = reinterpret_cast<AVAmbientViewingEnvironment*>(add(AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT, sizeof(AVAmbientViewingEnvironment)));
+        a->ambient_illuminance = R(hdr.ambient->illuminance);
+        a->ambient_light_x = R(hdr.ambient->lightX);
+        a->ambient_light_y = R(hdr.ambient->lightY);
+    }
+    if (hdr.dovi) {
+        size_t size = 0;
+        AVDOVIDecoderConfigurationRecord* d = av_dovi_alloc(&size);
+        if (!d) Throw("test clip: no memory for a Dolby Vision record");
+        d->dv_version_major = static_cast<uint8_t>(hdr.dovi->major);
+        d->dv_version_minor = static_cast<uint8_t>(hdr.dovi->minor);
+        d->dv_profile = static_cast<uint8_t>(hdr.dovi->profile);
+        d->dv_level = static_cast<uint8_t>(hdr.dovi->level);
+        d->rpu_present_flag = hdr.dovi->rpu;
+        d->el_present_flag = hdr.dovi->el;
+        d->bl_present_flag = hdr.dovi->bl;
+        d->dv_bl_signal_compatibility_id = static_cast<uint8_t>(hdr.dovi->blCompat);
+        if (!av_packet_side_data_add(&par->coded_side_data, &par->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF, d, size, 0)) {
+            av_free(d);
+            Throw("test clip: no room for the Dolby Vision record");
+        }
+    }
 }
 
 }  // namespace
@@ -136,6 +197,12 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
         if (!spec.sar.Square() && spec.codec == "ffv1") vctx->level = 3;  // the slices carry the frame's proportions from version 3
     }
     if (fmt->oformat->flags & AVFMT_GLOBALHEADER) vctx->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    // TASK-0078: the encoder's colour (an NVENC VUI says it; all unspecified by default, as before)
+    vctx->colorspace = static_cast<AVColorSpace>(spec.color.matrix);
+    vctx->color_primaries = static_cast<AVColorPrimaries>(spec.color.primaries);
+    vctx->color_trc = static_cast<AVColorTransferCharacteristic>(spec.color.trc);
+    vctx->color_range = static_cast<AVColorRange>(spec.color.range);
+    vctx->chroma_sample_location = static_cast<AVChromaLocation>(spec.color.chromaLoc);
     CheckAv(avcodec_open2(vctx, venc, nullptr), ("open " + spec.codec + " (" + spec.pixFmt + ")").c_str());
     AVStream* vs = avformat_new_stream(fmt, nullptr);
     vs->time_base = vctx->time_base;
@@ -155,6 +222,24 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
         if (spec.orientation.hflip) av_display_matrix_flip(m, 1, 0);
     }
     if (!spec.rotateTag.empty()) av_dict_set(&vs->metadata, "rotate", spec.rotateTag.c_str(), 0);
+    if (spec.containerColor) {  // TASK-0078: the container says other tags than the encoder
+        vs->codecpar->color_space = static_cast<AVColorSpace>(spec.containerColor->matrix);
+        vs->codecpar->color_primaries = static_cast<AVColorPrimaries>(spec.containerColor->primaries);
+        vs->codecpar->color_trc = static_cast<AVColorTransferCharacteristic>(spec.containerColor->trc);
+        vs->codecpar->color_range = static_cast<AVColorRange>(spec.containerColor->range);
+    }
+    AddHdrSideData(vs->codecpar, spec.hdr);
+    if (spec.extradata) {
+        const std::string bytes = spec.extradata(std::string(reinterpret_cast<const char*>(vs->codecpar->extradata),
+                                                             static_cast<size_t>(std::max(vs->codecpar->extradata_size, 0))));
+        auto* data = static_cast<uint8_t*>(av_mallocz(bytes.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+        if (!data) Throw("test clip: no memory for extradata");
+        std::memcpy(data, bytes.data(), bytes.size());
+        av_freep(&vs->codecpar->extradata);
+        vs->codecpar->extradata = data;
+        vs->codecpar->extradata_size = static_cast<int>(bytes.size());
+    }
+    if (spec.strict != INT32_MIN) fmt->strict_std_compliance = spec.strict;
 
     // --- audio (pcm_s16le sine) ---
     AVCodecContext* actx = nullptr;
@@ -179,12 +264,33 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     AVFrame* frame = av_frame_alloc();
     AVPacket* pkt = av_packet_alloc();
 
+    int64_t videoPackets = 0;
     auto drain = [&](AVCodecContext* ctx, AVStream* st, bool flush) {
         if (flush) CheckAv(avcodec_send_frame(ctx, nullptr), "flush");
         for (;;) {
             const int err = avcodec_receive_packet(ctx, pkt);
             if (err == AVERROR(EAGAIN) || err == AVERROR_EOF) break;
             CheckAv(err, "receive packet");
+            if (st == vs) {  // TASK-0078: a packet written anew, side data added
+                const int64_t index = videoPackets++;
+                if (spec.videoPacket) {
+                    const std::string bytes = spec.videoPacket(index, std::string(reinterpret_cast<const char*>(pkt->data), static_cast<size_t>(pkt->size)));
+                    AVBufferRef* buf = av_buffer_alloc(bytes.size() + AV_INPUT_BUFFER_PADDING_SIZE);
+                    if (!buf) Throw("test clip: no memory for a packet");
+                    std::memcpy(buf->data, bytes.data(), bytes.size());
+                    std::memset(buf->data + bytes.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
+                    av_buffer_unref(&pkt->buf);
+                    pkt->buf = buf;
+                    pkt->data = buf->data;
+                    pkt->size = static_cast<int>(bytes.size());
+                }
+                if (spec.videoPacketSideData)
+                    for (const auto& [type, bytes] : spec.videoPacketSideData(index)) {
+                        uint8_t* d = av_packet_new_side_data(pkt, static_cast<AVPacketSideDataType>(type), bytes.size());
+                        if (!d) Throw("test clip: no room for packet side data");
+                        std::memcpy(d, bytes.data(), bytes.size());
+                    }
+            }
             av_packet_rescale_ts(pkt, ctx->time_base, st->time_base);
             pkt->stream_index = st->index;
             CheckAv(av_interleaved_write_frame(fmt, pkt), "write packet");
@@ -200,6 +306,13 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
         frame->width = vctx->width;
         frame->height = vctx->height;
         frame->sample_aspect_ratio = spec.sarIn != "container" ? sar : AVRational{0, 1};
+        {  // TASK-0078: the frame's tags (prores_ks writes them into its header)
+            const RawTags fc = spec.frameColor ? spec.frameColor(i) : spec.color;
+            frame->colorspace = static_cast<AVColorSpace>(fc.matrix);
+            frame->color_primaries = static_cast<AVColorPrimaries>(fc.primaries);
+            frame->color_trc = static_cast<AVColorTransferCharacteristic>(fc.trc);
+            frame->color_range = static_cast<AVColorRange>(fc.range);
+        }
         CheckAv(av_frame_get_buffer(frame, 0), "frame buffer");
         const size_t W = spec.width, H = spec.height, cw = src.desc.PlaneWidth(1);
         auto row16 = [&](int plane, size_t r) { return reinterpret_cast<uint16_t*>(frame->data[plane] + static_cast<ptrdiff_t>(r) * frame->linesize[plane]); };
@@ -276,6 +389,14 @@ StreamSummary Summarize(const std::filesystem::path& path) {
     AVFormatContext* fmt = nullptr;
     const std::string url = path.string();
     CheckAv(avformat_open_input(&fmt, url.c_str(), nullptr, nullptr), "open");
+    for (unsigned i = 0; i < fmt->nb_streams; ++i) {  // TASK-0078: the tags as the demuxer read them, before the decoder's turn
+        const AVCodecParameters* p = fmt->streams[i]->codecpar;
+        if (p->codec_type == AVMEDIA_TYPE_VIDEO) {
+            s.container = RawTags{static_cast<int>(p->color_space), static_cast<int>(p->color_primaries), static_cast<int>(p->color_trc),
+                                  static_cast<int>(p->color_range), static_cast<int>(p->chroma_location)};
+            break;
+        }
+    }
     CheckAv(avformat_find_stream_info(fmt, nullptr), "stream info");
     int audioIndex = -1;
     for (unsigned i = 0; i < fmt->nb_streams; ++i) {
@@ -297,6 +418,7 @@ StreamSummary Summarize(const std::filesystem::path& path) {
                 s.streamSar = PixelAspectFrom(st.num, st.den);
                 s.codecSar = PixelAspectFrom(p->sample_aspect_ratio.num, p->sample_aspect_ratio.den);
                 s.sar = PixelAspectFrom(guess.num, guess.den);
+                ReadCodedSideData(p->coded_side_data, p->nb_coded_side_data, s.hdr, &s.dovi);
             }
             ++s.videoStreams;
         }
@@ -321,6 +443,137 @@ StreamSummary Summarize(const std::filesystem::path& path) {
     av_packet_free(&pkt);
     avformat_close_input(&fmt);
     return s;
+}
+
+std::vector<RawTags> FrameColors(const std::filesystem::path& path, int maxFrames) {
+    std::vector<RawTags> out;
+    AVFormatContext* fmt = nullptr;
+    AVCodecContext* ctx = nullptr;
+    AVPacket* pkt = av_packet_alloc();
+    AVFrame* frame = av_frame_alloc();
+    const std::string url = path.string();
+    try {
+        CheckAv(avformat_open_input(&fmt, url.c_str(), nullptr, nullptr), "open");
+        CheckAv(avformat_find_stream_info(fmt, nullptr), "stream info");
+        const AVCodec* dec = nullptr;
+        const int vs = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, &dec, 0);
+        if (vs < 0 || !dec) Throw("FrameColors: no video stream or decoder");
+        if (dec->id == AV_CODEC_ID_AV1) Throw("FrameColors: AV1 has no software decoder in this build");
+        ctx = avcodec_alloc_context3(dec);
+        CheckAv(avcodec_parameters_to_context(ctx, fmt->streams[vs]->codecpar), "params");
+        ctx->thread_type = FF_THREAD_SLICE;
+        CheckAv(avcodec_open2(ctx, dec, nullptr), "open decoder");
+        auto receive = [&] {
+            for (;;) {
+                const int err = avcodec_receive_frame(ctx, frame);
+                if (err == AVERROR(EAGAIN) || err == AVERROR_EOF) return;
+                CheckAv(err, "receive frame");
+                if (static_cast<int>(out.size()) < maxFrames) out.push_back(FrameTagsOf(frame));
+                av_frame_unref(frame);
+            }
+        };
+        while (static_cast<int>(out.size()) < maxFrames && av_read_frame(fmt, pkt) >= 0) {
+            if (pkt->stream_index == vs) {
+                CheckAv(avcodec_send_packet(ctx, pkt), "send packet");
+                receive();
+            }
+            av_packet_unref(pkt);
+        }
+        if (static_cast<int>(out.size()) < maxFrames) {
+            CheckAv(avcodec_send_packet(ctx, nullptr), "flush");
+            receive();
+        }
+    } catch (...) {
+        av_frame_free(&frame);
+        av_packet_free(&pkt);
+        avcodec_free_context(&ctx);
+        avformat_close_input(&fmt);
+        throw;
+    }
+    av_frame_free(&frame);
+    av_packet_free(&pkt);
+    avcodec_free_context(&ctx);
+    avformat_close_input(&fmt);
+    return out;
+}
+
+std::string Hdr10PlusSideData() {
+    size_t size = 0;
+    AVDynamicHDRPlus* h = av_dynamic_hdr_plus_alloc(&size);
+    if (!h) Throw("Hdr10PlusSideData: no memory");
+    h->itu_t_t35_country_code = 0xB5;
+    h->application_version = 1;
+    h->num_windows = 1;
+    h->targeted_system_display_maximum_luminance = AVRational{400, 1};
+    AVHDRPlusColorTransformParams& p = h->params[0];
+    for (AVRational& m : p.maxscl) m = AVRational{50000, 100000};
+    p.average_maxrgb = AVRational{10000, 100000};
+    const uint8_t percentages[9] = {1, 5, 10, 25, 50, 75, 90, 95, 99};
+    p.num_distribution_maxrgb_percentiles = 9;
+    for (int i = 0; i < 9; ++i) p.distribution_maxrgb[i] = AVHDRPlusPercentile{percentages[i], AVRational{1000 * (i + 1), 100000}};
+    p.fraction_bright_pixels = AVRational{0, 1000};
+    std::string bytes(reinterpret_cast<const char*>(h), size);
+    av_free(h);
+    return bytes;
+}
+
+std::string HevcPrefixSei(int payloadType, const std::string& payload) {
+    std::string rbsp;  // the SEI message
+    for (int t = payloadType;; t -= 255) {
+        if (t < 255) {
+            rbsp += static_cast<char>(t);
+            break;
+        }
+        rbsp += static_cast<char>(0xFF);
+    }
+    for (size_t n = payload.size();; n -= 255) {
+        if (n < 255) {
+            rbsp += static_cast<char>(n);
+            break;
+        }
+        rbsp += static_cast<char>(0xFF);
+    }
+    rbsp += payload;
+    rbsp += static_cast<char>(0x80);  // rbsp trailing bits
+    // start code, NAL header: type 39 (prefix SEI), layer 0, nuh_temporal_id_plus1 1; then the payload with emulation prevention (no
+    // 00 00 0x with x <= 3 inside a NAL unit: a 03 goes before the third byte)
+    std::string nal("\x00\x00\x00\x01\x4E\x01", 6);
+    int zeros = 0;
+    for (char ch : rbsp) {
+        const auto b = static_cast<unsigned char>(ch);
+        if (zeros >= 2 && b <= 3) {
+            nal += '\x03';
+            zeros = 0;
+        }
+        nal += ch;
+        zeros = b == 0 ? zeros + 1 : 0;
+    }
+    return nal;
+}
+
+std::string AlternativeTransferSei(int trc) { return HevcPrefixSei(147, std::string(1, static_cast<char>(trc))); }
+
+std::string WithNalBeforeSlice(const std::string& au, const std::string& nal) {
+    // Annex B: the first NAL unit of a picture (VCL: types 0-31) - the SEI goes before its start code
+    for (size_t i = 0; i + 3 < au.size(); ++i) {
+        if (au[i] != 0 || au[i + 1] != 0 || au[i + 2] != 1) continue;
+        const size_t start = i + 3;
+        const int type = (static_cast<unsigned char>(au[start]) >> 1) & 0x3F;
+        if (type < 32) {
+            const size_t at = i > 0 && au[i - 1] == 0 ? i - 1 : i;  // a 4-byte start code begins one before
+            return au.substr(0, at) + nal + au.substr(at);
+        }
+        i = start;
+    }
+    throw std::runtime_error("WithNalBeforeSlice: no slice in the access unit");
+}
+
+std::filesystem::path ConcatFiles(const std::filesystem::path& a, const std::filesystem::path& b, const std::filesystem::path& out) {
+    const std::string both = ReadAllBytes(a) + ReadAllBytes(b);
+    std::ofstream o(out, std::ios::binary);
+    o.write(both.data(), static_cast<std::streamsize>(both.size()));
+    if (!o) throw std::runtime_error("ConcatFiles: cannot write " + out.string());
+    return out;
 }
 
 namespace {

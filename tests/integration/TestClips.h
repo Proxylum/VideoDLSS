@@ -7,9 +7,19 @@
 #include <string>
 #include <vector>
 
+#include "io/SourceColor.h"
 #include "pipeline/Frame.h"
 
 namespace dlssvid::test {
+
+// TASK-0078: the HDR records a test clip's video stream carries (its coded side data: MP4 / MOV mdcv, clli, amve, dvcC / dvvC; Matroska's
+// MasteringMetadata, MaxCLL / MaxFALL and its Dolby Vision mapping)
+struct ClipHdr {
+    std::optional<Mdcv> mastering;
+    std::optional<Cll> light;
+    std::optional<Amve> ambient;
+    std::optional<DoviConf> dovi;
+};
 
 std::filesystem::path TempDir();  // per-run scratch directory under the build tree
 
@@ -50,6 +60,21 @@ struct ClipSpec {
     // Non-square: the container says these pixels while the codec keeps `sar` (an MKV DisplayWidth correcting a stream's VUI) - the
     // codec parameters' SAR is cleared before the header (the muxer refuses two non-zero ones that differ)
     PixelAspect containerSar;
+    // TASK-0078: colour. `color` - the encoder's (its context: the bitstream where the codec writes one - an NVENC VUI - and the frames'
+    // unless `frameColor` says otherwise: a ProRes frame header); `containerColor` - the stream's parameters the muxer writes (MP4 / MOV
+    // colr, Matroska Colour), the encoder's when not set; `frameColor(i)` - frame i's tags (prores_ks writes them into its header)
+    RawTags color;
+    std::optional<RawTags> containerColor;
+    std::function<RawTags(int64_t)> frameColor;
+    ClipHdr hdr;
+    // the muxer's strictness (FF_COMPLIANCE_*; INT32_MIN: its default) - an MP4's Dolby Vision record needs «unofficial»
+    int strict = INT32_MIN;
+    // video packet i's bytes written anew (an SEI put into an HEVC access unit) and its side data (AV_PKT_DATA_* type, bytes)
+    std::function<std::string(int64_t, const std::string&)> videoPacket;
+    std::function<std::vector<std::pair<int, std::string>>(int64_t)> videoPacketSideData;
+    // the video stream's extradata written anew before the header (an HEVC encoder's Annex B parameter sets: SEI added to them reach
+    // the MP4 / MKV hvcC as its own array)
+    std::function<std::string(const std::string&)> extradata;
 };
 // The CpuFrame layout `WriteClip` feeds the encoder for a ClipSpec::pixFmt.
 FrameDesc FrameDescFor(const ClipSpec& spec);
@@ -77,8 +102,26 @@ struct StreamSummary {
     uint32_t width = 0, height = 0;
     PixelAspect streamSar, codecSar, sar;
     std::string comment;  // the container's `comment` tag (the settings note, PR-11)
+    // TASK-0078: the video stream's tags as the demuxer read them (before avformat_find_stream_info: colr, Matroska Colour), its HDR
+    // records and Dolby Vision record (coded side data)
+    RawTags container;
+    HdrStatic hdr;
+    std::optional<DoviConf> dovi;
 };
 StreamSummary Summarize(const std::filesystem::path& path);
+
+// TASK-0078: the colour tags of the first `maxFrames` frames of a file, decoded in software by libavcodec itself (a ProRes frame header,
+// what an HEVC SEI makes of the transfer) - not by the product's decoder. Throws for a codec without a software decoder (AV1).
+std::vector<RawTags> FrameColors(const std::filesystem::path& path, int maxFrames = 1);
+// An HDR10+ record (AVDynamicHDRPlus: one window, application version 1, 400 cd/m2 targeted) as a packet's side data
+// (AV_PKT_DATA_DYNAMIC_HDR10_PLUS): matroskaenc writes it as a BlockAdditional (ITU-T T.35), matroskadec reads it back.
+std::string Hdr10PlusSideData();
+// HEVC: an Annex B prefix SEI NAL unit (type 39) with one payload, and an access unit with a NAL unit put before its first slice
+std::string HevcPrefixSei(int payloadType, const std::string& payload);
+std::string AlternativeTransferSei(int trc);  // SEI 147: preferred_transfer_characteristics (18: HLG under a VUI of 14)
+std::string WithNalBeforeSlice(const std::string& accessUnit, const std::string& nal);
+// The bytes of `a` then `b` (two raw elementary streams joined)
+std::filesystem::path ConcatFiles(const std::filesystem::path& a, const std::filesystem::path& b, const std::filesystem::path& out);
 
 // FFmpeg's log while it lives (still written to stderr as before): what an encoder said when it refused. One at a time.
 class FfmpegLogCapture {

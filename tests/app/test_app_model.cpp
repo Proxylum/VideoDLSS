@@ -67,6 +67,7 @@
 #include "AppModel.h"
 #include "CompareBar.h"
 #include "ControlMaskRow.h"
+#include "ColourText.h"
 #include "ControlMaskText.h"
 #include "SourceNames.h"
 #include "PlaybackClock.h"
@@ -10971,4 +10972,217 @@ TEST_CASE("AppModel: a source whose layout the probe did not learn, refused for 
         }
     }
     CHECK(sources.count() == 1);
+}
+
+// ---- TASK-0078 (HDR TB-1): the «Цвет» row of the source card --------------------------------------------------------------------
+
+namespace {
+QString ColourRowOf(const std::filesystem::path& clip, bool* hidden, QString* tip = nullptr) {
+    AppModel model(true);
+    model.openVideo(Q(clip));
+    model.refreshPlan();
+    TaskQueue queue;
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    auto* label = panel.findChild<QLabel*>("sourceColour");
+    auto* name = panel.findChild<QLabel*>("sourceColourName");
+    REQUIRE(label);
+    REQUIRE(name);
+    CHECK(name->isHidden() == label->isHidden());  // the row as a whole: no empty «Цвет» under an SDR video
+    *hidden = label->isHidden();
+    if (tip) *tip = label->toolTip();
+    return label->text();
+}
+}  // namespace
+
+TEST_CASE("Source card colour row is hidden for SDR and names HLG with Dolby Vision 8.4 and PQ with mastering; an IPT base reads as wrong colours, not a refusal",
+          "[app][hdr]") {
+    App();
+    const auto d = Dir("colour_row");
+    auto clip = [&](const char* name, RawTags tags, ClipHdr hdr = {}) {
+        ClipSpec spec;
+        spec.frames = 2;
+        spec.width = 64;
+        spec.height = 48;
+        spec.pixFmt = "yuv420p10le";
+        spec.color = tags;
+        spec.hdr = hdr;
+        return WriteClip(d / name, spec);
+    };
+    bool hidden = false;
+    QString tip;
+    CHECK(ColourRowOf(clip("sdr.mkv", RawTags{1, 1, 1, 1, 0}), &hidden).isEmpty());
+    CHECK(hidden);
+
+    ClipHdr dv84;
+    DoviConf conf;
+    conf.profile = 8;
+    conf.level = 6;
+    conf.blCompat = 4;
+    conf.rpu = conf.bl = true;
+    dv84.dovi = conf;
+    CHECK(ColourRowOf(clip("hlg_dv84.mkv", RawTags{9, 9, 18, 1, 0}, dv84), &hidden, &tip) ==
+          QString::fromUtf8("HDR HLG · BT.2020 · Dolby Vision 8.4 (будет снят)"));
+    CHECK_FALSE(hidden);
+    CHECK(tip.contains(QString::fromUtf8("Dolby Vision 8.4 снимается при любой записи")));
+    CHECK(tip.contains(QString::fromUtf8("Обработка пока читает этот ролик как SDR")));
+    CHECK(tip.contains(QString::fromUtf8("кривая arib-std-b67 (поток)")));
+
+    ClipHdr pq;
+    Mdcv m;
+    m.maxLum = {1000, 1};
+    m.minLum = {1, 10000};
+    m.hasLuminance = true;
+    pq.mastering = m;
+    pq.light = Cll{1000, 400};
+    CHECK(ColourRowOf(clip("pq.mkv", RawTags{9, 9, 16, 1, 0}, pq), &hidden) ==
+          QString::fromUtf8("HDR10 (PQ) · BT.2020 · мастеринг 1000 нит · MaxCLL 1000/400"));
+    CHECK_FALSE(hidden);
+
+    ClipHdr dv5;
+    DoviConf ipt;
+    ipt.profile = 5;
+    ipt.level = 6;
+    ipt.rpu = ipt.bl = true;
+    dv5.dovi = ipt;
+    const QString iptText = ColourRowOf(clip("dv5.mkv", RawTags{2, 2, 2, 2, 0}, dv5), &hidden);
+    CHECK(iptText == QString::fromUtf8("Dolby Vision 5 (база IPT): цвета при обработке будут неверны"));
+    CHECK_FALSE(iptText.contains(QString::fromUtf8("не поддерживается")));
+    CHECK(ColourRowOf(clip("wide.mkv", RawTags{9, 9, 14, 1, 0}), &hidden) == QString::fromUtf8("BT.2020 SDR"));
+}
+
+TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, notes in Russian", "[app][hdr]") {
+    auto of = [](RawTags tags, std::string_view layout = "420", std::function<void(ColourLayers&)> more = {}) {
+        ColourLayers in;
+        in.stream = in.container = tags;
+        if (more) more(in);
+        return SourceColorOf(in, layout, "hevc");
+    };
+    QString tip;
+    // the three a TB-1 source cannot get - said as wrong colours, never as a refusal
+    const QString ictcp = SourceColourText(of(RawTags{14, 9, 16, 1, 0}), &tip);
+    CHECK(ictcp == QString::fromUtf8("ICtCp (BT.2100): цвета при обработке будут неверны"));
+    CHECK(tip.contains(QString::fromUtf8("Матрица ICtCp (BT.2100) читается как BT.709 / BT.601")));
+    CHECK(SourceColourText(of(RawTags{10, 9, 14, 1, 0})) == QString::fromUtf8("BT.2020 CL: цвета при обработке будут неверны"));
+    const QString rgb = SourceColourText(of(RawTags{0, 9, 1, 2, 0}, "rgb"));  // RGB BT.2020 with an SDR curve: no «HDR» claimed
+    CHECK(rgb == QString::fromUtf8("RGB-поток HDR / BT.2020: читается как 8-битный SDR, цвета будут неверны"));
+    for (const QString& t : {ictcp, rgb}) CHECK_FALSE(t.contains(QString::fromUtf8("не поддерживается")));
+    // HDR10 is PQ of BT.2020 with its records; a P3 master is PQ with its gamut
+    const auto withLight = [](ColourLayers& in) { in.containerRecords.cll = Cll{1000, 400}; };
+    CHECK(SourceColourText(of(RawTags{9, 9, 16, 1, 0}, "420", withLight)) == QString::fromUtf8("HDR10 (PQ) · BT.2020 · MaxCLL 1000/400"));
+    CHECK(SourceColourText(of(RawTags{2, 2, 16, 1, 0}, "420", withLight)) == QString::fromUtf8("HDR10 (PQ) · BT.2020 (не указан) · MaxCLL 1000/400"));
+    CHECK(SourceColourText(of(RawTags{9, 12, 16, 1, 0}, "420", withLight)) == QString::fromUtf8("HDR (PQ) · Display P3 · MaxCLL 1000/400"));
+    {  // 8-bit PQ is no HDR10
+        SourceColor eight = of(RawTags{9, 9, 16, 1, 0}, "420", withLight);
+        eight.bitDepth = 8;
+        CHECK(SourceColourText(eight) == QString::fromUtf8("HDR (PQ) · BT.2020 · MaxCLL 1000/400"));
+        eight.bitDepth = 10;
+        CHECK(SourceColourText(eight) == QString::fromUtf8("HDR10 (PQ) · BT.2020 · MaxCLL 1000/400"));
+    }
+    // a note about an unsaid gamut keeps its words
+    SourceColourText(of(RawTags{9, 2, 1, 1, 0}), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Матрица BT.2020, охват не указан — принят широкий охват")));
+    CHECK(SourceColourText(of(RawTags{9, 2, 1, 1, 0})) == QString::fromUtf8("SDR, матрица BT.2020"));
+    // wide gamut by the matrix alone under BT.709 primaries: not «BT.2020 SDR · BT.709»
+    CHECK(SourceColourText(of(RawTags{9, 1, 1, 1, 0}), &tip) == QString::fromUtf8("SDR, матрица BT.2020 · BT.709"));
+    CHECK(tip.contains(QString::fromUtf8("Матрица BT.2020 при охвате BT.709 — принят широкий охват")));
+    // colr = the codec parameters (ProRes), the header otherwise: the first frame named, one note
+    ColourLayers prores;
+    prores.stream = prores.container = RawTags{9, 9, 16, 1, 0};
+    FirstLookColor header;
+    header.how = FirstLook::Decode;
+    header.tags = RawTags{1, 1, 1, 1, 0};
+    prores.first = header;
+    SourceColourText(SourceColorOf(prores, "422", "prores"), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Первый кадр (SDR) и параметры кодека (HDR (PQ)) размечены по-разному")));
+    CHECK_FALSE(tip.contains(QString::fromUtf8("Контейнер размечен иначе")));
+    // a legacy source whose look failed: the row says so
+    ColourLayers sdr;
+    sdr.stream = sdr.container = RawTags{1, 1, 1, 1, 0};
+    FirstLookColor broken;
+    broken.how = FirstLook::Decode;
+    broken.error = "no frame";
+    sdr.first = broken;
+    CHECK(SourceColourText(SourceColorOf(sdr, "420", "hevc"), &tip) == QString::fromUtf8("SDR · BT.709"));
+    CHECK(tip.contains(QString::fromUtf8("Первый кадр не прочитан")));
+    // layers that differ - in Russian, no English sentence
+    ColourLayers layers;
+    layers.stream = RawTags{9, 9, 16, 1, 0};
+    layers.container = RawTags{9, 1, 16, 1, 0};
+    SourceColourText(SourceColorOf(layers, "420", "hevc"), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Контейнер размечен иначе, взяты поток или кадр (контейнер / взято): охват bt709 / bt2020")));
+    CHECK_FALSE(tip.contains(QString::fromUtf8("the container")));
+    FirstLookColor first;
+    first.how = FirstLook::Decode;
+    first.tags = RawTags{9, 12, 16, 1, 0};
+    layers.container = RawTags{};
+    layers.first = first;
+    SourceColourText(SourceColorOf(layers, "420", "hevc"), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Первый кадр и поток размечены по-разному (кадр / поток): охват smpte432 / bt2020")));
+    CHECK_FALSE(tip.contains(QString::fromUtf8("the first frame")));
+    // a failed look names what failed
+    FirstLookColor failed;
+    failed.how = FirstLook::Packet;
+    failed.error = "no video packet";
+    layers.first = failed;
+    SourceColourText(SourceColorOf(layers, "420", "ffv1"), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Первый видеопакет не прочитан")));
+}
+
+TEST_CASE("Colour row: Dolby Vision from an RPU, the RGB matrix on YUV, layers of a wide gamut by the matrix", "[app][hdr]") {
+    auto withRpu = [](int vdrProfile, bool full) {
+        ColourLayers in;
+        in.stream = in.container = RawTags{9, 9, 16, 1, 0};
+        FirstLookColor first;
+        first.how = FirstLook::Decode;
+        first.tags = in.stream;
+        DoviRpu rpu;
+        rpu.vdrRpuProfile = vdrProfile;
+        rpu.blFullRange = full;
+        first.rpu = rpu;
+        in.first = first;
+        return SourceColorOf(in, "420", "hevc");
+    };
+    CHECK(SourceColourText(withRpu(1, false)) == QString::fromUtf8("HDR (PQ) · BT.2020 · Dolby Vision 8 (будет снят)"));
+    CHECK(SourceColourText(withRpu(0, false)) == QString::fromUtf8("HDR (PQ) · BT.2020 · Dolby Vision неизвестного профиля (будет снят)"));
+    CHECK(SourceColourText(withRpu(0, true)) == QString::fromUtf8("Dolby Vision 5 (база IPT): цвета при обработке будут неверны"));
+    {  // a base nobody names, no colour tags: taken for IPT - said so
+        ColourLayers in;
+        DoviConf d;
+        d.profile = 8;
+        d.blCompat = 3;
+        in.dovi = d;
+        QString tip;
+        CHECK(SourceColourText(SourceColorOf(in, "420", "hevc"), &tip) ==
+              QString::fromUtf8("Dolby Vision 8.3 (база не распознана, принята IPT): цвета при обработке будут неверны"));
+        CHECK(tip.contains(QString::fromUtf8("База Dolby Vision не распознана, а матрица и кривая не указаны — принята база IPT")));
+        // a record that names no base (compatibility 0 of a profile with one): the class from the tags, said as the record's lack
+        ColourLayers shortRecord;
+        DoviConf p8;
+        p8.profile = 8;
+        shortRecord.dovi = p8;
+        SourceColourText(SourceColorOf(shortRecord, "420", "hevc"), &tip);
+        CHECK(tip.contains(QString::fromUtf8("Dolby Vision 8.0: запись не называет базу")));
+        ColourLayers unknown;
+        DoviConf p83;
+        p83.profile = 8;
+        p83.blCompat = 3;
+        unknown.dovi = p83;
+        unknown.stream = RawTags{9, 9, 16, 1, 0};
+        SourceColourText(SourceColorOf(unknown, "420", "hevc"), &tip);
+        CHECK(tip.contains(QString::fromUtf8("Dolby Vision 8.3: база не распознана — цвет по тегам")));
+    }
+    // the RGB matrix on a Y'CbCr stream
+    ColourLayers yuv;
+    yuv.stream = yuv.container = RawTags{0, 9, 16, 1, 0};
+    QString tip;
+    CHECK(SourceColourText(SourceColorOf(yuv, "420", "hevc"), &tip) == QString::fromUtf8("Матрица RGB при YUV-раскладке (HDR / BT.2020): цвета будут неверны"));
+    CHECK(tip.contains(QString::fromUtf8("Поток YUV помечен матрицей RGB (0)")));
+    CHECK_FALSE(tip.contains(QString::fromUtf8("8-битный")));
+    // colr says the BT.2020 matrix, the VUI only BT.709 primaries and curve: both classes as the row says them
+    ColourLayers layers;
+    layers.container = RawTags{9, 1, 1, 1, 0};
+    layers.stream = RawTags{2, 1, 1, 1, 0};
+    SourceColourText(SourceColorOf(layers, "420", "hevc"), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Контейнер (SDR, матрица BT.2020) и параметры кодека (SDR) размечены по-разному")));
 }
