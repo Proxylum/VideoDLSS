@@ -242,7 +242,9 @@ bool SaidOnce(const std::string& what) {
 std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, const std::filesystem::path& file) {
     if (file.empty() || !std::filesystem::exists(file)) return std::nullopt;
     try {
-        VideoDecoder dec(file, VideoDecoder::Probe());
+        VideoDecoder::Options options = VideoDecoder::Probe();
+        options.colorProbe = false;  // TASK-0078: the viewport reads by the legacy fields until TE; the source's colour is AppModel's probe's
+        VideoDecoder dec(file, options);
         const VideoStreamInfo& info = dec.Info();
         ViewportSource s;
         s.name = name;
@@ -965,6 +967,7 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
         if (!rt.decoder) {
             VideoDecoder::Options o;
             o.probe = rt.openedOnce;  // TASK-0076: reopened (a task runs: NVDEC is let go after every frame) - not news in the log
+            o.colorProbe = false;     // TASK-0078: frames for the viewport, read by the legacy fields (viewDecode)
             rt.decoder = std::make_unique<VideoDecoder>(src.path, o);
             rt.openedOnce = true;
             rt.color = ResolveColor(rt.decoder->Info()).viewDecode;
@@ -1034,6 +1037,7 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
                 po.probe = true;  // logged at debug level: a pool of decoders, not news
                 po.sliceThreadsOnly = true;
                 po.indexRate = src.fps;  // the original's rate: the proxy's container may guess another
+                po.colorProbe = false;   // TASK-0078: the proxy's frames, not its colour
                 slot->decoder = std::make_unique<VideoDecoder>(src.proxy, po);
                 slot->opened = src.proxy;
             }

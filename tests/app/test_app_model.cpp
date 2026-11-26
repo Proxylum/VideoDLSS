@@ -11074,7 +11074,30 @@ TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, n
     CHECK(SourceColourText(of(RawTags{9, 12, 16, 1, 0}, "420", withLight)) == QString::fromUtf8("HDR (PQ) · Display P3 · MaxCLL 1000/400"));
     // a note about an unsaid gamut keeps its words
     SourceColourText(of(RawTags{9, 2, 1, 1, 0}), &tip);
-    CHECK(tip.contains(QString::fromUtf8("Матрица BT.2020 при охвате не указан — принят широкий охват")));
+    CHECK(tip.contains(QString::fromUtf8("Матрица BT.2020, охват не указан — принят широкий охват")));
+    CHECK(SourceColourText(of(RawTags{9, 2, 1, 1, 0})) == QString::fromUtf8("SDR, матрица BT.2020"));
+    // wide gamut by the matrix alone under BT.709 primaries: not «BT.2020 SDR · BT.709»
+    CHECK(SourceColourText(of(RawTags{9, 1, 1, 1, 0}), &tip) == QString::fromUtf8("SDR, матрица BT.2020 · BT.709"));
+    CHECK(tip.contains(QString::fromUtf8("Матрица BT.2020 при охвате BT.709 — принят широкий охват")));
+    // colr = the codec parameters (ProRes), the header otherwise: the first frame named, one note
+    ColourLayers prores;
+    prores.stream = prores.container = RawTags{9, 9, 16, 1, 0};
+    FirstLookColor header;
+    header.how = FirstLook::Decode;
+    header.tags = RawTags{1, 1, 1, 1, 0};
+    prores.first = header;
+    SourceColourText(SourceColorOf(prores, "422", "prores"), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Первый кадр (SDR) и параметры кодека (HDR (PQ)) размечены по-разному")));
+    CHECK_FALSE(tip.contains(QString::fromUtf8("Контейнер размечен иначе")));
+    // a legacy source whose look failed: the row says so
+    ColourLayers sdr;
+    sdr.stream = sdr.container = RawTags{1, 1, 1, 1, 0};
+    FirstLookColor broken;
+    broken.how = FirstLook::Decode;
+    broken.error = "no frame";
+    sdr.first = broken;
+    CHECK(SourceColourText(SourceColorOf(sdr, "420", "hevc"), &tip) == QString::fromUtf8("SDR · BT.709"));
+    CHECK(tip.contains(QString::fromUtf8("Первый кадр не прочитан")));
     // layers that differ - in Russian, no English sentence
     ColourLayers layers;
     layers.stream = RawTags{9, 9, 16, 1, 0};

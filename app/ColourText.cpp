@@ -31,9 +31,9 @@ QString MatrixText(int matrix) {
     }
 }
 
-QString GamutOrUnsaid(int primaries) {
-    const QString g = GamutText(primaries);
-    return g.isEmpty() ? Tr("не указан") : g;
+QString LayersText(const SourceColor& c) {  // as LayersWords
+    const std::string_view w = LayersWords(c);
+    return w == "the first frame says" ? Tr("Первый кадр") : w == "the container says" ? Tr("Контейнер") : Tr("Первый кадр и контейнер");
 }
 
 QString FieldText(std::string_view field) {
@@ -97,14 +97,16 @@ QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
     if (n.key == "source.bt2020_assumed") return Tr("Матрица или охват не указаны — принят BT.2020");
     if (n.key == "source.trc_unspecified") return Tr("Охват BT.2020 без кривой — принята кривая SDR");
     if (n.key == "source.trc_not_converted") return Tr("Кривая %1 при охвате BT.2020 (лог камеры?) не переводится").arg(Q(TrcName(e.trc)));
-    if (n.key == "source.matrix_2020") return Tr("Матрица BT.2020 при охвате %1 — принят широкий охват").arg(GamutOrUnsaid(e.primaries));
+    if (n.key == "source.matrix_2020")
+        return e.primaries == 2 ? Tr("Матрица BT.2020, охват не указан — принят широкий охват")
+                                : Tr("Матрица BT.2020 при охвате %1 — принят широкий охват").arg(GamutText(e.primaries));
     if (n.key == "source.av1_stream_metadata")
         return Tr("Метаданные HDR внутри потока AV1 здесь не читаются и в результат не переносятся") +
                (c.hdr.Empty() ? Tr("; в контейнере их нет") : Tr("; в контейнере есть"));
     if (n.key == "source.no_hdr_metadata") return Tr("PQ без метаданных мастеринга и уровня света");
     if (n.key == "source.hdr10plus") return Tr("Динамические метаданные HDR10+ в результат не переносятся");
     if (n.key == "source.layers_differ")
-        return Tr("Кадр или контейнер (%1) и параметры кодека (%2) размечены по-разному").arg(ClassText(c.cls), ClassText(c.rawCls));
+        return Tr("%1 (%2) и параметры кодека (%3) размечены по-разному").arg(LayersText(c), ClassText(c.cls), ClassText(c.rawCls));
     if (n.key == "source.frame_differs") return Tr("Первый кадр и поток размечены по-разному (кадр / поток): %1").arg(DifferencesText(FrameDifferences(c)));
     if (n.key == "source.container_differs")
         return Tr("Контейнер размечен иначе, взяты поток или кадр (контейнер / взято): %1").arg(DifferencesText(ContainerDifferences(c)));
@@ -132,7 +134,9 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
         QStringList parts;
         // HDR10: PQ of BT.2020 (said or assumed) with its static metadata; a P3 or BT.709 master is «HDR (PQ)» with its gamut beside
         const bool hdr10 = c.cls == SourceClass::Pq && (e.primaries == 9 || e.primaries == 2) && (c.hdr.mdcv || c.hdr.cll);
-        parts << (hdr10 ? Tr("HDR10 (PQ)") : ClassText(c.cls));
+        // wide gamut by the matrix alone (BT.2020's matrix under other primaries): said as such, the primaries beside it
+        const bool byMatrix = c.cls == SourceClass::Wide && e.primaries != 9;
+        parts << (hdr10 ? Tr("HDR10 (PQ)") : byMatrix ? Tr("SDR, матрица BT.2020") : ClassText(c.cls));
         const QString gamut = GamutText(e.primaries);
         if (!gamut.isEmpty() && !(c.cls == SourceClass::Wide && e.primaries == 9)) parts << gamut;  // «BT.2020 SDR» says it already
         else if (c.Hdr()) parts << Tr("BT.2020 (не указан)");

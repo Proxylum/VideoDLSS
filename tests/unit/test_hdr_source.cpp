@@ -103,12 +103,13 @@ TEST_CASE("HDR class follows the truth table rows over the whole M x P x T grid"
                 const bool rgbHdr = m == 0 && (pq || hlg || p == 9);
                 REQUIRE(c.refuseAll == (m == 15 ? ColourRefusal::DolbyVisionIpt : rgbHdr ? ColourRefusal::RgbHdr : ColourRefusal::None));
                 REQUIRE(c.legacyPath == (want == SourceClass::Legacy && !In(m, {10, 14, 15}) && !rgbHdr));
-                // the notes of the class's assumptions
-                REQUIRE((c.Note("source.bt2020_assumed") != nullptr) == ((pq || hlg) && (m == 2 || p == 2)));
-                REQUIRE((c.Note("source.trc_unspecified") != nullptr) == (p == 9 && t == 2));
-                REQUIRE((c.Note("source.trc_not_converted") != nullptr) == log);
-                REQUIRE((c.Note("source.matrix_2020") != nullptr) == wideMatrix);
-                REQUIRE((c.Note("source.no_hdr_metadata") != nullptr) == pq);  // hevc, no records
+                // the notes of the class's assumptions - not for a source refused in every mode (rows 1 and 3 stop there)
+                const bool classed = m != 15 && !rgbHdr;
+                REQUIRE((c.Note("source.bt2020_assumed") != nullptr) == (classed && (pq || hlg) && (m == 2 || p == 2)));
+                REQUIRE((c.Note("source.trc_unspecified") != nullptr) == (classed && p == 9 && t == 2));
+                REQUIRE((c.Note("source.trc_not_converted") != nullptr) == (classed && log));
+                REQUIRE((c.Note("source.matrix_2020") != nullptr) == (classed && wideMatrix));
+                REQUIRE((c.Note("source.no_hdr_metadata") != nullptr) == (classed && pq));  // hevc, no records
                 REQUIRE(c.Note("source.layers_differ") == nullptr);
                 ++cells;
             }
@@ -355,6 +356,8 @@ TEST_CASE("A source whose frames are SDR over PQ codec parameters is not on the 
     CHECK_FALSE(c.legacyPath);
     REQUIRE(c.Note("source.layers_differ") != nullptr);
     CHECK(c.Note("source.layers_differ")->plan);
+    CHECK(c.Note("source.layers_differ")->detail.rfind("the first frame says matrix bt709", 0) == 0);  // the layer that says it
+    CHECK(c.Note("source.container_differs") == nullptr);  // colr = the codec parameters: one difference, one note
     // and the other way round: frames PQ, colr SDR
     const SourceColor up = Layered(Tags(9, 9, 16), Tags(1, 1, 1), Tags(1, 1, 1), "prores");
     CHECK(up.cls == SourceClass::Pq);
@@ -379,6 +382,20 @@ TEST_CASE("HDR10+ and a failed first look are notes for the plan", "[hdr]") {
     CHECK(c.Note("source.hdr10plus")->detail.find("first packet") != std::string::npos);
     REQUIRE(c.Note("source.probe_failed") != nullptr);
     CHECK(c.Note("source.probe_failed")->detail.find("no frame in the first 64") != std::string::npos);
+    CHECK(c.Note("source.hdr10plus")->plan);
+    CHECK(c.Note("source.probe_failed")->plan);
+    // a legacy source whose look failed still says so: info prints it
+    ColourLayers sdr;
+    sdr.stream = sdr.container = Tags(1, 1, 1);
+    FirstLookColor failed;
+    failed.how = FirstLook::Decode;
+    failed.error = "no frame";
+    sdr.first = failed;
+    const SourceColor legacy = SourceColorOf(sdr, "420", "hevc");
+    CHECK(legacy.legacyPath);
+    const std::vector<std::string> lines = ColourInfoLines(legacy);
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[1] == "note:        the first frame could not be read (no frame): the colour comes from the stream and the container only");
 }
 
 TEST_CASE("info colour lines: none for SDR, the class with each tag's layer, the records and Dolby Vision", "[hdr][cli]") {
@@ -621,4 +638,56 @@ TEST_CASE("TB-1 says what a source cannot get without refusing it: ICtCp, BT.202
     CHECK(Classified(14, 9, 16).Note("source.matrix_unsupported")->detail == "matrix ictcp: read as BT.709 / BT.601 - its colours come out wrong when processed");
     CHECK(Classified(0, 9, 16, "rgb").Note("source.rgb_hdr")->detail ==
           "an RGB stream of smpte2084 / bt2020: read as 8-bit 4:2:0 SDR through swscale - its colours come out wrong");
+}
+
+// ---- review round 2 (TASK-0078) -------------------------------------------------------------------------------------------------
+
+TEST_CASE("A frame record that repeats the codec's (an SEI in hvcC) is the stream's; another one is the frame's", "[hdr]") {
+    ColourLayers in;
+    in.stream = Tags(9, 9, 16);
+    in.containerRecords.mdcv = Bt2020Display(false);  // 1000 cd/m2 in the container
+    Mdcv hvcc = Bt2020Display(false);
+    hvcc.maxLum = {40000000, 10000};  // 4000 in the hvcC SEI
+    in.codecRecords.mdcv = hvcc;
+    in.codecRecords.cll = Cll{4000, 1000};
+    in.containerRecords.cll = Cll{1000, 400};
+    FirstLookColor first;
+    first.how = FirstLook::Decode;
+    first.tags = Tags(9, 9, 16);
+    first.hdr.mdcv = hvcc;  // the frame carries what the decoder took from hvcC
+    first.hdr.cll = Cll{4000, 1000};
+    in.first = first;
+    SourceColor c = SourceColorOf(in, "420", "hevc");
+    CHECK(c.mdcvFrom == TagFrom::Stream);
+    CHECK(c.hdr.mdcv->maxLum.Value() == 4000.0);
+    CHECK(c.cllFrom == TagFrom::Stream);
+    // a frame whose SEI says a third value: the frame's
+    first.hdr.cll = Cll{2000, 500};
+    in.first = first;
+    c = SourceColorOf(in, "420", "hevc");
+    CHECK(c.cllFrom == TagFrom::Frame);
+    CHECK(c.hdr.cll == Cll{2000, 500});
+}
+
+TEST_CASE("A source refused in every mode gets no notes of a class it is not read in", "[hdr]") {
+    const SourceColor rgb = Classified(2, 9, 16, "rgb");  // an RGB master: no matrix at all
+    CHECK(rgb.refuseAll == ColourRefusal::RgbHdr);
+    CHECK(rgb.Note("source.bt2020_assumed") == nullptr);
+    CHECK(rgb.Note("source.no_hdr_metadata") == nullptr);
+    CHECK(rgb.Note("source.rgb_hdr") != nullptr);
+    const SourceColor ipt = WithDovi(2, 9, 16, 5, 0);
+    CHECK(ipt.refuseAll == ColourRefusal::DolbyVisionIpt);
+    CHECK(ipt.Note("source.bt2020_assumed") == nullptr);
+    CHECK(ipt.Note("source.no_hdr_metadata") == nullptr);
+    // matrix 10 / 14 take their class from the rows below, with its notes
+    CHECK(Classified(14, 2, 16).Note("source.bt2020_assumed") != nullptr);
+}
+
+TEST_CASE("Layer words name where the differing tags were read", "[hdr]") {
+    CHECK(LayersWords(Layered(Tags(1, 1, 1), Tags(9, 9, 16), RawTags{})) == "the first frame says");
+    CHECK(LayersWords(Layered(RawTags{}, RawTags{2, 9, 2, 1, 0}, Tags(1, 9, 16))) == "the container says");
+    CHECK(LayersWords(Layered(RawTags{2, 2, 18, 1, 0}, RawTags{2, 2, 2, 1, 0}, Tags(9, 9, 16))) == "the first frame and the container say");
+    // a container that says what the frame overrides, the stream silent: the container's news (the stream not saying it)
+    const SourceColor c = Layered(Tags(1, 1, 1), RawTags{2, 2, 2, 1, 0}, Tags(9, 9, 16), "prores");
+    CHECK(c.Note("source.container_differs") != nullptr);
 }

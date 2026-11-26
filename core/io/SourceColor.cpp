@@ -264,6 +264,15 @@ std::string DifferenceWords(const std::vector<TagDifference>& d) {  // "transfer
 
 }  // namespace
 
+std::string_view LayersWords(const SourceColor& c) {
+    bool frame = false, container = false;
+    for (TagFrom f : {c.matrixFrom, c.primariesFrom, c.trcFrom}) {
+        frame = frame || f == TagFrom::Frame;
+        container = container || f == TagFrom::Container;
+    }
+    return frame && container ? "the first frame and the container say" : frame ? "the first frame says" : "the container says";
+}
+
 std::string TagValueName(std::string_view field, int value) {
     if (field == "matrix") return MatrixName(value);
     if (field == "primaries") return PrimariesName(value);
@@ -284,9 +293,12 @@ std::vector<TagDifference> ContainerDifferences(const SourceColor& c) {
     std::vector<TagDifference> d;
     const RawTags &k = c.container, &e = c.effective;
     auto taken = [](TagFrom from) { return from == TagFrom::Stream || from == TagFrom::Frame; };
-    if (k.matrix != 2 && taken(c.matrixFrom) && k.matrix != e.matrix) d.push_back({"matrix", k.matrix, e.matrix});
-    if (k.primaries != 2 && taken(c.primariesFrom) && k.primaries != e.primaries) d.push_back({"primaries", k.primaries, e.primaries});
-    if (k.trc != 2 && taken(c.trcFrom) && k.trc != e.trc && !AltTransfer(k.trc, e.trc)) d.push_back({"transfer", k.trc, e.trc});
+    // (where the container says what the stream says, the frame's other value is the frame's news: layers_differ / frame_differs)
+    if (k.matrix != 2 && taken(c.matrixFrom) && k.matrix != e.matrix && k.matrix != c.stream.matrix) d.push_back({"matrix", k.matrix, e.matrix});
+    if (k.primaries != 2 && taken(c.primariesFrom) && k.primaries != e.primaries && k.primaries != c.stream.primaries)
+        d.push_back({"primaries", k.primaries, e.primaries});
+    if (k.trc != 2 && taken(c.trcFrom) && k.trc != e.trc && k.trc != c.stream.trc && !AltTransfer(k.trc, e.trc))
+        d.push_back({"transfer", k.trc, e.trc});
     return d;
 }
 
@@ -361,15 +373,17 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
                                    ": read as 8-bit 4:2:0 SDR through swscale - its colours come out wrong");
     }
 
-    // 4-9: what the class assumed
-    if ((c.cls == SourceClass::Pq || c.cls == SourceClass::Hlg) && (M == 2 || P == 2)) {
+    // 4-9: what the class assumed - not for a source rows 1 or 3 refuse (an IPT base, an RGB stream: no matrix is assumed for them;
+    // row 2's matrices take their class from these rows)
+    const bool classed = c.refuseAll == ColourRefusal::None;
+    if (classed && (c.cls == SourceClass::Pq || c.cls == SourceClass::Hlg) && (M == 2 || P == 2)) {
         std::string which = M == 2 && P == 2 ? "matrix and primaries" : M == 2 ? "matrix" : "primaries";
         note("source.bt2020_assumed", which + " unspecified under " + TrcName(T) + ": BT.2020 assumed");
     }
-    if (P == 9 && T == 2) note("source.trc_unspecified", "BT.2020 primaries without a transfer: taken as SDR");
-    if (c.cls == SourceClass::Log)
+    if (classed && P == 9 && T == 2) note("source.trc_unspecified", "BT.2020 primaries without a transfer: taken as SDR");
+    if (classed && c.cls == SourceClass::Log)
         note("source.trc_not_converted", "transfer " + TrcName(T) + " under BT.2020 primaries (a camera's log curve?): not converted");
-    if (M == 9 && P != 9 && T != 16 && T != 18)
+    if (classed && M == 9 && P != 9 && T != 16 && T != 18)
         note("source.matrix_2020", "matrix BT.2020 under primaries " + PrimariesName(P) + ": taken as wide gamut");
 
     // HDR records
@@ -377,7 +391,7 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
         const std::string records = HdrRecordsWords(c.hdr);
         note("source.av1_stream_metadata", "HDR metadata inside the AV1 stream (metadata OBUs) is not read here and not carried into results; " +
                                                (records.empty() ? std::string("the container has none") : "from the container: " + records));
-    } else if (c.cls == SourceClass::Pq && !c.hdr.mdcv && !c.hdr.cll) {
+    } else if (classed && c.cls == SourceClass::Pq && !c.hdr.mdcv && !c.hdr.cll) {
         note("source.no_hdr_metadata", "PQ without mastering display or light level metadata");
     }
     if (c.hdr10Plus)
@@ -387,7 +401,7 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
     const bool altTransfer = AltTransfer(c.stream.trc, e.trc) && (c.stream.matrix == 2 || c.stream.matrix == e.matrix) &&
                              (c.stream.primaries == 2 || c.stream.primaries == e.primaries);
     if (c.cls != c.rawCls && SaysSomething(c.stream) && !altTransfer) {
-        note("source.layers_differ", "the frame or the container say " + ColourWords(e) + " (" + std::string(ToString(c.cls)) +
+        note("source.layers_differ", std::string(LayersWords(c)) + " " + ColourWords(e) + " (" + std::string(ToString(c.cls)) +
                                          "), the codec parameters " + ColourWords(c.stream) + " (" + std::string(ToString(c.rawCls)) + ")");
     } else if (const std::vector<TagDifference> d = FrameDifferences(c); !d.empty()) {
         note("source.frame_differs", "the first frame and the stream say " + DifferenceWords(d), false);
@@ -531,6 +545,24 @@ bool SameRecord(const Amve& a, const Amve& b) {
            Units(a.lightY, 50000) == Units(b.lightY, 50000);
 }
 
+namespace {
+bool Same(const Mdcv& a, const Mdcv& b) { return SameRecord(a, b); }
+bool Same(const Amve& a, const Amve& b) { return SameRecord(a, b); }
+bool Same(const Cll& a, const Cll& b) { return a == b; }
+
+template <typename R>
+void PickFrameRecord(const std::optional<R>& frame, const std::optional<R>& codec, std::optional<R>& taken, TagFrom& from) {
+    if (!frame || (taken && Same(*frame, *taken))) return;
+    if (codec && Same(*frame, *codec)) {
+        taken = codec;
+        from = TagFrom::Stream;
+    } else {
+        taken = frame;
+        from = TagFrom::Frame;
+    }
+}
+}  // namespace
+
 SourceColor SourceColorOf(const ColourLayers& in, std::string_view layoutKind, std::string_view codec) {
     SourceColor c;
     c.container = WithoutReserved(in.container, codec);
@@ -554,11 +586,13 @@ SourceColor SourceColorOf(const ColourLayers& in, std::string_view layoutKind, s
             if (first.how == FirstLook::Decode) {
                 c.frame = WithoutReserved(first.tags, codec);
                 c.doviRpu = first.rpu;
-                // the frame carries the stream's records as well (libavcodec copies them into every frame), an SEI's in other fractions:
-                // the frame's own only where they say another value
-                if (first.hdr.mdcv && !(c.hdr.mdcv && SameRecord(*first.hdr.mdcv, *c.hdr.mdcv))) c.hdr.mdcv = first.hdr.mdcv, c.mdcvFrom = TagFrom::Frame;
-                if (first.hdr.cll && first.hdr.cll != c.hdr.cll) c.hdr.cll = first.hdr.cll, c.cllFrom = TagFrom::Frame;
-                if (first.hdr.amve && !(c.hdr.amve && SameRecord(*first.hdr.amve, *c.hdr.amve))) c.hdr.amve = first.hdr.amve, c.amveFrom = TagFrom::Frame;
+                // the first frame carries the container's records (libavcodec copies coded_side_data into every frame) unless the
+                // bitstream says its own - an SEI in the first access unit or in hvcC (the decoder's SEI state puts it into the frame and
+                // drops the container's copy): the frame's record is the container's or the codec's where it says their value (in
+                // whatever fractions), its own only where it says another
+                PickFrameRecord(first.hdr.mdcv, in.codecRecords.mdcv, c.hdr.mdcv, c.mdcvFrom);
+                PickFrameRecord(first.hdr.cll, in.codecRecords.cll, c.hdr.cll, c.cllFrom);
+                PickFrameRecord(first.hdr.amve, in.codecRecords.amve, c.hdr.amve, c.amveFrom);
             }
             if (first.hdr10Plus) {
                 c.hdr10Plus = true;

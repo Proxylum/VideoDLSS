@@ -18,6 +18,7 @@
 #include "io/SourceColor.h"
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
+#include "viewport/FrameStore.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -545,10 +546,25 @@ TEST_CASE("The first look's cache: a time ahead of the clock, the first packet, 
     { VideoDecoder a(files[0], VideoDecoder::Probe()); CHECK(a.Info().color.looked == FirstLook::Packet); }
     { VideoDecoder b(files[0], VideoDecoder::Probe()); CHECK(b.Info().color.looked == FirstLook::Packet); }
     CHECK(FirstPacketPeeks() == peeks + 1);
-    for (int i = 1; i <= 64; ++i) VideoDecoder d(files[static_cast<size_t>(i)], VideoDecoder::Probe());
+    for (int i = 1; i <= 63; ++i) VideoDecoder d(files[static_cast<size_t>(i)], VideoDecoder::Probe());
+    CHECK(FirstPacketPeeks() == peeks + 64);  // 64 entries now: files 0-63
+    { VideoDecoder again(files[0], VideoDecoder::Probe()); }  // used again: no longer the least recent
+    CHECK(FirstPacketPeeks() == peeks + 64);
+    { VideoDecoder one(files[64], VideoDecoder::Probe()); }  // one more: the least recently used goes - file 1, not file 0
     CHECK(FirstPacketPeeks() == peeks + 65);
-    { VideoDecoder last(files[64], VideoDecoder::Probe()); }
-    CHECK(FirstPacketPeeks() == peeks + 65);  // the most recent ones stay
-    { VideoDecoder first(files[0], VideoDecoder::Probe()); }
+    { VideoDecoder kept(files[0], VideoDecoder::Probe()); }
+    CHECK(FirstPacketPeeks() == peeks + 65);
+    { VideoDecoder dropped(files[1], VideoDecoder::Probe()); }
     CHECK(FirstPacketPeeks() == peeks + 66);
+}
+
+TEST_CASE("The viewport reads frames without a colour look", "[integration][hdr][cache]") {
+    const auto dir = Dir("viewport_no_look");
+    const auto clip = ProResHlg(dir);
+    SetOld(clip, std::chrono::minutes(60));
+    const int64_t decodes = FirstFrameDecodes(), peeks = FirstPacketPeeks();
+    const auto source = FrameStore::VideoSource("source", clip);
+    REQUIRE(source);
+    CHECK(FirstFrameDecodes() == decodes);
+    CHECK(FirstPacketPeeks() == peeks);
 }

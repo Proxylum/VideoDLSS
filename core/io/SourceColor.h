@@ -14,8 +14,8 @@ struct AVPacketSideData;
 namespace dlssvid {
 
 // TASK-0075 / TASK-0078 (HDR step TB-1): what a source's colour is - read from every layer that says it, classified, with notes. Nothing
-// here changes how a source is read or written yet: the SDR reading (ColorInfoFromStream) still takes VideoStreamInfo's four codecpar
-// fields; ResolveColor (convert/ColorPlan.h) acts on the class from TB-2 on.
+// here changes how a source is read or written yet: ResolveColor (convert/ColorPlan.h) still reads VideoStreamInfo's four codecpar fields
+// (ColorInfoFromStream the matrix and the range, the result's tags the primaries and the transfer); it acts on the class from TB-2 on.
 
 // Where a colour tag or an HDR record of a source was read.
 enum class TagFrom : uint8_t {
@@ -203,9 +203,13 @@ struct TagDifference {
 // The first frame against the stream: fields both say, differently - not an HLG transfer (18) over the SDR curve an HEVC VUI carries with
 // an alternative transfer SEI (1 / 6 / 14 / 15).
 std::vector<TagDifference> FrameDifferences(const SourceColor& c);
-// The container against what was taken from the stream or the frame (fields the container says and another layer decided otherwise;
-// the same HLG exception).
+// The container against what was taken from the stream or the frame: fields the container says, another layer decided otherwise, and
+// the stream does not say as the container does (that difference is the frame's: FrameDifferences / layers_differ); the same HLG
+// exception.
 std::vector<TagDifference> ContainerDifferences(const SourceColor& c);
+// Where the effective tags that differ from the codec parameters were read: "the first frame says", "the container says", "the first
+// frame and the container say" (the words of source.layers_differ)
+std::string_view LayersWords(const SourceColor& c);
 // The value a TagDifference names in FFmpeg's words ("arib-std-b67")
 std::string TagValueName(std::string_view field, int value);
 // The first look at a file, once per (absolute path, size, modification time) in this process: a software decode of the first frame
