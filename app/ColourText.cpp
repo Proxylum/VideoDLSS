@@ -254,7 +254,7 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
                      .arg(Q(MatrixName(e.matrix)), FromText(c.matrixFrom), Q(PrimariesName(e.primaries)), FromText(c.primariesFrom), Q(TrcName(e.trc)),
                           FromText(c.trcFrom), Q(RangeName(e.range)), FromText(c.rangeFrom));
         if (c.refuseAll != ColourRefusal::None)
-            lines << Tr("Ни обработка, ни запись как есть: такой ролик эта версия не пишет");
+            lines << Tr("Ни обработка, ни запись как есть: такой ролик не поддерживается");
         else if (c.refuseProcessing == ColourRefusal::Matrix)  // no later version lifts it
             lines << Tr("Обработка этой матрицы не поддерживается; без стадий («только кодирование») ролик пишется %1").arg(AsItIsText(c));
         else if (!c.legacyPath)

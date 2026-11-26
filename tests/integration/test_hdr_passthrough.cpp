@@ -313,6 +313,25 @@ TEST_CASE("Mastering and light level outside MP4 MOV fields are noted and not wr
     CHECK_FALSE(Has(under.warnings, "mdcv fields"));
     CHECK(Summarize(dir / "under.mov").hdr.mdcv);
     // the luminance: up to INT32_MAX units mov.c reads back positive (214748 cd/m2), above it negative; x265's units far above
+    {  // a minimum of 0 (ST 2086 allows it): kept in MOV and in Matroska, no note
+        Mdcv black = Mastering1000();
+        black.minLum = {0, 10000};
+        ClipHdr h;
+        h.mastering = black;
+        const auto src = PqFfv1(dir, "black.mkv", h);
+        for (const auto& [ext, codec] : {std::pair{".mov", "prores_ks"}, std::pair{".mkv", "ffv1"}}) {
+            INFO(ext);
+            const auto out = dir / (std::string("black") + ext + ext);
+            const ProcessPlan plan = PlanProcess(Passthrough(src, out, codec));
+            CHECK_FALSE(HasKey(plan.warnings, "encode.mdcv_unfit"));
+            CHECK_FALSE(HasKey(plan.warnings, "encode.mdcv_invalid"));
+            CHECK_NOTHROW(RunProcess(Passthrough(src, out, codec)));
+            const StreamSummary back = Summarize(out);
+            REQUIRE(back.hdr.mdcv);
+            CHECK(back.hdr.mdcv->hasLuminance);
+            CHECK(back.hdr.mdcv->minLum.Value() == 0.0);
+        }
+    }
     for (const auto& [lum, fits] : {std::pair{214748, true}, std::pair{214749, false}, std::pair{10000000, false}}) {
         INFO("max luminance " << lum);
         Mdcv bright = Mastering1000();
@@ -995,6 +1014,19 @@ TEST_CASE("A processed legacy source whose frames turn PQ warns in the result wi
         if (st.name == "upscale") st.params = {{"backend", "bicubic"}, {"scale", 2.0}};
     const ProcessResult r = RunProcess(o);
     CHECK(Has(r.warnings, "frame 6 and on are HDR PQ"));
+    // a pass shorter than the source (an MKV has no frame count: the pass of a --frames run is taken whole), the change past its end:
+    // the encode decodes the source on for its audio, but the change is not in the result - no warning
+    const auto mkv = WriteClip(dir / "turning.mkv", s);
+    ProcessOptions part = o;
+    part.input = mkv;
+    part.output = dir / "part.mkv";
+    part.frames = 4;
+    REQUIRE(RunProcess(part).framesOut == 4);
+    ProcessOptions whole = part;
+    whole.frames = -1;
+    const ProcessResult w = RunProcess(whole);
+    REQUIRE(w.framesOut == 4);  // the short pass reused
+    CHECK_FALSE(Has(w.warnings, "and on are"));
 }
 
 TEST_CASE("Dolby Vision 8.2 FFV1 MKV processed with bicubic notes the removed mapping in the plan and in the result", "[integration][hdr][dovi][process]") {

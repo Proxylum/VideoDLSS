@@ -1417,10 +1417,12 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     CpuFrame src;
     YuvResizer stretch;
     int64_t s = 0;
+    int64_t used = 0;  // the source frames the result holds (one pass frame written at least): a class change past them is not the result's
     while ((maxSourceFrames < 0 || s < maxSourceFrames) && decoder.NextFrame(src)) {  // decoding the source pumps its audio packets
         for (int k = 0; k < mult; ++k) {
             const int64_t idx = s * mult + k;
             if (!pass.HasFrame(m.firstFrame + idx)) break;
+            used = s + 1;
             const PassImage rgb = pass.ReadFrame(m.firstFrame + idx);
             CpuFrame yuv;
             RgbToYuv(rgb, ci, grid, yuv);
@@ -1440,7 +1442,7 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     encoder.Close();
     r.audio = encoder.AudioPacketsWritten() > 0;  // a source track without packets in the range: MP4 and MOV leave the track out
     r.sourceFrames = s;
-    r.classChange = decoder.ClassChange();  // TASK-0079
+    if (const auto ch = decoder.ClassChange(); ch && ch->index < used) r.classChange = ch;  // TASK-0079
     r.seconds = Seconds(t0);
     return r;
 }
