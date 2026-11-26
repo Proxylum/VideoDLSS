@@ -157,7 +157,9 @@ std::vector<std::string> ColourInfoLines(const SourceColor& c) {
                 std::to_string(c.doviConf->blCompat) + " (record)";
         else
             t = c.doviProfile ? "profile " + std::to_string(c.doviProfile) + " (guessed from the first frame's RPU)" : std::string("an RPU of an unknown profile");
-        if (c.refuseAll == ColourRefusal::DolbyVisionIpt) t += ": IPT base - colours come out wrong without the RPU";
+        if (c.refuseAll == ColourRefusal::DolbyVisionIpt)
+            t += c.iptAssumed ? ": unknown base without colour tags, taken for IPT - colours come out wrong without the RPU"
+                              : ": IPT base - colours come out wrong without the RPU";
         else if (c.Note("source.dv_unknown") || c.Note("source.dv_record_short")) t += ": unknown base - removed in every output";
         else t += ": removed in every output";
         lines.push_back(Line("dolby vision", t));
@@ -304,6 +306,7 @@ std::vector<TagDifference> ContainerDifferences(const SourceColor& c) {
 
 void Classify(SourceColor& c, std::string_view layoutKind, std::string_view codec) {
     c.notes.clear();
+    c.iptAssumed = false;
     c.refuseProcessing = ColourRefusal::None;
     c.refuseAll = ColourRefusal::None;
     const RawTags& e = c.effective;
@@ -330,6 +333,7 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
                                                "follows the colour tags; the RPU is dropped in every output");
         } else if (M == 2 && T == 2) {
             ipt = true;
+            c.iptAssumed = true;
             iptWords = DoviWords(d) + " - a base FFmpeg 7.1.1 does not name, without colour tags: taken for an IPT base";
         } else {
             note("source.dv_unknown", DoviWords(d) + " - a base FFmpeg 7.1.1 does not name: the class follows the colour tags; the RPU is dropped "
@@ -347,6 +351,7 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
             note("source.dv_removed", words + ": the RPU is dropped in every output, the base layer stays");
         } else if (M == 2 && T == 2) {
             ipt = true;
+            c.iptAssumed = true;
             iptWords = words + ", without colour tags: taken for an IPT base";
         } else {
             note("source.dv_unknown", words + ": the class follows the colour tags; the RPU is dropped in every output");

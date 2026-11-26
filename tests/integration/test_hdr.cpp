@@ -19,6 +19,7 @@
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
 #include "viewport/FrameStore.h"
+#include "viewport/ViewportProxy.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -587,4 +588,41 @@ TEST_CASE("A first look decodes frames an edit list discards: a cut made by stre
     CHECK(c.probeError.empty());
     CHECK(c.looked == FirstLook::Decode);
     CHECK(c.cls == SourceClass::Pq);
+}
+
+TEST_CASE("A decoded first frame gives its own HDR10+: ProRes PQ in Matroska", "[integration][hdr]") {
+    // the frame's side data (decode.c moves a packet's HDR10+ into its frame): the look decodes, not reads a packet
+    const auto dir = Dir("frame_hdr10plus");
+    ClipSpec spec;
+    spec.width = 64;
+    spec.height = 48;
+    spec.frames = 2;
+    spec.codec = "prores_ks";
+    spec.pixFmt = "yuv422p10le";
+    spec.color = Tags(9, 9, 16);
+    spec.videoPacketSideData = [](int64_t) {
+        std::vector<std::pair<int, std::string>> sd;
+        sd.emplace_back(AV_PKT_DATA_DYNAMIC_HDR10_PLUS, Hdr10PlusSideData());
+        return sd;
+    };
+    const auto clip = WriteClip(dir / "prores_pq.mkv", spec);
+    const int64_t decodes = FirstFrameDecodes(), peeks = FirstPacketPeeks();
+    VideoDecoder dec(clip, VideoDecoder::Probe());
+    const SourceColor& c = dec.Info().color;
+    CHECK(FirstFrameDecodes() == decodes + 1);
+    CHECK(FirstPacketPeeks() == peeks);
+    CHECK(c.looked == FirstLook::Decode);
+    CHECK(c.hdr10Plus);
+    CHECK(c.hdr10PlusFrom == TagFrom::Frame);
+}
+
+TEST_CASE("A proxy's check of its video reads no colour", "[integration][hdr][cache]") {
+    const auto dir = Dir("proxy_no_look");
+    const auto before = std::chrono::steady_clock::now();
+    const auto clip = ProResHlg(dir);  // just written: the build's look is not cached (a file 2 s old is looked at again)
+    BuildProxy(clip, dir / "passes", "source");
+    if (std::chrono::steady_clock::now() - before > std::chrono::milliseconds(1500)) SKIP("the proxy took too long to tell a look from a cached one");
+    const int64_t decodes = FirstFrameDecodes();
+    CHECK(ValidProxy(clip, dir / "passes", "source"));
+    CHECK(FirstFrameDecodes() == decodes);
 }

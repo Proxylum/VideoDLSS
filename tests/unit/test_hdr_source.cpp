@@ -733,5 +733,12 @@ TEST_CASE("info says a Dolby Vision RPU without a record: the guessed profile, o
     CHECK(line(WithRpu(9, 9, 16, 1, false)) == "dolby vision: profile 8 (guessed from the first frame's RPU): removed in every output");
     CHECK(line(WithRpu(9, 9, 16, 0, false)) == "dolby vision: an RPU of an unknown profile: unknown base - removed in every output");
     CHECK(line(WithRpu(9, 9, 16, 0, true)) == "dolby vision: profile 5 (guessed from the first frame's RPU): IPT base - colours come out wrong without the RPU");
+    // an IPT base taken for one (a base nobody names, no colour tags): said as an assumption
+    CHECK(line(WithRpu(2, 2, 2, 0, false)) ==
+          "dolby vision: an RPU of an unknown profile: unknown base without colour tags, taken for IPT - colours come out wrong without the RPU");
+    CHECK(WithRpu(2, 2, 2, 0, false).iptAssumed);
+    CHECK(WithDovi(2, 2, 2, 8, 3).iptAssumed);
+    CHECK_FALSE(WithDovi(2, 2, 2, 5, 0).iptAssumed);
+    CHECK_FALSE(Classified(15, 9, 16).iptAssumed);
     CHECK(line(WithDovi(9, 9, 16, 8, 0)) == "dolby vision: profile 8, level 6, compatibility 0 (record): unknown base - removed in every output");
 }

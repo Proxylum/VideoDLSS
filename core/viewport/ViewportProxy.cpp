@@ -102,7 +102,9 @@ std::optional<std::filesystem::path> ValidProxy(const std::filesystem::path& vid
         if (!(SourceStamp::FromJson(j.value("source", nlohmann::json::object())) == Stamp(video))) return std::nullopt;
         // TASK-0072: the proxy holds the frames as the decoder shows them - made before a turn of the source was applied (no field: not
         // turned), it is sideways; only such sources rebuild theirs (kProxyFormat would rebuild every project's)
-        if (j.value("orientation", std::string()) != VideoDecoder(video, VideoDecoder::Probe()).Info().orientation.Token()) return std::nullopt;
+        VideoDecoder::Options probe = VideoDecoder::Probe();
+        probe.colorProbe = false;  // TASK-0078: the orientation only (the GUI thread, after every run: no first frame decoded for colour)
+        if (j.value("orientation", std::string()) != VideoDecoder(video, probe).Info().orientation.Token()) return std::nullopt;
         return file;
     } catch (const std::exception& e) {
         Log()->debug("proxy {}: sidecar unreadable: {}", file.string(), e.what());

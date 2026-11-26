@@ -95,7 +95,9 @@ QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
     if (n.key == "source.dv_record_short" || n.key == "source.dv_unknown")
         return Tr("Dolby Vision %1: база не названа — цвет по тегам; Dolby Vision снимается при любой записи").arg(DoviName(c));
     if (n.key == "source.dv_ipt")
-        return Tr("База Dolby Vision в IPT: без RPU цвета неверны, а RPU эта программа не применяет — цвета при обработке будут неверны");
+        return c.iptAssumed ? Tr("База Dolby Vision не названа, а теги цвета не указаны — принята база IPT: без RPU её цвета неверны, а RPU эта "
+                                 "программа не применяет")
+                            : Tr("База Dolby Vision в IPT: без RPU цвета неверны, а RPU эта программа не применяет — цвета при обработке будут неверны");
     if (n.key == "source.matrix_unsupported")
         return Tr("Матрица %1 читается как BT.709 / BT.601 — цвета при обработке будут неверны").arg(MatrixText(e.matrix));
     if (n.key == "source.rgb_hdr")
@@ -133,7 +135,8 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
     QString text;
     // what cannot be read right comes first and alone: the rest would read as fine
     if (c.refuseAll == ColourRefusal::DolbyVisionIpt) {
-        text = Tr("Dolby Vision %1 (база IPT): цвета при обработке будут неверны").arg(DoviName(c));
+        text = c.iptAssumed ? Tr("Dolby Vision %1 (база не названа, принята IPT): цвета при обработке будут неверны").arg(DoviName(c))
+                            : Tr("Dolby Vision %1 (база IPT): цвета при обработке будут неверны").arg(DoviName(c));
     } else if (c.refuseAll == ColourRefusal::RgbHdr) {
         text = c.rgbLayout ? Tr("RGB-поток HDR / BT.2020: читается как 8-битный SDR, цвета будут неверны")
                            : Tr("Матрица RGB при YUV-раскладке (HDR / BT.2020): цвета будут неверны");

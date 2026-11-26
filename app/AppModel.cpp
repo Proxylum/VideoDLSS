@@ -597,7 +597,9 @@ void AppModel::startProxies() {
                 if (!l.startsWith(head)) continue;
                 const std::filesystem::path video = std::string(name) == "source" ? builtSource : builtResult;
                 try {
-                    VideoDecoder probe(video, VideoDecoder::Probe());
+                    VideoDecoder::Options options = VideoDecoder::Probe();
+                    options.colorProbe = false;  // TASK-0078: whether it decodes here, not its colour
+                    VideoDecoder probe(video, options);
                     if (!probe.Info().hardwareOnly) continue;
                     if (!CheckDecodeSupport(probe.Info()).Ok()) {
                         heardVerdict = true;

@@ -11139,6 +11139,17 @@ TEST_CASE("Colour row: Dolby Vision from an RPU, the RGB matrix on YUV, layers o
     CHECK(SourceColourText(withRpu(1, false)) == QString::fromUtf8("HDR (PQ) · BT.2020 · Dolby Vision 8 (будет снят)"));
     CHECK(SourceColourText(withRpu(0, false)) == QString::fromUtf8("HDR (PQ) · BT.2020 · Dolby Vision неизвестного профиля (будет снят)"));
     CHECK(SourceColourText(withRpu(0, true)) == QString::fromUtf8("Dolby Vision 5 (база IPT): цвета при обработке будут неверны"));
+    {  // a base nobody names, no colour tags: taken for IPT - said so
+        ColourLayers in;
+        DoviConf d;
+        d.profile = 8;
+        d.blCompat = 3;
+        in.dovi = d;
+        QString tip;
+        CHECK(SourceColourText(SourceColorOf(in, "420", "hevc"), &tip) ==
+              QString::fromUtf8("Dolby Vision 8.3 (база не названа, принята IPT): цвета при обработке будут неверны"));
+        CHECK(tip.contains(QString::fromUtf8("База Dolby Vision не названа, а теги цвета не указаны — принята база IPT")));
+    }
     // the RGB matrix on a Y'CbCr stream
     ColourLayers yuv;
     yuv.stream = yuv.container = RawTags{0, 9, 16, 1, 0};
