@@ -11228,7 +11228,9 @@ TEST_CASE("A stopped HDR source gives a Russian plan error and turns off Process
     REQUIRE(run);
     CHECK_FALSE(run->isEnabled());
     PreviewRunner runner(model, queue);
-    CHECK(runner.appBlock(nullptr) == QString::fromUtf8("Превью недоступно: обработка HDR — в следующей версии"));
+    const PreviewRunner::Availability preview = runner.availability({PreviewRunner::Kind::Frame, 0});
+    CHECK_FALSE(preview.ok);
+    CHECK(preview.text == QString::fromUtf8("Превью недоступно: обработка HDR — в следующей версии"));
 }
 
 TEST_CASE("An HDR source with every stage off can be passed through but no stage card runs; a plan note shows the soft label", "[app][hdr]") {
@@ -11260,7 +11262,9 @@ TEST_CASE("An HDR source with every stage off can be passed through but no stage
     CHECK_FALSE(run->isEnabled());
     CHECK(run->toolTip().contains(QString::fromUtf8("Обработка ролика HDR (PQ) появится в следующей версии")));
     PreviewRunner runner(model, queue);
-    CHECK(runner.appBlock(nullptr) == QString::fromUtf8("Превью недоступно: обработка HDR — в следующей версии"));
+    const PreviewRunner::Availability preview = runner.availability({PreviewRunner::Kind::Frame, 0});
+    CHECK_FALSE(preview.ok);
+    CHECK(preview.text == QString::fromUtf8("Превью недоступно: обработка HDR — в следующей версии"));
     // an SDR source: no notes, the label hidden, the run on
     AppModel sdr(true);
     sdr.openVideo(Q(PqClip(d, "sdr.mkv", RawTags{1, 1, 1, 1, 0})));

@@ -22,6 +22,7 @@
 #include "io/VideoEncoder.h"
 #include "pipeline/ProcessRunner.h"
 #include "pipeline/ResultColour.h"
+#include "viewport/Project.h"
 #include "viewport/ViewportProxy.h"
 
 using namespace dlssvid;
@@ -253,8 +254,7 @@ TEST_CASE("Processing a PQ source is refused before hashing: process upscale dep
     ClipSpec sdr = Small("ffv1", "yuv420p");
     const auto sdrClip = WriteClip(dir / "sdr.mkv", sdr);
     const auto project = dir / "p.dlssvid.json";
-    const auto created = RunAll({"project", "create", "-i", sdrClip.string(), "-o", project.string()}, dir / "create.log");
-    REQUIRE(created.code == 0);
+    Project::Create(sdrClip, dir / "passes").Save(project);
     const auto withInput = RunAll({"process", "--project", project.string(), "-i", p, "--warp", "--codec", "ffv1", "--stages", "upscale", "--param",
                                    "upscale.backend=bicubic", "-o", (dir / "pr.mkv").string()},
                                   dir / "project.log");
