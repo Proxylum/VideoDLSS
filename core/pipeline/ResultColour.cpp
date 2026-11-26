@@ -103,7 +103,7 @@ PassthroughColour PlanPassthroughColour(const VideoStreamInfo& info, const std::
                 if (primaries || luminance)
                     note("encode.mdcv_invalid", "warning",
                          "the mastering display's " + std::string(primaries && luminance ? "primaries and luminance do" : primaries ? "primaries do" : "luminance does") +
-                             " not hold (a coordinate 0, or max not above min): " + container + "'s readers drop " + (primaries && luminance ? "them" : "it"));
+                             " not hold (a coordinate 0, a minimum below 0 or max not above min): " + container + "'s readers drop " + (primaries && luminance ? "them" : "it"));
                 m.hasPrimaries = m.hasPrimaries && !primaries;
                 m.hasLuminance = m.hasLuminance && !luminance;
             }

@@ -841,6 +841,26 @@ TEST_CASE("A mastering display Matroska's reader would drop is noted and not exp
         CHECK_FALSE(mkv.expect->mdcv->hasPrimaries);
         CHECK(mkv.expect->mdcv->hasLuminance);
     }
+    // the luminance's other two edges: a minimum below 0 (as mov.c reads a u32 past INT32_MAX) and max equal to min
+    for (int which = 0; which < 2; ++which) {
+        INFO("case " << which);
+        Mdcv lum = Mastering1000();
+        if (which == 0) lum.minLum = {-1, 10000};
+        if (which == 1) lum.maxLum = lum.minLum = {1, 10000};
+        s.hdr.mastering = lum;
+        const auto src = WriteClip(dir / ("lum" + std::to_string(which) + ".mov"), s);
+        VideoDecoder probe(src, VideoDecoder::Probe());
+        REQUIRE(probe.Info().color.hdr.mdcv);
+        if (which == 0) REQUIRE(probe.Info().color.hdr.mdcv->minLum.Value() < 0);
+        const auto out = dir / ("lum" + std::to_string(which) + ".mkv");
+        CHECK(HasKey(PlanProcess(Passthrough(src, out, "ffv1")).warnings, "encode.mdcv_invalid"));
+        ProcessResult lr;
+        CHECK_NOTHROW(lr = RunProcess(Passthrough(src, out, "ffv1")));
+        CHECK(Has(lr.warnings, "luminance does not hold (a coordinate 0, a minimum below 0 or max not above min)"));
+        REQUIRE(Summarize(out).hdr.mdcv);
+        CHECK(Summarize(out).hdr.mdcv->hasPrimaries);
+        CHECK_FALSE(Summarize(out).hdr.mdcv->hasLuminance);
+    }
     zero.maxLum = {0, 1};
     s.hdr.mastering = zero;
     const ProcessResult both = RunProcess(Passthrough(WriteClip(dir / "both.mov", s), dir / "both.mkv", "ffv1"));

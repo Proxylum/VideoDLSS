@@ -168,6 +168,16 @@ TEST_CASE("Frame trc 18 over stream 1 6 14 or 15 is HLG without a note; other di
     CHECK(pqContainer.cls == SourceClass::Legacy);  // the stream's taken
     REQUIRE(pqContainer.Note("source.container_differs") != nullptr);
     CHECK(pqContainer.Note("source.container_differs")->plan);
+    // the plan takes only the plan's notes (TASK-0079): an SDR source whose layers differ within its class plans and runs with no note
+    VideoStreamInfo info;
+    for (const SourceColor* c : {&sameClass, &sdrContainer}) {
+        info.color = *c;
+        REQUIRE(info.color.legacyPath);
+        CHECK(ResolveColor(info).notes.empty());
+    }
+    info.color = pqContainer;
+    const ColorPlan heard = ResolveColor(info);
+    CHECK(std::any_of(heard.notes.begin(), heard.notes.end(), [](const PlanNote& n) { return n.key == "source.container_differs"; }));
 }
 
 TEST_CASE("RGB layout or matrix 0 with PQ HLG or BT.2020 primaries is refused in every mode", "[hdr]") {
