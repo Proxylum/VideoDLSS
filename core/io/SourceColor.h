@@ -139,7 +139,7 @@ struct SourceColor {
 // proresdec.c - and H.264 / HEVC / FFV1 frames repeat the stream's). `from` (optional): matrix, primaries, trc, range.
 RawTags MergeTags(const RawTags& frame, const RawTags& stream, const RawTags& container, TagFrom from[4] = nullptr);
 
-// The class of a tag set by the truth table's rows 4-10 (design: Output/hdr-design, «Таблица истинности»): trc 16 PQ, trc 18 HLG,
+// The class of a tag set by the truth table's rows 4-10 (the design of TASK-0075, its truth table): trc 16 PQ, trc 18 HLG,
 // primaries 9 Wide (a curve 1 / 6 / 13 / 14 / 15 / unspecified) or Log (any other curve), matrix 9 under other primaries Wide; else
 // Legacy.
 SourceClass ClassOf(int matrix, int primaries, int trc);

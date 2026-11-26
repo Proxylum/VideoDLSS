@@ -85,7 +85,7 @@ TEST_CASE("HDR class follows the truth table rows over the whole M x P x T grid"
         for (int p = 0; p <= 22; ++p)
             for (int t = 0; t <= 18; ++t) {
                 const SourceColor c = Classified(m, p, t);
-                // the design's rows, each as its own predicate (Output/hdr-design, «Таблица истинности»)
+                // the design's rows, each as its own predicate (the design of TASK-0075, its truth table)
                 const bool pq = t == 16, hlg = t == 18;
                 const bool wideCurve = p == 9 && In(t, {1, 2, 6, 13, 14, 15});
                 const bool log = p == 9 && !pq && !hlg && !wideCurve;
