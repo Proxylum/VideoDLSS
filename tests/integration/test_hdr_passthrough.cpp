@@ -15,6 +15,7 @@
 
 #include "TestClips.h"
 #include "convert/ColorPlan.h"
+#include "gpu/D3D12Device.h"
 #include "io/ResultFile.h"
 #include "io/SourceColor.h"
 #include "io/VideoDecoder.h"
@@ -575,4 +576,79 @@ TEST_CASE("Container colour caps by muxer: mp4 and mov keep amve, mkv not, mov n
     CHECK(CodecKeepsRange("hevc_nvenc"));
     CHECK_FALSE(CodecKeepsRange("prores_ks"));
     CHECK_FALSE(CodecKeepsRange("ffv1"));
+}
+
+// ---- NVENC ----------------------------------------------------------------------------------------------------------------------
+
+namespace {
+bool HaveNvenc(const char* codec) {
+    D3D12Device dev;
+    return !dev.IsWarp() && dev.IsNvidia() && VideoEncoder::EncoderAvailable(codec);
+}
+}  // namespace
+
+TEST_CASE("NVENC passthrough of PQ and HLG writes VUI 9/16/9 and 9/18/9, colr mdcv clli and amve in MP4", "[integration][hdr][gpu][formats]") {
+    const auto dir = Dir("nvenc");
+    for (const char* codec : {"hevc_nvenc", "av1_nvenc"}) {
+        if (!HaveNvenc(codec)) SKIP(std::string("no NVIDIA GPU with ") + codec);
+        INFO(codec);
+        ClipHdr hdr;
+        hdr.mastering = Mastering1000();
+        hdr.light = Cll{1000, 400};
+        ClipSpec s = Small();
+        s.width = 320;
+        s.height = 192;
+        s.color = Tags(9, 9, 16);
+        s.hdr = hdr;
+        const auto pq = WriteClip(dir / (std::string(codec) + "_pq.mkv"), s);
+        const auto out = dir / (std::string(codec) + "_pq.mp4");
+        const ProcessResult r = RunProcess(Passthrough(pq, out, codec));
+        CHECK(r.framesOut == 4);
+        const StreamSummary got = Summarize(out);
+        CHECK(got.colorSpace == 9);
+        CHECK(got.colorPrimaries == 9);
+        CHECK(got.colorTrc == 16);
+        REQUIRE(got.hdr.mdcv);
+        CHECK(*got.hdr.mdcv == Mastering1000());
+        REQUIRE(got.hdr.cll);
+        CHECK(*got.hdr.cll == Cll{1000, 400});
+    }
+    if (!HaveNvenc("hevc_nvenc")) SKIP("no NVIDIA GPU with hevc_nvenc");
+    ClipSpec h = Small("prores_ks", "yuv422p10le");
+    h.width = 320;
+    h.height = 192;
+    h.color = Tags(9, 9, 14);
+    h.frameColor = [](int64_t) { return Tags(9, 9, 18); };
+    h.hdr.ambient = Amve{{3140000, 10000}, {15635, 50000}, {16450, 50000}};
+    const auto hlg = WriteClip(dir / "hlg.mov", h);
+    const auto out = dir / "hlg.mp4";
+    RunProcess(Passthrough(hlg, out, "hevc_nvenc"));
+    const StreamSummary got = Summarize(out);
+    CHECK(got.colorTrc == 18);
+    REQUIRE(got.hdr.amve);
+    CHECK(got.hdr.amve->illuminance.Value() == 314.0);
+}
+
+TEST_CASE("Legacy h264 hevc and av1 NVENC results in mp4 mov and mkv publish as before", "[integration][result][gpu][regression]") {
+    const auto dir = Dir("nvenc_legacy");
+    ClipSpec s = Small("ffv1", "yuv420p");
+    s.width = 320;
+    s.height = 192;
+    s.color = Tags(1, 1, 1);
+    const auto in = WriteClip(dir / "sdr.mkv", s);
+    for (const char* codec : {"h264_nvenc", "hevc_nvenc", "av1_nvenc"}) {
+        if (!HaveNvenc(codec)) continue;
+        for (const char* ext : {".mp4", ".mov", ".mkv"}) {
+            if (std::string(codec) == "av1_nvenc" && std::string(ext) == ".mov") continue;  // MOV takes no AV1
+            INFO(codec << ext);
+            const auto out = dir / (std::string(codec) + ext);
+            const ProcessResult r = RunProcess(Passthrough(in, out, codec));
+            CHECK(r.warnings.empty());
+            const StreamSummary got = Summarize(out);
+            CHECK(got.colorSpace == 1);
+            CHECK(got.colorPrimaries == 1);
+            CHECK(got.colorTrc == 1);
+            CHECK_FALSE(got.hdr.mdcv);
+        }
+    }
 }
