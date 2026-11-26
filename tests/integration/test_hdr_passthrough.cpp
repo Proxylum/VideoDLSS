@@ -153,7 +153,10 @@ TEST_CASE("Passthrough of HLG ProRes MOV keeps trc 18 in colr and in the frame h
     CHECK(s.colorTrc == 18);  // the frame's HLG, not the colr's bt2020-10
     CHECK(s.colorPrimaries == 9);
     CHECK(s.colorSpace == 9);
-    CHECK(FrameColors(out).at(0).trc == 18);  // prores_ks writes the frame header from the same tags
+    const RawTags header = FrameColors(out, 1, true).at(0);  // prores_ks writes the frame header from the same tags
+    CHECK(header.trc == 18);
+    CHECK(header.primaries == 9);
+    CHECK(header.matrix == 9);
     REQUIRE(s.hdr.mdcv);
     CHECK(*s.hdr.mdcv == Mastering1000());
     REQUIRE(s.hdr.cll);
@@ -329,7 +332,7 @@ TEST_CASE("CheckEncodedResult names a colour tag or HDR metadata that differs", 
     CHECK_THAT(CheckEncodedResult(file, e), ContainsSubstring("ambient viewing environment"));
 }
 
-TEST_CASE("Legacy ProRes and FFV1 results in MOV and MKV with tags 1/1/1 2/2/2 and matrix only publish as before", "[integration][result][regression]") {
+TEST_CASE("Legacy ProRes and FFV1 results in MOV and MKV with tags 1/1/1 2/2/2 matrix only and full range publish as before", "[integration][result][regression]") {
     const auto dir = Dir("legacy");
     int i = 0;
     for (const RawTags tags : {Tags(1, 1, 1), RawTags{2, 2, 2, 0, 0}, RawTags{1, 2, 2, 1, 0}, Tags(6, 6, 6)})
@@ -352,6 +355,16 @@ TEST_CASE("Legacy ProRes and FFV1 results in MOV and MKV with tags 1/1/1 2/2/2 a
             }
             CHECK_FALSE(got.hdr.mdcv);
         }
+    // full range into a MOV of ProRes (which keeps none): lost without a word, as before TB-2 - no note on the legacy path
+    ClipSpec s = Small("ffv1", "yuv420p");
+    s.color = Tags(1, 1, 1, 2);
+    const auto full = WriteClip(dir / "full.mkv", s);
+    VideoDecoder probe(full, VideoDecoder::Probe());
+    REQUIRE(probe.Info().color.legacyPath);
+    REQUIRE(probe.Info().color.effective.range == 2);
+    const ProcessResult r = RunProcess(Passthrough(full, dir / "full_out.mov", "prores_ks"));
+    CHECK(r.warnings.empty());
+    CHECK(std::filesystem::exists(dir / "full_out.mov"));
 }
 
 TEST_CASE("Frames turning PQ under colr 1/1/1 warn at the first PQ frame in passthrough; frames 6/6/6 do not", "[integration][hdr][passthrough]") {

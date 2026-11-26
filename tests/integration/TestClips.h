@@ -112,7 +112,9 @@ StreamSummary Summarize(const std::filesystem::path& path);
 
 // TASK-0078: the colour tags of the first `maxFrames` frames of a file, decoded in software by libavcodec itself (a ProRes frame header,
 // what an HEVC SEI makes of the transfer) - not by the product's decoder. Throws for a codec without a software decoder (AV1).
-std::vector<RawTags> FrameColors(const std::filesystem::path& path, int maxFrames = 1);
+// `bitstreamOnly` (TASK-0079): the decoder opened without the stream's tags - libavcodec fills a frame's unspecified tags from its
+// context (decode.c), so only then does an empty ProRes frame header read as unspecified.
+std::vector<RawTags> FrameColors(const std::filesystem::path& path, int maxFrames = 1, bool bitstreamOnly = false);
 // An HDR10+ record (AVDynamicHDRPlus: one window, application version 1, 400 cd/m2 targeted) as a packet's side data
 // (AV_PKT_DATA_DYNAMIC_HDR10_PLUS): matroskaenc writes it as a BlockAdditional (ITU-T T.35), matroskadec reads it back.
 std::string Hdr10PlusSideData();

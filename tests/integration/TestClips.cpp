@@ -445,7 +445,7 @@ StreamSummary Summarize(const std::filesystem::path& path) {
     return s;
 }
 
-std::vector<RawTags> FrameColors(const std::filesystem::path& path, int maxFrames) {
+std::vector<RawTags> FrameColors(const std::filesystem::path& path, int maxFrames, bool bitstreamOnly) {
     std::vector<RawTags> out;
     AVFormatContext* fmt = nullptr;
     AVCodecContext* ctx = nullptr;
@@ -461,6 +461,12 @@ std::vector<RawTags> FrameColors(const std::filesystem::path& path, int maxFrame
         if (dec->id == AV_CODEC_ID_AV1) Throw("FrameColors: AV1 has no software decoder in this build");
         ctx = avcodec_alloc_context3(dec);
         CheckAv(avcodec_parameters_to_context(ctx, fmt->streams[vs]->codecpar), "params");
+        if (bitstreamOnly) {
+            ctx->color_range = AVCOL_RANGE_UNSPECIFIED;
+            ctx->colorspace = AVCOL_SPC_UNSPECIFIED;
+            ctx->color_primaries = AVCOL_PRI_UNSPECIFIED;
+            ctx->color_trc = AVCOL_TRC_UNSPECIFIED;
+        }
         ctx->thread_type = FF_THREAD_SLICE;
         CheckAv(avcodec_open2(ctx, dec, nullptr), "open decoder");
         auto receive = [&] {
