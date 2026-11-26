@@ -23,7 +23,8 @@ bool LuminanceHolds(const Mdcv& m) { return m.maxLum.Value() > m.minLum.Value() 
 
 // What MP4 / MOV's boxes hold (movenc: mdcv's coordinates in 16 bits of 1/50000, its luminance in 32 bits of 1/10000; clli in 16 bits):
 // a value outside them is written as its low bits - a record from Matroska's floats in other units (x265's 34000 for 0.68) included.
-// Counted as movenc counts it (rescale_rational: av_rescale, half away from zero; a zero denominator gives INT64_MIN)
+// Counted as movenc counts it (rescale_rational: av_rescale, half away from zero; a zero denominator gives INT64_MIN). The luminance up to
+// INT32_MAX only: mov.c reads the u32 through av_make_q(int, ...) - above it the value comes back negative (the result check would fail)
 bool Fits(const Ratio& r, int64_t per, int64_t top) {
     const int64_t v = av_rescale(r.num, per, r.den);
     return v >= 0 && v <= top;
@@ -31,7 +32,7 @@ bool Fits(const Ratio& r, int64_t per, int64_t top) {
 bool MdcvFitsBox(const Mdcv& m) {
     for (const auto& xy : m.primaries)
         if (!Fits(xy[0], 50000, 65535) || !Fits(xy[1], 50000, 65535)) return false;
-    return Fits(m.white[0], 50000, 65535) && Fits(m.white[1], 50000, 65535) && Fits(m.maxLum, 10000, 4294967295LL) && Fits(m.minLum, 10000, 4294967295LL);
+    return Fits(m.white[0], 50000, 65535) && Fits(m.white[1], 50000, 65535) && Fits(m.maxLum, 10000, 2147483647LL) && Fits(m.minLum, 10000, 2147483647LL);
 }
 
 std::string TagWords(const ColorTags& t) {
@@ -92,7 +93,7 @@ PassthroughColour PlanPassthroughColour(const VideoStreamInfo& info, const std::
         } else if (caps.mdcv && box && !MdcvFitsBox(m)) {
             note("encode.mdcv_unfit", "warning",
                  "the mastering display has a value outside " + container + "'s mdcv fields (a coordinate above 1.31, a luminance below 0 or above "
-                 "429496 cd/m2) - not carried");
+                 "214748 cd/m2) - not carried");
             pc.meta.mdcv.reset();  // not written: the box would hold its low bits
         } else if (caps.mdcv) {
             if (matroska) {

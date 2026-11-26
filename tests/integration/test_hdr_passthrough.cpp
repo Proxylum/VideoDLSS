@@ -206,6 +206,16 @@ TEST_CASE("MKV keeps no light level with MaxFALL 0 and none is expected back", "
     CHECK_FALSE(Summarize(out).hdr.cll);  // matroskadec makes none of MaxCLL alone
     CHECK(Has(r.warnings, "the light level MaxCLL 1000 / MaxFALL 0: matroska's readers keep one only with both values"));
     CHECK(HasKey(PlanProcess(Passthrough(in, out, "ffv1")).warnings, "encode.cll_invalid"));
+    // 0 / 0 (nothing known): no note, published, none in MKV; kept in MOV
+    hdr.light = Cll{0, 0};
+    const auto zero = PqFfv1(dir, "zero.mov", hdr);
+    REQUIRE(Summarize(zero).hdr.cll);
+    CHECK_NOTHROW(RunProcess(Passthrough(zero, dir / "zero.mkv", "ffv1")));
+    CHECK_FALSE(HasKey(PlanProcess(Passthrough(zero, dir / "zero.mkv", "ffv1")).warnings, "encode.cll_invalid"));
+    CHECK_FALSE(Summarize(dir / "zero.mkv").hdr.cll);
+    CHECK_NOTHROW(RunProcess(Passthrough(zero, dir / "zero_out.mov", "ffv1")));
+    REQUIRE(Summarize(dir / "zero_out.mov").hdr.cll);
+    CHECK(*Summarize(dir / "zero_out.mov").hdr.cll == Cll{0, 0});
 }
 
 TEST_CASE("Mastering and light level outside MP4 MOV fields are noted and not written; the publish holds", "[integration][hdr][passthrough][result]") {
@@ -237,6 +247,24 @@ TEST_CASE("Mastering and light level outside MP4 MOV fields are noted and not wr
     const ProcessResult e = RunProcess(Passthrough(edgeIn, dir / "edge.mov", "prores_ks"));
     CHECK(Has(e.warnings, "a value outside mov's mdcv fields"));
     CHECK_FALSE(Summarize(dir / "edge.mov").hdr.mdcv);
+    // under the edge: 1.310707 is 65535.35 units - written as 65535 and read back
+    edge.primaries[0][0] = {1310707, 1000000};
+    edgeHdr.mastering = edge;
+    const ProcessResult under = RunProcess(Passthrough(PqFfv1(dir, "under.mkv", edgeHdr), dir / "under.mov", "prores_ks"));
+    CHECK_FALSE(Has(under.warnings, "mdcv fields"));
+    CHECK(Summarize(dir / "under.mov").hdr.mdcv);
+    // the luminance: up to INT32_MAX units mov.c reads back positive (214748 cd/m2), above it negative; x265's units far above
+    for (const auto& [lum, fits] : {std::pair{214748, true}, std::pair{214749, false}, std::pair{10000000, false}}) {
+        INFO("max luminance " << lum);
+        Mdcv bright = Mastering1000();
+        bright.maxLum = {lum, 1};
+        ClipHdr h;
+        h.mastering = bright;
+        const auto name = "lum" + std::to_string(lum);
+        const ProcessResult b = RunProcess(Passthrough(PqFfv1(dir, (name + ".mkv").c_str(), h), dir / (name + ".mov"), "prores_ks"));
+        CHECK(Has(b.warnings, "a value outside mov's mdcv fields") == !fits);
+        CHECK(Summarize(dir / (name + ".mov")).hdr.mdcv.has_value() == fits);
+    }
 }
 
 TEST_CASE("HDR passthrough into AVI or M4V is refused before any file is made; SDR into AVI publishes as before", "[integration][hdr][process]") {
@@ -301,6 +329,8 @@ TEST_CASE("Processing a PQ source is refused before hashing: process upscale dep
         {{"nr", "-i", p, "-o", (dir / "nr2").string(), "--warp", "--color-dir", (dir / "no_pass").string(), "--start", "1"}, "nr: "},
         {{"scenes", "-i", p, "-o", (dir / "sc").string()}, "scenes: "},
         {{"export", "-i", p, "-o", (dir / "ex").string(), "--range", "0-1"}, "export: "},
+        // through Prepare (no CLI check of its own): refused before the hash too
+        {{"bench", "-i", p, "--warp", "--frames", "2", "--codec", "ffv1", "--stages", "upscale", "--param", "upscale.backend=bicubic"}, "process: "},
     };
     for (const Case& c : cases) {
         std::vector<std::string> verbose = c.args;
@@ -311,10 +341,17 @@ TEST_CASE("Processing a PQ source is refused before hashing: process upscale dep
         CHECK(run.code != 0);
         CHECK_THAT(run.out, ContainsSubstring(c.where + p + ": processing of HDR PQ"));
         CHECK_THAT(run.out, ContainsSubstring("passthrough (no stages) writes it as it is"));
-        if (c.args[0] != "scenes" && c.args[0] != "process") CHECK(FilesUnder(c.args[4]).empty());  // no pass, no part file
+        if (c.args[0] != "scenes" && c.args[0] != "process" && c.args[0] != "bench") CHECK(FilesUnder(c.args[4]).empty());  // no pass, no part file
     }
     CHECK_FALSE(std::filesystem::exists(dir / "r.mkv"));
     CHECK(FilesUnder(dir / "sc") == scenesBefore);
+    // scenes --threshold 0 reads no frame (the pass says «off»): not refused
+    const auto off = RunAll({"scenes", "-i", p, "-o", (dir / "sc0").string(), "--threshold", "0"}, dir / "scenes_off.log");
+    {
+        INFO(off.out);
+        CHECK(off.code == 0);
+        CHECK_THAT(off.out, !ContainsSubstring("processing of HDR"));
+    }
     // a project of an SDR video run with -i on the PQ one: refused before -i is hashed («is not the source of the project» is said after it)
     const auto project = dir / "p.dlssvid.json";
     Project::Create(sdrClip, dir / "passes").Save(project);
@@ -575,7 +612,7 @@ TEST_CASE("The source passed through with every stage off keeps the passthrough 
     const ProcessPlan quiet = PlanProcess(noEncode);
     CHECK_FALSE(HasKey(quiet.warnings, "encode.tags_filled"));
     CHECK(HasKey(quiet.warnings, "source.bt2020_assumed"));
-    // into AVI: refused before the passes' folder is made (and the source hashed)
+    // into AVI: refused in Prepare, before the passes' folder is made (bench's case in «refused before hashing» sees no hash)
     o.output = dir / "avi.avi";
     CHECK_THROWS_AS(RunProcess(o), ColourUnsupported);
     CHECK_FALSE(std::filesystem::exists(dir / "avi_passes"));
@@ -741,6 +778,16 @@ TEST_CASE("dlssvid info of a PQ video exits 0, says HDR10 records go to the cont
     INFO(rgb.out);
     CHECK_THAT(rgb.out, ContainsSubstring("processing:  not supported - the RGB matrix on a Y'CbCr stream"));
     CHECK_THAT(rgb.out, !ContainsSubstring("hdr note:"));
+    const auto bare = RunAll({"info", PqFfv1(dir, "bare.mkv").string()}, dir / "bare.log");
+    CHECK_THAT(bare.out, ContainsSubstring("processing:  not yet"));
+    CHECK_THAT(bare.out, !ContainsSubstring("hdr note:"));
+    ClipHdr stale;
+    stale.mastering = Mastering1000();
+    stale.light = Cll{1000, 400};
+    const auto wide = RunAll({"info", PqFfv1(dir, "wide.mkv", stale, Tags(9, 9, 14)).string()}, dir / "wide.log");
+    INFO(wide.out);
+    CHECK_THAT(wide.out, ContainsSubstring("processing:  not yet"));
+    CHECK_THAT(wide.out, !ContainsSubstring("hdr note:"));
 }
 
 TEST_CASE("A processed legacy source whose frames turn PQ warns in the result with the frame number", "[integration][hdr][process]") {
@@ -826,6 +873,8 @@ TEST_CASE("ProRes MOV with PQ colr and SDR frame headers is stopped for processi
     CHECK(Summarize(dir / "pt.mov").colorTrc == 1);  // the frames' tags
     CHECK_FALSE(Summarize(dir / "pt.mov").hdr.mdcv);
     CHECK_FALSE(Summarize(dir / "pt.mov").hdr.cll);
+    CHECK_NOTHROW(RunProcess(Passthrough(in, dir / "pt.avi", "ffv1")));  // SDR frames: an AVI as any SDR video
+    CHECK(std::filesystem::exists(dir / "pt.avi"));
 }
 
 TEST_CASE("Passthrough notes a mastering display it cannot write and a full range it cannot keep", "[integration][hdr][passthrough][result]") {

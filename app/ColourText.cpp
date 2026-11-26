@@ -35,6 +35,11 @@ QString LayersText(const SourceColor& c) {  // as LayersWords
     const std::string_view w = LayersWords(c);
     return w == "the first frame says" ? Tr("Первый кадр") : w == "the container says" ? Tr("Контейнер") : Tr("Первый кадр и контейнер");
 }
+QString LayersTextInside(const SourceColor& c) {  // the same within a sentence
+    QString t = LayersText(c);
+    if (!t.isEmpty()) t[0] = t[0].toLower();
+    return t;
+}
 
 QString FieldText(std::string_view field) {
     if (field == "matrix") return Tr("матрица");
@@ -170,8 +175,8 @@ QString ColourStopText(ColourStop stop, const SourceColor& c) {
         case ColourStop::None: return QString();
         case ColourStop::NotYet:
             if (c.Note("source.layers_differ"))
-                return Tr("Слои ролика размечены по-разному (%1 — %2, параметры кодека — %3): обработка такого ролика появится в следующей версии. %4")
-                    .arg(LayersText(c), ClassText(c.cls, c.effective.primaries), ClassText(c.rawCls, c.stream.primaries), passthrough);
+                return Tr("Слои ролика размечены по-разному (%1: %2; параметры кодека: %3): обработка такого ролика появится в следующей версии. %4")
+                    .arg(LayersTextInside(c), ClassText(c.cls, c.effective.primaries), ClassText(c.rawCls, c.stream.primaries), passthrough);
             return Tr("Обработка ролика %1 появится в следующей версии: сейчас его цвета вышли бы неверными. %2").arg(ClipClassText(c), passthrough);
         case ColourStop::Matrix:
             return Tr("Матрица %1: обработка не поддерживается. %2").arg(MatrixText(c.effective.matrix), passthrough);

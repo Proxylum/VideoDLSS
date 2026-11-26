@@ -11072,6 +11072,16 @@ TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, n
     CHECK(ColourStopText(ColourStop::NoContainerTags, log)
               .startsWith(QString::fromUtf8("Этот контейнер не хранит теги цвета: ролик с лог-кривой пишется только в .mp4, .mov или .mkv")));
     CHECK(ColourStopText(ColourStop::NoContainerTags, of(RawTags{9, 1, 1, 1, 0})).contains(QString::fromUtf8("ролик SDR с матрицей BT.2020 пишется")));
+    // layers that disagree: the layer in the sentence's case, «;» between the layers
+    const SourceColor split = of(RawTags{9, 9, 16, 1, 0}, "422", [](ColourLayers& in) {
+        FirstLookColor f;
+        f.how = FirstLook::Decode;
+        f.tags = RawTags{1, 1, 1, 1, 0};
+        in.first = f;
+    });
+    REQUIRE(split.Note("source.layers_differ"));
+    CHECK(ColourStopText(ColourStop::NotYet, split)
+              .startsWith(QString::fromUtf8("Слои ролика размечены по-разному (первый кадр: SDR; параметры кодека: HDR (PQ)): обработка такого ролика")));
     // a Dolby Vision base nobody names, no matrix nor transfer said: taken for IPT - said as taken, as the source row says it
     const SourceColor assumed = of(RawTags{2, 2, 2, 1, 0}, "420", [](ColourLayers& in) {
         DoviConf d;
