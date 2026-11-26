@@ -524,6 +524,23 @@ TEST_CASE("A transfer H.273 leaves undefined (19 in Matroska) reads as unspecifi
     CHECK_FALSE(probe.Info().color.Note("source.layers_differ"));
 }
 
+TEST_CASE("Frames saying no colour under a PQ colr are the container's PQ to the class observer: no warning", "[integration][hdr][passthrough]") {
+    const auto dir = Dir("frames_bare");
+    ClipSpec s = Small("prores_ks", "yuv422p10le");
+    s.color = Tags(9, 9, 16);
+    s.frameColor = [](int64_t) { return RawTags{0, 0, 0, 1, 0}; };  // prores_ks writes 0 into the header: unspecified for ProRes
+    const auto in = WriteClip(dir / "bare_frames.mov", s);
+    REQUIRE(FrameColors(in, 1, true).at(0).trc == 0);
+    VideoDecoder probe(in, VideoDecoder::Probe());
+    REQUIRE(probe.Info().color.cls == SourceClass::Pq);
+    for (const auto& [ext, codec] : {std::pair{".mov", "prores_ks"}, std::pair{".mkv", "ffv1"}}) {
+        INFO(ext);
+        const ProcessResult r = RunProcess(Passthrough(in, dir / (std::string("out") + ext), codec));
+        CHECK_FALSE(Has(r.warnings, "from the first one"));
+        CHECK_FALSE(Has(r.warnings, "and on are"));
+    }
+}
+
 TEST_CASE("A MOV of a source with an unspecified tag left writes no colr and expects none; it publishes", "[integration][hdr][passthrough][result]") {
     const auto dir = Dir("no_colr");
     ClipSpec s = Small("prores_ks", "yuv422p10le");
@@ -1282,6 +1299,30 @@ TEST_CASE("HEVC HLG with the transfer in an SEI passes through tagged trc 18; un
     CHECK(Has(w.warnings, "the frames are HDR HLG"));
     CHECK(Has(w.warnings, "from the first one"));
     CHECK_FALSE(Has(w.warnings, "cut the video"));
+}
+
+TEST_CASE("HEVC MP4 with a PQ colr and no colour in its VUI passes through without a class change, in software and by NVDEC", "[integration][hdr][gpu][nvdec]") {
+    if (!HaveNvenc("hevc_nvenc")) SKIP("no NVIDIA GPU with hevc_nvenc");
+    const auto dir = Dir("hevc_colr_only");
+    ClipSpec spec;
+    spec.frames = 4;
+    spec.pixFmt = "p010le";
+    spec.containerColor = Tags(9, 9, 16);
+    std::string why;
+    const auto clip = NvencClip(dir / "pq_colr.mp4", spec, &why);
+    if (!clip) SKIP("NVENC does not write the clip here: " << why);
+    REQUIRE(Summarize(*clip).colorTrc == 2);  // the VUI says none; the colr says PQ
+    VideoDecoder probe(*clip, VideoDecoder::Probe());
+    REQUIRE(probe.Info().color.cls == SourceClass::Pq);
+    for (const char* hw : {"none", "cuda"}) {
+        INFO("hwaccel " << hw);
+        ProcessOptions o = Passthrough(*clip, dir / (std::string("out_") + hw + ".mkv"), "ffv1");
+        o.hwaccel = hw;
+        const ProcessResult r = RunProcess(o);
+        CHECK_FALSE(Has(r.warnings, "from the first one"));
+        CHECK_FALSE(Has(r.warnings, "and on are"));
+        CHECK(Summarize(o.output).colorTrc == 16);
+    }
 }
 
 TEST_CASE("Raw HEVC of SDR then PQ segments warns at the first PQ frame, decoded in software and by NVDEC; 1/1/1 then 6/6/6 does not", "[integration][hdr][gpu][nvdec]") {
