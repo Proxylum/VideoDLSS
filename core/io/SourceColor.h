@@ -178,7 +178,7 @@ struct FirstLookColor {
 // Reserved values of the tags as unspecified (2): primaries and transfer 0 and 3 (H.273's reserved), matrix 3; for ProRes (`codec`
 // "prores") matrix 0 as well - a ProRes header's 0 is «unknown» (FFmpeg's own `prores` encoder writes it for any value outside its lists),
 // and ProRes is always Y'CbCr.
-RawTags WithoutReserved(const RawTags& t, std::string_view codec);
+RawTags WithoutReserved(const RawTags& t, std::string_view codec);  // also a value FFmpeg has no name for (H.273 leaves it undefined)
 
 // Two records of the same display or light, written as different fractions (Matroska's floats through av_d2q, an SEI's 1/50000 and
 // 1/10000): equal at MP4's units - chromaticities to 1/50000, luminance and illuminance to 1/10000 - and with the same flags.

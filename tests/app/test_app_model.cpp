@@ -11082,6 +11082,21 @@ TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, n
     REQUIRE(split.Note("source.layers_differ"));
     CHECK(ColourStopText(ColourStop::NotYet, split)
               .startsWith(QString::fromUtf8("Слои ролика размечены по-разному (первый кадр: SDR; параметры кодека: HDR (PQ)): обработка такого ролика")));
+    // the matrix stop: not supported, no later version; RGB HDR in both forms; an IPT base named by its record
+    const SourceColor ictcpColour = of(RawTags{14, 9, 16, 1, 0});
+    CHECK(ColourStopText(ColourStop::Matrix, ictcpColour).startsWith(QString::fromUtf8("Матрица ICtCp (BT.2100): обработка не поддерживается.")));
+    CHECK_FALSE(ColourStopText(ColourStop::Matrix, ictcpColour).contains(QString::fromUtf8("в следующей версии")));
+    CHECK(ColourStopShortText(ColourStop::Matrix, ictcpColour) == QString::fromUtf8("обработка этой матрицы не поддерживается"));
+    CHECK(ColourStopText(ColourStop::RgbHdr, of(RawTags{0, 9, 16, 1, 0}, "rgb")).startsWith(QString::fromUtf8("RGB-поток HDR / BT.2020 не поддерживается")));
+    CHECK(ColourStopText(ColourStop::RgbHdr, of(RawTags{0, 9, 16, 1, 0})).startsWith(QString::fromUtf8("Поток YUV помечен матрицей RGB")));
+    CHECK(ColourStopShortText(ColourStop::RgbHdr, ictcpColour) == QString::fromUtf8("цвет источника не поддерживается"));
+    const SourceColor known = of(RawTags{2, 2, 2, 1, 0}, "420", [](ColourLayers& in) {
+        DoviConf d;
+        d.profile = 5;
+        in.dovi = d;
+    });
+    REQUIRE_FALSE(known.iptAssumed);
+    CHECK(ColourStopText(ColourStop::DolbyVisionIpt, known).startsWith(QString::fromUtf8("Dolby Vision 5 с базой IPT не поддерживается")));
     // a Dolby Vision base nobody names, no matrix nor transfer said: taken for IPT - said as taken, as the source row says it
     const SourceColor assumed = of(RawTags{2, 2, 2, 1, 0}, "420", [](ColourLayers& in) {
         DoviConf d;
@@ -11340,6 +11355,16 @@ TEST_CASE("A wide gamut SDR source is stopped in its own words: no HDR promised,
     CHECK(runner.availability({PreviewRunner::Kind::Frame, 0}).text == QString::fromUtf8("Превью недоступно: обработка широкого охвата — в следующей версии"));
     model.setStageEnabled("upscale", false);
     model.refreshPlan();
+    CHECK_FALSE(model.colourStopSaid());  // the plan clean again: the said stop cleared, the stop itself stands
+    CHECK(model.colourStopSaidKind() == ColourStop::None);
+    CHECK(model.colourStop() == ColourStop::NotYet);
+    CHECK(model.planError().isEmpty());
+    ProjectPanel panel(model, queue);
+    panel.refresh();
+    QPushButton* process = ButtonStarting(panel, QString::fromUtf8("Обработать"));
+    REQUIRE(process);
+    CHECK(process->isEnabled());
+    CHECK(process->text() == QString::fromUtf8("Обработать · только кодирование"));
     CHECK(model.planNotes().contains(QString::fromUtf8("Неуказанные теги цвета записываются по классу источника: матрица bt2020nc, охват bt2020, кривая bt709")));
     QString tip;
     SourceColourText(model.sourceInfo().color, &tip);

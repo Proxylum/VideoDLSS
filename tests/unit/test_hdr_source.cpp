@@ -491,6 +491,10 @@ TEST_CASE("Reserved tag values are unspecified; a ProRes header's 0 is unknown, 
     CHECK(WithoutReserved(RawTags{0, 0, 0, 1, 0}, "hevc") == RawTags{0, 2, 2, 1, 0});  // matrix 0 is RGB (GBR) outside ProRes
     CHECK(WithoutReserved(RawTags{3, 3, 3, 2, 1}, "hevc") == RawTags{2, 2, 2, 2, 1});
     CHECK(WithoutReserved(RawTags{9, 9, 16, 1, 0}, "prores") == RawTags{9, 9, 16, 1, 0});
+    // values H.273 does not define (FFmpeg has no name): unspecified, as mov.c and h2645_vui read them (TASK-0079)
+    CHECK(WithoutReserved(RawTags{18, 13, 19, 1, 0}, "hevc") == RawTags{2, 2, 2, 1, 0});
+    CHECK(WithoutReserved(RawTags{9, 255, 255, 1, 0}, "hevc") == RawTags{9, 2, 2, 1, 0});
+    CHECK(WithoutReserved(RawTags{17, 22, 18, 1, 0}, "hevc") == RawTags{17, 22, 18, 1, 0});  // the last named ones kept
     // FFmpeg's own prores encoder writes 0 for a curve outside its list (bt2020-10): the colr box's 14 stands
     ColourLayers in;
     in.container = in.stream = Tags(9, 9, 14);

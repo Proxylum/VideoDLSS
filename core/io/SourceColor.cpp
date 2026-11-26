@@ -534,9 +534,12 @@ void ReadFrameSideData(AVFrameSideData* const* sd, int count, HdrStatic& hdr, st
 
 RawTags WithoutReserved(const RawTags& t, std::string_view codec) {
     RawTags out = t;
-    if (out.primaries == 0 || out.primaries == 3) out.primaries = 2;
-    if (out.trc == 0 || out.trc == 3) out.trc = 2;
-    if (out.matrix == 3 || (out.matrix == 0 && codec == "prores")) out.matrix = 2;
+    // reserved (0, 3) and values H.273 does not define - FFmpeg names none of them and its readers (mov.c's colr, h2645_vui) take them as
+    // unspecified, its Matroska writer drops a transfer or matrix past its tables: a result tagged with one reads back unspecified
+    // (TASK-0079: its check would fail after the whole encode)
+    if (out.primaries == 0 || out.primaries == 3 || !av_color_primaries_name(static_cast<AVColorPrimaries>(out.primaries))) out.primaries = 2;
+    if (out.trc == 0 || out.trc == 3 || !av_color_transfer_name(static_cast<AVColorTransferCharacteristic>(out.trc))) out.trc = 2;
+    if (out.matrix == 3 || (out.matrix == 0 && codec == "prores") || !av_color_space_name(static_cast<AVColorSpace>(out.matrix))) out.matrix = 2;
     return out;
 }
 

@@ -409,6 +409,34 @@ TEST_CASE("process --project of a PQ source with every stage off passes it throu
     CHECK(s.colorTrc == 16);
 }
 
+TEST_CASE("A transfer H.273 leaves undefined (19 in Matroska) reads as unspecified and the passthrough publishes", "[integration][hdr][passthrough][regression]") {
+    const auto dir = Dir("unnamed");
+    // matroskaenc writes no transfer past its table: an 18 written, its byte made 19 (TransferCharacteristics 0x55BA, one byte)
+    const auto written = PqFfv1(dir, "hlg.mkv", {}, Tags(9, 9, 18));
+    std::string bytes;
+    {
+        std::ifstream f(written, std::ios::binary);
+        bytes.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    }
+    const std::string element("\x55\xBA\x81\x12", 4);
+    const size_t at = bytes.find(element);
+    REQUIRE(at != std::string::npos);
+    REQUIRE(bytes.find(element, at + 1) == std::string::npos);
+    bytes[at + 3] = 19;
+    const auto in = dir / "t19.mkv";
+    std::ofstream(in, std::ios::binary).write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    REQUIRE(Summarize(in).colorTrc == 19);  // matroskadec keeps it
+    VideoDecoder probe(in, VideoDecoder::Probe());
+    CHECK(probe.Info().color.effective.trc == 2);
+    CHECK(probe.Info().color.cls == SourceClass::Wide);  // BT.2020 without a curve
+    for (const char* ext : {".mkv", ".mov"}) {
+        INFO(ext);
+        const auto out = dir / (std::string("out") + ext);
+        CHECK_NOTHROW(RunProcess(Passthrough(in, out, "ffv1")));
+        CHECK(Summarize(out).colorTrc == 1);  // the wide class's curve filled
+    }
+}
+
 TEST_CASE("Wide gamut SDR and a log curve pass through with their tags and without stale HDR records; into AVI they are refused", "[integration][hdr][passthrough]") {
     const auto dir = Dir("wide_log");
     ClipHdr stale;  // a container's records of an HDR master the SDR grade kept
@@ -510,6 +538,15 @@ TEST_CASE("CheckEncodedResult names a colour tag or HDR metadata that differs", 
     mastering.mdcv->maxLum = {4000, 1};
     e.color = mastering;
     CHECK_THAT(CheckEncodedResult(file, e), ContainsSubstring("mastering display"));
+    for (int which = 0; which < 3; ++which) {  // a primary, the white point, the halves said
+        ResultColor m = c;
+        if (which == 0) m.mdcv->primaries[1][0].num += 100;
+        if (which == 1) m.mdcv->white[1].num += 100;
+        if (which == 2) m.mdcv->hasPrimaries = false;
+        e.color = m;
+        INFO("case " << which);
+        CHECK(CheckEncodedResult(file, e) == "its mastering display metadata differs from what was written");
+    }
     ResultColor amve = c;
     amve.amve = Amve{{314, 1}, {3127, 10000}, {329, 1000}};
     e.color = amve;
@@ -652,6 +689,16 @@ TEST_CASE("What a passthrough expects back per codec and container: tags, range,
     CHECK(mov.expect->mdcv);
     CHECK(mov.expect->cll);
     CHECK_FALSE(PlanPassthroughColour(info, "prores_aw", {}, "a.mov", "t").expect->checkRange);  // an encoder outside the table: no range
+    VideoDecoder full(PqFfv1(dir, "full.mkv", hdr, Tags(9, 9, 16, 2)), VideoDecoder::Probe());
+    for (const char* nvenc : {"hevc_nvenc", "h264_nvenc"}) {  // MOV keeps no range, the codec's VUI does
+        INFO(nvenc);
+        const PassthroughColour nv = PlanPassthroughColour(full.Info(), nvenc, {}, "a.mov", "t");
+        REQUIRE(nv.expect);
+        CHECK(nv.expect->checkRange);
+        CHECK(nv.expect->range == 2);
+        CHECK(nv.expect->trc == 16);
+        CHECK_FALSE(HasKey(nv.encodeNotes, "encode.range_lost"));
+    }
     CHECK(PlanPassthroughColour(info, "ffv1", {}, "a.mkv", "t").expect->checkRange);              // Matroska's Colour keeps it
     CHECK_FALSE(PlanPassthroughColour(info, "ffv1", {}, "a.mkv", "t").expect->amve);
     CHECK_FALSE(PlanPassthroughColour(info, "ffv1", {}, "", "t").expect);  // no output named yet: nothing to check
@@ -933,6 +980,7 @@ TEST_CASE("Container colour caps by muxer: mp4 and mov keep amve, mkv not, mov n
     }
     CHECK(CodecKeepsRange("hevc_nvenc"));
     CHECK(CodecKeepsRange("av1_nvenc"));
+    CHECK(CodecKeepsRange("h264_nvenc"));
     CHECK_FALSE(CodecKeepsRange("prores_ks"));
     CHECK_FALSE(CodecKeepsRange("prores_aw"));  // an encoder outside the table: its range is not known
     CHECK_FALSE(CodecKeepsRange("ffv1"));
