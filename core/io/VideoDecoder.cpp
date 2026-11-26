@@ -776,6 +776,7 @@ void VideoDecoder::ReadColour(bool look, const RawTags& container) {
     const FirstLook how = look ? NeedsFirstLook(codec, fmt_->iformat->name, info_.bitDepth, hint) : FirstLook::None;
     if (how != FirstLook::None && !(how == FirstLook::Decode && hwOnly_)) in.first = FirstLookCached(url_, how);
     info_.color = SourceColorOf(in, LayoutKindOf(info_.pixelFormat), codec);
+    watchColour_ = look;
     info_.color.bitDepth = info_.pixelFormat == "unknown" ? 0 : info_.bitDepth;
     const SourceColor& c = info_.color;
     // said once per real open of a reader that looked (a probe, or a reader of frames only - the viewport, a thumbnail: tags alone, the
@@ -784,6 +785,12 @@ void VideoDecoder::ReadColour(bool look, const RawTags& container) {
         Log()->log(probe_ || !look ? spdlog::level::debug : spdlog::level::info, "{}: colour {} ({}){}", url_,
                    c.refuseAll == ColourRefusal::None ? ToString(c.cls) : ToString(c.refuseAll), ColourWords(c.effective),
                    !look ? std::string(", tags only") : c.looked != FirstLook::None ? ", " + std::string(ToString(c.looked)) + " read" : std::string());
+}
+
+std::string ClassChangeText(const ColorClassChange& ch) {
+    return "frame " + std::to_string(ch.index) + " and on are " + std::string(ClassWords(ch.to)) + " (" + ColourWords(ch.tags) +
+           "), the source was read as " + std::string(ClassWords(ch.from)) +
+           ": the frames after the change are written with the source's colour - cut the video there to keep each part right";
 }
 
 AVCodecContext* VideoDecoder::OpenCodec(AVBufferRef* device) const {
@@ -1038,6 +1045,12 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     decodedSinceSeek_ = true;
     ++framesDecoded_;
     ++instanceFrames_;
+    // TASK-0079: the class of each frame's colour against the source's - the class, not the tags (an SDR file's container and VUI often
+    // differ within SDR); the first that differs is kept. From the start only: after a seek the plan's reading of the start says nothing
+    if (watchColour_ && !seeked_ && !classChange_) {
+        const RawTags merged = MergeTags(WithoutReserved(FrameTagsOf(frame_), decoder_->name), info_.color.stream, info_.color.container);
+        if (const SourceClass k = ClassOf(merged); k != info_.color.cls) classChange_ = ColorClassChange{index, info_.color.cls, k, merged};
+    }
     if (!checkedFrameMatrix_) {  // an orientation in the bitstream (SEI) other than the container's: the container's is applied
         checkedFrameMatrix_ = true;
         if (const AVFrameSideData* sd = av_frame_get_side_data(frame_, AV_FRAME_DATA_DISPLAYMATRIX); sd && sd->size >= 9 * sizeof(int32_t)) {

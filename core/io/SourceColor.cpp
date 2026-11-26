@@ -161,8 +161,8 @@ std::vector<std::string> ColourInfoLines(const SourceColor& c) {
         else
             t = c.doviProfile ? "profile " + std::to_string(c.doviProfile) + " (guessed from the first frame's RPU)" : std::string("an RPU of an unknown profile");
         if (c.refuseAll == ColourRefusal::DolbyVisionIpt)
-            t += c.iptAssumed ? ": unknown base without a matrix or a transfer, taken for IPT - colours come out wrong without the RPU"
-                              : ": IPT base - colours come out wrong without the RPU";
+            t += c.iptAssumed ? ": unknown base without a matrix or a transfer, taken for IPT - not supported (colours wrong without the RPU)"
+                              : ": IPT base - not supported (colours wrong without the RPU)";
         else if (c.Note("source.dv_unknown") || c.Note("source.dv_record_short")) t += ": unknown base - removed in every output";
         else t += ": removed in every output";
         lines.push_back(Line("dolby vision", t));

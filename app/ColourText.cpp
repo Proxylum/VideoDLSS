@@ -129,6 +129,51 @@ QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
     return Q(n.detail);
 }
 
+QString ColourStopShortText(ColourStop stop) {
+    switch (stop) {
+        case ColourStop::None: return QString();
+        case ColourStop::NotYet: return Tr("обработка HDR — в следующей версии");
+        case ColourStop::Matrix: return Tr("обработка этой матрицы не поддерживается");
+        case ColourStop::DolbyVisionIpt:
+        case ColourStop::RgbHdr: return Tr("цвет источника не поддерживается");
+        case ColourStop::NoContainerTags: return Tr("контейнер не хранит цвет HDR");
+    }
+    return QString();
+}
+
+QString ColourStopText(ColourStop stop, const SourceColor& c) {
+    const QString passthrough = Tr("«Обработать» без стадий («только кодирование») запишет ролик как есть, с HDR");
+    switch (stop) {
+        case ColourStop::None: return QString();
+        case ColourStop::NotYet:
+            if (c.Note("source.layers_differ"))
+                return Tr("Слои ролика размечены по-разному (%1 — %2, параметры кодека — %3): обработка такого ролика появится в следующей версии. %4")
+                    .arg(LayersText(c), ClassText(c.cls, c.effective.primaries), ClassText(c.rawCls, c.stream.primaries), passthrough);
+            return Tr("Обработка ролика %1 появится в следующей версии: сейчас его цвета вышли бы неверными. %2")
+                .arg(ClassText(c.cls, c.effective.primaries), passthrough);
+        case ColourStop::Matrix:
+            return Tr("Матрица %1: обработка не поддерживается. %2").arg(MatrixText(c.effective.matrix), passthrough);
+        case ColourStop::DolbyVisionIpt:
+            return Tr("Dolby Vision %1 с базой IPT не поддерживается: без RPU её цвета неверны — ни обработка, ни запись как есть").arg(DoviName(c));
+        case ColourStop::RgbHdr:
+            return c.rgbLayout ? Tr("RGB-поток HDR / BT.2020 не поддерживается: он читается как 8-битный SDR — ни обработка, ни запись как есть")
+                               : Tr("Поток YUV помечен матрицей RGB: ни одна матрица YUV к нему не подходит — ни обработка, ни запись как есть");
+        case ColourStop::NoContainerTags:
+            return Tr("Этот контейнер не хранит цвет: ролик %1 сохраните как .mp4, .mov или .mkv").arg(ClassText(c.cls, c.effective.primaries));
+    }
+    return QString();
+}
+
+QString PlanNoteText(const SourceColor& c, const PlanNote& n) {
+    if (n.scope == "source") return ColourNoteText(c, ColourNote{n.key, n.text, true});
+    if (n.key == "encode.tags_filled") return Tr("Неуказанные теги цвета записываются по классу источника (BT.2020), чтобы плееры узнали HDR");
+    if (n.key == "encode.hdr_8bit") return Tr("HDR в 8 битах: плавные переходы станут ступеньками — лучше HEVC или AV1 10 бит, или ProRes");
+    if (n.key == "encode.range_lost") return Tr("Полный диапазон: этот контейнер с этим кодеком его не хранит — плееры прочтут ограниченный");
+    if (n.key == "encode.mdcv_lost") return Tr("Данные мастеринга неполные, а этот контейнер пишет их только целиком — они не перенесутся");
+    if (n.key == "encode.no_amve") return Tr("Условия просмотра (ambient viewing environment) в этот контейнер не переносятся");
+    return Q(n.text);
+}
+
 QString SourceColourText(const SourceColor& c, QString* tip) {
     bool planNote = false;
     for (const ColourNote& n : c.notes) planNote = planNote || n.plan;
@@ -138,13 +183,13 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
     QString text;
     // what cannot be read right comes first and alone: the rest would read as fine
     if (c.refuseAll == ColourRefusal::DolbyVisionIpt) {
-        text = c.iptAssumed ? Tr("Dolby Vision %1 (база не распознана, принята IPT): цвета при обработке будут неверны").arg(DoviName(c))
-                            : Tr("Dolby Vision %1 (база IPT): цвета при обработке будут неверны").arg(DoviName(c));
+        text = c.iptAssumed ? Tr("Dolby Vision %1 (база не распознана, принята IPT) — не поддерживается").arg(DoviName(c))
+                            : Tr("Dolby Vision %1 (база IPT) — не поддерживается").arg(DoviName(c));
     } else if (c.refuseAll == ColourRefusal::RgbHdr) {
-        text = c.rgbLayout ? Tr("RGB-поток HDR / BT.2020: читается как 8-битный SDR, цвета будут неверны")
-                           : Tr("Матрица RGB при YUV-раскладке (HDR / BT.2020): цвета будут неверны");
+        text = c.rgbLayout ? Tr("RGB-поток HDR / BT.2020 — не поддерживается")
+                           : Tr("Матрица RGB при YUV-раскладке (HDR / BT.2020) — не поддерживается");
     } else if (c.refuseProcessing == ColourRefusal::Matrix) {
-        text = Tr("%1: цвета при обработке будут неверны").arg(MatrixText(e.matrix));
+        text = Tr("%1 — обработка не поддерживается").arg(MatrixText(e.matrix));
     } else {
         QStringList parts;
         // HDR10: PQ of BT.2020 (said or assumed) with its static metadata; a P3 or BT.709 master is «HDR (PQ)» with its gamut beside
@@ -166,8 +211,10 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
         lines << Tr("Матрица %1 (%2), охват %3 (%4), кривая %5 (%6), диапазон %7 (%8)")
                      .arg(Q(MatrixName(e.matrix)), FromText(c.matrixFrom), Q(PrimariesName(e.primaries)), FromText(c.primariesFrom), Q(TrcName(e.trc)),
                           FromText(c.trcFrom), Q(RangeName(e.range)), FromText(c.rangeFrom));
-        if (!c.legacyPath)
-            lines << Tr("Обработка пока читает этот ролик как SDR: цвета обработанного результата будут неверны");
+        if (c.refuseAll != ColourRefusal::None)
+            lines << Tr("Ни обработка, ни запись как есть: такой ролик эта версия не пишет");
+        else if (!c.legacyPath)
+            lines << Tr("Обработка HDR и широкого охвата — в следующей версии; без стадий («только кодирование») ролик пишется как есть, с HDR");
         for (const ColourNote& n : c.notes) lines << ColourNoteText(c, n);
         *tip = lines.join('\n');
     }

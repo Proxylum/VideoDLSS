@@ -139,7 +139,7 @@ void ApplyYUp(PassReader& r, bool yUp) {
 int CmdInfo(const std::string& input, bool warp) {
     VideoDecoder dec(input);
     const auto& i = dec.Info();
-    const ColorInfo ci = ResolveColor(i).colourDecode;
+    const ColorInfo ci = ResolveColor(i).View();  // TASK-0079: the SDR reading - info works on any source
     std::printf("file:        %s\n", input.c_str());
     std::printf("video:       %s %ux%u %s (%s, %s range)\n", i.codecName.c_str(), i.width, i.height, i.pixelFormat.c_str(),
                 std::string(ToString(ci.matrix)).c_str(), std::string(ToString(ci.range)).c_str());
@@ -154,6 +154,13 @@ int CmdInfo(const std::string& input, bool warp) {
         std::printf("samples:     %d-bit %s, decoded as %s (%s)\n", i.bitDepth, i.chroma.c_str(), i.decoded.Name().c_str(), i.decoded.Describe().c_str());
     std::printf("decode:      %s\n", DescribeDecode(decode).c_str());
     for (const std::string& line : ColourInfoLines(i.color)) std::printf("%s\n", line.c_str());  // TASK-0078: HDR, Dolby Vision, notes
+    {  // TASK-0079: what this version does with that colour
+        const ColorPlan cp = ResolveColor(i);
+        if (cp.all != ColourStop::None) std::printf("processing:  not supported - %s\n", cp.why.c_str());
+        else if (cp.process != ColourStop::None) std::printf("processing:  not yet - %s\n", cp.why.c_str());
+        if (i.color.Hdr() && !i.color.hdr.Empty())
+            std::printf("hdr note:    the HDR10 records go to the container only when passed through (FFmpeg 7.1.1's NVENC writes no SEI)\n");
+    }
     if (!i.orientation.Identity())  // TASK-0072: the frames are turned as players show them
         std::printf("orientation: %s (%s), stored %ux%u\n", i.orientation.Describe().c_str(), i.orientationFrom.c_str(), i.codedWidth, i.codedHeight);
     if (!i.sar.Square()) {  // TASK-0073: non-square pixels - the result of process is stretched to square ones
@@ -230,6 +237,7 @@ int CmdDepth(const DepthArgs& a) {
         Log()->info("depth: model {} ({}), window {} / overlap {}", choice.modelId, choice.license, choice.window, choice.overlap);
     VideoDecoder decoder(a.input);
     decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
+    RequireColour(ResolveColor(decoder.Info()), ColourUse::Process, "depth: " + a.input);  // TASK-0079: before the model and the hash
     const auto& info = decoder.Info();
     DepthStageOptions o;
     o.backend = a.backend;
@@ -312,6 +320,7 @@ int CmdFlow(const FlowArgs& a) {
     else if (a.hwaccel != "none") Throw("--hwaccel must be none|cuda");
     VideoDecoder decoder(a.input, dopt);
     decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
+    RequireColour(ResolveColor(decoder.Info()), ColourUse::Process, "flow: " + a.input);  // TASK-0079: before the preparation and the hash
     const auto& info = decoder.Info();
     FlowStageOptions o;
     o.backend = a.backend;
@@ -441,7 +450,8 @@ int CmdExport(const ExportArgs& a) {
         decoder = std::make_unique<VideoDecoder>(a.input);
         decoder->RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
         const auto& info = decoder->Info();
-        ColorInfo ci = ResolveColor(info).colourDecode;
+        RequireColour(ResolveColor(info), ColourUse::Process, "export: " + a.input);  // TASK-0079: before the hash
+        ColorInfo ci = ResolveColor(info).Colour();
         if (a.matrix == "bt601") ci.matrix = ColorMatrix::Bt601;
         else if (a.matrix == "bt709") ci.matrix = ColorMatrix::Bt709;
         else if (a.matrix != "auto") Throw("--matrix must be bt601|bt709|auto");

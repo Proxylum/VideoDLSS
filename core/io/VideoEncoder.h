@@ -6,6 +6,7 @@
 #include <string>
 
 #include "io/VideoDecoder.h"
+#include "io/SourceColor.h"
 #include "pipeline/Frame.h"
 
 struct AVFormatContext;
@@ -44,6 +45,11 @@ public:
         // TASK-0073: the pixels' proportions written to the codec and the stream (MP4 / MOV pasp, MKV DisplayWidth, AVI vprp, NVENC's
         // VUI); square: nothing written
         PixelAspect sar;
+        // TASK-0079: a PQ / HLG source's static HDR records passed through - mastering display, content light level, ambient viewing
+        // environment. They reach the container (libavcodec maps them into the stream's coded side data: MP4 / MOV mdcv / clli / amve,
+        // Matroska's MasteringMetadata / MaxCLL), not the bitstream: FFmpeg 7.1.1's NVENC writes no SEI. What a container keeps:
+        // ContainerColorCapsFor.
+        HdrStatic hdr;
     };
 
     VideoEncoder(const std::filesystem::path& path, const FrameDesc& frameDesc, const Options& options);
@@ -68,6 +74,22 @@ public:
     const std::string& PixelFormatName() const { return pixelFormatName_; }  // the encoder's input format ("p010le", "yuv422p10le" ...)
 
     static bool EncoderAvailable(const std::string& name);
+    // TASK-0079: what an output's muxer (by the file name, as the encoder picks it) writes of colour - FFmpeg 7.1.1's movenc and
+    // matroskaenc. mp4: colr (nclx: with the range; only when the matrix, primaries and transfer are all said), mdcv (only with both its
+    // primaries and its luminance), clli, amve; mov: the same with colr nclc (no range); matroska / webm: Colour (each tag on its own,
+    // the range too), MasteringMetadata (either half), MaxCLL / MaxFALL, no ambient viewing environment; anything else (avi, the ipod
+    // muxer of .m4v, mpegts, raw streams): no colour at all.
+    struct ContainerColorCaps {
+        std::string muxer;
+        bool tags = false;            // colour tags at all
+        bool allThreeOrNone = false;  // the tags only when matrix, primaries and transfer are all said
+        bool range = false;           // the range among them
+        bool mdcv = false;            // a mastering display
+        bool mdcvNeedsBoth = false;   // ... only with both its primaries and its luminance
+        bool cll = false;             // content light level
+        bool amve = false;            // ambient viewing environment
+    };
+    static ContainerColorCaps ContainerColorCapsFor(const std::filesystem::path& output);
     // The encoder's input pixel format for a frame layout (empty when the encoder takes none that holds it).
     static std::string PixelFormatFor(const std::string& codec, const FrameDesc& frameDesc);
 

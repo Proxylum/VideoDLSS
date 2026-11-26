@@ -180,6 +180,12 @@ ProjectPanel::ProjectPanel(AppModel& model, TaskQueue& tasks, QWidget* parent) :
     outError_->setWordWrap(true);
     SetRole(outError_, "warn");
     og->addWidget(outError_, row++, 0, 1, 2);
+    outNotes_ = new QLabel(outCard);  // TASK-0079: what the colour loses or assumes - a note, «Обработать» stays on
+    outNotes_->setObjectName("outNotes");
+    outNotes_->setWordWrap(true);
+    SetRole(outNotes_, "hint");
+    outNotes_->setVisible(false);
+    og->addWidget(outNotes_, row++, 0, 1, 2);
     process_ = new QPushButton(tr("Обработать"), outCard);
     process_->setDefault(true);
     SetRole(process_, "primary-big");
@@ -497,8 +503,13 @@ void ProjectPanel::refresh() {
     }
     outError_->setText(model_.planError());
     outError_->setVisible(!model_.planError().isEmpty() && hasSource);
+    {
+        const QStringList notes = model_.planNotes();
+        outNotes_->setText(notes.join("\n"));
+        outNotes_->setVisible(hasSource && !notes.isEmpty());
+    }
     const int toRun = std::max(0, out.stagesToRun - 1);  // the encode is not a «stage» for the button
-    process_->setText(!model_.sourceDecode().Ok() ? tr("Обработать")  // TASK-0076: nothing can be run on a source this machine cannot decode
+    process_->setText(!model_.sourceDecode().Ok() || model_.colourStopSaid() ? tr("Обработать")  // TASK-0076/0079: nothing runs on such a source
                       : toRun > 0                 ? tr("Обработать · %1").arg(Plural(toRun, tr("стадия"), tr("стадии"), tr("стадий")))
                                                   : tr("Обработать · только кодирование"));
     // a preview does not hold processing back: «Обработать» preempts it (TaskQueue)
@@ -575,6 +586,8 @@ void ProjectPanel::refresh() {
     // TASK-0076: a source this machine cannot decode - no «обновится»: no run starts (as the stages' cards say)
     encodeState_->setText(!hasSource                    ? QString()
                           : model_.sourceRefusalSaid() ? SourceRefusedShortText()
+                          : model_.colourStopSaid()    ? ColourStopShortText(model_.colourStopAll() != ColourStop::None ? model_.colourStopAll()
+                                                                                                                         : model_.colourStop())
                                                        : tr("пересчёт · %1 · %2 обновится").arg(enc ? FormatDuration(enc->seconds) : "—").arg(result));
     refreshVersions();
     updating_ = false;
@@ -794,6 +807,7 @@ void ProjectPanel::runStage(const std::string& stage) {
         if (s.name == stage) st = &s;
     if (!st || p.sourceVideo.empty()) return;
     if (!model_.sourceDecode().Ok()) return;  // TASK-0076: the plan says why (the stage would refuse the source at once)
+    if (model_.colourStop() != ColourStop::None) return;  // TASK-0079: likewise its colour (the card's tooltip says why)
     QStringList args{QString::fromStdString(st->name), "-i", QString::fromStdWString(p.sourceVideo.wstring()), "-o", QString::fromStdWString(p.passesRoot.wstring())};
     // one mapping of the schema keys to the command's options, checked against every command (tests/integration/test_cli.cpp)
     for (const std::string& a : StageCliArgs(st->name, st->params)) args << QString::fromStdString(a);

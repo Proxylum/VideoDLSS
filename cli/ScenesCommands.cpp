@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include "convert/ColorPlan.h"
 #include "io/VideoDecoder.h"
 #include "passes/ScenesPass.h"
 #include "pipeline/PassFingerprint.h"
@@ -42,6 +43,8 @@ int CmdScenes(const ScenesCommands::Args& a) {
     // (a decoder with a software path refuses nothing: its history is not listed here - FindSceneScores lists it below)
     if (decodes && decoder.Info().hardwareOnly && (a.reanalyze || ListPassVersions(a.output, kScenesPass).empty())) decoder.RequireDecodable();
     const auto& info = decoder.Info();
+    // TASK-0079: a colour this version cannot read for the scores - refused before the hash, the pass on disk kept where it is
+    if (decodes) RequireColour(ResolveColor(info), ColourUse::Process, "scenes: " + a.input);
     ScenesStageOptions o;
     o.threshold = a.threshold;
     o.backend = a.backend;
