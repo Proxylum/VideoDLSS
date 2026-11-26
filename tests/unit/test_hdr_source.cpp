@@ -735,10 +735,50 @@ TEST_CASE("info says a Dolby Vision RPU without a record: the guessed profile, o
     CHECK(line(WithRpu(9, 9, 16, 0, true)) == "dolby vision: profile 5 (guessed from the first frame's RPU): IPT base - colours come out wrong without the RPU");
     // an IPT base taken for one (a base nobody names, no colour tags): said as an assumption
     CHECK(line(WithRpu(2, 2, 2, 0, false)) ==
-          "dolby vision: an RPU of an unknown profile: unknown base without colour tags, taken for IPT - colours come out wrong without the RPU");
+          "dolby vision: an RPU of an unknown profile: unknown base without a matrix or a transfer, taken for IPT - colours come out wrong without "
+          "the RPU");
     CHECK(WithRpu(2, 2, 2, 0, false).iptAssumed);
     CHECK(WithDovi(2, 2, 2, 8, 3).iptAssumed);
     CHECK_FALSE(WithDovi(2, 2, 2, 5, 0).iptAssumed);
     CHECK_FALSE(Classified(15, 9, 16).iptAssumed);
     CHECK(line(WithDovi(9, 9, 16, 8, 0)) == "dolby vision: profile 8, level 6, compatibility 0 (record): unknown base - removed in every output");
+}
+
+// ---- review round 5 (TASK-0078) -------------------------------------------------------------------------------------------------
+
+TEST_CASE("info names an IPT base for what it is, not the class of its tags", "[hdr][cli][dovi]") {
+    const std::vector<std::string> p5 = ColourInfoLines(WithDovi(2, 2, 2, 5, 0));
+    REQUIRE_FALSE(p5.empty());
+    CHECK(p5[0].rfind("colour:      Dolby Vision IPT base - matrix unknown", 0) == 0);
+    const std::vector<std::string> assumed = ColourInfoLines(WithDovi(2, 2, 2, 8, 3));
+    CHECK(assumed[0].rfind("colour:      Dolby Vision, taken for an IPT base - ", 0) == 0);
+    CHECK(ColourInfoLines(WithDovi(9, 9, 18, 8, 4))[0].rfind("colour:      HDR HLG - ", 0) == 0);  // a named base: its class
+    CHECK(WithDovi(9, 9, 16, 8, 0).Note("source.dv_record_short")->detail.find("the record names no base") != std::string::npos);
+}
+
+TEST_CASE("Reserved values are dropped in the stream and the container as well as in the frame", "[hdr]") {
+    // a transfer 0 (reserved) under BT.2020 primaries in the codec parameters: unspecified - wide gamut, not a log curve
+    ColourLayers in;
+    in.stream = in.container = RawTags{9, 9, 0, 1, 0};
+    const SourceColor wide = SourceColorOf(in, "420", "hevc");
+    CHECK(wide.cls == SourceClass::Wide);
+    CHECK(wide.effective.trc == 2);
+    CHECK(wide.Note("source.trc_unspecified") != nullptr);
+    // ProRes: colr and the header say matrix 0 - unknown in every layer, no RGB refusal
+    ColourLayers prores;
+    prores.stream = RawTags{0, 9, 16, 1, 0};
+    FirstLookColor header;
+    header.how = FirstLook::Decode;
+    header.tags = RawTags{0, 9, 16, 1, 0};
+    prores.first = header;
+    CHECK(SourceColorOf(prores, "422", "prores").refuseAll == ColourRefusal::None);
+    CHECK(SourceColorOf(prores, "422", "prores").cls == SourceClass::Pq);
+    ColourLayers containerOnly;
+    containerOnly.container = RawTags{0, 9, 16, 1, 0};
+    CHECK(SourceColorOf(containerOnly, "422", "prores").refuseAll == ColourRefusal::None);
+    // primaries 3 in the container (reserved): unspecified, the stream's taken - no container difference
+    ColourLayers three;
+    three.stream = Tags(9, 9, 16);
+    three.container = RawTags{9, 3, 16, 1, 0};
+    CHECK(SourceColorOf(three, "420", "hevc").Note("source.container_differs") == nullptr);
 }

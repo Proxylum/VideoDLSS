@@ -778,7 +778,7 @@ void VideoDecoder::ReadColour(bool look, const RawTags& container) {
     info_.color = SourceColorOf(in, LayoutKindOf(info_.pixelFormat), codec);
     const SourceColor& c = info_.color;
     if (!c.legacyPath || c.doviConf || c.doviRpu || !c.hdr.Empty() || !c.probeError.empty())
-        Log()->log(probe_ ? spdlog::level::debug : spdlog::level::info, "{}: colour {} ({}){}", url_, ToString(c.cls), ColourWords(c.effective),
+        Log()->log(probe_ ? spdlog::level::debug : spdlog::level::info, "{}: colour {} ({}){}", url_, c.refuseAll == ColourRefusal::None ? ToString(c.cls) : ToString(c.refuseAll), ColourWords(c.effective),
                    c.looked != FirstLook::None ? ", " + std::string(ToString(c.looked)) + " read" : std::string());
 }
 

@@ -95,7 +95,7 @@ QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
     if (n.key == "source.dv_record_short" || n.key == "source.dv_unknown")
         return Tr("Dolby Vision %1: база не названа — цвет по тегам; Dolby Vision снимается при любой записи").arg(DoviName(c));
     if (n.key == "source.dv_ipt")
-        return c.iptAssumed ? Tr("База Dolby Vision не названа, а теги цвета не указаны — принята база IPT: без RPU её цвета неверны, а RPU эта "
+        return c.iptAssumed ? Tr("База Dolby Vision не названа, а матрица и кривая не указаны — принята база IPT: без RPU её цвета неверны, а RPU эта "
                                  "программа не применяет")
                             : Tr("База Dolby Vision в IPT: без RPU цвета неверны, а RPU эта программа не применяет — цвета при обработке будут неверны");
     if (n.key == "source.matrix_unsupported")

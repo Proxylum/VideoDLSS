@@ -72,6 +72,9 @@ struct ClipSpec {
     // video packet i's bytes written anew (an SEI put into an HEVC access unit) and its side data (AV_PKT_DATA_* type, bytes)
     std::function<std::string(int64_t, const std::string&)> videoPacket;
     std::function<std::vector<std::pair<int, std::string>>(int64_t)> videoPacketSideData;
+    // the video stream's extradata written anew before the header (an HEVC encoder's Annex B parameter sets: SEI added to them reach
+    // the MP4 / MKV hvcC as its own array)
+    std::function<std::string(const std::string&)> extradata;
 };
 // The CpuFrame layout `WriteClip` feeds the encoder for a ClipSpec::pixFmt.
 FrameDesc FrameDescFor(const ClipSpec& spec);

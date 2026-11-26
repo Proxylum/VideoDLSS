@@ -229,6 +229,16 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
         vs->codecpar->color_range = static_cast<AVColorRange>(spec.containerColor->range);
     }
     AddHdrSideData(vs->codecpar, spec.hdr);
+    if (spec.extradata) {
+        const std::string bytes = spec.extradata(std::string(reinterpret_cast<const char*>(vs->codecpar->extradata),
+                                                             static_cast<size_t>(std::max(vs->codecpar->extradata_size, 0))));
+        auto* data = static_cast<uint8_t*>(av_mallocz(bytes.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+        if (!data) Throw("test clip: no memory for extradata");
+        std::memcpy(data, bytes.data(), bytes.size());
+        av_freep(&vs->codecpar->extradata);
+        vs->codecpar->extradata = data;
+        vs->codecpar->extradata_size = static_cast<int>(bytes.size());
+    }
     if (spec.strict != INT32_MIN) fmt->strict_std_compliance = spec.strict;
 
     // --- audio (pcm_s16le sine) ---
@@ -508,23 +518,36 @@ std::string Hdr10PlusSideData() {
 }
 
 std::string HevcPrefixSei(int payloadType, const std::string& payload) {
-    std::string nal("\x00\x00\x00\x01\x4E\x01", 6);  // start code, NAL type 39 (prefix SEI), layer 0, temporal id 1
+    std::string rbsp;  // the SEI message
     for (int t = payloadType;; t -= 255) {
         if (t < 255) {
-            nal += static_cast<char>(t);
+            rbsp += static_cast<char>(t);
             break;
         }
-        nal += static_cast<char>(0xFF);
+        rbsp += static_cast<char>(0xFF);
     }
     for (size_t n = payload.size();; n -= 255) {
         if (n < 255) {
-            nal += static_cast<char>(n);
+            rbsp += static_cast<char>(n);
             break;
         }
-        nal += static_cast<char>(0xFF);
+        rbsp += static_cast<char>(0xFF);
     }
-    nal += payload;
-    nal += static_cast<char>(0x80);  // rbsp trailing bits
+    rbsp += payload;
+    rbsp += static_cast<char>(0x80);  // rbsp trailing bits
+    // start code, NAL header: type 39 (prefix SEI), layer 0, nuh_temporal_id_plus1 1; then the payload with emulation prevention (no
+    // 00 00 0x with x <= 3 inside a NAL unit: a 03 goes before the third byte)
+    std::string nal("\x00\x00\x00\x01\x4E\x01", 6);
+    int zeros = 0;
+    for (char ch : rbsp) {
+        const auto b = static_cast<unsigned char>(ch);
+        if (zeros >= 2 && b <= 3) {
+            nal += '\x03';
+            zeros = 0;
+        }
+        nal += ch;
+        zeros = b == 0 ? zeros + 1 : 0;
+    }
     return nal;
 }
 

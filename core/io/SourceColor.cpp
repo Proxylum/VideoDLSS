@@ -129,7 +129,10 @@ std::vector<std::string> ColourInfoLines(const SourceColor& c) {
     for (const ColourNote& n : c.notes) planNote = planNote || n.plan;
     if (c.legacyPath && !c.doviConf && !c.doviRpu && c.hdr.Empty() && !c.hdr10Plus && !planNote) return lines;
     const RawTags& e = c.effective;
-    lines.push_back(Line("colour", std::string(ClassWords(c.cls)) + " - " + FieldWords("matrix", MatrixName(e.matrix), c.matrixFrom, MatrixName(c.stream.matrix)) +
+    // an IPT base is no class of its tags (row 1 of the table stops there): its tags say nothing of its colours
+    const std::string cls = c.refuseAll == ColourRefusal::DolbyVisionIpt ? (c.iptAssumed ? "Dolby Vision, taken for an IPT base" : "Dolby Vision IPT base")
+                                                                          : std::string(ClassWords(c.cls));
+    lines.push_back(Line("colour", cls + " - " + FieldWords("matrix", MatrixName(e.matrix), c.matrixFrom, MatrixName(c.stream.matrix)) +
                                        ", " + FieldWords("primaries", PrimariesName(e.primaries), c.primariesFrom, PrimariesName(c.stream.primaries)) +
                                        ", " + FieldWords("transfer", TrcName(e.trc), c.trcFrom, TrcName(c.stream.trc)) + ", " +
                                        FieldWords("range", RangeName(e.range), c.rangeFrom, RangeName(c.stream.range))));
@@ -158,7 +161,7 @@ std::vector<std::string> ColourInfoLines(const SourceColor& c) {
         else
             t = c.doviProfile ? "profile " + std::to_string(c.doviProfile) + " (guessed from the first frame's RPU)" : std::string("an RPU of an unknown profile");
         if (c.refuseAll == ColourRefusal::DolbyVisionIpt)
-            t += c.iptAssumed ? ": unknown base without colour tags, taken for IPT - colours come out wrong without the RPU"
+            t += c.iptAssumed ? ": unknown base without a matrix or a transfer, taken for IPT - colours come out wrong without the RPU"
                               : ": IPT base - colours come out wrong without the RPU";
         else if (c.Note("source.dv_unknown") || c.Note("source.dv_record_short")) t += ": unknown base - removed in every output";
         else t += ": removed in every output";
@@ -329,12 +332,12 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
             note("source.dv_removed", DoviWords(d) + " (" + BaseWords(d.blCompat) + "): the RPU is dropped in every output, the base layer stays");
         } else if (d.blCompat == 0 && (d.profile == 4 || d.profile == 7 || d.profile == 8 || d.profile == 9)) {
             note("source.dv_record_short", DoviWords(d) +
-                                               ": a record too short to name its base (FFmpeg reads one under 5 bytes as compatibility 0) - the class "
+                                               ": the record names no base (an old record, or one under 5 bytes that FFmpeg reads as compatibility 0) - the class "
                                                "follows the colour tags; the RPU is dropped in every output");
         } else if (M == 2 && T == 2) {
             ipt = true;
             c.iptAssumed = true;
-            iptWords = DoviWords(d) + " - a base FFmpeg 7.1.1 does not name, without colour tags: taken for an IPT base";
+            iptWords = DoviWords(d) + " - a base FFmpeg 7.1.1 does not name, without a matrix or a transfer: taken for an IPT base";
         } else {
             note("source.dv_unknown", DoviWords(d) + " - a base FFmpeg 7.1.1 does not name: the class follows the colour tags; the RPU is dropped "
                                                      "in every output");
@@ -352,7 +355,7 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
         } else if (M == 2 && T == 2) {
             ipt = true;
             c.iptAssumed = true;
-            iptWords = words + ", without colour tags: taken for an IPT base";
+            iptWords = words + ", without a matrix or a transfer: taken for an IPT base";
         } else {
             note("source.dv_unknown", words + ": the class follows the colour tags; the RPU is dropped in every output");
         }

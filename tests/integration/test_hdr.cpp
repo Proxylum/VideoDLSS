@@ -626,3 +626,48 @@ TEST_CASE("A proxy's check of its video reads no colour", "[integration][hdr][ca
     CHECK(ValidProxy(clip, dir / "passes", "source"));
     CHECK(FirstFrameDecodes() == decodes);
 }
+
+TEST_CASE("HEVC MP4 whose mastering and light level are SEI in hvcC: the stream's records", "[integration][hdr][gpu]") {
+    const auto dir = Dir("hvcc_sei");
+    // SEI 137 (mastering display: G, B, R and white x/y in 1/50000, max / min luminance in 1/10000 cd/m2) and 144 (MaxCLL, MaxFALL)
+    std::string mdcv;
+    auto be16 = [&](int v) { mdcv += static_cast<char>((v >> 8) & 0xFF); mdcv += static_cast<char>(v & 0xFF); };
+    for (int v : {8500, 39850, 6550, 2300, 35400, 14600, 15635, 16450}) be16(v);
+    for (uint32_t v : {10000000u, 1u})
+        for (int shift : {24, 16, 8, 0}) mdcv += static_cast<char>((v >> shift) & 0xFF);
+    const std::string cll{'\x03', '\xE8', '\x01', '\x90'};  // 1000, 400
+    ClipSpec spec;
+    spec.codec = "hevc_nvenc";
+    spec.color = Tags(9, 9, 16);
+    spec.extradata = [&](const std::string& ps) { return ps + HevcPrefixSei(137, mdcv) + HevcPrefixSei(144, cll); };
+    REQUIRE_NVENC(clip, dir / "pq_hvcc.mp4", spec);
+    REQUIRE_FALSE(Summarize(clip).hdr.mdcv);  // no mdcv box: the records are the bitstream's alone
+    VideoDecoder dec(clip, VideoDecoder::Probe());
+    const SourceColor& c = dec.Info().color;
+    REQUIRE(c.hdr.mdcv);
+    CHECK(c.hdr.mdcv->maxLum.Value() == 1000.0);
+    CHECK(c.mdcvFrom == TagFrom::Stream);
+    REQUIRE(c.hdr.cll);
+    CHECK(*c.hdr.cll == Cll{1000, 400});
+    CHECK(c.cllFrom == TagFrom::Stream);
+    CHECK(c.Note("source.no_hdr_metadata") == nullptr);
+    const auto info = RunAll({"info", clip.string()}, dir / "info.log");
+    INFO(info.out);
+    CHECK_THAT(info.out, ContainsSubstring("light level: MaxCLL 1000, MaxFALL 400 cd/m2 (stream)"));
+}
+
+TEST_CASE("info of a Dolby Vision profile 5 file says its IPT base on the colour line", "[integration][hdr][cli][dovi]") {
+    const auto dir = Dir("info_dv5");
+    ClipSpec dv;
+    dv.width = 64;
+    dv.height = 48;
+    dv.frames = 2;
+    DoviConf d;
+    d.profile = 5;
+    d.level = 6;
+    dv.hdr.dovi = d;
+    const auto info = RunAll({"info", WriteClip(dir / "dv5.mkv", dv).string()}, dir / "info.log");
+    INFO(info.out);
+    CHECK_THAT(info.out, ContainsSubstring("colour:      Dolby Vision IPT base - "));
+    CHECK_THAT(info.out, !ContainsSubstring("colour:      SDR"));
+}

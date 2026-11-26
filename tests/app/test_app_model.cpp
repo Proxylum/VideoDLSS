@@ -11148,7 +11148,7 @@ TEST_CASE("Colour row: Dolby Vision from an RPU, the RGB matrix on YUV, layers o
         QString tip;
         CHECK(SourceColourText(SourceColorOf(in, "420", "hevc"), &tip) ==
               QString::fromUtf8("Dolby Vision 8.3 (база не названа, принята IPT): цвета при обработке будут неверны"));
-        CHECK(tip.contains(QString::fromUtf8("База Dolby Vision не названа, а теги цвета не указаны — принята база IPT")));
+        CHECK(tip.contains(QString::fromUtf8("База Dolby Vision не названа, а матрица и кривая не указаны — принята база IPT")));
     }
     // the RGB matrix on a Y'CbCr stream
     ColourLayers yuv;
