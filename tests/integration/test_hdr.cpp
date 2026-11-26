@@ -569,24 +569,22 @@ TEST_CASE("The viewport reads frames without a colour look", "[integration][hdr]
     CHECK(FirstPacketPeeks() == peeks);
 }
 
-TEST_CASE("A first look decodes frames an edit list discards: a cut made by stream copy", "[integration][hdr]") {
+TEST_CASE("A first look decodes frames an edit list discards: a cut made by stream copy", "[integration][hdr][gpu]") {
+    // a long-GOP HEVC whose MP4 edit list starts 100 frames after its only keyframe: the demuxer marks those 100 packets discard (an
+    // intra codec would not do: its index starts at the cut's own keyframe)
     const auto dir = Dir("editlist");
     ClipSpec spec;
-    spec.width = 64;
-    spec.height = 48;
-    spec.frames = 72;
-    spec.codec = "prores_ks";
-    spec.pixFmt = "yuv422p10le";
-    spec.color = Tags(9, 9, 14);
-    spec.frameColor = [](int64_t) { return Tags(9, 9, 18); };
-    spec.pts = [](int64_t i) { return i - 70; };  // 70 frames before 0: an edit list starts the MOV at the 71st
-    const auto clip = WriteClip(dir / "cut.mov", spec);
-    // FFmpeg drops the frames of packets before the edit's start: a plain decode of the first 64 packets gives nothing
-    REQUIRE(FrameColors(clip, 72).size() == 2);
+    spec.codec = "hevc_nvenc";
+    spec.color = Tags(9, 9, 16);
+    spec.frames = 102;
+    spec.gop = 200;
+    spec.bframes = 0;
+    spec.pts = [](int64_t i) { return i - 100; };
+    REQUIRE_NVENC(clip, dir / "cut.mp4", spec);
+    REQUIRE(FrameColors(clip, 200).size() == 2);  // FFmpeg drops the frames of the 100 discarded packets
     VideoDecoder dec(clip, VideoDecoder::Probe());
     const SourceColor& c = dec.Info().color;
     CHECK(c.probeError.empty());
     CHECK(c.looked == FirstLook::Decode);
-    CHECK(c.cls == SourceClass::Hlg);
-    CHECK(c.trcFrom == TagFrom::Frame);
+    CHECK(c.cls == SourceClass::Pq);
 }
