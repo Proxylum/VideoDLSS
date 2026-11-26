@@ -192,6 +192,8 @@ struct ColourLayers {
     std::optional<DoviConf> dovi;
     std::optional<FirstLookColor> first;
 };
+// The tags NeedsFirstLook decides by: the stream's over the container's, reserved values dropped (a ProRes colr's matrix 0 is unsaid).
+RawTags LookHint(const ColourLayers& in, std::string_view codec);
 // The source's colour from them: reserved values dropped (WithoutReserved), the tags merged (MergeTags), the records - the container's,
 // the codec's where the container has none, the first frame's where it has one of another value (SameRecord) -, the RPU and HDR10+ of
 // the look, a failed look as probeError / lookFailed; then Classify.

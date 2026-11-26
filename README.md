@@ -326,7 +326,9 @@ run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame|query-fails|
 
 **HDR and wide-gamut sources are recognised** (TASK-0078, the first step of HDR support): `dlssvid info` prints a `colour:`
 line - the class (HDR PQ, HDR HLG, wide gamut SDR, log curve, SDR; for an IPT base «Dolby Vision IPT base», or «Dolby Vision,
-taken for an IPT base» when the record names no base and no matrix nor transfer is said) and each tag with the layer it was read from (`container`: MP4 /
+taken for an IPT base» when the base is one FFmpeg 7.1.1 does not know - a reserved compatibility, a profile without a base, or an RPU of
+an unknown profile without a record - and no matrix nor transfer is said; a record of compatibility 0 for a profile that has a base names
+none and the class follows the tags) and each tag with the layer it was read from (`container`: MP4 /
 MOV `colr`, Matroska Colour; `stream`: the codec parameters - an HEVC / H.264 VUI, an AV1 sequence header; `frame`: the first
 frame where it differs - a ProRes frame header, an HEVC alternative transfer SEI that turns BT.2020 into HLG) - and, when present,
 `mastering:`, `light level:` (MaxCLL / MaxFALL), `ambient:`, `dolby vision:` (profile, level, the base layer's compatibility:

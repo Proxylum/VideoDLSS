@@ -772,7 +772,7 @@ void VideoDecoder::ReadColour(bool look, const RawTags& container) {
     ReadCodedSideData(par->coded_side_data, par->nb_coded_side_data, in.containerRecords, &in.dovi);
     ReadFrameSideData(codec_->decoded_side_data, codec_->nb_decoded_side_data, in.codecRecords);
     const std::string_view codec = decoder_->name;
-    const RawTags hint = MergeTags(RawTags{}, WithoutReserved(in.stream, codec), WithoutReserved(in.container, codec));
+    const RawTags hint = LookHint(in, codec);
     const FirstLook how = look ? NeedsFirstLook(codec, fmt_->iformat->name, info_.bitDepth, hint) : FirstLook::None;
     if (how != FirstLook::None && !(how == FirstLook::Decode && hwOnly_)) in.first = FirstLookCached(url_, how);
     info_.color = SourceColorOf(in, LayoutKindOf(info_.pixelFormat), codec);

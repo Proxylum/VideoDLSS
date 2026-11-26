@@ -11147,8 +11147,23 @@ TEST_CASE("Colour row: Dolby Vision from an RPU, the RGB matrix on YUV, layers o
         in.dovi = d;
         QString tip;
         CHECK(SourceColourText(SourceColorOf(in, "420", "hevc"), &tip) ==
-              QString::fromUtf8("Dolby Vision 8.3 (база не названа, принята IPT): цвета при обработке будут неверны"));
-        CHECK(tip.contains(QString::fromUtf8("База Dolby Vision не названа, а матрица и кривая не указаны — принята база IPT")));
+              QString::fromUtf8("Dolby Vision 8.3 (база не распознана, принята IPT): цвета при обработке будут неверны"));
+        CHECK(tip.contains(QString::fromUtf8("База Dolby Vision не распознана, а матрица и кривая не указаны — принята база IPT")));
+        // a record that names no base (compatibility 0 of a profile with one): the class from the tags, said as the record's lack
+        ColourLayers shortRecord;
+        DoviConf p8;
+        p8.profile = 8;
+        shortRecord.dovi = p8;
+        SourceColourText(SourceColorOf(shortRecord, "420", "hevc"), &tip);
+        CHECK(tip.contains(QString::fromUtf8("Dolby Vision 8.0: запись не называет базу")));
+        ColourLayers unknown;
+        DoviConf p83;
+        p83.profile = 8;
+        p83.blCompat = 3;
+        unknown.dovi = p83;
+        unknown.stream = RawTags{9, 9, 16, 1, 0};
+        SourceColourText(SourceColorOf(unknown, "420", "hevc"), &tip);
+        CHECK(tip.contains(QString::fromUtf8("Dolby Vision 8.3: база не распознана — цвет по тегам")));
     }
     // the RGB matrix on a Y'CbCr stream
     ColourLayers yuv;

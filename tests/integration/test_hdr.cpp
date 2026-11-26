@@ -699,6 +699,7 @@ TEST_CASE("A reader without the colour look logs the source's colour at debug le
         VideoDecoder::Options frames;  // the viewport's first open: not a probe, no look
         frames.colorProbe = false;
         VideoDecoder viewport(clip, frames);
+        VideoDecoder probe(clip, VideoDecoder::Probe());  // a probe looks and says it at debug level
         VideoDecoder task(clip);  // a reader that looks
     }
     const std::string log = text.str();
@@ -706,6 +707,29 @@ TEST_CASE("A reader without the colour look logs the source's colour at debug le
     CHECK(log.find("info " + clip.string() + ": colour wide") == std::string::npos);
     CHECK(log.find("debug " + clip.string() + ": colour wide (matrix bt2020nc, primaries bt2020, transfer bt2020-10, range unknown), tags only") !=
           std::string::npos);
-    CHECK(log.find("info " + clip.string() + ": colour hlg (matrix bt2020nc, primaries bt2020, transfer arib-std-b67, range unknown), first frame read") !=
-          std::string::npos);
+    const std::string hlg = clip.string() + ": colour hlg (matrix bt2020nc, primaries bt2020, transfer arib-std-b67, range unknown), first frame read";
+    CHECK(log.find("debug " + hlg) != std::string::npos);  // the probe
+    size_t infos = 0;
+    for (size_t at = log.find("info " + hlg); at != std::string::npos; at = log.find("info " + hlg, at + 1)) ++infos;
+    CHECK(infos == 1);  // the task alone
+}
+
+TEST_CASE("A ProRes colr with matrix 0 does not keep the first frame unread", "[integration][hdr]") {
+    const auto dir = Dir("prores_matrix0");
+    ClipSpec spec;
+    spec.width = 64;
+    spec.height = 48;
+    spec.frames = 2;
+    spec.codec = "prores_ks";
+    spec.pixFmt = "yuv422p10le";
+    spec.color = RawTags{0, 1, 1, 1, 0};  // colr 1/1/0: «unknown» in ProRes terms
+    spec.frameColor = [](int64_t) { return Tags(9, 9, 16); };
+    const auto clip = WriteClip(dir / "m0.mov", spec);
+    REQUIRE(Summarize(clip).container.matrix == 0);
+    const int64_t decodes = FirstFrameDecodes();
+    VideoDecoder dec(clip, VideoDecoder::Probe());
+    CHECK(FirstFrameDecodes() == decodes + 1);
+    CHECK(dec.Info().color.looked == FirstLook::Decode);
+    CHECK(dec.Info().color.cls == SourceClass::Pq);
+    CHECK(dec.Info().color.trcFrom == TagFrom::Frame);
 }

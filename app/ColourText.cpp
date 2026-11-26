@@ -92,10 +92,13 @@ QString ClassText(SourceClass c, int primaries) { return c == SourceClass::Wide 
 QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
     const RawTags& e = c.effective;
     if (n.key == "source.dv_removed") return Tr("Dolby Vision %1 снимается при любой записи: остаётся базовый слой").arg(DoviName(c));
-    if (n.key == "source.dv_record_short" || n.key == "source.dv_unknown")
-        return Tr("Dolby Vision %1: база не названа — цвет по тегам; Dolby Vision снимается при любой записи").arg(DoviName(c));
+    if (n.key == "source.dv_record_short")
+        return Tr("Dolby Vision %1: запись не называет базу (старая или короче 5 байт) — цвет по тегам; Dolby Vision снимается при любой записи")
+            .arg(DoviName(c));
+    if (n.key == "source.dv_unknown")
+        return Tr("Dolby Vision %1: база не распознана — цвет по тегам; Dolby Vision снимается при любой записи").arg(DoviName(c));
     if (n.key == "source.dv_ipt")
-        return c.iptAssumed ? Tr("База Dolby Vision не названа, а матрица и кривая не указаны — принята база IPT: без RPU её цвета неверны, а RPU эта "
+        return c.iptAssumed ? Tr("База Dolby Vision не распознана, а матрица и кривая не указаны — принята база IPT: без RPU её цвета неверны, а RPU эта "
                                  "программа не применяет")
                             : Tr("База Dolby Vision в IPT: без RPU цвета неверны, а RPU эта программа не применяет — цвета при обработке будут неверны");
     if (n.key == "source.matrix_unsupported")
@@ -135,7 +138,7 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
     QString text;
     // what cannot be read right comes first and alone: the rest would read as fine
     if (c.refuseAll == ColourRefusal::DolbyVisionIpt) {
-        text = c.iptAssumed ? Tr("Dolby Vision %1 (база не названа, принята IPT): цвета при обработке будут неверны").arg(DoviName(c))
+        text = c.iptAssumed ? Tr("Dolby Vision %1 (база не распознана, принята IPT): цвета при обработке будут неверны").arg(DoviName(c))
                             : Tr("Dolby Vision %1 (база IPT): цвета при обработке будут неверны").arg(DoviName(c));
     } else if (c.refuseAll == ColourRefusal::RgbHdr) {
         text = c.rgbLayout ? Tr("RGB-поток HDR / BT.2020: читается как 8-битный SDR, цвета будут неверны")

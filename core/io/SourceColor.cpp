@@ -577,6 +577,10 @@ void PickFrameRecord(const std::optional<R>& frame, const std::optional<R>& code
 }
 }  // namespace
 
+RawTags LookHint(const ColourLayers& in, std::string_view codec) {
+    return MergeTags(RawTags{}, WithoutReserved(in.stream, codec), WithoutReserved(in.container, codec));
+}
+
 SourceColor SourceColorOf(const ColourLayers& in, std::string_view layoutKind, std::string_view codec) {
     SourceColor c;
     c.container = WithoutReserved(in.container, codec);

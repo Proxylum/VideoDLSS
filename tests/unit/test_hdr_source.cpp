@@ -782,3 +782,19 @@ TEST_CASE("Reserved values are dropped in the stream and the container as well a
     three.container = RawTags{9, 3, 16, 1, 0};
     CHECK(SourceColorOf(three, "420", "hevc").Note("source.container_differs") == nullptr);
 }
+
+TEST_CASE("The first look's hint drops reserved values: a ProRes colr with matrix 0 is looked at", "[hdr]") {
+    ColourLayers in;
+    in.stream = in.container = RawTags{0, 1, 1, 1, 0};  // movenc writes colr when all three are said - matrix 0 among them
+    const std::string mov = "mov,mp4,m4a,3gp,3g2,mj2";
+    CHECK(LookHint(in, "prores") == RawTags{2, 1, 1, 1, 0});
+    CHECK(NeedsFirstLook("prores", mov, 10, LookHint(in, "prores")) == FirstLook::Decode);
+    in.stream = RawTags{2, 9, 0, 1, 0};  // a transfer 0 under BT.2020: no curve said
+    in.container = RawTags{};
+    CHECK(LookHint(in, "hevc").trc == 2);
+    CHECK(NeedsFirstLook("hevc", mov, 10, LookHint(in, "hevc")) == FirstLook::Decode);
+    // the stream's over the container's
+    in.stream = RawTags{2, 2, 2, 0, 0};
+    in.container = Tags(9, 9, 16);
+    CHECK(LookHint(in, "hevc") == RawTags{9, 9, 16, 1, 0});
+}
