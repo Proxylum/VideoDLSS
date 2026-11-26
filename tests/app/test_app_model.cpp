@@ -11121,3 +11121,35 @@ TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, n
     SourceColourText(SourceColorOf(layers, "420", "ffv1"), &tip);
     CHECK(tip.contains(QString::fromUtf8("Первый видеопакет не прочитан")));
 }
+
+TEST_CASE("Colour row: Dolby Vision from an RPU, the RGB matrix on YUV, layers of a wide gamut by the matrix", "[app][hdr]") {
+    auto withRpu = [](int vdrProfile, bool full) {
+        ColourLayers in;
+        in.stream = in.container = RawTags{9, 9, 16, 1, 0};
+        FirstLookColor first;
+        first.how = FirstLook::Decode;
+        first.tags = in.stream;
+        DoviRpu rpu;
+        rpu.vdrRpuProfile = vdrProfile;
+        rpu.blFullRange = full;
+        first.rpu = rpu;
+        in.first = first;
+        return SourceColorOf(in, "420", "hevc");
+    };
+    CHECK(SourceColourText(withRpu(1, false)) == QString::fromUtf8("HDR (PQ) · BT.2020 · Dolby Vision 8 (будет снят)"));
+    CHECK(SourceColourText(withRpu(0, false)) == QString::fromUtf8("HDR (PQ) · BT.2020 · Dolby Vision неизвестного профиля (будет снят)"));
+    CHECK(SourceColourText(withRpu(0, true)) == QString::fromUtf8("Dolby Vision 5 (база IPT): цвета при обработке будут неверны"));
+    // the RGB matrix on a Y'CbCr stream
+    ColourLayers yuv;
+    yuv.stream = yuv.container = RawTags{0, 9, 16, 1, 0};
+    QString tip;
+    CHECK(SourceColourText(SourceColorOf(yuv, "420", "hevc"), &tip) == QString::fromUtf8("Матрица RGB при YUV-раскладке (HDR / BT.2020): цвета будут неверны"));
+    CHECK(tip.contains(QString::fromUtf8("Поток YUV помечен матрицей RGB (0)")));
+    CHECK_FALSE(tip.contains(QString::fromUtf8("8-битный")));
+    // colr says the BT.2020 matrix, the VUI only BT.709 primaries and curve: both classes as the row says them
+    ColourLayers layers;
+    layers.container = RawTags{9, 1, 1, 1, 0};
+    layers.stream = RawTags{2, 1, 1, 1, 0};
+    SourceColourText(SourceColorOf(layers, "420", "hevc"), &tip);
+    CHECK(tip.contains(QString::fromUtf8("Контейнер (SDR, матрица BT.2020) и параметры кодека (SDR) размечены по-разному")));
+}

@@ -568,3 +568,25 @@ TEST_CASE("The viewport reads frames without a colour look", "[integration][hdr]
     CHECK(FirstFrameDecodes() == decodes);
     CHECK(FirstPacketPeeks() == peeks);
 }
+
+TEST_CASE("A first look decodes frames an edit list discards: a cut made by stream copy", "[integration][hdr]") {
+    const auto dir = Dir("editlist");
+    ClipSpec spec;
+    spec.width = 64;
+    spec.height = 48;
+    spec.frames = 72;
+    spec.codec = "prores_ks";
+    spec.pixFmt = "yuv422p10le";
+    spec.color = Tags(9, 9, 14);
+    spec.frameColor = [](int64_t) { return Tags(9, 9, 18); };
+    spec.pts = [](int64_t i) { return i - 70; };  // 70 frames before 0: an edit list starts the MOV at the 71st
+    const auto clip = WriteClip(dir / "cut.mov", spec);
+    // FFmpeg drops the frames of packets before the edit's start: a plain decode of the first 64 packets gives nothing
+    REQUIRE(FrameColors(clip, 72).size() == 2);
+    VideoDecoder dec(clip, VideoDecoder::Probe());
+    const SourceColor& c = dec.Info().color;
+    CHECK(c.probeError.empty());
+    CHECK(c.looked == FirstLook::Decode);
+    CHECK(c.cls == SourceClass::Hlg);
+    CHECK(c.trcFrom == TagFrom::Frame);
+}

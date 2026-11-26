@@ -72,6 +72,9 @@ QString FromText(TagFrom from) {
     return Tr("не указано");
 }
 
+// A class as the row says it: wide gamut by the matrix alone (BT.2020's matrix under other primaries) is not «BT.2020 SDR»
+QString ClassText(SourceClass c, int primaries);
+
 QString ClassText(SourceClass c) {
     switch (c) {
         case SourceClass::Legacy: return "SDR";
@@ -82,6 +85,8 @@ QString ClassText(SourceClass c) {
     }
     return "SDR";
 }
+
+QString ClassText(SourceClass c, int primaries) { return c == SourceClass::Wide && primaries != 9 ? Tr("SDR, матрица BT.2020") : ClassText(c); }
 }  // namespace
 
 QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
@@ -93,7 +98,9 @@ QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
         return Tr("База Dolby Vision в IPT: без RPU цвета неверны, а RPU эта программа не применяет — цвета при обработке будут неверны");
     if (n.key == "source.matrix_unsupported")
         return Tr("Матрица %1 читается как BT.709 / BT.601 — цвета при обработке будут неверны").arg(MatrixText(e.matrix));
-    if (n.key == "source.rgb_hdr") return Tr("RGB-поток HDR / BT.2020 читается как 8-битный SDR — цвета будут неверны");
+    if (n.key == "source.rgb_hdr")
+        return c.rgbLayout ? Tr("RGB-поток HDR / BT.2020 читается как 8-битный SDR — цвета будут неверны")
+                           : Tr("Поток YUV помечен матрицей RGB (0) — ни одна матрица YUV к нему не подходит, цвета будут неверны");
     if (n.key == "source.bt2020_assumed") return Tr("Матрица или охват не указаны — принят BT.2020");
     if (n.key == "source.trc_unspecified") return Tr("Охват BT.2020 без кривой — принята кривая SDR");
     if (n.key == "source.trc_not_converted") return Tr("Кривая %1 при охвате BT.2020 (лог камеры?) не переводится").arg(Q(TrcName(e.trc)));
@@ -106,13 +113,14 @@ QString ColourNoteText(const SourceColor& c, const ColourNote& n) {
     if (n.key == "source.no_hdr_metadata") return Tr("PQ без метаданных мастеринга и уровня света");
     if (n.key == "source.hdr10plus") return Tr("Динамические метаданные HDR10+ в результат не переносятся");
     if (n.key == "source.layers_differ")
-        return Tr("%1 (%2) и параметры кодека (%3) размечены по-разному").arg(LayersText(c), ClassText(c.cls), ClassText(c.rawCls));
+        return Tr("%1 (%2) и параметры кодека (%3) размечены по-разному")
+            .arg(LayersText(c), ClassText(c.cls, c.effective.primaries), ClassText(c.rawCls, c.stream.primaries));
     if (n.key == "source.frame_differs") return Tr("Первый кадр и поток размечены по-разному (кадр / поток): %1").arg(DifferencesText(FrameDifferences(c)));
     if (n.key == "source.container_differs")
         return Tr("Контейнер размечен иначе, взяты поток или кадр (контейнер / взято): %1").arg(DifferencesText(ContainerDifferences(c)));
     if (n.key == "source.probe_failed")
-        return c.lookFailed == FirstLook::Packet ? Tr("Первый видеопакет не прочитан — HDR10+ не проверен, цвет только по тегам потока и контейнера")
-                                                  : Tr("Первый кадр не прочитан — цвет только по тегам потока и контейнера");
+        return c.lookFailed == FirstLook::Packet ? Tr("Первый видеопакет не прочитан — HDR10+ не проверен")
+                                                  : Tr("Первый кадр не прочитан — цвет только по тегам потока и контейнера, записи HDR кадра не прочитаны");
     return Q(n.detail);
 }
 
@@ -127,7 +135,8 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
     if (c.refuseAll == ColourRefusal::DolbyVisionIpt) {
         text = Tr("Dolby Vision %1 (база IPT): цвета при обработке будут неверны").arg(DoviName(c));
     } else if (c.refuseAll == ColourRefusal::RgbHdr) {
-        text = Tr("RGB-поток HDR / BT.2020: читается как 8-битный SDR, цвета будут неверны");
+        text = c.rgbLayout ? Tr("RGB-поток HDR / BT.2020: читается как 8-битный SDR, цвета будут неверны")
+                           : Tr("Матрица RGB при YUV-раскладке (HDR / BT.2020): цвета будут неверны");
     } else if (c.refuseProcessing == ColourRefusal::Matrix) {
         text = Tr("%1: цвета при обработке будут неверны").arg(MatrixText(e.matrix));
     } else {
@@ -135,8 +144,7 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
         // HDR10: PQ of BT.2020 (said or assumed) with its static metadata; a P3 or BT.709 master is «HDR (PQ)» with its gamut beside
         const bool hdr10 = c.cls == SourceClass::Pq && (e.primaries == 9 || e.primaries == 2) && (c.hdr.mdcv || c.hdr.cll);
         // wide gamut by the matrix alone (BT.2020's matrix under other primaries): said as such, the primaries beside it
-        const bool byMatrix = c.cls == SourceClass::Wide && e.primaries != 9;
-        parts << (hdr10 ? Tr("HDR10 (PQ)") : byMatrix ? Tr("SDR, матрица BT.2020") : ClassText(c.cls));
+        parts << (hdr10 ? Tr("HDR10 (PQ)") : ClassText(c.cls, e.primaries));
         const QString gamut = GamutText(e.primaries);
         if (!gamut.isEmpty() && !(c.cls == SourceClass::Wide && e.primaries == 9)) parts << gamut;  // «BT.2020 SDR» says it already
         else if (c.Hdr()) parts << Tr("BT.2020 (не указан)");

@@ -366,11 +366,15 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
         c.refuseProcessing = ColourRefusal::Matrix;
         note("source.matrix_unsupported", "matrix " + MatrixName(M) + ": read as BT.709 / BT.601 - its colours come out wrong when processed");
     }
-    // 3. an RGB stream of HDR or BT.2020: swscale makes it 8-bit 4:2:0 SDR (VideoDecoder: the swscale path)
-    if ((layoutKind == "rgb" || M == 0) && (T == 16 || T == 18 || P == 9)) {
+    // 3. RGB of HDR or BT.2020: an RGB stream goes through swscale into 8-bit 4:2:0 SDR (VideoDecoder: the swscale path); a Y'CbCr
+    // stream tagged with the RGB matrix (0: a chain that kept an RGB source's tag) has no Y'CbCr matrix that fits
+    c.rgbLayout = layoutKind == "rgb";
+    if ((c.rgbLayout || M == 0) && (T == 16 || T == 18 || P == 9)) {
         if (c.refuseAll == ColourRefusal::None) c.refuseAll = ColourRefusal::RgbHdr;
-        note("source.rgb_hdr", "an RGB stream of " + TrcName(T) + " / " + PrimariesName(P) +
-                                   ": read as 8-bit 4:2:0 SDR through swscale - its colours come out wrong");
+        note("source.rgb_hdr", c.rgbLayout ? "an RGB stream of " + TrcName(T) + " / " + PrimariesName(P) +
+                                                 ": read as 8-bit 4:2:0 SDR through swscale - its colours come out wrong"
+                                           : "the RGB matrix (gbr) on a Y'CbCr stream of " + TrcName(T) + " / " + PrimariesName(P) +
+                                                 ": no Y'CbCr matrix fits it - its colours come out wrong");
     }
 
     // 4-9: what the class assumed - not for a source rows 1 or 3 refuse (an IPT base, an RGB stream: no matrix is assumed for them;
@@ -391,7 +395,7 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
         const std::string records = HdrRecordsWords(c.hdr);
         note("source.av1_stream_metadata", "HDR metadata inside the AV1 stream (metadata OBUs) is not read here and not carried into results; " +
                                                (records.empty() ? std::string("the container has none") : "from the container: " + records));
-    } else if (classed && c.cls == SourceClass::Pq && !c.hdr.mdcv && !c.hdr.cll) {
+    } else if (classed && c.cls == SourceClass::Pq && !c.hdr.mdcv && !c.hdr.cll && c.lookFailed != FirstLook::Decode) {  // not read: not said absent
         note("source.no_hdr_metadata", "PQ without mastering display or light level metadata");
     }
     if (c.hdr10Plus)
@@ -413,8 +417,10 @@ void Classify(SourceColor& c, std::string_view layoutKind, std::string_view code
         note("source.container_differs", "the container says " + DifferenceWords(d) + " taken from the stream or the frame", containerCls != c.cls);
     }
     if (!c.probeError.empty())
-        note("source.probe_failed", std::string(c.lookFailed == FirstLook::Packet ? "the first video packet" : "the first frame") +
-                                        " could not be read (" + c.probeError + "): the colour comes from the stream and the container only");
+        note("source.probe_failed", c.lookFailed == FirstLook::Packet
+                                        ? "the first video packet could not be read (" + c.probeError + "): HDR10+ was not checked"
+                                        : "the first frame could not be read (" + c.probeError +
+                                              "): the colour comes from the stream and the container only, the frame's HDR records unread");
 
     c.legacyPath = c.cls == SourceClass::Legacy && c.rawCls == SourceClass::Legacy && c.refuseProcessing == ColourRefusal::None &&
                    c.refuseAll == ColourRefusal::None;
@@ -683,6 +689,9 @@ FirstLookColor LookOnce(const std::filesystem::path& path, FirstLook how) {
         if (err == AVERROR_EOF) break;
         CheckAv(err, "av_read_frame");
         if (p.pkt->stream_index == vs) {
+            // a packet before an edit list's start (a cut made by stream copy: the frames from the keyframe to the cut) comes marked
+            // discard, and libavcodec drops its frame - it carries the same parameters and SEI as the shown ones: decoded
+            p.pkt->flags &= ~AV_PKT_FLAG_DISCARD;
             const int s = avcodec_send_packet(p.ctx, p.pkt);
             if (s < 0 && s != AVERROR(EAGAIN)) CheckAv(s, "avcodec_send_packet");
             ++sent;

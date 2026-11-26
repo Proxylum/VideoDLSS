@@ -449,7 +449,7 @@ void ProjectPanel::refresh() {
         sourceFrame_->setText("—");
         sourceFrame_->setToolTip(QString());
     }
-    {  // TASK-0078: HDR, wide gamut, Dolby Vision - hidden for an SDR video
+    {  // TASK-0078: HDR, wide gamut, Dolby Vision, notes - hidden for an SDR video with nothing to say
         QString tip;
         const QString colour = src.width > 0 ? SourceColourText(src.color, &tip) : QString();
         sourceColour_->setText(colour);

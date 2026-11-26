@@ -331,7 +331,8 @@ frame where it differs - a ProRes frame header, an HEVC alternative transfer SEI
 `mastering:`, `light level:` (MaxCLL / MaxFALL), `ambient:`, `dolby vision:` (profile, level, the base layer's compatibility:
 an HDR10, SDR or HLG base keeps its picture and loses the RPU in every output; an IPT base - profiles 5 and 10.0 - comes out in wrong
 colours) and `hdr10+:` lines, and notes (BT.2020 assumed for an untagged PQ / HLG, a transfer not converted, layers that disagree).
-The GUI's source card shows a «Цвет» row for such a file. An SDR file prints as before. The first frame is decoded for this only
+The GUI's source card shows a «Цвет» row for such a file. An SDR file with nothing to say (no Dolby Vision, no HDR record, no note)
+prints as before and has no such row. The first frame is decoded for this only
 for H.264 / HEVC / ProRes with a hint of HDR or BT.2020 (or a raw `.hevc` / `.h264`, an untagged 10-bit HEVC, a ProRes whose
 container does not say all three tags - a ProRes frame header always does), and the first packet is read for PQ in Matroska / WebM
 (HDR10+); once per file and modification time in a process. Processing such a source

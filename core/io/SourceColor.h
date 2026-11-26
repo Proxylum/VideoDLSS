@@ -123,6 +123,7 @@ struct SourceColor {
     SourceClass cls = SourceClass::Legacy;     // by `effective`
     SourceClass rawCls = SourceClass::Legacy;  // ClassOf(stream): the fields the legacy path reads
     bool legacyPath = true;                    // cls and rawCls Legacy, nothing refused: read and written as before
+    bool rgbLayout = false;                    // the stream's pixel format is RGB (decoded through swscale)
     ColourRefusal refuseProcessing = ColourRefusal::None;  // processing (stages) refused; passthrough allowed
     ColourRefusal refuseAll = ColourRefusal::None;         // processing and passthrough refused
     FirstLook looked = FirstLook::None;                    // what the first look read (None: not asked or failed)

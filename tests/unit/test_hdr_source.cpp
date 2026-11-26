@@ -395,7 +395,8 @@ TEST_CASE("HDR10+ and a failed first look are notes for the plan", "[hdr]") {
     CHECK(legacy.legacyPath);
     const std::vector<std::string> lines = ColourInfoLines(legacy);
     REQUIRE(lines.size() == 2);
-    CHECK(lines[1] == "note:        the first frame could not be read (no frame): the colour comes from the stream and the container only");
+    CHECK(lines[1] == "note:        the first frame could not be read (no frame): the colour comes from the stream and the container only, the "
+                      "frame's HDR records unread");
 }
 
 TEST_CASE("info colour lines: none for SDR, the class with each tag's layer, the records and Dolby Vision", "[hdr][cli]") {
@@ -690,4 +691,47 @@ TEST_CASE("Layer words name where the differing tags were read", "[hdr]") {
     // a container that says what the frame overrides, the stream silent: the container's news (the stream not saying it)
     const SourceColor c = Layered(Tags(1, 1, 1), RawTags{2, 2, 2, 1, 0}, Tags(9, 9, 16), "prores");
     CHECK(c.Note("source.container_differs") != nullptr);
+}
+
+// ---- review round 3 (TASK-0078) -------------------------------------------------------------------------------------------------
+
+TEST_CASE("A PQ source whose first frame was not read is not said to lack HDR metadata", "[hdr]") {
+    ColourLayers in;
+    in.stream = in.container = Tags(9, 9, 16);
+    FirstLookColor failed;
+    failed.how = FirstLook::Decode;
+    failed.error = "no frame";
+    in.first = failed;
+    const SourceColor notRead = SourceColorOf(in, "420", "hevc");
+    CHECK(notRead.Note("source.no_hdr_metadata") == nullptr);
+    CHECK(notRead.Note("source.probe_failed")->detail.find("the frame's HDR records unread") != std::string::npos);
+    // a packet that was not read: no frame records were going to be read - the records are absent, and HDR10+ unchecked
+    failed.how = FirstLook::Packet;
+    in.first = failed;
+    const SourceColor packet = SourceColorOf(in, "420", "ffv1");
+    CHECK(packet.Note("source.no_hdr_metadata") != nullptr);
+    CHECK(packet.Note("source.probe_failed")->detail == "the first video packet could not be read (no frame): HDR10+ was not checked");
+}
+
+TEST_CASE("The RGB matrix on a Y'CbCr stream is said as such, not as swscale's 8-bit path", "[hdr]") {
+    const SourceColor yuv = Classified(0, 9, 16, "420");
+    CHECK(yuv.refuseAll == ColourRefusal::RgbHdr);
+    CHECK_FALSE(yuv.rgbLayout);
+    CHECK(yuv.Note("source.rgb_hdr")->detail ==
+          "the RGB matrix (gbr) on a Y'CbCr stream of smpte2084 / bt2020: no Y'CbCr matrix fits it - its colours come out wrong");
+    const SourceColor rgb = Classified(1, 9, 16, "rgb");
+    CHECK(rgb.rgbLayout);
+    CHECK(rgb.Note("source.rgb_hdr")->detail.find("through swscale") != std::string::npos);
+}
+
+TEST_CASE("info says a Dolby Vision RPU without a record: the guessed profile, or an unknown one", "[hdr][cli][dovi]") {
+    auto line = [](const SourceColor& c) {
+        for (const std::string& l : ColourInfoLines(c))
+            if (l.rfind("dolby vision:", 0) == 0) return l;
+        return std::string();
+    };
+    CHECK(line(WithRpu(9, 9, 16, 1, false)) == "dolby vision: profile 8 (guessed from the first frame's RPU): removed in every output");
+    CHECK(line(WithRpu(9, 9, 16, 0, false)) == "dolby vision: an RPU of an unknown profile: unknown base - removed in every output");
+    CHECK(line(WithRpu(9, 9, 16, 0, true)) == "dolby vision: profile 5 (guessed from the first frame's RPU): IPT base - colours come out wrong without the RPU");
+    CHECK(line(WithDovi(9, 9, 16, 8, 0)) == "dolby vision: profile 8, level 6, compatibility 0 (record): unknown base - removed in every output");
 }
