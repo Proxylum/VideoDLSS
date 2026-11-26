@@ -1054,7 +1054,8 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     // none (hevcdec resets the context's), and filling it with the first one's would hide the change; a decoder that keeps no tags of
     // its own gives the frames the context's, which are the stream's already
     if (watchColour_ && !seeked_ && !classChange_) {
-        const RawTags merged = MergeTags(WithoutReserved(FrameTagsOf(frame_), decoder_->name), RawTags{}, info_.color.container);
+        RawTags merged = MergeTags(WithoutReserved(FrameTagsOf(frame_), decoder_->name), RawTags{}, info_.color.container);
+        if (merged.range == 0) merged.range = info_.color.effective.range;  // for the text: the class does not depend on the range
         if (const SourceClass k = ClassOf(merged); k != info_.color.cls) classChange_ = ColorClassChange{index, info_.color.cls, k, merged};
     }
     if (!checkedFrameMatrix_) {  // an orientation in the bitstream (SEI) other than the container's: the container's is applied

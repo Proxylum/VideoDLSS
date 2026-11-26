@@ -210,6 +210,7 @@ QString PlanNoteText(const SourceColor& c, const PlanNote& n) {
     if (n.key == "encode.mdcv_invalid")
         return Tr("В данных мастеринга нулевая координата, минимальная яркость ниже 0 или max не выше min — читатели этого контейнера отбросят эту "
                   "часть (или их целиком)");
+    if (n.key == "encode.unchecked") return Tr("Кодер не из таблицы проекта: цвет результата пишется по плану, но не сверяется");
     if (n.key == "encode.cll_invalid")
         return Tr("Уровень света (MaxCLL / MaxFALL) с одним нулём или вне полей этого контейнера — он не перенесётся");
     if (n.key == "encode.no_amve") return Tr("Условия просмотра (ambient viewing environment) в этот контейнер не переносятся");

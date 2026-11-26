@@ -128,6 +128,14 @@ PassthroughColour PlanPassthroughColour(const VideoStreamInfo& info, const std::
         else if (pc.meta.amve->illuminance.num != 0)
             expect.amve = pc.meta.amve;
     }
+    if (!FindCodecCaps(codec)) {
+        // an encoder outside the table (--codec takes any): what it and its decoder keep of the colour is not known - mpeg2video's decoder
+        // says limited to every frame, utvideo reads its matrix its own way; the result is written as planned and not checked back (a
+        // check would fail after the whole encode)
+        note("encode.unchecked", "note", codec + " is outside the encoder table: the result's colour is written as planned, not checked back");
+        expect = ResultColor{};
+        expect.checkRange = false;
+    }
     pc.expect = expect;
     return pc;
 }

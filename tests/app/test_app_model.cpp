@@ -11109,7 +11109,7 @@ TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, n
     CHECK_FALSE(ColourStopText(ColourStop::DolbyVisionIpt, assumed).contains(QString::fromUtf8("с базой IPT не поддерживается")));
     // every encode note has its Russian text (the integration tests tie these keys to the core's notes: HasKey)
     for (const char* key : {"encode.tags_filled", "encode.hdr_8bit", "encode.range_lost", "encode.mdcv_lost", "encode.mdcv_unfit", "encode.mdcv_invalid",
-                            "encode.cll_invalid", "encode.no_amve"}) {
+                            "encode.cll_invalid", "encode.no_amve", "encode.unchecked"}) {
         INFO(key);
         CHECK(PlanNoteText(log, PlanNote{key, "warning", "encode", "english"}) != QString("english"));
     }

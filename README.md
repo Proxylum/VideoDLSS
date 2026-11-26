@@ -350,8 +350,8 @@ all three) - and its
 mastering display, light level and ambient viewing environment where the container has a field (MP4 / MOV: `mdcv`, `clli`, `amve`;
 Matroska: MasteringMetadata, MaxCLL / MaxFALL, no ambient viewing environment); the result check reads them back. Notes in the plan
 (`process --plan`), the result and the GUI's output card say what is lost or assumed: Dolby Vision's RPU, HDR10+, 8 bits of HDR
-(banding), a full range ProRes keeps in no container (FFmpeg's decoder says limited) and a MOV of FFV1 or another encoder cannot
-keep, a half mastering display MP4 / MOV cannot write, a mastering display or light level outside MP4 / MOV's fields (not written), a
+(banding), a full range ProRes keeps in no container (FFmpeg's decoder says limited) and a MOV of FFV1 cannot keep (NVENC keeps it
+in its VUI), an encoder outside the table (its result's colour is written as planned, not checked back), a half mastering display MP4 / MOV cannot write, a mastering display or light level outside MP4 / MOV's fields (not written), a
 mastering half or a light level with one value 0 Matroska's readers drop, an ambient viewing environment in Matroska. A Dolby Vision IPT base and RGB HDR are refused in every mode; a source
 whose effective tags (its frames') are HDR PQ / HLG, wide gamut or a log curve into a container without colour tags (AVI, `.m4v`,
 MPEG-TS) is refused before the file is made (with every stage off, before the passes' folder) - SDR frames under HDR codec parameters,

@@ -182,6 +182,8 @@ TEST_CASE("Passthrough of HLG ProRes MOV keeps trc 18 in colr and in the frame h
     CHECK(*s.hdr.cll == Cll{1000, 400});
     REQUIRE(s.hdr.amve);
     CHECK(s.hdr.amve->illuminance.Value() == 314.0);
+    CHECK(std::llround(s.hdr.amve->lightX.Value() * 50000) == 15635);
+    CHECK(std::llround(s.hdr.amve->lightY.Value() * 50000) == 16450);
 }
 
 TEST_CASE("Passthrough of HLG into MKV notes the missing amve and publishes", "[integration][hdr][passthrough][result]") {
@@ -524,6 +526,22 @@ TEST_CASE("A transfer H.273 leaves undefined (19 in Matroska) reads as unspecifi
     CHECK_FALSE(probe.Info().color.Note("source.layers_differ"));
 }
 
+TEST_CASE("An encoder outside the table writes the colour as planned, checks nothing back and publishes: utvideo of full-range PQ", "[integration][hdr][passthrough][result][regression]") {
+    if (!VideoEncoder::EncoderAvailable("utvideo")) SKIP("no utvideo encoder in this FFmpeg");
+    const auto dir = Dir("outside_table");
+    const auto in = PqFfv1(dir, "full.mkv", {}, Tags(9, 9, 16, 2));
+    VideoDecoder probe(in, VideoDecoder::Probe());
+    const PassthroughColour pc = PlanPassthroughColour(probe.Info(), "utvideo", {}, "a.mkv", "t");
+    CHECK(HasKey(pc.encodeNotes, "encode.unchecked"));
+    REQUIRE(pc.expect);
+    CHECK_FALSE(pc.expect->checkRange);
+    CHECK(pc.expect->trc == 2);
+    CHECK_FALSE(HasKey(PlanPassthroughColour(probe.Info(), "ffv1", {}, "a.mkv", "t").encodeNotes, "encode.unchecked"));
+    // its decoder reads the matrix its own way (BT.601 / BT.709 only): a check of the tags would fail after the whole encode
+    CHECK_NOTHROW(RunProcess(Passthrough(in, dir / "out.mkv", "utvideo")));
+    CHECK(std::filesystem::exists(dir / "out.mkv"));
+}
+
 TEST_CASE("Frames saying no colour under a PQ colr are the container's PQ to the class observer: no warning", "[integration][hdr][passthrough]") {
     const auto dir = Dir("frames_bare");
     ClipSpec s = Small("prores_ks", "yuv422p10le");
@@ -839,6 +857,19 @@ TEST_CASE("What a passthrough expects back per codec and container: tags, range,
     CHECK(PlanPassthroughColour(info, "ffv1", {}, "a.mkv", "t").expect->checkRange);              // Matroska's Colour keeps it
     CHECK_FALSE(PlanPassthroughColour(info, "ffv1", {}, "a.mkv", "t").expect->amve);
     CHECK_FALSE(PlanPassthroughColour(info, "ffv1", {}, "", "t").expect);  // no output named yet: nothing to check
+    {  // the ambient viewing environment: expected back in MOV and MP4 (Matroska has none)
+        VideoDecoder hlg(HlgProRes(dir, "hlg.mov"), VideoDecoder::Probe());
+        for (const auto& [codec, out] : {std::pair{"prores_ks", "a.mov"}, std::pair{"hevc_nvenc", "a.mp4"}}) {
+            INFO(codec);
+            const PassthroughColour h = PlanPassthroughColour(hlg.Info(), codec, {}, out, "t");
+            REQUIRE(h.expect);
+            REQUIRE(h.expect->amve);
+            CHECK(h.expect->amve->illuminance.Value() == 314.0);
+            CHECK(std::llround(h.expect->amve->lightX.Value() * 50000) == 15635);
+            CHECK(std::llround(h.expect->amve->lightY.Value() * 50000) == 16450);
+        }
+        CHECK_FALSE(PlanPassthroughColour(hlg.Info(), "ffv1", {}, "a.mkv", "t").expect->amve);
+    }
     VideoDecoder sdr(WriteClip(dir / "sdr.mkv", Small()), VideoDecoder::Probe());
     CHECK_FALSE(PlanPassthroughColour(sdr.Info(), "ffv1", {}, "a.mkv", "t").expect);  // SDR: checked as before
 }
@@ -1270,6 +1301,8 @@ TEST_CASE("NVENC passthrough of PQ and HLG writes VUI 9/16/9 and 9/18/9, colr md
     CHECK(got.colorTrc == 18);
     REQUIRE(got.hdr.amve);
     CHECK(got.hdr.amve->illuminance.Value() == 314.0);
+    CHECK(std::llround(got.hdr.amve->lightX.Value() * 50000) == 15635);
+    CHECK(std::llround(got.hdr.amve->lightY.Value() * 50000) == 16450);
 }
 
 TEST_CASE("HEVC HLG with the transfer in an SEI passes through tagged trc 18; under a BT.709 VUI it warns from the first frame", "[integration][hdr][gpu][passthrough]") {
@@ -1365,7 +1398,9 @@ TEST_CASE("Raw HEVC of SDR then PQ segments warns at the first PQ frame, decoded
         INFO("hwaccel " << hw);
         ProcessOptions o = Passthrough(pqThenBare, dir / (std::string("pq_bare_") + hw + ".mkv"), "ffv1");
         o.hwaccel = hw;
-        CHECK(Has(RunProcess(o).warnings, "frame 6 and on are SDR"));
+        const ProcessResult r = RunProcess(o);
+        CHECK(Has(r.warnings, "frame 6 and on are SDR"));
+        CHECK_FALSE(Has(r.warnings, "range unknown"));  // a frame that says no range: the source's
     }
 }
 
