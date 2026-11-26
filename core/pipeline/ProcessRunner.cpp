@@ -8,6 +8,7 @@
 #include <set>
 
 #include "convert/ColorConvert.h"
+#include "convert/ColorPlan.h"
 #include "convert/YuvConvert.h"
 #include "gpu/D3D12Device.h"
 #include "io/EncodeDefaults.h"
@@ -1338,16 +1339,6 @@ bool PassComplete(const std::filesystem::path& dir, int64_t neededFrames, const 
     }
 }
 
-ColorTags ColorTagsFor(const ColorInfo& ci, const VideoStreamInfo& info) {
-    ColorTags t;
-    t.range = ci.range == ColorRange::Full ? 2 : 1;  // AVCOL_RANGE_JPEG / MPEG
-    if (ci.matrix == ColorMatrix::Bt709) t.matrix = 1;  // AVCOL_SPC_BT709
-    else t.matrix = info.colorSpace == 5 ? 5 : 6;        // BT.601: BT470BG as the source said, else SMPTE170M
-    t.primaries = info.colorPrimaries;
-    t.transfer = info.colorTrc;
-    return t;
-}
-
 EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::filesystem::path& source, const std::filesystem::path& output, const EncodeSettings& encode,
                                int64_t maxSourceFrames, const std::function<void(int64_t, int64_t)>& progress, const std::string& hwaccel) {
     const auto t0 = Clock::now();
@@ -1381,12 +1372,13 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     target.width = rw;
     target.height = rh;
     if (!sar.Square()) Log()->info("encode: the pass {}x{} has pixels {} - stretched to {}x{} square ones", m.width, m.height, sar.Token(), rw, rh);
-    const ColorInfo ci = ColorInfoFromStream(info);
+    const ColorPlan color = ResolveColor(info);
+    const ColorInfo ci = color.resultEncode;
     VideoEncoder::Options eo;
     eo.codec = encode.codec;
     eo.frameRate = fps.num > 0 ? fps : Rational{30, 1};
     eo.timeBase = Rational{eo.frameRate.den, eo.frameRate.num};
-    eo.color = ColorTagsFor(ci, info);
+    eo.color = color.resultTags;
     eo.metadata = encode.metadata;
     // no `b` given: the bitrate for this output (NVENC's own default is far too low for 4K)
     eo.codecOptions = EffectiveCodecOptions(encode.codec, encode.codecOptions, rw, rh, eo.frameRate.ToDouble());
@@ -1516,7 +1508,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             eopt.frameRate = info.frameRate;
             eopt.timeBase = info.timeBase;
             eopt.codecOptions = EffectiveCodecOptions(options.codec, options.codecOptions, info.width, info.height, info.frameRate.ToDouble());
-            eopt.color = ColorTagsFor(ColorInfoFromStream(info), info);
+            eopt.color = ResolveColor(info).resultTags;
             eopt.sar = info.sar;  // TASK-0073: the grid passes through as it is, its pixels' proportions with it (turned with the frames)
             const OutputFormat of = ResolveOutputFormat(options.codec, options.outputFormat, SourceLayout(info));  // the stream's chroma (TASK-0072)
             FrameDesc target = of.desc;

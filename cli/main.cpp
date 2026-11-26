@@ -17,6 +17,7 @@
 #include <string>
 
 #include "convert/ColorConvert.h"
+#include "convert/ColorPlan.h"
 #include "convert/DepthConvert.h"
 #include "convert/MvConvert.h"
 #include "gpu/D3D12Device.h"
@@ -138,7 +139,7 @@ void ApplyYUp(PassReader& r, bool yUp) {
 int CmdInfo(const std::string& input, bool warp) {
     VideoDecoder dec(input);
     const auto& i = dec.Info();
-    const ColorInfo ci = ColorInfoFromStream(i);
+    const ColorInfo ci = ResolveColor(i).colourDecode;
     std::printf("file:        %s\n", input.c_str());
     std::printf("video:       %s %ux%u %s (%s, %s range)\n", i.codecName.c_str(), i.width, i.height, i.pixelFormat.c_str(),
                 std::string(ToString(ci.matrix)).c_str(), std::string(ToString(ci.range)).c_str());
@@ -439,7 +440,7 @@ int CmdExport(const ExportArgs& a) {
         decoder = std::make_unique<VideoDecoder>(a.input);
         decoder->RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
         const auto& info = decoder->Info();
-        ColorInfo ci = ColorInfoFromStream(info);
+        ColorInfo ci = ResolveColor(info).colourDecode;
         if (a.matrix == "bt601") ci.matrix = ColorMatrix::Bt601;
         else if (a.matrix == "bt709") ci.matrix = ColorMatrix::Bt709;
         else if (a.matrix != "auto") Throw("--matrix must be bt601|bt709|auto");

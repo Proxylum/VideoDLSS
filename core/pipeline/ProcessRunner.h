@@ -15,7 +15,6 @@
 namespace dlssvid {
 
 struct Project;
-struct ColorInfo;
 
 // The whole pipeline as one command (stage 8, ТЗ §4 / §7 / §9): the stages run one after another over the disk
 // cache of passes under `passesRoot` (depth -> flow -> upscale -> nr -> fg; each reads what the previous ones wrote),
@@ -217,8 +216,4 @@ struct EncodeReport {
 EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::filesystem::path& source, const std::filesystem::path& output,
                                const EncodeSettings& encode, int64_t maxSourceFrames = -1, const std::function<void(int64_t done, int64_t total)>& progress = {},
                                const std::string& hwaccel = "none");
-// Stream colour tags for a result made from `info` with the conversion `ci`: the matrix and range used, the source's
-// primaries and transfer passed through.
-ColorTags ColorTagsFor(const ColorInfo& ci, const VideoStreamInfo& info);
-
 }  // namespace dlssvid

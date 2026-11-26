@@ -8,6 +8,7 @@
 #include <limits>
 #include <string_view>
 
+#include "convert/ColorPlan.h"
 #include "passes/ControlMaskPass.h"
 #include "pipeline/PassVersions.h"
 #include "util/Error.h"
@@ -257,7 +258,7 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.height = info.height;
         s.fps = info.frameRate;
         s.sar = info.sar;
-        s.color = ColorInfoFromStream(info);
+        s.color = ResolveColor(info).viewDecode;
         s.hasColor = true;
         s.hardwareOnly = info.hardwareOnly;
         {
@@ -966,7 +967,7 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
             o.probe = rt.openedOnce;  // TASK-0076: reopened (a task runs: NVDEC is let go after every frame) - not news in the log
             rt.decoder = std::make_unique<VideoDecoder>(src.path, o);
             rt.openedOnce = true;
-            rt.color = ColorInfoFromStream(rt.decoder->Info());
+            rt.color = ResolveColor(rt.decoder->Info()).viewDecode;
         }
         if (!src.hasColor) color = rt.color;
     };

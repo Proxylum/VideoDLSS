@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "convert/ColorConvert.h"
+#include "convert/ColorPlan.h"
 #include "convert/SceneCut.h"
 #include "util/Log.h"
 
@@ -31,7 +32,7 @@ void LogCuts(const SceneList& l, const std::vector<float>& scores) {
 
 ScenesRunResult AnalyseScenes(VideoDecoder& decoder, const ScenesStageOptions& o, int64_t maxFrames, const std::function<void(int64_t)>& progress) {
     const auto& info = decoder.Info();
-    SceneCutDetector det(ColorInfoFromStream(info));
+    SceneCutDetector det(ResolveColor(info).guideDecode);
     SceneScores s;
     CpuFrame frame;
     bool reachedEnd = false;

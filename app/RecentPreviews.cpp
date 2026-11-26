@@ -10,6 +10,7 @@
 #include <filesystem>
 
 #include "convert/ColorConvert.h"
+#include "convert/ColorPlan.h"
 #include "io/NvdecSupport.h"
 #include "io/VideoDecoder.h"
 #include "passes/PassImage.h"
@@ -56,7 +57,7 @@ QImage FirstFrame(const QString& file, bool* transient = nullptr) {
     try {
         VideoDecoder dec(FsPath(file));  // CPU decode: one frame, any GPU stays free for the pipeline (AV1: NVDEC, the only decoder - TASK-0076)
         sar = dec.Info().sar;
-        const ColorInfo color = ColorInfoFromStream(dec.Info());
+        const ColorInfo color = ResolveColor(dec.Info()).viewDecode;
         CpuFrame f;
         for (int i = 0; i < 12 && dec.NextFrame(f); ++i) {
             const PassImage rgb = YuvToRgb(f, color, PixelType::U8);

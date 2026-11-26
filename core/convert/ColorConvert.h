@@ -6,7 +6,9 @@
 
 namespace dlssvid {
 
-enum class ColorMatrix { Bt601, Bt709 };
+// Y'CbCr matrices. Bt2020: the non-constant-luminance one (Kr 0.2627, Kb 0.0593) of HDR and wide-gamut sources
+// (TASK-0075); which source gets which is decided by ResolveColor (convert/ColorPlan.h) alone.
+enum class ColorMatrix { Bt601, Bt709, Bt2020 };
 enum class ColorRange { Limited, Full };
 
 struct ColorInfo {
@@ -15,7 +17,7 @@ struct ColorInfo {
 };
 
 // Stream metadata when present, otherwise BT.709 for >= 720 lines of the stored frame (codedHeight: before a display turn, TASK-0072)
-// and BT.601 below (limited range).
+// and BT.601 below (limited range). The SDR reading of a source; consumers take theirs from ResolveColor (convert/ColorPlan.h).
 ColorInfo ColorInfoFromStream(const VideoStreamInfo& info);
 std::string_view ToString(ColorMatrix m);
 std::string_view ToString(ColorRange r);
@@ -23,7 +25,8 @@ std::string_view ToString(ColorRange r);
 // YUV (any CpuFrame format: 8-bit or 10/12/16-bit, 4:2:0 / 4:2:2 / 4:4:4) -> RGB (display-referred, sRGB/BT.709
 // transfer, [0,1]); chroma is replicated (nearest) so the result is deterministic and reversible per block. Limited
 // range scales with the bit depth (16..235 at 8 bits is 64..940 at 10). U16 output = round(v * 65535).
-PassImage YuvToRgb(const CpuFrame& frame, const ColorInfo& info, PixelType outType = PixelType::F16);
+// `threads`: bands of rows converted in parallel, as YuvToRgba16f (0 = auto); the result does not depend on it.
+PassImage YuvToRgb(const CpuFrame& frame, const ColorInfo& info, PixelType outType = PixelType::F16, int threads = 0);
 
 // Same conversion straight into the viewport's RGBA16F texture layout (alpha = 1). Bit-identical to
 // YuvToRgb(frame, info, PixelType::F16) plus alpha; uses F16C when the CPU has it.

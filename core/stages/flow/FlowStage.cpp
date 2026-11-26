@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "convert/ColorPlan.h"
 #include "convert/Warp.h"
 #include "gpu/D3D12Device.h"
 #include "gpu/GpuFrameCache.h"
@@ -250,7 +251,7 @@ void FlowStage::Shutdown() {
 
 FlowRunResult RunFlow(VideoDecoder& decoder, D3D12Device& device, FlowStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress) {
     const auto& info = decoder.Info();
-    options.color = ColorInfoFromStream(info);
+    options.color = ResolveColor(info).guideDecode;
     options.fps = info.frameRate;
     Pipeline pipeline(device, 4);
     auto stage = std::make_unique<FlowStage>(options);

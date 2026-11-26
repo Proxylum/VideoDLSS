@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "convert/ColorPlan.h"
 #include "convert/DepthConvert.h"
 #include "convert/MvConvert.h"
 #include "convert/Warp.h"
@@ -283,7 +284,7 @@ void DepthStage::Shutdown() {
 
 DepthRunResult RunDepth(VideoDecoder& decoder, D3D12Device& device, DepthStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress) {
     const auto& info = decoder.Info();
-    options.color = ColorInfoFromStream(info);
+    options.color = ResolveColor(info).guideDecode;
     options.fps = info.frameRate;
     Pipeline pipeline(device, 4);
     auto stage = std::make_unique<DepthStage>(options);

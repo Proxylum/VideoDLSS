@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstring>
 
+#include "convert/ColorPlan.h"
 #include "gpu/GpuFrameCache.h"
 #include "pipeline/Pipeline.h"
 #include "stages/upscale/Jitter.h"
@@ -389,7 +390,7 @@ void UpscaleStage::Shutdown() {
 
 UpscaleRunResult RunUpscale(VideoDecoder& decoder, D3D12Device& device, UpscaleStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params) {
     const auto& info = decoder.Info();
-    options.color = ColorInfoFromStream(info);
+    options.color = ResolveColor(info).colourDecode;
     options.fps = info.frameRate;
     options.sar = info.sar;  // TASK-0073: process and the standalone command alike
     options.uploadToGpu = false;  // single-stage run: nothing reads the slot

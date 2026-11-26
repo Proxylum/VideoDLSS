@@ -13,6 +13,7 @@
 #include <sstream>
 
 #include "convert/ColorConvert.h"
+#include "convert/ColorPlan.h"
 #include "convert/Warp.h"
 #include "gpu/D3D12Device.h"
 #include "io/VideoDecoder.h"
@@ -111,7 +112,7 @@ public:
         } else {
             decoder_ = std::make_unique<VideoDecoder>(path);
             decoder_->RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
-            color_ = ColorInfoFromStream(decoder_->Info());
+            color_ = ResolveColor(decoder_->Info()).colourDecode;
             count_ = decoder_->Info().frameCount;
             width_ = decoder_->Info().width;
             height_ = decoder_->Info().height;
