@@ -3,10 +3,13 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #include "gpu/D3D12Device.h"
 #include "passes/PassSequence.h"
@@ -188,6 +191,50 @@ TEST_CASE("FrameStore loads the current frame, reports statuses and prefetches",
     // a frame that does not exist in a partial pass is Missing, not an error
     store.SetSources(FrameStore::DiscoverPasses(root));
     CHECK(store.ResidentCount() == 0);
+}
+
+TEST_CASE("FrameStore::Update takes missing marks alone: it says it did something, and the frames are missing right after - already "
+          "between its two critical sections",
+          "[viewport][store][gpu][regression]") {
+    const auto root = Root("missing_marks");
+    WritePass(root / "depth_raw", PassKind::DepthRaw, 8, 4, 0, 9);
+    const Manifest m = Manifest::Load(root / "depth_raw");
+    for (const int64_t f : {4, 5, 6}) std::filesystem::remove(root / "depth_raw" / m.FrameFileName(f));  // listed, not readable
+    D3D12Device dev({true, false});
+    FrameStore::Options opt;
+    opt.prefetch = 0;  // one frame each side
+    // TASK-0076: the marks are taken in Update's first critical section - between its two sections the frames read Missing already
+    // (a retry from a loader meanwhile sees them in missing_, never in neither loaded_ nor missing_); taken with the batch they would
+    // read Queued there
+    FrameStore* seen = nullptr;
+    std::atomic<bool> armed{false};
+    std::mutex betweenMutex;
+    std::vector<FrameStore::Status> between;
+    opt.betweenUpdateSectionsForTests = [&] {
+        if (!armed.exchange(false) || !seen) return;  // called outside mutex_: GetStatus may be asked
+        std::lock_guard<std::mutex> lock(betweenMutex);
+        for (const int64_t f : {4, 5, 6}) between.push_back(seen->GetStatus(f, "depth_raw"));
+    };
+    FrameStore store(dev, opt);
+    seen = &store;
+    store.SetSources(FrameStore::DiscoverPasses(root));
+    store.SetCurrentFrame(5, {"depth_raw"});
+    // the loads over (no Update yet): their missing marks published
+    REQUIRE(WaitUntil([&] {
+        for (const int64_t f : {4, 5, 6})
+            if (store.GetStatus(f, "depth_raw") != FrameStore::Status::Missing) return false;
+        return true;
+    }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    armed = true;
+    CHECK(store.Update());  // marks alone, nothing to upload: still work done
+    {
+        std::lock_guard<std::mutex> lock(betweenMutex);
+        REQUIRE(between.size() == 3);
+        for (const auto status : between) CHECK(status == FrameStore::Status::Missing);
+    }
+    for (const int64_t f : {4, 5, 6}) CHECK(store.GetStatus(f, "depth_raw") == FrameStore::Status::Missing);
+    CHECK_FALSE(store.Update());  // nothing left
 }
 
 TEST_CASE("FrameStore evicts least recently used frames outside the window within the budget", "[viewport][store][gpu]") {

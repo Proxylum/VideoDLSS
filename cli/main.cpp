@@ -20,6 +20,7 @@
 #include "convert/DepthConvert.h"
 #include "convert/MvConvert.h"
 #include "gpu/D3D12Device.h"
+#include "io/NvdecSupport.h"
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
 #include "passes/PassSequence.h"
@@ -141,7 +142,16 @@ int CmdInfo(const std::string& input, bool warp) {
     std::printf("file:        %s\n", input.c_str());
     std::printf("video:       %s %ux%u %s (%s, %s range)\n", i.codecName.c_str(), i.width, i.height, i.pixelFormat.c_str(),
                 std::string(ToString(ci.matrix)).c_str(), std::string(ToString(ci.range)).c_str());
-    std::printf("samples:     %d-bit %s, decoded as %s (%s)\n", i.bitDepth, i.chroma.c_str(), i.decoded.Name().c_str(), i.decoded.Describe().c_str());
+    const DecodeSupport decode = CheckDecodeSupport(i);  // TASK-0076: software, or NVDEC only (AV1) and whether it takes it
+    if (i.pixelFormat == "unknown" && decode.hardwareOnly && !decode.Ok())  // TASK-0076: no decoder starts here - no first frame to learn it
+        std::printf("samples:     not known (the probe did not learn the pixel format; not decoded here, see decode)\n");
+    else if (i.pixelFormat == "unknown")  // TASK-0076: bitDepth / chroma / decoded are defaults then, not the stream's
+        std::printf("samples:     not known before the first frame (the probe did not learn the pixel format)\n");
+    else if (decode.hardwareOnly && !decode.Ok())  // TASK-0076: not decoded here - no «decoded as» (see decode:)
+        std::printf("samples:     %d-bit %s (not decoded here, see decode)\n", i.bitDepth, i.chroma.c_str());
+    else
+        std::printf("samples:     %d-bit %s, decoded as %s (%s)\n", i.bitDepth, i.chroma.c_str(), i.decoded.Name().c_str(), i.decoded.Describe().c_str());
+    std::printf("decode:      %s\n", DescribeDecode(decode).c_str());
     if (!i.orientation.Identity())  // TASK-0072: the frames are turned as players show them
         std::printf("orientation: %s (%s), stored %ux%u\n", i.orientation.Describe().c_str(), i.orientationFrom.c_str(), i.codedWidth, i.codedHeight);
     if (!i.sar.Square()) {  // TASK-0073: non-square pixels - the result of process is stretched to square ones
@@ -217,6 +227,7 @@ int CmdDepth(const DepthArgs& a) {
     if (!choice.family.empty())
         Log()->info("depth: model {} ({}), window {} / overlap {}", choice.modelId, choice.license, choice.window, choice.overlap);
     VideoDecoder decoder(a.input);
+    decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
     const auto& info = decoder.Info();
     DepthStageOptions o;
     o.backend = a.backend;
@@ -298,6 +309,7 @@ int CmdFlow(const FlowArgs& a) {
     if (a.hwaccel == "cuda") dopt.hwaccel = HwAccel::Cuda;
     else if (a.hwaccel != "none") Throw("--hwaccel must be none|cuda");
     VideoDecoder decoder(a.input, dopt);
+    decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
     const auto& info = decoder.Info();
     FlowStageOptions o;
     o.backend = a.backend;
@@ -425,6 +437,7 @@ int CmdExport(const ExportArgs& a) {
 
     if (!a.input.empty()) {
         decoder = std::make_unique<VideoDecoder>(a.input);
+        decoder->RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
         const auto& info = decoder->Info();
         ColorInfo ci = ColorInfoFromStream(info);
         if (a.matrix == "bt601") ci.matrix = ColorMatrix::Bt601;
@@ -876,7 +889,7 @@ int main(int argc, char** argv) {
     flow->add_option("-o,--output", fa.output, "pass root folder (writes mv_raw/ and mv_dlss/)")->required();
     flow->add_option("--backend", fa.backend, "ofa | searaft | stub")->default_val("ofa");
     flow->add_option("--model", fa.model, "registry model id (searaft)");
-    flow->add_option("--hwaccel", fa.hwaccel, "decoder: cuda (NVDEC frames feed OFA directly) | none")->default_val("cuda");
+    flow->add_option("--hwaccel", fa.hwaccel, "decoder: cuda (NVDEC frames feed OFA directly) | none (AV1 always decodes on NVDEC: this build has no software AV1 decoder)")->default_val("cuda");
     flow->add_option("--max-res,--max_res", fa.maxRes, "searaft: model input cap on the shorter side")->default_val(720);
     flow->add_flag("--fp32", fa.fp32, "searaft: fp32 engine");
     flow->add_option("--frames", fa.frames, "process at most N frames")->default_val(-1);

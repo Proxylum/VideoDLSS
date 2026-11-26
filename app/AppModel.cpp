@@ -14,6 +14,7 @@
 #include <optional>
 
 #include "ControlMaskText.h"
+#include "DecodeText.h"
 #include "ParamText.h"
 #include "PresetStore.h"
 #include "SourceNames.h"
@@ -398,6 +399,7 @@ bool AppModel::removeControlMask(QString* error) {
 
 void AppModel::reloadSources() {
     store_->SetSources(viewportSources(controlMaskBusy_));
+    heardRefusal_.clear();  // TASK-0076: the new sources' refusals are heard (the file may have been written again)
     if (!controlMaskBusy_) controlMask_ = ReadControlMaskState(project_.passesRoot);  // while importing it stays «Importing»
     scrubStartNs_ = -1;
     resultAudio_ = false;
@@ -466,7 +468,47 @@ void AppModel::releaseResult(const std::filesystem::path& file) {
     emit stateChanged();
 }
 
-void AppModel::requestFrames() { store_->SetCurrentTime(state().time, neededSources()); }
+void AppModel::requestFrames() {
+    // TASK-0076: NVDEC did not start for a video (memory) - its frames are tried again on a jump or a step (not playback: its new frames
+    // are tried anyway) and when other sources are shown; not on a pan, a zoom, the wipe or an inspector edit, which call here on every
+    // mouse move (each try opens the file and a CUDA context again)
+    const std::vector<std::string> needed = neededSources();
+    if ((!inPlayTick_ && std::abs(state().time - retriedAt_) > 1e-9) || needed != retriedFor_) {
+        retriedAt_ = state().time;
+        retriedFor_ = needed;
+        store_->RetryStartFailures();
+    }
+    store_->SetCurrentTime(state().time, needed);
+}
+
+void AppModel::setTasksRunning(bool running) {
+    tasksRunning_ = running;
+    updateNvdecHold();
+}
+
+void AppModel::updateNvdecHold() {
+    // TASK-0076: while a task, a preview or a check runs, the viewport does not hold NVDEC between frames (its memory is theirs); from
+    // what runs, not counted - a check that did not start or a task cancelled in the queue leaves nothing behind
+    const bool busy = tasksRunning_ || checkProcess_ != nullptr;
+    if (!store_) return;
+    if (busy && !nvdecLetGo_) {
+        store_->SetHoldNvdec(false);
+        store_->ReleaseNvdecDecoders();
+    } else if (!busy) {
+        store_->SetHoldNvdec(true);
+        store_->RetryStartFailures();  // NVDEC's memory is free again: the frames a start failure left out come again
+    }
+    nvdecLetGo_ = busy;
+}
+
+// TASK-0076: a file as it is now - its path, size and time (a file written again on the same path is another)
+std::string AppModel::FileStamp(const std::filesystem::path& file) {
+    std::error_code e1, e2;
+    const auto size = std::filesystem::file_size(file, e1);
+    const auto time = std::filesystem::last_write_time(file, e2);
+    return file.string() + "|" + (e1 ? std::string("?") : std::to_string(size)) + "|" +
+           (e2 ? std::string("?") : std::to_string(time.time_since_epoch().count()));
+}
 
 void AppModel::startProxies() {
     if (!hasProject() || project_.passesRoot.empty() || !std::filesystem::exists(project_.sourceVideo)) return;
@@ -477,6 +519,7 @@ void AppModel::startProxies() {
         const std::filesystem::path video = std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo;
         if (video.empty() || !std::filesystem::exists(video) || ValidProxy(video, project_.passesRoot, name)) continue;
         if (isReleased(video)) continue;  // being replaced (TASK-0070)
+        if (store_ && store_->Undecodable(name)) continue;  // TASK-0076: nothing here decodes it
         names << name;
     }
     if (names.isEmpty()) return;
@@ -488,14 +531,19 @@ void AppModel::startProxies() {
     proxyArgs_ = args;
     proxyProcess_ = new QProcess(this);
     proxyProcess_->setProcessChannelMode(QProcess::MergedChannels);
-    connect(proxyProcess_, &QProcess::finished, this, [this, p = proxyProcess_](int code, QProcess::ExitStatus status) {
+    // the videos of this build, not the ones of a project opened before it ends (TASK-0076: its verdicts are theirs)
+    connect(proxyProcess_, &QProcess::finished, this,
+            [this, p = proxyProcess_, builtSource = project_.sourceVideo, builtResult = project_.resultVideo](int code, QProcess::ExitStatus status) {
         const QString out = QString::fromUtf8(p->readAll());  // dlssvid writes UTF-8 (TASK-0066)
         p->deleteLater();
         if (proxyProcess_ == p) proxyProcess_ = nullptr;
-        if (status != QProcess::NormalExit || code != 0) {
+        if (status != QProcess::NormalExit) {  // crashed or killed: its output is no account of the videos
             Log()->warn("viewport proxy: dlssvid proxy failed ({}): {}", code, out.right(400).toStdString());
             return;
         }
+        // TASK-0076: an error on one video ends the process with 1 after the lines of the ones before it (a verdict, a proxy built) -
+        // read as a whole run's (BuildMissingProxies goes on after a refusal, not after other errors)
+        if (code != 0) Log()->warn("viewport proxy: dlssvid proxy failed ({}): {}", code, out.right(400).toStdString());
         QStringList ready;
         for (const char* name : {"source", "result"}) {
             const std::filesystem::path video = std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo;
@@ -504,7 +552,66 @@ void AppModel::startProxies() {
                 ready << HumanSourceName(name);
             }
         }
-        if (!ready.isEmpty()) emit message(tr("Прокси для перемотки готов: %1").arg(ready.join(", ")));
+        // TASK-0076: one message for the build - the status bar shows the last one only (each replaces the one before): «готов» first,
+        // then what was not built; «готов» in the log too (the status bar's line goes in 5 s)
+        QStringList said;
+        if (!ready.isEmpty()) {
+            said << (ready.size() > 1 ? tr("Прокси для перемотки готовы: %1") : tr("Прокси для перемотки готов: %1")).arg(ready.join(", "));
+            Log()->info("viewport proxy ready: {}", ready.join(", ").toStdString());
+        }
+        // TASK-0076: NVDEC refused the video or did not start in the proxy process (its lines: «<name>: no proxy …») - said, not silent
+        QStringList refused, notNow;
+        for (const char* name : {"source", "result"}) {
+            // of the videos of the project open now only: a build of the one before says nothing of these (its reasons are in the log)
+            if (!SameFile(std::string(name) == "source" ? builtSource : builtResult, std::string(name) == "source" ? project_.sourceVideo : project_.resultVideo))
+                continue;
+            // «no proxy, the video cannot be decoded here» / «no proxy now, NVDEC did not start» - not «no proxy needed» (a short GOP)
+            if (out.contains(QString("%1: no proxy,").arg(name))) refused << HumanSourceName(name);
+            if (out.contains(QString("%1: no proxy now").arg(name))) notNow << HumanSourceName(name);
+        }
+        for (const QString& line : out.split('\n'))  // the reasons themselves, whole (not the tail of the output)
+            if (line.contains(": no proxy,") || line.contains(": no proxy now")) Log()->warn("viewport proxy: {}", line.trimmed().toStdString());
+        if (!refused.isEmpty())  // (two videos: the plural, as the question of «Удалить прокси» says it)
+            said << (refused.size() > 1 ? tr("Прокси для перемотки не построены (%1): видео на этом компьютере не декодируются (подробности в логе) — "
+                                             "перекодируйте их в H.264 или HEVC другой программой")
+                                        : tr("Прокси для перемотки не построен (%1): видео на этом компьютере не декодируется (подробности в логе) — "
+                                             "перекодируйте его в H.264 или HEVC другой программой"))
+                        .arg(refused.join(", "));
+        if (!notNow.isEmpty())
+            said << (notNow.size() > 1 ? tr("Прокси для перемотки сейчас не построены (%1): видеокарта не начала декодировать — постройте их позже (Вид → "
+                                            "Построить прокси для перемотки)")
+                                       : tr("Прокси для перемотки сейчас не построен (%1): видеокарта не начала декодировать — постройте его позже (Вид → "
+                                            "Построить прокси для перемотки)"))
+                        .arg(notNow.join(", "));
+        if (!said.isEmpty()) emit message(said.join(". "));
+        // a verdict on a file is the viewport's too: the sources set again say it (the plan stops, the viewport and the menus say it, the
+        // background build does not try it again). The driver's answer this process gets as well (no AV1 on this GPU, the size): the sources
+        // find it themselves; NVDEC refusing the stream there: remembered with the file's size and time as a loader's refusal is
+        bool heardVerdict = false;
+        for (const QString& line : out.split('\n')) {
+            const QString l = line.trimmed();
+            for (const char* name : {"source", "result"}) {
+                const QString head = QString("%1: no proxy, the video cannot be decoded here: ").arg(name);
+                if (!l.startsWith(head)) continue;
+                const std::filesystem::path video = std::string(name) == "source" ? builtSource : builtResult;
+                try {
+                    VideoDecoder probe(video, VideoDecoder::Probe());
+                    if (!probe.Info().hardwareOnly) continue;
+                    if (!CheckDecodeSupport(probe.Info()).Ok()) {
+                        heardVerdict = true;
+                        continue;
+                    }
+                    // the process's verdict with its own block (a part, a learned layout, frames smaller than the sequence, an odd height:
+                    // their own reasons, not «the GPU refused it, update the driver»); one this process's loader met on the same file stays
+                    const DecodeSupport verdict = VerdictFromWhy(probe.Info(), l.mid(head.size()).toStdString(), "the proxy build");
+                    // not remembered (the file not readable now): the sources are not set again - they would start the same build again
+                    if (FrameStore::RememberRefusedFile(video, verdict, true)) heardVerdict = true;
+                } catch (const std::exception& e) {
+                    Log()->debug("viewport proxy: {} not probed: {}", video.string(), e.what());
+                }
+            }
+        }
+        if (heardVerdict && (SameFile(builtSource, project_.sourceVideo) || SameFile(builtResult, project_.resultVideo))) reloadSources();
         emit proxiesChanged();
     });
     Log()->info("viewport proxy: building {} in the background", names.join(", ").toStdString());
@@ -752,7 +859,38 @@ void AppModel::markDirty() {
 
 void AppModel::notifyFramesUpdated() {
     noteScrubReady();
+    noteSourceRefused();
     emit framesUpdated();
+}
+
+bool AppModel::sourceRefusalSaid() const { return !sourceDecode_.Ok() && planError_ == SourceDecodeText(sourceDecode_); }
+
+void AppModel::noteSourceRefused() {
+    // TASK-0076: NVDEC refused the source in the viewport as a verdict (not a start failure): the plan says it now -
+    // «Обработать», Ctrl+Return, the preview and the stage runs stop, as for a refusal known in advance
+    if (!hasProject() || !sourceDecode_.Ok() || !store_) return;
+    const auto refused = store_->Undecodable("source");
+    if (!refused) {
+        // the file as loaded decodes (a frame of it shown, no verdict, not written since): a refusal met later on that path is set again
+        // anew - reloadedFor_ holds back only a file still being written (just set again, its loads not yet refused: no frame)
+        // (the cheap checks first: no file is read for a video that never needed it - any H.264 on every frame update)
+        if (!reloadedFor_.empty() && store_->StatusAt(state().time, "source") == FrameStore::Status::Ready && !store_->SourceChanged("source"))
+            reloadedFor_.clear();
+        return;
+    }
+    // another file on that path now (written over, still being written): not its verdict - the plan probes the file there and sets the
+    // sources again, once per refusal (refreshPlan marks it: reloadedFor_), not on every frame update
+    if (store_->SourceChanged("source")) {
+        if (project_.sourceVideo.string() + "|" + refused->why != reloadedFor_) refreshPlan();
+        return;
+    }
+    // once per refusal of the file as it is: a plan made with it is not made again on every frame update; the file written again since
+    // (refreshPlan forgets), the sources set again, another refusal - heard
+    const std::string heard = FileStamp(project_.sourceVideo) + "|" + refused->why;
+    if (heard == heardRefusal_) return;
+    heardRefusal_ = heard;
+    refreshPlan();  // reads the refusal before anything else: it replaces another plan error (the more basic one) and drops the plan; one
+                    // that stops before the probe keeps it too
 }
 
 // ---- comparison in one action ----------------------------------------------------------------------
@@ -912,6 +1050,7 @@ ProcessOptions AppModel::planOptions(bool withForce) {
 }
 
 void AppModel::refreshPlan() {
+    sourceDecode_ = {};  // TASK-0076: set again below for the source of this plan
     planTimer_.stop();
     plan_ = ProcessPlan{};
     planNoForce_.reset();
@@ -926,8 +1065,33 @@ void AppModel::refreshPlan() {
         sourceInfo_.fps = store_->FpsOf("source");
         sourceInfo_.frames = src->lastFrame + 1;
     }
+    // TASK-0076: the store's verdict is the file's as it loaded it: one written there since (another AV1, a broken copy, another codec) gets
+    // its sources set again - once per verdict (a file still being written is not set again on every plan), and whenever its own probe
+    // says otherwise than a verdict a probe gives (another codec; the layout, the GPU, the size: another answer) - see below
+    std::optional<DecodeSupport> stale;
+    if (hasProject())
+        if (auto refused = store_->Undecodable("source"); refused && store_->SourceChanged("source")) {
+            heardRefusal_.clear();  // the file as it comes back (the same bytes again) is heard anew
+            stale = std::move(refused);
+        }
+    const auto setSourcesAgain = [this](const DecodeSupport& refused, bool whatever) {
+        const std::string key = project_.sourceVideo.string() + "|" + refused.why;
+        if (!whatever && key == reloadedFor_) return;
+        reloadedFor_ = key;
+        QTimer::singleShot(0, this, [this] {
+            if (store_ && store_->SourceChanged("source") && store_->Undecodable("source")) reloadSources();
+        });
+    };
+    // TASK-0076: a plan that stops before it probes the source (the video not found, the probe failing): the viewport's verdict on it
+    // still holds the runs (a plan that probed it decides itself - a file replaced by one with a software decoder is no AV1 refusal)
+    // (of the file as the viewport loaded it: one written there since - a broken copy, another video - is not that file)
+    const auto keepViewportVerdict = [this] {
+        if (sourceInfo_.codec.empty() && hasProject() && !store_->SourceChanged("source"))
+            if (const auto refused = store_->Undecodable("source")) sourceDecode_ = *refused;
+    };
     if (!hasProject() || !std::filesystem::exists(project_.sourceVideo)) {
         planError_ = hasProject() ? tr("видео не найдено") : tr("нет проекта");
+        keepViewportVerdict();
         emit planChanged();
         return;
     }
@@ -946,6 +1110,21 @@ void AppModel::refreshPlan() {
         sourceInfo_.sarFrom = probe.Info().sarFrom;
         sourceInfo_.bitDepth = probe.Info().bitDepth;
         sourceInfo_.chroma = probe.Info().chroma;
+        sourceInfo_.pixelFormat = probe.Info().pixelFormat;
+        sourceDecode_ = CheckDecodeSupport(probe.Info());
+        if (stale) {  // TASK-0076: the file written over - its probe tells a probe's verdict apart (a loader's: once, as above)
+            setSourcesAgain(*stale, !probe.Info().hardwareOnly ||
+                                        (IsProbeVerdict(*stale) && (sourceDecode_.block != stale->block || sourceDecode_.why != stale->why)));
+        }
+        // TASK-0076: NVDEC refused the viewport's frames (the driver could not be asked, a part, frames of another size) - for this file
+        // as loaded (another one on that path: set again above, no old verdict)
+        if (sourceDecode_.Ok() && probe.Info().hardwareOnly && !store_->SourceChanged("source"))
+            if (const auto refused = store_->Undecodable("source")) sourceDecode_ = *refused;
+        if (!sourceDecode_.Ok()) {  // TASK-0076: AV1 without NVDEC AV1 - «Обработать» and the stage runs stay off
+            planError_ = SourceDecodeText(sourceDecode_);
+            emit planChanged();
+            return;
+        }
         const ProcessOptions o = planOptions(true);
         plan_ = PlanProcess(o);
         // PR-10: the preview reads the stages above NR as they are - a «пересчитать» mark there would make them «run» for it
@@ -975,8 +1154,13 @@ void AppModel::refreshPlan() {
         outcome_.format.height = outcome_.height;
         for (const auto& v : ListPassVersions(project_.passesRoot))
             if (!v.current) ++history_[v.pass];
+    } catch (const DecodeUnavailable& e) {  // TASK-0076: in the GUI's words
+        sourceDecode_ = e.support;
+        planError_ = SourceDecodeText(e.support);
     } catch (const std::exception& e) {
         planError_ = QString::fromUtf8(e.what());
+        keepViewportVerdict();
+        if (stale) setSourcesAgain(*stale, false);  // a broken copy: once
     }
     emit planChanged();
 }
@@ -1127,7 +1311,10 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     for (const auto& s : plan_.stages)
         if (s.name == stage) d = &s;
     if (!d) {
-        st.state = planError_.isEmpty() ? tr("—") : planError_;
+        // TASK-0076: the source's refusal is said once, under «Что получится» - a card gets a short line, not the whole paragraph
+        st.state = sourceRefusalSaid()   ? SourceRefusedShortText()
+                   : planError_.isEmpty() ? tr("—")
+                                          : planError_;
         return st;
     }
     const std::string primary = d->outputs.empty() ? stage : d->outputs.back();
@@ -1325,14 +1512,17 @@ AppModel::ResultInfo AppModel::resultInfo() const {
     return r;
 }
 
+QString AppModel::codecLabel(const std::string& codec) {
+    if (codec == "hevc" || codec == "hevc_nvenc") return "HEVC";
+    if (codec == "h264" || codec == "h264_nvenc") return "H.264";
+    if (codec == "av1" || codec == "av1_nvenc") return "AV1";
+    if (codec == "prores" || codec == "prores_ks") return "ProRes";
+    if (codec == "ffv1") return "FFV1";
+    return QString::fromStdString(codec).toUpper();
+}
+
 QString AppModel::formatLabel(const std::string& codec, const FrameDesc& format) {
-    QString name;
-    if (codec == "hevc" || codec == "hevc_nvenc") name = "HEVC";
-    else if (codec == "h264" || codec == "h264_nvenc") name = "H.264";
-    else if (codec == "av1" || codec == "av1_nvenc") name = "AV1";
-    else if (codec == "prores" || codec == "prores_ks") name = "ProRes";
-    else if (codec == "ffv1") name = "FFV1";
-    else if (!codec.empty()) name = QString::fromStdString(codec).toUpper();
+    const QString name = codecLabel(codec);
     const std::string_view chroma = ChromaName(format.format);
     const QString layout = tr("%1 бит %2:%3:%4").arg(format.HighBitDepth() ? format.bitDepth : 8).arg(chroma[0]).arg(chroma[1]).arg(chroma[2]);
     return name.isEmpty() ? layout : name + " " + layout;
@@ -2073,6 +2263,7 @@ void AppModel::checkStage(const std::string& stage) {
     checkingStage_ = stage;
     const std::string key = checkKey(stage);
     checkProcess_ = new QProcess(this);
+    updateNvdecHold();  // TASK-0076: the check's NGX feature gets the memory of the viewport's NVDEC decoders
     checkProcess_->setProcessChannelMode(QProcess::MergedChannels);
     QProcess* proc = checkProcess_;
     QTimer::singleShot(120000, proc, [proc] {  // NGX that does not answer: the check ends as failed
@@ -2085,6 +2276,7 @@ void AppModel::checkStage(const std::string& stage) {
         QDir(dir).removeRecursively();
         if (checkProcess_ != proc) return;
         checkProcess_ = nullptr;
+        updateNvdecHold();
         checkingStage_.clear();
         StageCheck c;
         c.when = QTime::currentTime().toString("HH:mm");
@@ -2103,6 +2295,7 @@ void AppModel::checkStage(const std::string& stage) {
         QDir(dir).removeRecursively();  // the settings file and the report
         if (checkProcess_ != proc) return;  // cancelled: another project
         checkProcess_ = nullptr;
+        updateNvdecHold();
         checkingStage_.clear();
         StageCheck c;
         c.when = QTime::currentTime().toString("HH:mm");
@@ -2136,6 +2329,7 @@ void AppModel::cancelCheck() {
     if (!checkProcess_) return;
     QProcess* p = checkProcess_;
     checkProcess_ = nullptr;
+    updateNvdecHold();
     checkingStage_.clear();
     p->kill();  // its finished slot sees another process (or none) and returns; deleteLater there
     emit availabilityChanged();

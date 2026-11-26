@@ -124,6 +124,7 @@ int CmdFgAsStage(const FgCommands::FgArgs& a) {
     nlohmann::json params = a.paramsJson.empty() ? nlohmann::json::object() : nlohmann::json::parse(a.paramsJson);
     if (!params.is_object()) Throw("fg --as-stage: --params-json must be a JSON object");
     VideoDecoder decoder(a.input);
+    decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
     FgStageOptions o;
     o.outputDir = a.output;
     o.colorDir = a.colorDir;
@@ -171,6 +172,7 @@ int CmdFg(const FgCommands::FgArgs& a) {
     if (a.input.empty()) Throw("fg: -i/--input is required (or --check)");
     if (a.output.empty()) Throw("fg: -o/--output is required");
     VideoDecoder decoder(a.input);
+    decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
     const auto& info = decoder.Info();
     FgStageOptions o;
     o.backend = a.backend;

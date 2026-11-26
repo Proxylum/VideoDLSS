@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include <algorithm>
 #include <QAction>
 #include <QCloseEvent>
 #include <QDesktopServices>
@@ -25,6 +26,7 @@
 #include <cmath>
 
 #include "CompareBar.h"
+#include "DecodeText.h"
 #include "InspectorPanel.h"
 #include "LogPanel.h"
 #include "PreviewRunner.h"
@@ -124,6 +126,7 @@ MainWindow::MainWindow(bool warp, QWidget* parent) : QMainWindow(parent), model_
     connect(viewport_, &ViewportWindow::zoomChanged, this, [this](float z) { zoomLabel_->setText(QString("%1 %").arg(static_cast<int>(std::lround(z * 100)))); });
     connect(&model_, &AppModel::stateChanged, this, &MainWindow::updateCellLabels);
     connect(&model_, &AppModel::timeChanged, this, [this](double) { updateCellLabels(); });
+    connect(&model_, &AppModel::planChanged, this, [this] { updateCellLabels(); });  // TASK-0076: the tooltips follow the source's verdict
     connect(&model_, &AppModel::framesUpdated, this, &MainWindow::updateCellLabels);  // «загрузка…» -> the frame
     connect(&model_, &AppModel::sourcesChanged, this, &MainWindow::updateCellLabels);
     connect(&model_, &AppModel::nrPreviewChanged, this, &MainWindow::updateCellLabels);  // PR-10
@@ -241,8 +244,30 @@ void MainWindow::buildMenus() {
         model_.startProxies();
         QSettings().setValue("view/autoProxy", was);
         QSettings().setValue("view/proxyMaxGiB", before);
+        // TASK-0076: startProxies skips a video this machine cannot decode - said, not silent (a proxy already there shows it: nothing to say)
+        QStringList skipped;  // «<name>: <why>» - the video need not be on screen (no cell's tooltip to point to)
+        for (const char* name : {"source", "result"})
+            if (const ViewportSource* s = model_.store().FindSource(name); s && s->proxy.empty())
+                if (const auto d = model_.store().Undecodable(name))
+                    skipped << tr("%1: прокси для перемотки не строится.").arg(HumanSourceName(name)) + "\n" + SourceDecodeText(*d) +
+                                   resultRewriteAdvice(name, *d);
+        // (the title says no more than its lines: another video's proxy may be building in the background meanwhile)
+        if (!skipped.isEmpty()) QMessageBox::information(this, tr("Прокси для перемотки"), skipped.join("\n\n"));
     });
     view->addAction(tr("Удалить прокси для перемотки"), this, [this] {
+        // TASK-0076: a video this machine cannot decode is shown only from its proxy, and it is not built again here
+        QStringList only;
+        for (const char* name : {"source", "result"})
+            if (const ViewportSource* s = model_.store().FindSource(name); s && !s->proxy.empty() && model_.store().Undecodable(name))
+                only << HumanSourceName(name);
+        if (!only.isEmpty() &&
+            QMessageBox::question(this, tr("Удалить прокси для перемотки"),
+                                  (only.size() > 1 ? tr("%1: на этом компьютере не декодируются и показываются только по прокси, а заново здесь не "
+                                                        "построятся. Удалить прокси?")
+                                                   : tr("%1: на этом компьютере не декодируется и показывается только по прокси, а заново здесь не "
+                                                        "построится. Удалить прокси?"))
+                                      .arg(only.join(", "))) != QMessageBox::Yes)
+            return;
         model_.cancelProxies();
         RemoveProxy(model_.project().passesRoot, "source");
         RemoveProxy(model_.project().passesRoot, "result");
@@ -363,6 +388,36 @@ void MainWindow::selectSource(int hotkey) {
     model_.showSource(chips[static_cast<size_t>(hotkey - 1)].source);
 }
 
+// TASK-0076: a result this machine cannot decode, of a source it decodes and has read: written again here in H.264 / HEVC - not when
+// the GPU decodes nothing (no CUDA, no nvcuvid). Empty otherwise; else a line of its own
+QString MainWindow::resultRewriteAdvice(const std::string& name, const DecodeSupport& refusal) const {
+    if (name != "result" || !model_.sourceDecode().Ok() || model_.sourceInfo().codec.empty() || refusal.block == DecodeBlock::NoCuda ||
+        refusal.block == DecodeBlock::NoNvdec)
+        return {};
+    return "\n" + tr("Результат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».");
+}
+
+// TASK-0076: the tooltip of a cell showing a video this machine cannot decode says why and what to do
+QString MainWindow::withDecodeReason(const QString& tech, const std::vector<std::string>& sources) {
+    QString s = tech;
+    std::vector<std::string> said;  // two layers of one source: its reason once
+    for (const auto& name : sources) {
+        if (std::find(said.begin(), said.end(), name) != said.end()) continue;
+        said.push_back(name);
+        const auto d = model_.store().Undecodable(name);
+        if (const auto f = model_.store().StartFailure(name); f && !d) s += "\n" + HumanSourceName(name) + ": " + SourceDecodeText(*f);  // not now
+        if (d) {
+            const ViewportSource* src = model_.store().FindSource(name);
+            const bool proxied = src && !src->proxy.empty();
+            s += "\n" + HumanSourceName(name) + ": " +
+                 (!proxied            ? SourceDecodeText(*d) + resultRewriteAdvice(name, *d)
+                  : name == "source"    ? tr("показан по прокси перемотки; само видео на этом компьютере не декодируется, обработать его нельзя")
+                                        : tr("показан по прокси перемотки; само видео на этом компьютере не декодируется"));
+        }
+    }
+    return s;
+}
+
 void MainWindow::updateCellLabels() {
     const ViewportState& st = model_.state();
     const bool grid = st.mode == ViewMode::Grid;
@@ -370,7 +425,7 @@ void MainWindow::updateCellLabels() {
         cellLabels_[i]->setVisible(grid ? (st.expandedCell < 0 || st.expandedCell == static_cast<int>(i)) : i == 0);
         if (grid) {
             cellLabels_[i]->setText(cellLabel(HumanSourceName(st.gridSources[i]), st.gridSources[i]));
-            cellLabels_[i]->setToolTip(QString::fromStdString(st.gridSources[i]));
+            cellLabels_[i]->setToolTip(withDecodeReason(QString::fromStdString(st.gridSources[i]), {st.gridSources[i]}));
         }
     }
     if (!grid) {
@@ -378,7 +433,7 @@ void MainWindow::updateCellLabels() {
             const LayerState* after = st.CompareSide(true);
             cellLabels_[0]->setText(tr("ДО: %1   |   ПОСЛЕ: %2").arg(cellLabel(HumanSourceName(before->source), before->source, false),
                                                                        cellLabel(HumanSourceName(after->source), after->source)));
-            cellLabels_[0]->setToolTip(QString::fromStdString(before->source + " | " + after->source));
+            cellLabels_[0]->setToolTip(withDecodeReason(QString::fromStdString(before->source + " | " + after->source), {before->source, after->source}));
         } else {
             QString t, tech;
             for (const auto& l : st.layers) {
@@ -386,7 +441,9 @@ void MainWindow::updateCellLabels() {
                 tech += (tech.isEmpty() ? "" : " + ") + QString::fromStdString(l.source);
             }
             cellLabels_[0]->setText(cellLabel(t, model_.baseSource()));
-            cellLabels_[0]->setToolTip(tech);
+            std::vector<std::string> names;
+            for (const auto& l : st.layers) names.push_back(l.source);
+            cellLabels_[0]->setToolTip(withDecodeReason(tech, names));
         }
     }
 }
@@ -406,7 +463,11 @@ QString MainWindow::cellLabel(const QString& title, const std::string& source, b
     switch (model_.frameStateOf(source)) {
         case FrameState::Loading:
         case FrameState::Stale: s += tr(" · загрузка…"); break;  // stale: the previous frame stays on screen meanwhile
-        case FrameState::Missing: s += tr(" · нет кадра"); break;
+        case FrameState::Missing:  // TASK-0076: not decodable here; NVDEC did not start now (memory: a task runs)
+            s += model_.store().Undecodable(source)    ? SourceDecodeShort()
+                 : model_.store().StartFailure(source) ? tr(" · видеокарта не начала декодировать")
+                                                       : tr(" · нет кадра");
+            break;
         default: break;
     }
     return s;

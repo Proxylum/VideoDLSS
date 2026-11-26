@@ -18,6 +18,7 @@
 
 #include "convert/ColorConvert.h"
 #include "gpu/D3D12Device.h"
+#include "io/NvdecSupport.h"
 #include "io/VideoDecoder.h"
 #include "passes/Manifest.h"
 #include "passes/PassImage.h"
@@ -52,6 +53,12 @@ struct ViewportSource {
     std::shared_ptr<const Manifest> manifest;
     // A static pass (PR-8: mask_control, Manifest::IsStatic): its one frame stands at every time - no duration of its own
     bool isStatic = false;
+    // Videos (TASK-0076): a stream this machine cannot decode (AV1 without NVDEC AV1) and why; the original's decoder never opens - its
+    // frames come from the proxy when there is one, else they are missing
+    std::optional<DecodeSupport> undecodable;
+    bool hardwareOnly = false;  // TASK-0076: the video decodes on NVDEC only (VideoStreamInfo::hardwareOnly)
+    uintmax_t fileSize = 0;     // TASK-0076: the video file as it was loaded (SourceChanged)
+    std::filesystem::file_time_type fileTime{};
     bool HasFrame(int64_t f) const { return f >= firstFrame && (lastFrame < 0 || f <= lastFrame); }
 };
 
@@ -72,6 +79,13 @@ public:
         int prefetch = 6;                             // frames of the fastest source before/after the current time
         int uploadsPerUpdate = 4;
         int loaderThreads = 0;                        // 0 = auto (2..4)
+        // tests (TASK-0076): called on the loader thread before LoaderMain publishes the frames LoadOne returned (a pass's frame, a
+        // missing mark - a start failure's too; a video's decoded frames LoadVideo published itself, earlier) and after (before the load
+        // is marked done) - a race between that and the GUI thread (RetryStartFailures, SetCurrentTime, Update) made deterministic
+        std::function<void(int64_t frame, const std::string& source)> beforePublishForTests;
+        std::function<void(int64_t frame, const std::string& source)> afterLoadForTests;
+        // tests (TASK-0076): called on Update's thread between its two critical sections (the batch taken, not yet resident)
+        std::function<void()> betweenUpdateSectionsForTests;
     };
     // Missing: outside the source or failed to read; Queued: loadable, not requested yet or waiting in the
     // queue; Loading: a loader reads it or it waits for the upload; Ready: resident on the GPU.
@@ -86,6 +100,34 @@ public:
     void SetSources(std::vector<ViewportSource> sources);
     const std::vector<ViewportSource>& Sources() const { return sources_; }
     const ViewportSource* FindSource(const std::string& name) const;
+    // TASK-0076: why the video `name` cannot be decoded here - the verdict its ViewportSource carries (undecodable: the probe's, or one
+    // remembered for the file in this process - an earlier set's loader, the proxy build: RememberRefusedFile), or a loader's refusal that is
+    // no start failure (refusedInLoad_: any non-Transient DecodeUnavailable of its decoder); nullopt: it decodes
+    std::optional<DecodeSupport> Undecodable(const std::string& name) const;
+    // TASK-0076: the video `name` was written again since it was loaded (another size or time) - its verdicts are the old file's. A file
+    // gone, a pass folder or no such source: false
+    bool SourceChanged(const std::string& name) const;
+    // TASK-0076: NVDEC could not start for the video `name` (NvdecStartFailed: memory, the driver) - no verdict on the video; its frames
+    // met then are missing until RetryStartFailures (a frame of it decoded by its own decoder, a jump or a step, the end of a task) or
+    // SetSources
+    std::optional<DecodeSupport> StartFailure(const std::string& name) const;
+    // TASK-0076: forgets the start failures of `source` (empty: of every video) and asks for their frames again - a frame of it decoded
+    // by its own decoder since, frames asked for at a new time or for other sources (AppModel::requestFrames: a jump, a step - not a
+    // pan or a zoom), nothing running any more
+    void RetryStartFailures(const std::string& source = {});
+    // TASK-0076: closes the videos' decoders that hold NVDEC (an AV1 source in the GUI process): a run gets that memory; a later frame of
+    // the viewport opens one again. Never waits for a load in flight (the GUI thread): a busy decoder is closed by its loader after it.
+    void ReleaseNvdecDecoders();
+    // TASK-0076: a verdict on `file` met elsewhere (the proxy process): remembered with the file's size and time as a loader's refusal is
+    // - the next VideoSource of it is undecodable (the file however its path is written). false: the file could not be read (not remembered).
+    // keep: a verdict already remembered for this very file stays (a loader's own, more exact one) - true then too
+    static bool RememberRefusedFile(const std::filesystem::path& file, const DecodeSupport& support, bool keep = false);
+    // TASK-0076: false - every load of an NVDEC-only video closes its decoder afterwards (a task runs: the viewport does not hold NVDEC
+    // between frames), and such a video without a proxy that decodes here gets no prefetch (RequeueLocked; one with a verdict -
+    // undecodable, refused in a load - keeps its window: it opens no decoder, its frames are missing at once); true (the default) - kept
+    // for the next frame.
+    // A change asks for the window again (the prefetch comes back after the task)
+    void SetHoldNvdec(bool hold);
     // Pass folders with a manifest directly under passesRoot, named by their folder (the texture kind comes from the manifest).
     static std::vector<ViewportSource> DiscoverPasses(const std::filesystem::path& passesRoot);
     // Previous versions under <pass>.v/ as sources named "<pass>@<id>" (stage 9: compare versions with the wipe).
@@ -194,19 +236,27 @@ private:
         };
         std::array<ProxySlot, 4> proxies;
         std::atomic<int64_t> aborted{0}, proxyLoads{0};
+        std::atomic<bool> releasePending{false};  // TASK-0076: ReleaseNvdecDecoders found it busy - the loader closes it after the load
+        bool openedOnce = false;  // TASK-0076: the original's decoder was opened before (a reopen logs at debug level)
     };
+    void ReleaseNvdecAfterLoad(const std::string& source);  // TASK-0076: a pending release, or every load while SetHoldNvdec(false)
     struct LoadResult {
         std::vector<Loaded> loaded;
         bool aborted = false;  // not loaded because nobody wants it any more; not missing
+        // TASK-0076: the video's own decoder published a frame (LoadVideo publishes its frames itself, `loaded` stays empty then): NVDEC
+        // works for it - its start failures are tried again. A frame from the proxy (software) says nothing of NVDEC
+        bool decodedOriginal = false;
     };
 
     void LoaderMain();
+    void RequeueLocked();  // the queue from currentTime_ / needed_: every source's current frame first, then prefetch outwards
     LoadResult LoadOne(const Key& key);
     LoadResult LoadVideo(const Key& key, const ViewportSource& src, SourceRuntime& rt);
     // Decodes the target (and keeps wanted frames on the way) with `dec`; false: dropped before decoding (not wanted).
     bool DecodeTo(VideoDecoder& dec, const Key& key, int64_t walkLimit, std::vector<CpuFrame>& kept, bool& missing);
     Loaded LoadPass(const Key& key, const ViewportSource& src, SourceRuntime& rt);
-    void Publish(Loaded&& loaded);   // into loaded_ (and the current-frame callback)
+    // into loaded_ (and the current-frame callback); a missing frame of a start failure (TASK-0076) marks it in the same critical section
+    void Publish(Loaded&& loaded, const DecodeSupport* startFailure = nullptr);
     bool Wanted(const Key& key) const;  // needed by the viewport and not resident / known-missing
     bool WantedLocked(const Key& key) const;
     bool IsCurrentLocked(const Key& key) const;  // the needed frame of its source at the current time (mutex_ held)
@@ -218,6 +268,13 @@ private:
     std::map<Key, Entry>::const_iterator NearestResident(int64_t frame, const std::string& source) const;
     void Evict();
     bool InWindow(const Key& key) const;              // within the prefetch window of its source (mutex_ held)
+    // TASK-0076: the frames of a source RequeueLocked asks for around the current time (its prefetch span, 0 for an NVDEC-only video
+    // without a proxy while a task runs) and whether a key is within them (mutex_ held)
+    int QueueSpanLocked(const std::string& name) const;
+    bool InQueueWindowLocked(const Key& key) const;
+    // TASK-0076: a frame whose load ended without it (aborted, asked for in flight, a kept frame of a load that threw) back into the
+    // queue if it is still wanted, within the window asked for now: a current frame first, another after the current ones (mutex_ held)
+    void RequeueAfterLoadLocked(const Key& key);
     int SpanOf(const std::string& source) const;      // prefetch frames of a source: window seconds × its rate
     double ReferenceLastTime() const;                 // time of the reference's last frame (ExpectedFrames)
     // The frame a source loads and keeps for `time`: FrameAt, or the one frame of a static source (PR-8) - the key of every load,
@@ -227,6 +284,17 @@ private:
     D3D12Device& device_;
     Options options_;
     std::vector<ViewportSource> sources_;
+    std::map<std::string, DecodeSupport> refusedInLoad_;  // TASK-0076: NVDEC refused a video in a loader (under mutex_; SetSources forgets)
+    std::map<std::string, DecodeSupport> startFailed_;    // TASK-0076: NVDEC did not start for a video (under mutex_; SetSources forgets)
+    // TASK-0076 (under mutex_; SetSources forgets): frames RetryStartFailures met in flight - a start failure of such a load began
+    // before the retry and is not published (Publish); frames a requeue (RequeueLocked, RetryStartFailures) wanted while they were in
+    // flight - their loader asks for them again when it is done, if they are still wanted (a frame dropped or forgotten meanwhile);
+    // frames Update took for its upload - published, not resident yet (not loaded again meanwhile)
+    std::set<Key> retriedInFlight_;
+    std::set<Key> askedInFlight_;
+    std::set<Key> uploading_;
+    bool resetting_ = false;  // TASK-0076: SetSources waits for the loads of the old sources - nothing is queued meanwhile (under mutex_)
+    std::atomic<bool> holdNvdec_{true};                   // TASK-0076: SetHoldNvdec
     std::map<std::string, std::unique_ptr<SourceRuntime>> runtimes_;
     uint32_t imageW_ = 0, imageH_ = 0;
     Rational fps_{0, 1};

@@ -116,8 +116,10 @@ private:
     void onFinished(int id, bool ok);
     void onOutput(int id, const QString& line);
     void runPending();
-    void show(const NrPreviewEntry& entry, const NrPreviewJob& job, bool cached, bool seek);
+    // made: the settings it was asked with (a run - the request's, TASK-0076); null - the project's now (a cache hit: the same)
+    void show(const NrPreviewEntry& entry, const NrPreviewJob& job, bool cached, bool seek, const std::pair<std::vector<StageEntry>, QString>* made = nullptr);
     void updateStale();
+    void sayShown();  // the status of the preview shown: stale or not, and (refusalShown_) that a new one cannot come
     void updateUsage();
     void housekeep(std::function<void()> work, std::function<void()> done);
     void calibrate(const NrPreviewJob& job, double seconds, const NrPreviewEntry& entry);
@@ -127,6 +129,7 @@ private:
     TaskQueue& tasks_;
     // the preview being computed
     std::optional<NrPreviewJob> job_;
+    std::pair<std::vector<StageEntry>, QString> jobMade_;  // TASK-0076: its stages up to NR and control mask at the request (show's snapshot)
     Request jobRequest_;
     int taskId_ = -1;
     uint64_t jobGeneration_ = 0;
@@ -143,6 +146,12 @@ private:
     std::optional<NrPreviewEntry> shownEntry_;
     Request shownRequest_;
     QString stale_;
+    bool refusalShown_ = false;  // TASK-0076: the status says a new preview cannot come (the source refused since it was shown)
+    // TASK-0076: what the preview shown was made with (the stages up to NR, the control mask) - judges it while the source is refused
+    // (no plan then); staleBySnapshot_: stale_ is that judgement's (a plan's reason before the refusal is kept)
+    std::vector<StageEntry> shownStages_;
+    QString shownMask_;
+    bool staleBySnapshot_ = false;
     QString uncachedTip_;  // why the preview shown is not in the cache (another DLL, a folder that could not be renamed)
     QString shownStatus_, shownTip_;  // show()'s status: back when the preview is current again
     QString upstreamNote_;  // «Этапы до улучшения посчитаны за …»: said until the preview after them shows

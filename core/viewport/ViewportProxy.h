@@ -46,7 +46,9 @@ struct ProxyBuildOptions {
 };
 // Decodes `video` from its first frame and writes the proxy. Refuses (throws) when the frame indices are not 0, 1, 2 ...
 // (a variable-rate or oddly timed stream: the viewport then keeps decoding the original) and when the source changed
-// while it was read. Returns the proxy path; false-free: a cancel throws too (the message says so).
+// while it was read. Returns the proxy path; false-free: a cancel throws too (the message says so). A video this machine cannot
+// decode (TASK-0076: AV1 without NVDEC AV1) throws DecodeUnavailable - before the partial file, or removing it when NVDEC refuses
+// a frame on the way (the first or a later one, a verdict or a start failure).
 std::filesystem::path BuildProxy(const std::filesystem::path& video, const std::filesystem::path& passesRoot, const std::string& name,
                                  const ProxyBuildOptions& options = {});
 // Removes the proxy and its sidecar (Вид → «Удалить прокси»).

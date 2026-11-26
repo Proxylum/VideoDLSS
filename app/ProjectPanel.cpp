@@ -19,6 +19,7 @@
 
 #include "AppModel.h"
 #include "ControlMaskText.h"
+#include "DecodeText.h"
 #include "SceneCutsView.h"
 #include "SourceNames.h"
 #include "PresetMenu.h"
@@ -29,6 +30,7 @@
 #include "TaskQueue.h"
 #include "io/EncodeDefaults.h"
 #include "io/OutputFormat.h"
+#include "io/VideoDecoder.h"
 #include "passes/ScenesPass.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
@@ -367,7 +369,16 @@ void ProjectPanel::refresh() {
                             .arg(QString::number(src.fps, 'g', 5))
                             .arg(src.frames)
                             .arg(QString::number(src.fps > 0 ? src.frames / src.fps : 0.0, 'f', 1));
-        if (!src.codec.empty()) frame += " · " + AppModel::formatLabel(src.codec, src.layout.width ? src.layout : src.decoded);  // «HEVC 10 бит 4:4:4»
+        // TASK-0076: a layout the probe did not learn is not shown as the defaults it has - the one a refusal learned, else «not known»;
+        // a layout refused (gray, 12-bit ...) in the refusal's words, not as the layout a decoder would fall back to
+        const DecodeSupport& decode = model_.sourceDecode();
+        const bool unknown = src.pixelFormat == "unknown";
+        const bool learned = unknown && !decode.Ok() && !decode.part && !decode.pixelFormat.empty() && decode.pixelFormat != "unknown";
+        const bool refusedLayout = learned || (!decode.Ok() && !decode.part && decode.block == DecodeBlock::Layout);
+        if (!src.codec.empty())
+            frame += " · " + (refusedLayout ? AppModel::codecLabel(src.codec) + " " + DecodeLayoutText(decode.bitDepth, decode.chroma, decode.pixelFormat)
+                              : unknown     ? AppModel::codecLabel(src.codec) + tr(", формат заранее неизвестен")
+                                            : AppModel::formatLabel(src.codec, src.layout.width ? src.layout : src.decoded));  // «HEVC 10 бит 4:4:4»
         // TASK-0072: a phone video stored landscape, shown turned - as in a player
         if (!src.orientation.Identity())
             frame += src.orientation.rotate ? tr(" · повёрнут на %1°").arg(src.orientation.rotate) + (src.orientation.hflip ? tr(" и отражён") : QString())
@@ -376,7 +387,27 @@ void ProjectPanel::refresh() {
         const auto [shownW, shownH] = src.sar.DisplaySize(src.width, src.height);
         if (!src.sar.Square()) frame += tr(" · пиксель %1, показ %2×%3").arg(QString::fromStdString(src.sar.Token())).arg(shownW).arg(shownH);
         sourceFrame_->setText(frame);
-        QString tip = src.codec.empty() ? QString() : tr("Поток: %1 бит %2; декодируется как %3").arg(src.bitDepth).arg(QString::fromStdString(src.chroma)).arg(QString::fromStdString(src.decoded.Name()));
+        // TASK-0076: the same reading in the tooltip (a refusal learned the layout, or it is not known in advance); a refusal of a part
+        // names that part
+        // (no decoder starts here - no CUDA, no nvcuvid, no AV1 in NVDEC: no first frame to learn the layout from)
+        const bool noDecoder = !decode.Ok() && !decode.part &&
+                               (decode.block == DecodeBlock::NoCuda || decode.block == DecodeBlock::NoNvdec || decode.block == DecodeBlock::NoAv1);
+        QString stream = refusedLayout          ? DecodeLayoutText(decode.bitDepth, decode.chroma, decode.pixelFormat)
+                         : unknown && noDecoder ? tr("формат заранее неизвестен")
+                         : unknown              ? tr("формат заранее неизвестен (его узнаёт декодер на первом кадре)")
+                                                : DecodeLayoutText(src.bitDepth, src.chroma, src.pixelFormat);
+        if (!decode.Ok() && decode.part) {  // what the part was refused for: its frame as stored (Size, OddHeight), else its layout
+            const bool otherLayout = decode.pixelFormat != src.pixelFormat && !unknown;
+            if (decode.block == DecodeBlock::Size || decode.block == DecodeBlock::OddHeight)
+                stream += otherLayout ? tr(", в части — %1, кадр в файле %2×%3").arg(DecodeLayoutText(decode.bitDepth, decode.chroma, decode.pixelFormat)).arg(decode.width).arg(decode.height)
+                                      : tr(", в части — кадр в файле %1×%2").arg(decode.width).arg(decode.height);
+            else
+                stream += tr(", в части — %1").arg(DecodeLayoutText(decode.bitDepth, decode.chroma, decode.pixelFormat));
+        }
+        QString tip = src.codec.empty() ? QString()
+                      : !decode.Ok()    ? tr("Поток: %1; на этом компьютере не декодируется").arg(stream)
+                      : unknown         ? tr("Поток: %1").arg(stream)
+                                        : tr("Поток: %1; декодируется как %2").arg(stream, QString::fromStdString(src.decoded.Name()));
         if (!src.orientation.Identity()) {
             const QString how = src.orientation.rotate ? (src.orientation.hflip ? tr("повёрнутым и отражённым") : tr("повёрнутым")) : tr("отражённым");
             const QString by = src.orientationFrom == "rotate tag" ? tr("по тегу rotate") : tr("по матрице дисплея");
@@ -444,9 +475,11 @@ void ProjectPanel::refresh() {
     outError_->setText(model_.planError());
     outError_->setVisible(!model_.planError().isEmpty() && hasSource);
     const int toRun = std::max(0, out.stagesToRun - 1);  // the encode is not a «stage» for the button
-    process_->setText(toRun > 0 ? tr("Обработать · %1").arg(Plural(toRun, tr("стадия"), tr("стадии"), tr("стадий"))) : tr("Обработать · только кодирование"));
+    process_->setText(!model_.sourceDecode().Ok() ? tr("Обработать")  // TASK-0076: nothing can be run on a source this machine cannot decode
+                      : toRun > 0                 ? tr("Обработать · %1").arg(Plural(toRun, tr("стадия"), tr("стадии"), tr("стадий")))
+                                                  : tr("Обработать · только кодирование"));
     // a preview does not hold processing back: «Обработать» preempts it (TaskQueue)
-    process_->setEnabled(hasSource && model_.planError().isEmpty() && model_.planBlocker().isEmpty() && !tasks_.mainBusy() && !model_.controlMaskBusy());
+    process_->setEnabled(hasSource && canProcess());
     if (hasSource && model_.planError().isEmpty() && !model_.planBlocker().isEmpty()) {  // a stage the run would refuse
         outError_->setText(model_.planBlocker());
         outError_->setVisible(true);
@@ -516,7 +549,10 @@ void ProjectPanel::refresh() {
     for (const auto& e : out.stages)
         if (e.stage == "encode") enc = &e;
     const QString result = p.resultVideo.empty() ? tr("результат") : QString::fromStdWString(p.resultVideo.filename().wstring());
-    encodeState_->setText(hasSource ? tr("пересчёт · %1 · %2 обновится").arg(enc ? FormatDuration(enc->seconds) : "—").arg(result) : QString());
+    // TASK-0076: a source this machine cannot decode - no «обновится»: no run starts (as the stages' cards say)
+    encodeState_->setText(!hasSource                    ? QString()
+                          : model_.sourceRefusalSaid() ? SourceRefusedShortText()
+                                                       : tr("пересчёт · %1 · %2 обновится").arg(enc ? FormatDuration(enc->seconds) : "—").arg(result));
     refreshVersions();
     updating_ = false;
 }
@@ -701,11 +737,17 @@ void ProjectPanel::updateGates() {
     for (StageCard* card : cards_) card->refreshBusy();
 }
 
+bool ProjectPanel::canProcess() const {
+    // PR-8: the mask's import (its plan would read the folder being renamed); PR-10: a run waiting for a preempted preview's process to exit;
+    // TASK-0076: a plan error (an AV1 source this machine cannot decode among them) holds Ctrl+Return as it holds the button
+    return model_.planError().isEmpty() && model_.planBlocker().isEmpty() && !tasks_.mainBusy() && !model_.controlMaskBusy();
+}
+
 void ProjectPanel::processAll() {
     Project& p = model_.project();
     if (p.sourceVideo.empty()) return;
-    if (model_.controlMaskBusy()) return;  // PR-8: Ctrl+Return too waits for the mask's import (its plan would read the folder being renamed)
-    if (tasks_.mainBusy()) return;         // PR-10: a second press while the run waits for a preempted preview's process to exit
+    model_.refreshPlanIfPending();  // Ctrl+Return right after an edit: the verdict of the plan it would run
+    if (!canProcess()) return;
     if (!model_.saveForRun()) return;
     std::vector<TaskQueue::StagePlan> plan;
     for (const StageEstimate& e : model_.outcome().stages) {
@@ -728,6 +770,7 @@ void ProjectPanel::runStage(const std::string& stage) {
     for (const auto& s : p.stages)
         if (s.name == stage) st = &s;
     if (!st || p.sourceVideo.empty()) return;
+    if (!model_.sourceDecode().Ok()) return;  // TASK-0076: the plan says why (the stage would refuse the source at once)
     QStringList args{QString::fromStdString(st->name), "-i", QString::fromStdWString(p.sourceVideo.wstring()), "-o", QString::fromStdWString(p.passesRoot.wstring())};
     // one mapping of the schema keys to the command's options, checked against every command (tests/integration/test_cli.cpp)
     for (const std::string& a : StageCliArgs(st->name, st->params)) args << QString::fromStdString(a);

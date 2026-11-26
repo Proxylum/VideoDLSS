@@ -32,6 +32,7 @@ public:
     void forget(int id) { origins_.erase(id); }  // a task whose end was handled elsewhere
 
 private:
+    void syncTasksRunning();  // TASK-0076: the queue runs or holds a task or a preview -> AppModel::setTasksRunning
     struct Origin {
         uint64_t generation = 0;
         std::filesystem::path passesRoot;

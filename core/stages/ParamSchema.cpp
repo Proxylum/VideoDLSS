@@ -220,8 +220,11 @@ std::vector<StageSchema> Build() {
             Tuning(Number("grid", "Сетка OFA", ParamType::Int, 1, 1, 4, 1, ParamWidget::Spin, "", true)),
             Tuning(Number("dilate", "Дилатация у границ", ParamType::Int, 1, 0, 2, 1, ParamWidget::Spin, "", true)),
             Tuning(Text("target", "Целевое разрешение mv_dlss (WxH)", "")),
-            // NVDEC for OFA only: searaft / stub decode on the CPU whatever the key says (TASK-0043: it was hashed as "cuda")
-            Tuning(OnlyFor(Enum("hwaccel", "Декод", "cuda", {{"cuda", "CUDA", ""}, {"none", "CPU", ""}}, ParamWidget::Select, "", true), {"ofa"})),
+            // NVDEC for OFA only: searaft / stub decode on the CPU whatever the key says (TASK-0043: it was hashed as "cuda"); AV1 decodes on
+            // NVDEC whatever it says - this build has no software AV1 decoder (TASK-0076)
+            Tuning(OnlyFor(Enum("hwaccel", "Декод", "cuda", {{"cuda", "CUDA", ""}, {"none", "CPU", "AV1 и тогда декодирует видеокарта: другого декодера AV1 нет"}},
+                                ParamWidget::Select, "", true),
+                           {"ofa"})),
             Flag("fp32", "FP32", false),
             Tuning(Flag("no_dlss", "Только mv_raw", false, "не писать mv_dlss")),
             Tuning(Enum("format", "Формат пасса", "exr", Formats(false), ParamWidget::Select, "", true)),

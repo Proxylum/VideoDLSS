@@ -441,6 +441,11 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
         return {};
     };
     o.colorDir = autoDir(a.colorDir, "color_sr");
+    // with the colour pass a range starting past frame 0 takes its frames from the passes by index: no seek, any frame rate (PR-10) - and
+    // no video decode: otherwise the frames come from the video (RunNr walks it even with the colour pass), so a stream this machine
+    // cannot decode is refused here, before hashing it and the NGX feature (TASK-0076)
+    const bool fromPass = !o.colorDir.empty() && a.start - std::min(a.warmup, a.start) > 0;
+    if (!fromPass) decoder.RequireDecodable();
     o.depthDir = autoDir(a.depthDir, "depth_dlss");
     o.mvDir = autoDir(a.mvDir, "mv_dlss");
     o.masksDir = !a.masksDir.empty() ? std::filesystem::path(a.masksDir) : a.noAuto ? std::filesystem::path() : std::filesystem::path(a.output);
@@ -454,8 +459,6 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     bool scenesUsed = false;
     o.sceneCuts = ResolveScenes(a.scenesDir, a.noScenes, a.noAuto, a.output, o.sourceHash, StageReadsSceneCuts("nr", EffectiveStageParams("nr", params)), "nr",
                                 a.frames > 0 ? a.start + a.frames : 0, &scenesUsed);
-    // with the colour pass a range starting past frame 0 takes its frames from the passes by index: no seek, any frame rate (PR-10)
-    const bool fromPass = !o.colorDir.empty() && a.start - std::min(a.warmup, a.start) > 0;
     const NrRange range = PrepareRange(a, decoder, o, fromPass);
     if (!range.Ranged() && !NrAbJson(o).empty()) GuardProcessedPass(o, "an A/B run");
     int64_t passFrames = -1;  // the pass path: frames from range.from to the colour pass's (and the clip's) end, at most maxFrames

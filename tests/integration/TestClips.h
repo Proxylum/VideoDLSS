@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,7 @@ struct ClipSpec {
     // layout (SyntheticFrame(index, desc) or WriteClipWith) and write them as they are — ffv1 and prores_ks keep them.
     std::string pixFmt = "yuv420p";
     int gop = 0;  // keyframe interval of the encoder (0 = its default: 12 for ffv1); 1 = intra only (TASK-0040)
+    int bframes = -1;  // TASK-0076: the encoder's B-frames between references (max_b_frames); -1 = its default
     // The pts of frame i in 1/fps units (empty: i). A gap makes a variable-frame-rate clip (PR-10: the preview refuses to seek into it).
     std::function<int64_t(int64_t)> pts;
     // TASK-0072: how players show the clip - a display matrix on the video stream (av_display_rotation_set clockwise, then
@@ -77,5 +79,50 @@ struct StreamSummary {
     std::string comment;  // the container's `comment` tag (the settings note, PR-11)
 };
 StreamSummary Summarize(const std::filesystem::path& path);
+
+// FFmpeg's log while it lives (still written to stderr as before): what an encoder said when it refused. One at a time.
+class FfmpegLogCapture {
+public:
+    FfmpegLogCapture();
+    ~FfmpegLogCapture();
+    FfmpegLogCapture(const FfmpegLogCapture&) = delete;
+    FfmpegLogCapture& operator=(const FfmpegLogCapture&) = delete;
+    std::string Text() const;
+
+private:
+    std::string text_;
+};
+// NVENC saying this GPU lacks the encoder, its depth or 4:4:4: «Codec not supported», «10 bit encode not supported», «YUV444P not
+// supported» (libavcodec/nvenc.c).
+// Nothing else: «No capable devices found» (also a session not opened now), «unsupported param», an invalid spec, a test's own
+// error are failures.
+bool SaysUnsupported(const std::string& text);
+// WriteClip; nullopt (`why` says what the encoder said) when the encoder refuses the spec as not supported here (a GPU tests skip). Any
+// other failure throws: a test fails on it rather than skipping (a broken spec or a regression is not «unsupported»).
+std::optional<std::filesystem::path> WriteClipIfSupported(const std::filesystem::path& path, const ClipSpec& spec, std::string* why = nullptr);
+
+// TASK-0076: AV1 streams NVENC does not write, made of ones it does (an IVF file holds a temporal unit per frame):
+// `a` then `b` one after the other in one IVF file (b's timestamps going on from a's); `partB` may write b's units anew
+std::filesystem::path ConcatIvf(const std::filesystem::path& a, const std::filesystem::path& b, const std::filesystem::path& out,
+                                const std::function<std::string(const std::string&)>& partB = {});
+// an IVF file `copies` times one after the other, the timestamps going on; `each(index, unit)` writes each unit anew
+std::filesystem::path RepeatIvf(const std::filesystem::path& src, int copies, const std::filesystem::path& out,
+                                const std::function<std::string(int, const std::string&)>& each);
+// a temporal unit whose sequence headers (8-bit 4:2:0, profile 0) say 12-bit 4:2:0 (profile 2): av1dec asks for yuv420p12 - which
+// FFmpeg offers to no NVDEC - before it decodes the frames after it
+std::string TwelveBitTemporalUnit(const std::string& unit);
+// a temporal unit without its sequence header OBUs
+std::string WithoutSequenceHeaders(const std::string& unit);
+// a temporal unit whose sequence headers (av1_nvenc's: no timing info, no initial display delay) say an initial display delay - other
+// bytes, the same decoder (size, depth, chroma)
+std::string InitialDisplayDelayTemporalUnit(const std::string& unit);
+// a temporal unit whose sequence headers say a frame `rows` rows shorter (max_frame_height_minus_1 less by it, in the same bits): an odd
+// height made of av1_nvenc's even one - the frames' headers (no frame size override in them) stay valid while the 8-row block rows
+// (MiRows) stay the same
+std::string ShorterFrameTemporalUnit(const std::string& unit, int rows);
+// the same for the width (max_frame_width_minus_1): an odd width made of av1_nvenc's even one - the 8-pixel block columns (MiCols) the same
+std::string NarrowerFrameTemporalUnit(const std::string& unit, int columns);
+// the frame size an IVF file's header says (what the demuxer reports before any frame)
+void SetIvfFrameSize(const std::filesystem::path& ivf, uint16_t width, uint16_t height);
 
 }  // namespace dlssvid::test

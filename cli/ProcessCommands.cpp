@@ -8,7 +8,9 @@
 #include <sstream>
 
 #include "gpu/D3D12Device.h"
+#include "io/NvdecSupport.h"
 #include "io/OutputFormat.h"
+#include "io/VideoDecoder.h"
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/ProcessRunner.h"
 #include "stages/ParamSchema.h"
@@ -257,6 +259,16 @@ void PrintReport(const ProcessResult& r) {
 }
 
 int CmdProcess(const ProcessCommands::ProcessArgs& a) {
+    {  // TASK-0076: the video this run decodes, refused before anything is hashed - the project's own source rehashed when its file
+       // changed, another -i hashed in full: a 10 GB AV1 read for nothing otherwise
+        std::filesystem::path input = a.input;
+        if (input.empty() && !a.project.empty()) input = Project::Load(a.project).sourceVideo;
+        std::error_code ec;
+        if (!input.empty() && std::filesystem::exists(input, ec)) {
+            VideoDecoder probe(input, VideoDecoder::Probe());
+            if (const DecodeSupport s = CheckDecodeSupport(probe.Info()); !s.Ok()) throw DecodeUnavailable(s, "process: " + input.string() + ": " + s.why);
+        }
+    }
     ProcessOptions o;
     FileLayer file;
     BuildStages(a.project, a.paramFiles, a.stages, a.params, a.depthBackend, a.flowBackend, a.upscaleBackend, a.nrBackend, a.fgBackend, a.scale, a.multiplier, o,
@@ -442,7 +454,7 @@ void ProcessCommands::Register(CLI::App& app) {
     process_->add_option("--bit-depth,--bit_depth", pa_.bitDepth,
                          "result bit depth: auto | 8 | 10 | 12 (auto: the source's within the codec — 10-bit HEVC / AV1 / ProRes / FFV1, 8-bit H.264)");
     process_->add_option("--chroma", pa_.chroma, "result chroma subsampling: auto | 420 | 422 | 444 (auto: 4:2:0 for NVENC, 4:2:2 for ProRes, the source's for FFV1)");
-    process_->add_option("--hwaccel", pa_.hwaccel, "source decode for the encode / passthrough step: none | cuda")->default_val("none");
+    process_->add_option("--hwaccel", pa_.hwaccel, "source decode for the encode / passthrough step: none | cuda (AV1 always decodes on NVDEC: this build has no software AV1 decoder)")->default_val("none");
     process_->add_option("--frames", pa_.frames, "process at most N source frames")->default_val(-1);
     process_->add_flag("--warp", pa_.warp, "use the WARP software adapter");
     process_->add_flag("--passthrough", pa_.passthrough, "decode -> GPU -> encode without processing (stage 0)");

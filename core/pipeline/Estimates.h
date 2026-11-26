@@ -56,6 +56,7 @@ struct SourceInfo {
     uint32_t codedWidth = 0, codedHeight = 0;  // as stored
     int bitDepth = 8;         // of the source's own pixel format
     std::string chroma = "420";
+    std::string pixelFormat;  // the source's own ("unknown": the probe did not learn it - bitDepth / chroma are then defaults; TASK-0076)
     // TASK-0073: the proportions of a pixel in the axes of width / height (VideoStreamInfo::sar; codedSar - as stored, as ffprobe says)
     PixelAspect sar, codedSar;
     std::string sarFrom;      // "container" | "bitstream" | ""

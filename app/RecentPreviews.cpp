@@ -10,6 +10,7 @@
 #include <filesystem>
 
 #include "convert/ColorConvert.h"
+#include "io/NvdecSupport.h"
 #include "io/VideoDecoder.h"
 #include "passes/PassImage.h"
 #include "util/Log.h"
@@ -49,11 +50,11 @@ bool Probe(const QString& file, VideoStreamInfo& out) {
 
 // The first frame that is not a black lead-in (at most a dozen decoded), as an 8-bit RGB QImage - as shown (an anamorphic video stretched
 // to square pixels, TASK-0073).
-QImage FirstFrame(const QString& file) {
+QImage FirstFrame(const QString& file, bool* transient = nullptr) {
     QImage last;
     PixelAspect sar;
     try {
-        VideoDecoder dec(FsPath(file));  // CPU decode: one frame, any GPU stays free for the pipeline
+        VideoDecoder dec(FsPath(file));  // CPU decode: one frame, any GPU stays free for the pipeline (AV1: NVDEC, the only decoder - TASK-0076)
         sar = dec.Info().sar;
         const ColorInfo color = ColorInfoFromStream(dec.Info());
         CpuFrame f;
@@ -73,6 +74,9 @@ QImage FirstFrame(const QString& file) {
                 }
             if (n > 0 && sum / n > 16.0) break;
         }
+    } catch (const DecodeUnavailable& e) {  // TASK-0076: NVDEC not started now is no verdict - made again later (forgetRetries)
+        if (transient) *transient = e.support.Transient() && last.isNull();
+        Log()->debug("recent preview: cannot decode '{}': {}", file.toStdString(), e.what());
     } catch (const std::exception& e) {
         Log()->debug("recent preview: cannot decode '{}': {}", file.toStdString(), e.what());
     }
@@ -127,7 +131,7 @@ RecentPreviews::Preview RecentPreviews::Make(const QString& video, const QString
     VideoStreamInfo src, res;
     if (Probe(video, src)) p.meta = SizeLine(src);
     if (Probe(result, res)) p.meta += (p.meta.isEmpty() ? "" : " → ") + SizeLine(res);
-    const QImage frame = FirstFrame(result.isEmpty() ? video : result);
+    const QImage frame = FirstFrame(result.isEmpty() ? video : result, &p.retry);
     if (!frame.isNull()) p.image = Cover(frame, kWidth * kScale, kHeight * kScale);
     if (!p.image.isNull()) {  // the cache holds decoded previews only: an unreadable file is retried next time
         QDir().mkpath(CacheDir());
@@ -136,6 +140,11 @@ RecentPreviews::Preview RecentPreviews::Make(const QString& video, const QString
         out.save(file, "PNG");
     }
     return p;
+}
+
+void RecentPreviews::forgetRetries() {
+    for (const QString& key : std::as_const(retry_)) ready_.remove(key);
+    retry_.clear();
 }
 
 std::optional<RecentPreviews::Preview> RecentPreviews::get(const QString& video, const QString& result) {
@@ -149,6 +158,7 @@ std::optional<RecentPreviews::Preview> RecentPreviews::get(const QString& video,
             QMetaObject::invokeMethod(
                 this,
                 [this, key, video, p = std::move(p)]() mutable {
+                    if (p.retry) retry_.insert(key);
                     ready_.insert(key, std::move(p));
                     pending_.remove(key);
                     emit previewReady(video);

@@ -48,6 +48,8 @@ protected:
 
 private:
     void buildMenus();
+    QString withDecodeReason(const QString& tech, const std::vector<std::string>& sources);
+    QString resultRewriteAdvice(const std::string& name, const DecodeSupport& refusal) const;
     void updateCellLabels();
     QString cellLabel(const QString& title, const std::string& source, bool withTime = true);
     void saveScreenshot();

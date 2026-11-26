@@ -171,6 +171,20 @@ void BuildMissingProxies(const Project& project, const std::vector<std::string>&
                 std::printf("%s: proxy up to date: %s\n", name.c_str(), valid->string().c_str());
                 continue;
             }
+        // TASK-0076: --force over a proxy built earlier for a video this machine cannot decode: that one stays (the GUI never forces: its
+        // «no proxy,» lines are not these)
+        const auto kept = [&]() -> std::optional<std::filesystem::path> { return force ? ValidProxy(video, project.passesRoot, name) : std::nullopt; };
+        {  // TASK-0076: nothing here decodes it (AV1 without NVDEC AV1) - the other proxy and the render go on (and below: NVDEC refusing a frame on the way, the first or a later one)
+            VideoDecoder probe(video, VideoDecoder::Probe());
+            if (const DecodeSupport d = CheckDecodeSupport(probe.Info()); !d.Ok()) {
+                if (const auto earlier = kept())
+                    std::printf("%s: proxy not rebuilt, the video cannot be decoded here (the proxy built earlier stays: %s): %s\n", name.c_str(),
+                                earlier->string().c_str(), d.why.c_str());
+                else
+                    std::printf("%s: no proxy, the video cannot be decoded here: %s\n", name.c_str(), d.why.c_str());
+                continue;
+            }
+        }
         const ProxyPlan plan = PlanProxy(video);
         if (!plan.needed && !force) {
             std::printf("%s: no proxy needed (%s)\n", name.c_str(), plan.reason.c_str());
@@ -196,7 +210,21 @@ void BuildMissingProxies(const Project& project, const std::vector<std::string>&
                 std::fflush(stdout);
             }
         };
-        const auto path = BuildProxy(video, project.passesRoot, name, o);
+        std::filesystem::path path;
+        try {
+            path = BuildProxy(video, project.passesRoot, name, o);
+        } catch (const DecodeUnavailable& e) {  // TASK-0076: NVDEC refused a frame (the first or a later one; a verdict or a start failure) - the other proxy and the render go on
+            if (const auto earlier = kept()) {
+                std::printf("%s: proxy not rebuilt, %s (the proxy built earlier stays: %s): %s\n", name.c_str(),
+                            e.support.Transient() ? "NVDEC did not start (run it again later)" : "the video cannot be decoded here", earlier->string().c_str(),
+                            e.support.why.c_str());
+                continue;
+            }
+            std::printf(e.support.Transient() ? "%s: no proxy now, NVDEC did not start (run it again later): %s\n"
+                                              : "%s: no proxy, the video cannot be decoded here: %s\n",
+                        name.c_str(), e.support.why.c_str());
+            continue;
+        }
         std::printf("%s: proxy %s (%.1f MB) in %.1f s\n", name.c_str(), path.string().c_str(), static_cast<double>(std::filesystem::file_size(path)) / 1e6,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
@@ -217,6 +245,8 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
     ApplyOverrides(st, a);
 
     if (a.proxy != "auto" && a.proxy != "off" && a.proxy != "build") Throw("render: --proxy must be auto | off | build");
+    if (a.bench > 0 && a.benchMode != "all" && a.benchMode != "cold" && a.benchMode != "warm" && a.benchMode != "random")
+        Throw("render: --bench-mode must be all | cold | warm | random");
     if (a.proxy == "build") BuildMissingProxies(project, {"source", "result"}, false);
     const bool useProxies = a.proxy != "off";
     D3D12Device device({a.warp, false});
@@ -240,11 +270,44 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
         for (const auto& n : needed) states[n] = store.StatusAt(t, n) == FrameStore::Status::Ready ? FrameState::Ready : FrameState::Missing;
         return renderer.RenderToImage(st, store.TexturesAt(t), store.ImageWidth(), store.ImageHeight(), tw, th, &states);
     };
+    // TASK-0076: the frame at `t` rendered; none of the needed sources gave one - a video this machine cannot decode says why (the probe's
+    // verdict, NVDEC refusing its first frame; NVDEC not started: tried once more first). A needed source refused while another gives a
+    // frame is shown empty and said in the log. false: no frame and no refusal
+    auto shownAt = [&](double t, PassImage& img) {
+        auto anyReady = [&] {
+            bool any = false;
+            for (const auto& n : needed) any = any || store.StatusAt(t, n) == FrameStore::Status::Ready;
+            return any;
+        };
+        img = renderAt(t);
+        bool any = anyReady();
+        bool startFailed = false;
+        for (const auto& n : needed) startFailed = startFailed || store.StartFailure(n).has_value();
+        if (!any && startFailed) {  // NVDEC did not start (memory, the driver): once more
+            store.RetryStartFailures();
+            img = renderAt(t);
+            any = anyReady();
+        }
+        for (const auto& n : needed) {
+            if (store.StatusAt(t, n) == FrameStore::Status::Ready) continue;
+            std::optional<DecodeSupport> refusal = store.Undecodable(n);  // the probe's verdict or NVDEC refusing a frame
+            if (!refusal) refusal = store.StartFailure(n);              // NVDEC did not start now
+            if (!refusal) continue;
+            const std::string why = "render: '" + n + "': " + refusal->why;
+            if (!any) Throw(why);
+            Log()->warn("{} - shown empty", why);
+        }
+        return any;
+    };
 
     if (a.bench > 0) {
+        {  // TASK-0076: the first frame loaded once before anything is timed - a video this machine cannot decode (no proxy to show it, or
+           // NVDEC refusing / not starting on its first frame) is said, not timed as empty frames; then the cache dropped: cold stays cold
+            PassImage first;
+            shownAt(0.0, first);
+            store.SetSources(project.Sources(useProxies));
+        }
         const int64_t n = store.FrameCount() > 0 ? std::min<int64_t>(a.bench, store.FrameCount()) : a.bench;
-        if (a.benchMode != "all" && a.benchMode != "cold" && a.benchMode != "warm" && a.benchMode != "random")
-            Throw("render: --bench-mode must be all | cold | warm | random");
         const double rate = store.BaseFps().ToDouble();
         // one jump: SetCurrentTime -> the exact frames of every needed source on the GPU -> the composite done (the
         // latency the viewport sees; TexturesAt by time, so sources of other rates show their own frame)
@@ -350,10 +413,8 @@ int CmdRender(const ViewportCommands::RenderArgs& a) {
         Throw("render: time " + std::to_string(st.time) + " s is outside 0.." + std::to_string(store.Duration()) + " s (" + std::to_string(store.FrameCount()) +
               " frames at the base rate)");
     const auto t0 = std::chrono::steady_clock::now();
-    const PassImage img = renderAt(st.time);
-    bool any = false;
-    for (const auto& n : needed) any = any || store.StatusAt(st.time, n) == FrameStore::Status::Ready;
-    if (!any) Throw("render: " + FormatTimecode(st.time) + " has none of the requested sources");
+    PassImage img;
+    if (!shownAt(st.time, img)) Throw("render: " + FormatTimecode(st.time) + " has none of the requested sources");
     if (!a.output.empty()) {
         std::filesystem::create_directories(std::filesystem::absolute(a.output).parent_path());
         WritePng(a.output, img);
@@ -388,8 +449,19 @@ int CmdProxy(const ViewportCommands::ProxyArgs& a) {
                 std::printf("%-8s no video\n", name.c_str());
                 continue;
             }
-            const ProxyPlan plan = PlanProxy(video);
             const auto valid = ValidProxy(video, project.passesRoot, name);
+            {  // TASK-0076: as `proxy` itself would answer - none is built here; one built earlier stays in use (the viewport shows the video from it)
+                VideoDecoder probe(video, VideoDecoder::Probe());
+                if (const DecodeSupport d = CheckDecodeSupport(probe.Info()); !d.Ok()) {
+                    if (valid)
+                        std::printf("%-8s %s: cannot be decoded here, shown from its proxy %s: %s\n", name.c_str(), video.filename().string().c_str(),
+                                    valid->string().c_str(), d.why.c_str());
+                    else
+                        std::printf("%-8s %s: cannot be decoded here, no proxy: %s\n", name.c_str(), video.filename().string().c_str(), d.why.c_str());
+                    continue;
+                }
+            }
+            const ProxyPlan plan = PlanProxy(video);
             std::printf("%-8s %s: %lld frames, keyframes up to %lld apart -> %s; ~%.0f MB; proxy %s\n", name.c_str(), video.filename().string().c_str(),
                         static_cast<long long>(plan.frames), static_cast<long long>(plan.maxKeyframeInterval), plan.needed ? "needs a proxy" : "no proxy needed",
                         static_cast<double>(plan.estimatedBytes) / 1e6, valid ? valid->string().c_str() : "none");
@@ -444,7 +516,7 @@ void ViewportCommands::Register(CLI::App& app) {
     proxy_->add_option("--passes", xa_.passes, "passes root folder");
     proxy_->add_option("--result", xa_.result, "result video");
     proxy_->add_option("--sources", xa_.sources, "comma-separated: source, result")->default_val("source,result");
-    proxy_->add_flag("--force", xa_.force, "rebuild even a valid proxy");
+    proxy_->add_flag("--force", xa_.force, "rebuild even a valid proxy (one of a video that cannot be decoded here is kept)");
     proxy_->add_flag("--check", xa_.check, "print what is needed and what exists; build nothing");
     proxy_->add_flag("--background", xa_.background, "below-normal priority (the GUI builds while you work)");
     proxy_->add_option("--max-gb,--max_gb", xa_.maxGb, "skip a proxy estimated above this size or above a quarter of the free disk (0 = no limit)");

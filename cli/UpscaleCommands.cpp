@@ -46,6 +46,7 @@ void ParseSize(const std::string& s, uint32_t& w, uint32_t& h) {
 
 int CmdUpscale(const UpscaleCommands::UpscaleArgs& a) {
     VideoDecoder decoder(a.input);
+    decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
     const auto& info = decoder.Info();
     UpscaleStageOptions o;
     o.backend = a.backend;
@@ -109,6 +110,7 @@ public:
             height_ = reader_->Man().height;
         } else {
             decoder_ = std::make_unique<VideoDecoder>(path);
+            decoder_->RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
             color_ = ColorInfoFromStream(decoder_->Info());
             count_ = decoder_->Info().frameCount;
             width_ = decoder_->Info().width;

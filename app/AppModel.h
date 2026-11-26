@@ -108,6 +108,16 @@ public:
     // it - TASK-0073), else the source's; {0, 0} unknown. The preview's estimate and calibration key
     std::pair<uint32_t, uint32_t> nrColorSize() const;
     QString planError() const { return planError_; }         // why there is no plan (bad parameters, no video)
+    // TASK-0076: whether this machine decodes the source (AV1 without NVDEC AV1: not) - the plan's verdict, Ok while there is none
+    const DecodeSupport& sourceDecode() const { return sourceDecode_; }
+    // TASK-0076: the plan's error is the source's refusal (a card, the preview say it short); false - another error (the video not found)
+    bool sourceRefusalSaid() const;
+    // TASK-0076: whether a task or a preview runs or waits (ProjectTasks, from the queue): with a check of the model's, the viewport does
+    // not hold NVDEC between frames meanwhile
+    void setTasksRunning(bool running);
+    // TASK-0076: a verdict the viewport holds on the source (FrameStore::Undecodable: a loader's refusal or one remembered for the file)
+    // the plan did not have becomes the plan's verdict
+    void noteSourceRefused();
     // a stage the run would refuse although the plan exists (depth does not fit the GPU, TASK-0039): «Обработать» waits
     QString planBlocker() const;
     QString sourceHashStatus() const;                        // «совпадает с пассами» / «N пассов от другого исходника» / «пассов нет»
@@ -198,6 +208,7 @@ public:
     QString resultSummary() const;                      // «3840×1600 · 48 fps · 479 кадров · HEVC 10 бит 4:2:0 · со звуком · обновлён сегодня 19:23 · готов за 11:22»; empty without a result
     // «HEVC 10 бит 4:2:0», «ProRes 10 бит 4:2:2»: a codec name and a frame layout in the words of the GUI (empty codec: the layout alone).
     static QString formatLabel(const std::string& codec, const FrameDesc& format);
+    static QString codecLabel(const std::string& codec);  // «HEVC», «AV1» ... (formatLabel without the layout)
     std::vector<std::string> exportablePasses() const;  // current pass folders with a manifest (folder names), pipeline order
     // «Экспорт пассов», one task per folder: dlssvid export --from-dir <passes root>/<pass> -o <dir>/<pass> --format exr
     QStringList exportPassArgs(const std::string& pass, const QString& dir) const;
@@ -382,6 +393,15 @@ private:
     RunOutcome outcome_;
     SourceInfo sourceInfo_;
     QString planError_;
+    DecodeSupport sourceDecode_;
+    bool tasksRunning_ = false, nvdecLetGo_ = false;  // TASK-0076: setTasksRunning, updateNvdecHold
+    double retriedAt_ = -1.0;                // TASK-0076: requestFrames tried start failures again at this time ...
+    std::vector<std::string> retriedFor_;    // ... for these sources
+    std::string heardRefusal_;  // TASK-0076: the source's refusal noteSourceRefused acted on last (FileStamp|why; reloadSources, a file written over forget)
+    std::string reloadedFor_;   // TASK-0076: refreshPlan set the sources again for this refusal of a file written over (path|why) - once;
+                                // forgotten when a frame of the file as loaded is shown (noteSourceRefused)
+    static std::string FileStamp(const std::filesystem::path& file);  // TASK-0076: path|size|time
+    void updateNvdecHold();
     std::set<std::string> force_;
     std::map<std::string, int> history_;  // pass -> previous versions on disk
     QTimer planTimer_;

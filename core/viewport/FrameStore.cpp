@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <string_view>
 
 #include "passes/ControlMaskPass.h"
 #include "pipeline/PassVersions.h"
@@ -199,6 +200,44 @@ std::vector<ViewportSource> FrameStore::DiscoverPassVersions(const std::filesyst
     return out;
 }
 
+namespace {
+// TASK-0076: NVDEC's refusal of a file met by a loader as a verdict (the layout unknown to the probe, a later frame or part) - on the stream on this
+// machine: kept for the process, so a new set of sources does not forget it (the plan would let a run start until a frame refuses again)
+// (keyed by the path and checked against the file's size and time: a result written again on the same path is another stream)
+struct RefusedFile {
+    uintmax_t size = 0;
+    std::filesystem::file_time_type time{};
+    DecodeSupport support;
+};
+std::mutex refusedFilesMutex;
+std::map<std::string, RefusedFile> refusedFiles;
+
+// the file as one key however its path is written (separators, «..», letter case on Windows): the project's path and a loader's
+std::string RefusedKey(const std::filesystem::path& file) {
+    std::error_code ec;
+    std::filesystem::path p = std::filesystem::weakly_canonical(file, ec);
+    if (ec || p.empty()) p = std::filesystem::absolute(file, ec).lexically_normal();
+    if (ec || p.empty()) p = file.lexically_normal();
+    return p.make_preferred().string();
+}
+
+bool SameFile(const std::filesystem::path& file, const RefusedFile& r) {
+    std::error_code e1, e2;
+    const auto size = std::filesystem::file_size(file, e1);
+    const auto time = std::filesystem::last_write_time(file, e2);
+    return !e1 && !e2 && size == r.size && time == r.time;
+}
+
+// TASK-0076: a video that cannot be decoded here is said once per process at warning level - the GUI sets its sources again on many
+// occasions (a preview, a mask, the result let go), each would say it again
+bool SaidOnce(const std::string& what) {
+    static std::mutex mutex;
+    static std::set<std::string> said;
+    std::lock_guard<std::mutex> lock(mutex);
+    return said.insert(what).second;
+}
+}  // namespace
+
 std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, const std::filesystem::path& file) {
     if (file.empty() || !std::filesystem::exists(file)) return std::nullopt;
     try {
@@ -220,6 +259,25 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.sar = info.sar;
         s.color = ColorInfoFromStream(info);
         s.hasColor = true;
+        s.hardwareOnly = info.hardwareOnly;
+        {
+            std::error_code e1, e2;
+            s.fileSize = std::filesystem::file_size(file, e1);
+            s.fileTime = std::filesystem::last_write_time(file, e2);
+        }
+        if (info.hardwareOnly) {
+            std::lock_guard<std::mutex> lock(refusedFilesMutex);
+            if (const auto it = refusedFiles.find(RefusedKey(file)); it != refusedFiles.end()) {  // met before (TASK-0076)
+                if (SameFile(file, it->second)) s.undecodable = it->second.support;
+                else refusedFiles.erase(it);  // the file was replaced: its verdict is not this one's
+            }
+        }
+        if (info.hardwareOnly && !s.undecodable)  // TASK-0076: asked once here (the answer is cached), not by a decoder on every frame
+            if (DecodeSupport d = CheckDecodeSupport(info); !d.Ok()) {
+                Log()->log(SaidOnce(file.string()) ? spdlog::level::warn : spdlog::level::debug, "video {} ('{}') cannot be decoded here: {}",
+                           file.string(), name, d.why);
+                s.undecodable = std::move(d);
+            }
         return s;
     } catch (const std::exception& e) {
         Log()->warn("video {} not usable as source '{}': {}", file.string(), name, e.what());
@@ -247,11 +305,20 @@ FrameStore::~FrameStore() {
 
 void FrameStore::SetSources(std::vector<ViewportSource> sources) {
     std::unique_lock<std::mutex> lock(mutex_);
+    // TASK-0076: nothing is queued while the loads of the old sources end (a load's requeue, a retry from a loader): they would load
+    // more on the old runtimes and keep this wait going; their marks go now
+    resetting_ = true;
     queue_.clear();
     queued_.clear();
+    askedInFlight_.clear();
+    retriedInFlight_.clear();
     idleCv_.wait(lock, [&] { return inFlight_.empty(); });  // loaders may still use the old runtimes
+    resetting_ = false;
     sources_ = std::move(sources);
     runtimes_.clear();
+    refusedInLoad_.clear();
+    startFailed_.clear();
+    uploading_.clear();
     for (const auto& s : sources_) runtimes_[s.name] = std::make_unique<SourceRuntime>();
     loaded_.clear();
     kept_.clear();
@@ -292,6 +359,118 @@ void FrameStore::SetSources(std::vector<ViewportSource> sources) {
     }
     for (const auto& s : sources_)  // a static source has no length: one frame would not make the time line one frame long
         if (s.lastFrame >= 0 && !s.isStatic) duration_ = std::max(duration_, static_cast<double>(s.lastFrame + 1) / FpsOf(s.name));
+}
+
+std::optional<DecodeSupport> FrameStore::Undecodable(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& s : sources_)
+        if (s.name == name && s.undecodable) return s.undecodable;
+    if (const auto it = refusedInLoad_.find(name); it != refusedInLoad_.end()) return it->second;
+    return std::nullopt;
+}
+
+bool FrameStore::SourceChanged(const std::string& name) const {
+    std::filesystem::path path;
+    uintmax_t size = 0;
+    std::filesystem::file_time_type time{};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = std::find_if(sources_.begin(), sources_.end(), [&](const ViewportSource& s) { return s.name == name && s.isVideo; });
+        if (it == sources_.end()) return false;
+        path = it->path;
+        size = it->fileSize;
+        time = it->fileTime;
+    }
+    std::error_code e1, e2;
+    const auto nowSize = std::filesystem::file_size(path, e1);
+    const auto nowTime = std::filesystem::last_write_time(path, e2);
+    return !e1 && !e2 && (nowSize != size || nowTime != time);
+}
+
+void FrameStore::RetryStartFailures(const std::string& source) {
+    std::lock_guard<std::mutex> lock(mutex_);  // one critical section: the time and the sources of now, not a copy a newer jump replaced
+    // TASK-0076: a load of an NVDEC-only video in flight now began before this retry - a start failure it meets is stale (the memory may
+    // be free now): Publish does not publish it, its loader asks for the frame again (retriedInFlight_); also when no failure of it is
+    // recorded yet
+    for (const auto& k : inFlight_) {
+        if (!source.empty() && k.source != source) continue;
+        if (const ViewportSource* s = FindSource(k.source); s && s->isVideo && s->hardwareOnly) retriedInFlight_.insert(k);
+    }
+    bool any = false;
+    for (auto it = startFailed_.begin(); it != startFailed_.end();) {
+        if (!source.empty() && it->first != source) {
+            ++it;
+            continue;
+        }
+        const std::string name = it->first;
+        // its marks forgotten; a frame of it in flight whose mark is forgotten here (published before its loader is done) is asked for
+        // again by the requeue below (askedInFlight_: its loader queues it when done)
+        for (auto m = missing_.begin(); m != missing_.end();) m = m->source == name ? missing_.erase(m) : std::next(m);
+        loaded_.erase(std::remove_if(loaded_.begin(), loaded_.end(), [&](const Loaded& l) { return l.missing && l.key.source == name; }), loaded_.end());
+        it = startFailed_.erase(it);
+        any = true;
+    }
+    if (any) RequeueLocked();  // the frames of the window are asked for again
+}
+
+bool FrameStore::RememberRefusedFile(const std::filesystem::path& file, const DecodeSupport& support, bool keep) {
+    const std::string key = RefusedKey(file);
+    std::lock_guard<std::mutex> files(refusedFilesMutex);
+    RefusedFile r;
+    std::error_code e1, e2;
+    r.size = std::filesystem::file_size(file, e1);
+    r.time = std::filesystem::last_write_time(file, e2);
+    r.support = support;
+    if (e1 || e2) return false;
+    if (const auto it = refusedFiles.find(key); keep && it != refusedFiles.end() && it->second.size == r.size && it->second.time == r.time) return true;
+    refusedFiles[key] = std::move(r);
+    return true;
+}
+
+std::optional<DecodeSupport> FrameStore::StartFailure(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (const auto it = startFailed_.find(name); it != startFailed_.end()) return it->second;
+    return std::nullopt;
+}
+
+void FrameStore::SetHoldNvdec(bool hold) {
+    if (holdNvdec_.exchange(hold) == hold) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    RequeueLocked();
+}
+
+void FrameStore::ReleaseNvdecDecoders() {
+    std::vector<SourceRuntime*> runtimes;  // the videos that decode on NVDEC only
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& s : sources_)
+            if (s.isVideo && s.hardwareOnly)
+                if (const auto it = runtimes_.find(s.name); it != runtimes_.end()) runtimes.push_back(it->second.get());
+    }
+    for (SourceRuntime* rt : runtimes) {
+        std::unique_lock<std::mutex> guard(rt->mutex, std::try_to_lock);  // the GUI thread does not wait for a walk through a long GOP
+        if (!guard.owns_lock()) {
+            rt->releasePending = true;  // its loader closes it after this load (ReleaseNvdecAfterLoad)
+            continue;
+        }
+        if (rt->decoder && rt->decoder->HoldsCudaDevice()) rt->decoder.reset();
+    }
+}
+
+void FrameStore::ReleaseNvdecAfterLoad(const std::string& source) {
+    SourceRuntime* rt = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);  // the key is still in flight: SetSources waits for it, the runtime stays valid
+        const ViewportSource* s = FindSource(source);
+        if (!s || !s->isVideo || !s->hardwareOnly) return;
+        if (const auto it = runtimes_.find(source); it != runtimes_.end()) rt = it->second.get();
+    }
+    if (!rt || (holdNvdec_ && !rt->releasePending)) return;
+    // busy: the loader that holds it closes it after its own load (it comes here too) - not waited for (a walk on a long GOP)
+    std::unique_lock<std::mutex> guard(rt->mutex, std::try_to_lock);
+    if (!guard.owns_lock()) return;
+    rt->releasePending = false;
+    if (rt->decoder && rt->decoder->HoldsCudaDevice()) rt->decoder.reset();
 }
 
 const ViewportSource* FrameStore::FindSource(const std::string& name) const {
@@ -365,23 +544,39 @@ void FrameStore::SetCurrentTime(double time, const std::vector<std::string>& nee
     std::lock_guard<std::mutex> lock(mutex_);
     currentTime_ = std::max(0.0, time);
     needed_ = neededSources;
+    RequeueLocked();
+}
+
+void FrameStore::RequeueLocked() {
     // Rebuild the queue: every source's current frame first, then prefetch outwards (forward first). Loads in
     // flight stay marked so they are not requested a second time.
     queue_.clear();
     queued_ = inFlight_;
+    if (resetting_) return;  // TASK-0076: SetSources waits for the old sources' loads
     auto push = [&](const std::string& name, int64_t f) {
         const ViewportSource* s = FindSource(name);
         if (!s || !s->HasFrame(f)) return;
         const Key k{f, name};
-        if (entries_.count(k) || missing_.count(k) || queued_.count(k) || kept_.count(k)) return;
+        if (entries_.count(k) || missing_.count(k) || kept_.count(k) || uploading_.count(k)) return;
+        // TASK-0076: in flight - its loader asks for it again when done if it is still wanted then (dropped by Update or forgotten by a
+        // retry meanwhile); queued it would be loaded twice
+        if (inFlight_.count(k)) {
+            askedInFlight_.insert(k);
+            return;
+        }
+        if (queued_.count(k)) return;
+        // TASK-0076: published already, waiting for Update - its load would find it and publish nothing (as WantedLocked, LoadOne)
+        for (const auto& l : loaded_)
+            if (l.key.frame == k.frame && l.key.source == k.source) return;
         queue_.push_back(k);
         queued_.insert(k);
     };
+    const auto spanOf = [&](const std::string& name) { return QueueSpanLocked(name); };
     int maxSpan = 0;
-    for (const auto& name : needed_) maxSpan = std::max(maxSpan, SpanOf(name));
+    for (const auto& name : needed_) maxSpan = std::max(maxSpan, spanOf(name));
     for (int d = 0; d <= maxSpan; ++d)
         for (const auto& name : needed_) {
-            if (d > SpanOf(name)) continue;
+            if (d > spanOf(name)) continue;
             const int64_t f0 = KeyFrame(name, currentTime_);  // a static source: its one frame; the neighbours are outside it
             push(name, f0 + d);
             if (d > 0 && f0 - d >= 0) push(name, f0 - d);
@@ -396,10 +591,44 @@ bool FrameStore::Wanted(const Key& key) const {
     return WantedLocked(key);
 }
 
+void FrameStore::RequeueAfterLoadLocked(const Key& key) {
+    if (resetting_ || !WantedLocked(key) || !InQueueWindowLocked(key)) return;
+    // in flight with another loader (a kept frame of a load that threw may be): that loader asks for it again when done, if still
+    // wanted; queued already: once is enough - a key queued twice would be loaded by two loaders at once (inFlight_ is a set). queue_
+    // itself is looked at: queued_ may have lost a key still in it (a neighbour kept on another load's walk, published and uploaded -
+    // Update forgets its mark - then evicted again); the queue is short (the windows of the shown sources)
+    if (inFlight_.count(key)) {
+        askedInFlight_.insert(key);
+        return;
+    }
+    if (queued_.count(key) ||
+        std::any_of(queue_.begin(), queue_.end(), [&](const Key& k) { return k.frame == key.frame && k.source == key.source; }))
+        return;
+    // a current frame first; another after the current ones queued (the loaders wait on the front: not ahead of a jump's target)
+    auto at = queue_.begin();
+    if (!IsCurrentLocked(key)) at = std::find_if(queue_.begin(), queue_.end(), [&](const Key& k) { return !IsCurrentLocked(k); });
+    queue_.insert(at, key);
+    queued_.insert(key);
+    cv_.notify_one();
+}
+
+int FrameStore::QueueSpanLocked(const std::string& name) const {
+    // TASK-0076: while a task runs (SetHoldNvdec(false)) a video decoding on NVDEC only, without a proxy, gets its shown frame only:
+    // each of its loads opens a decoder (the CUDA device, a walk from the keyframe) and closes it after - no prefetch paid for that, on
+    // the GPU the run has. A video refused here opens no decoder: its window stays (its frames are missing at once - playback goes on)
+    const ViewportSource* s = FindSource(name);
+    return !holdNvdec_ && s && s->isVideo && s->hardwareOnly && s->proxy.empty() && !s->undecodable && !refusedInLoad_.count(name) ? 0
+                                                                                                                                       : SpanOf(name);
+}
+
+bool FrameStore::InQueueWindowLocked(const Key& key) const {
+    return std::llabs(key.frame - KeyFrame(key.source, currentTime_)) <= QueueSpanLocked(key.source);
+}
+
 bool FrameStore::WantedLocked(const Key& key) const {
     if (!InWindow(key)) return false;
     if (std::find(needed_.begin(), needed_.end(), key.source) == needed_.end()) return false;
-    if (entries_.count(key) || missing_.count(key) || kept_.count(key)) return false;
+    if (entries_.count(key) || missing_.count(key) || kept_.count(key) || uploading_.count(key)) return false;
     for (const auto& l : loaded_)
         if (l.key.frame == key.frame && l.key.source == key.source) return false;
     return true;
@@ -414,12 +643,15 @@ FrameStore::Status FrameStore::StatusLocked(const Key& k) const {
     const int64_t frame = k.frame;
     const std::string& source = k.source;
     if (entries_.count(k)) return Status::Ready;
-    if (inFlight_.count(k) || kept_.count(k)) return Status::Loading;
+    // TASK-0076: a missing mark known (Update takes it at once) is Missing also while its load is still closing - no new load is
+    // queued for a key in missing_ (RequeueLocked), and WaitForCurrent counts it as done
+    if (missing_.count(k)) return Status::Missing;
+    if (inFlight_.count(k) || kept_.count(k) || uploading_.count(k)) return Status::Loading;
     for (const auto& l : loaded_)
         if (l.key.frame == frame && l.key.source == source) return l.missing ? Status::Missing : Status::Loading;
     if (queued_.count(k)) return Status::Queued;
     const ViewportSource* s = FindSource(source);
-    if (!s || !s->HasFrame(frame) || missing_.count(k)) return Status::Missing;
+    if (!s || !s->HasFrame(frame)) return Status::Missing;  // (missing_: above)
     return Status::Queued;  // not loaded yet but loadable
 }
 
@@ -500,8 +732,38 @@ void FrameStore::LoaderMain() {
             if (prefetch) ++prefetchActive_;
         }
         LoadResult result;
+        std::optional<DecodeSupport> startFailure;  // TASK-0076: marked with the missing frame (Publish)
         try {
             result = LoadOne(key);
+        } catch (const DecodeUnavailable& e) {  // TASK-0076: NVDEC refused the video - its later frames open no decoder
+            SourceRuntime* refused = nullptr;
+            std::filesystem::path file;  // a start failure is said once per file: its words name the frame's place - another each seek
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                // a start failure (memory, the driver) is no verdict on the video: the next frame tries a new decoder
+                if (!e.support.Transient()) {
+                    refusedInLoad_.emplace(key.source, e.support);
+                    if (const ViewportSource* s = FindSource(key.source)) RememberRefusedFile(s->path, e.support);
+                } else {
+                    startFailure = e.support;
+                    if (const ViewportSource* s = FindSource(key.source)) file = s->path;
+                }
+                if (const auto it = runtimes_.find(key.source); it != runtimes_.end()) refused = it->second.get();
+            }
+            if (refused) {  // the refused decoder still holds the CUDA device: let it go now (SetSources waits for this load: still valid)
+                std::lock_guard<std::mutex> guard(refused->mutex);
+                refused->decoder.reset();
+            }
+            const std::string once = !e.support.Transient() ? std::string(e.what()) : "start|" + (file.empty() ? key.source : RefusedKey(file));
+            const auto level = SaidOnce(once) ? spdlog::level::warn : spdlog::level::debug;
+            if (e.support.Transient())
+                Log()->log(level, "'{}': NVDEC did not start now (its frames are asked for again later): {}", key.source, e.what());
+            else
+                Log()->log(level, "'{}' cannot be decoded here: {}", key.source, e.what());
+            Loaded l;
+            l.key = key;
+            l.missing = true;
+            result.loaded.push_back(std::move(l));
         } catch (const std::exception& e) {
             Log()->warn("frame {} of '{}' failed to load: {}", key.frame, key.source, e.what());
             Loaded l;
@@ -509,28 +771,34 @@ void FrameStore::LoaderMain() {
             l.missing = true;
             result.loaded.push_back(std::move(l));
         }
-        for (auto& l : result.loaded) Publish(std::move(l));
+        ReleaseNvdecAfterLoad(key.source);  // TASK-0076: a pending release, or a task running
+        if (result.decodedOriginal) RetryStartFailures(key.source);  // TASK-0076: NVDEC works again - the frames a start failure left out come again
+        if (options_.beforePublishForTests) options_.beforePublishForTests(key.frame, key.source);
+        for (auto& l : result.loaded) Publish(std::move(l), startFailure ? &*startFailure : nullptr);
+        if (options_.afterLoadForTests) options_.afterLoadForTests(key.frame, key.source);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             inFlight_.erase(key);
             if (prefetch) --prefetchActive_;
             cv_.notify_all();  // a current frame done: the prefetch waiting for it may start
-            if (result.aborted) {
-                // dropped before decoding (TASK-0040). In the same critical section as the erase: if the time came back to
-                // this frame meanwhile, SetCurrentTime skipped it (it was in flight) - queue it again, or nobody loads it
-                queued_.erase(key);
-                if (WantedLocked(key)) {
-                    queue_.push_front(key);
-                    queued_.insert(key);
-                    cv_.notify_one();
-                }
-            }
+            // in flight no more, and not in queue_ (popped by this loader; RequeueLocked skips a key in flight): no longer queued -
+            // queued_ stays within queue_ and inFlight_. A stale mark would make the requeue below (and KeptCleanup's) skip the key: nobody
+            // would load it until the time moves
+            queued_.erase(key);
+            // TASK-0076: a frame a requeue wanted while this load ran (RequeueLocked skipped it in flight; a retry forgot its missing
+            // mark; Update dropped it after the time moved, and the time came back) - asked for again here if it is still wanted, within
+            // the window asked for now, or nobody loads it until the time moves; a load done as published is no longer wanted
+            retriedInFlight_.erase(key);
+            const bool asked = askedInFlight_.erase(key) > 0;
+            // dropped before decoding (TASK-0040). In the same critical section as the erase: if the time came back to this frame
+            // meanwhile, SetCurrentTime skipped it (it was in flight) - queue it again, or nobody loads it
+            if (result.aborted || asked) RequeueAfterLoadLocked(key);
         }
         idleCv_.notify_all();
     }
 }
 
-void FrameStore::Publish(Loaded&& l) {
+void FrameStore::Publish(Loaded&& l, const DecodeSupport* startFailure) {
     if (!l.missing && !l.image.Empty() && !l.staged.texture) {
         // on the loader thread: the texture and the copy of the rows into an upload buffer (Update only records copies)
         l.bytes = l.image.ByteSize();
@@ -559,7 +827,16 @@ void FrameStore::Publish(Loaded&& l) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         kept_.erase(l.key);
+        // TASK-0076: a start failure of a load a retry met in flight began before the retry (the memory may be free now): not
+        // published - its loader asks for the frame again (askedInFlight_, LoaderMain)
+        if (startFailure && l.missing && retriedInFlight_.count(l.key)) {
+            askedInFlight_.insert(l.key);
+            return;
+        }
         current = !l.missing && IsCurrentLocked(l.key);
+        // TASK-0076: the mark with its missing frame - one who sees the frame missing (render's shownAt, a retry) sees the mark as well,
+        // and a retry erases both or neither
+        if (startFailure && l.missing) startFailed_[l.key.source] = *startFailure;
         loaded_.push_back(std::move(l));
         if (current) callback = onCurrentLoaded_;
     }
@@ -579,6 +856,7 @@ FrameStore::LoadResult FrameStore::LoadOne(const Key& key) {
         }
         for (const auto& l : loaded_)
             if (l.key.frame == key.frame && l.key.source == key.source) return {};
+        if (uploading_.count(key)) return {};  // TASK-0076: Update uploads it now
         const ViewportSource* s = FindSource(key.source);
         const auto it = runtimes_.find(key.source);
         if (!s || it == runtimes_.end()) {
@@ -590,6 +868,7 @@ FrameStore::LoadResult FrameStore::LoadOne(const Key& key) {
             return r;
         }
         src = *s;
+        if (const auto r = refusedInLoad_.find(key.source); r != refusedInLoad_.end() && !src.undecodable) src.undecodable = r->second;
         rt = it->second.get();
     }
     if (src.isVideo) return LoadVideo(key, src, *rt);
@@ -683,7 +962,10 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
     ColorInfo color = src.color;
     auto openOriginal = [&] {
         if (!rt.decoder) {
-            rt.decoder = std::make_unique<VideoDecoder>(src.path);
+            VideoDecoder::Options o;
+            o.probe = rt.openedOnce;  // TASK-0076: reopened (a task runs: NVDEC is let go after every frame) - not news in the log
+            rt.decoder = std::make_unique<VideoDecoder>(src.path, o);
+            rt.openedOnce = true;
             rt.color = ColorInfoFromStream(rt.decoder->Info());
         }
         if (!src.hasColor) color = rt.color;
@@ -692,15 +974,24 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
     struct KeptCleanup {
         FrameStore& fs;
         const std::string& source;
+        int64_t target;
         std::vector<CpuFrame>& frames;
         bool armed = true;
         ~KeptCleanup() {
             if (!armed) return;
             std::lock_guard<std::mutex> lock(fs.mutex_);
-            for (const auto& f : frames) fs.kept_.erase(Key{f.index, source});
+            for (const auto& f : frames) {
+                // the target is no frame kept by this load (keep() marks the others only): a mark on it is another load's walk's
+                if (f.index == target) continue;
+                const Key k{f.index, source};
+                // TASK-0076: still kept here - not published (the load threw): asked for again if still wanted (not queued twice, not
+                // while another loader has it - RequeueAfterLoadLocked)
+                if (fs.kept_.erase(k) > 0) fs.RequeueAfterLoadLocked(k);
+            }
         }
-    } cleanup{*this, key.source, kept};
-    if (!src.HasFrame(key.frame)) {
+    } cleanup{*this, key.source, key.frame, kept};
+    // TASK-0076: a stream that cannot be decoded here opens no decoder (said once); its proxy (software, lossless) still shows it
+    if (!src.HasFrame(key.frame) || (src.undecodable && src.proxy.empty())) {
         missing = true;
     } else {
         bool done = false;
@@ -708,7 +999,7 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
             // hybrid (TASK-0040): a step forward walks the original decoder that stands just before the target; a jump
             // decodes one frame of the intra proxy - on its own decoder, so it does not wait for a walk in progress
             std::unique_lock<std::mutex> guard(rt.mutex, std::try_to_lock);
-            if (guard.owns_lock() && rt.decoder && !rt.decoder->Drained() && rt.decoder->PositionKnown() && key.frame >= rt.decoder->NextIndex() &&
+            if (guard.owns_lock() && !src.undecodable && rt.decoder && !rt.decoder->Drained() && rt.decoder->PositionKnown() && key.frame >= rt.decoder->NextIndex() &&
                 key.frame - rt.decoder->NextIndex() <= kWalkLimit) {
                 openOriginal();
                 tDecoder = Clock::now();
@@ -758,10 +1049,21 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
         }
         if (!done) {
             std::lock_guard<std::mutex> guard(rt.mutex);  // one decoder per video: its frames decode sequentially
-            openOriginal();
-            tDecoder = Clock::now();
-            if (!DecodeTo(*rt.decoder, key, kWalkLimit, kept, missing)) result.aborted = true;
-            tDecoded = Clock::now();
+            // TASK-0076: another loader's verdict on this video since this one looked (it writes the verdict, then closes the decoder
+            // under rt.mutex): no new NVDEC decoder for it - the frame is missing as the next ones will be
+            bool refusedSince = false;
+            if (!rt.decoder) {
+                std::lock_guard<std::mutex> lock(mutex_);  // rt.mutex then mutex_, as DecodeTo takes them
+                refusedSince = refusedInLoad_.count(key.source) > 0;
+            }
+            if (refusedSince) {
+                missing = true;
+            } else {
+                openOriginal();
+                tDecoder = Clock::now();
+                if (!DecodeTo(*rt.decoder, key, kWalkLimit, kept, missing)) result.aborted = true;
+                tDecoded = Clock::now();
+            }
         }
     }
     if (result.aborted) {
@@ -782,7 +1084,7 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
             // decided and dropped in one critical section: SetCurrentTime skips a key in kept_ (or the target, in flight),
             // so a drop the time came back to meanwhile would lose it; dropped, the target is re-queued by LoaderMain
             std::lock_guard<std::mutex> lock(mutex_);
-            bool done = entries_.count(k) || missing_.count(k);
+            bool done = entries_.count(k) || missing_.count(k) || uploading_.count(k);  // (TASK-0076: Update uploads it now)
             for (const auto& l : loaded_) done = done || (l.key.frame == k.frame && l.key.source == k.source);
             const bool needed = std::find(needed_.begin(), needed_.end(), k.source) != needed_.end();
             // the target of a jump the time already left is still a stand-in for Update; a neighbour only in the window
@@ -805,6 +1107,7 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
                          ms(tStart, tDecoder), ms(tDecoder, tDecoded), kept.size(), ms(tc, Clock::now()));
         }
         Publish(std::move(l));
+        if (std::string_view(path) != "proxy") result.decodedOriginal = true;
     }
     cleanup.armed = false;
     if (result.aborted) ++rt.aborted;
@@ -823,8 +1126,9 @@ bool FrameStore::CurrentPendingLocked() const {
     for (const auto& name : needed_) {
         const Key k{KeyFrame(name, currentTime_), name};
         if (entries_.count(k) || missing_.count(k)) continue;
-        if (!inFlight_.count(k) && !kept_.count(k)) continue;  // queued or not loadable: a loader takes it first anyway
-        bool published = false;
+        if (!inFlight_.count(k) && !kept_.count(k)) continue;  // queued or not loadable: a loader takes it first anyway (a current key
+                                                               // is at the queue's front: RequeueLocked, and a requeue after a load)
+        bool published = uploading_.count(k) > 0;  // TASK-0076: Update uploads it now
         for (const auto& l : loaded_) published = published || (l.key.frame == k.frame && l.key.source == k.source);
         if (!published) return true;
     }
@@ -837,19 +1141,27 @@ bool FrameStore::IsCurrentLocked(const Key& key) const {
 
 bool FrameStore::Update() {
     std::vector<Loaded> batch;
+    bool anyMissing = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        // 1) frames of the current time and missing marks: alone, so the target of a jump is not held back
+        // 1) frames of the current time and missing marks: alone, so the target of a jump is not held back. TASK-0076: a missing mark
+        //    goes to missing_ here, in this critical section (no GPU work for it) - always in loaded_ or missing_, so a retry
+        //    (RetryStartFailures) never misses it; a frame taken for the upload is uploading_ until resident (not loaded again meanwhile)
         for (auto it = loaded_.begin(); it != loaded_.end();) {
-            if (it->missing || IsCurrentLocked(it->key)) {
+            if (it->missing) {
+                missing_.insert(it->key);
+                queued_.erase(it->key);
+                anyMissing = true;
+                it = loaded_.erase(it);
+            } else if (IsCurrentLocked(it->key)) {
+                uploading_.insert(it->key);
                 batch.push_back(std::move(*it));
                 it = loaded_.erase(it);
             } else {
                 ++it;
             }
         }
-        bool currentUploaded = false;
-        for (const auto& l : batch) currentUploaded = currentUploaded || !l.missing;
+        const bool currentUploaded = !batch.empty();
         // 2) otherwise up to uploadsPerUpdate others: the window first; a frame outside it only as a better stand-in
         //    than the resident one (fast drag without a proxy: the screen follows), the rest is dropped
         if (!currentUploaded) {
@@ -867,6 +1179,7 @@ bool FrameStore::Update() {
                             if (&o != &*it && !o.missing && o.key.source == k.source && std::llabs(o.key.frame - target) < std::llabs(k.frame - target)) take = false;
                 }
                 if (take) {
+                    uploading_.insert(it->key);
                     batch.push_back(std::move(*it));
                     it = loaded_.erase(it);
                     ++n;
@@ -879,7 +1192,8 @@ bool FrameStore::Update() {
             }
         }
     }
-    if (batch.empty()) return false;
+    if (options_.betweenUpdateSectionsForTests) options_.betweenUpdateSectionsForTests();
+    if (batch.empty()) return anyMissing;
     const auto tUpload = std::chrono::steady_clock::now();
     // one command list and one wait for the whole batch (the textures and upload buffers were made by the loaders)
     std::vector<D3D12Device::StagedTexture*> copies;
@@ -890,16 +1204,11 @@ bool FrameStore::Update() {
     if (Log()->should_log(spdlog::level::debug) && !copies.empty())
         Log()->debug("viewport copy {} texture(s): {:.1f} ms", copies.size(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tCopy).count());
     for (Loaded& l : batch) {
-        if (l.missing) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            missing_.insert(l.key);
-            queued_.erase(l.key);
-            continue;
-        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (entries_.count(l.key) || !l.staged.texture) {  // already resident (loaded twice): keep the first texture
                 queued_.erase(l.key);
+                uploading_.erase(l.key);
                 continue;
             }
         }
@@ -918,6 +1227,7 @@ bool FrameStore::Update() {
         residentBytes_ += e.bytes;
         entries_[l.key] = std::move(e);
         queued_.erase(l.key);
+        uploading_.erase(l.key);
     }
     if (Log()->should_log(spdlog::level::debug))
         Log()->debug("viewport upload {} frame(s) in {:.1f} ms", batch.size(), std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tUpload).count());

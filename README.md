@@ -116,7 +116,8 @@ bin\dlssvid.exe process -i clip.mp4 -o result.mp4     :: depth -> flow -> upscal
 ```
 
 Without an NVIDIA GPU the CLI and the viewport still work on the D3D12 software adapter (`--warp`) with the
-non-NVIDIA backends: NIS / bicubic upscale, the blend frame generator, the stub depth / NR backends.
+non-NVIDIA backends: NIS / bicubic upscale, the blend frame generator, the stub depth / NR backends — except for AV1
+videos, which only NVDEC decodes in this build (see «AV1 sources decode on the GPU» below).
 
 ## Requirements
 
@@ -127,6 +128,7 @@ non-NVIDIA backends: NIS / bicubic upscale, the blend frame generator, the stub 
 | Windows 10/11 x64 | everything | the pipeline is D3D12 + CUDA, Windows only; paths with non-ASCII letters (Cyrillic and others) need Windows 10 version 1903 or newer |
 | NVIDIA GPU | DLSS SR and NIS: RTX 20 and newer · DLSS Frame Generation: RTX 40 and newer (x3/x4 on RTX 50) · Neural Rendering: RTX 50 with the official DLL, RTX 20/30/40 with a patched copy · TensorRT models (depth, flow, Real-ESRGAN, RIFE): RTX 20 and newer | engines are built for your GPU on first use; other GPUs and the WARP software adapter run the non-NVIDIA backends only |
 | NVIDIA driver | ≥ 616.56 for Neural Rendering; any recent driver for the rest | `nvofapi64.dll` (Optical Flow) and NVDEC / NVENC come with the driver |
+| A GPU whose NVDEC decodes AV1 | AV1 sources and results (8 / 10-bit 4:2:0): this build has no software AV1 decoder | for example, GeForce RTX 30 series and newer; `dlssvid info <file>` says whether this one does |
 | CUDA 12 runtime (`cudart64_12.dll`) | NVDEC frames on the GPU, TensorRT | from the CUDA Toolkit 12.x installer (on `PATH`) or bundled in the full package |
 | TensorRT 10.16 runtime (`nvinfer_10.dll`, `nvonnxparser_10.dll`, `nvinfer_plugin_10.dll`, builder resources) | depth (DA3, VDA), SEA-RAFT flow, Real-ESRGAN, RIFE | the pip package `tensorrt-cu12==10.16.1.11` in the Python environment is found by itself; or `DLSSVID_TENSORRT_DIR`; or `bin\tensorrt\` of the full package |
 | Python 3.12 + the venv of `models\export\requirements.txt` (PyTorch cu126) | ONNX export of every model on first use, `depth_worker` (DA3 / VDA in PyTorch), `sr_worker` (RealBasicVSR), `nr-patch` | found at `models\export\.venv\Scripts\python.exe` or `DLSSVID_PYTHON` |
@@ -218,7 +220,7 @@ The application never redistributes NVIDIA binaries; every file below comes from
 | `nvngx_dlssg.dll` | the same DLSS SDK folder | `bin\nvidia\` | DLSS Frame Generation (`fg`, RTX 40 and newer) |
 | `nvngx_dlssnr.dll` | your own copy from a driver or game with DLSS 5 — RTX 50: as is; RTX 20/30/40: patched on your machine with `dlssvid nr-patch` ([dlssnr-patcher](https://github.com/dev-camo/dlssnr-patcher) + the `ptxas` / `fatbinary` / `cuobjdump` tools of CUDA Toolkit 13.3) | `bin\nvidia\` (the patch leaves a sidecar `nvngx_dlssnr.dll.patch.json`) | Neural Rendering (`nr`; the GUI has a «Пропатчить DLL…» button) |
 | `nvofapi64.dll` | ships with the driver | nothing to do | Optical Flow Accelerator (`flow --backend ofa`) |
-| NVDEC / NVENC | ship with the driver | nothing to do | `--hwaccel cuda` decoding, `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` encoding (10-bit HEVC Main 10 / 4:4:4 and AV1 on RTX 40 and newer) |
+| NVDEC / NVENC | ship with the driver | nothing to do | `--hwaccel cuda` decoding, every AV1 source (no software AV1 decoder in this build), `h264_nvenc` / `hevc_nvenc` / `av1_nvenc` encoding (10-bit HEVC Main 10 / 4:4:4 and AV1 on RTX 40 and newer) |
 
 `DLSSVID_NVIDIA_DLL_DIR` or `--dll-dir` points at another folder of DLSS DLLs; `bin\dlssvid.exe nr --check` and
 `fg --check` print which file was found, its SHA-256 and whether the feature can be created on this GPU / driver.
@@ -283,6 +285,45 @@ build\release\bin\dlssvid process --passthrough -i input.mp4 -o output.mkv --cod
 
 `--hwaccel cuda` decodes with NVDEC; `--warp` runs on the D3D12 software adapter (tests, CI without a GPU).
 
+**AV1 sources decode on the GPU.** This build of FFmpeg has no software AV1 decoder, so an AV1 video (phones, OBS, YouTube,
+an `av1_nvenc` result) is always decoded by NVDEC — in the viewport, the stages, `process` and the passthrough, whatever
+`--hwaccel` says. This build decodes AV1 only as 8 or 10-bit 4:2:0, on GPUs whose NVDEC has an AV1 decoder (for example,
+GeForce RTX 30 series and newer; the driver is asked, the series is only an example). `dlssvid info` prints how a file
+decodes (`decode:` line). The sample layout is checked from the file; the driver is asked (a definite answer once per process: CUDA, NVDEC, AV1 at that
+depth, the frame size limits). A file this machine cannot decode is refused with the reason before the work starts —
+`process` before its stages, a stage command before its model (`nr` reading its colour from `color_sr` from a frame past 0
+decodes no video and is not refused), the GUI instead of the plan with «Обработать», Ctrl+Enter, the preview and the stage
+runs off, the viewport cell reads «· не декодируется» (its tooltip says why), no proxy is built (`proxy --check` says so and
+names a proxy built earlier, which stays in use), `render` and `render --bench` refuse with the reason when none of the requested
+sources gives a frame (a refused source beside others is an empty cell, the reason in the log). A file whose sample layout the probe did not learn is checked on its first frame, once the decoder has learned it, as
+above (a layout, a size, NVDEC not starting; a driver that could not be asked for a CUDA error is a start failure, as below). The GUI stops the runs as soon as its viewport or the background proxy build met such a
+refusal (and remembers it while the file is the same, until it is closed); so is NVDEC refusing a later frame - `process` then
+fails after the work started. A part of the video in other parameters (a new sequence header: size, bit depth) is checked
+against the GPU as the file was: a part it does not take is refused with that reason (the GUI says it is a part of the video);
+a part it takes gets an NVDEC decoder of its own (FFmpeg 7.1.1 would go on with the first part's, made for its size and depth),
+and NVDEC refusing it is judged as for the file (on that decoder's first frame, a start failure as below). Frames smaller than
+their sequence's declared maximum (a frame size override, a resize within one sequence) are refused: FFmpeg 7.1.1's NVDEC hands them
+out at the maximum's size, a lower one also with its colours read from the wrong place (a narrower one of the full height is refused
+out of caution - not seen on a GPU). Frames of an odd height are refused: their colours come a row off. An odd width is decoded: the frame NVDEC hands
+out one column wider (its surface) is cut to the video's own size. With `--hwaccel cuda`, any codec of an odd width has no on-GPU
+frames (the host path, OFA through ABGR), and one with a software decoder and an odd height (VP9 1920x803, H.264 320x191) decodes in software: NVDEC gives its colours wrong
+(not HEVC 4:4:4 - of an odd height it stays on NVDEC, which gives it right)
+(`dlssvid info` says so in its `decode:` line). `dlssvid scenes` re-derives the cuts from stored scores (or writes the pass off with
+`--threshold 0`) also where the video does not decode here; it refuses only when it would decode. A gray (monochrome) AV1 is refused also when the probe
+did not learn its layout or it starts in a later part. A driver too old for
+FFmpeg's NVDEC is reported as the driver's video decoder being unavailable («nvcuvid.dll could not be loaded»; the GUI says to
+reinstall or update the driver). NVDEC or its CUDA device failing to start
+(out of GPU memory, a driver error; also a driver that could not be asked for such an error) is no verdict on the video: the
+viewport cell reads «· видеокарта не начала декодировать», and those frames are asked for again on the next jump or step, when
+other sources are shown, when a frame of that video decodes, and when the task is over (not on a pan, a zoom or the wipe); `process` and `render` report the failure. A scrubbing proxy built earlier still shows
+such a source (one copied from another PC is used when the source kept its file times). The GUI's viewport decodes an AV1
+video on NVDEC in its own process; while any task of its queue waits or runs (processing, a stage run alone, a pass export, an
+NR preview) or a stage check is going on, it does not keep that decoder between frames and loads no frame of an AV1 video it decodes without a
+proxy ahead: playing it then shows about a frame every 2 s (a frame not decoded in time is skipped), steps and scrubbing are slower; a
+scrubbing proxy, or the end of the task, lifts it. A recent project's thumbnail that NVDEC could not decode now is made again the next time the start page is rebuilt. The decoder is CUDA device 0, as FFmpeg's NVDEC takes it: on a PC with several GPUs it may not be the one the stages
+run on. `DLSSVID_FAKE_NVDEC_AV1=no-cuda|no-nvdec|no-av1|first-frame|query-fails|start-fails|device-fails|later-frame` stands in for the driver's answer
+(tests, reproducing a support case).
+
 Paths may contain any letters: `dlssvid` and `dlssvid-gui` run with UTF-8 as their code page. The CLI prints UTF-8,
 so in a console with the OEM code page (866 on Russian Windows) Cyrillic in its output reads wrong; `chcp 65001` first.
 
@@ -328,7 +369,7 @@ dlssvid render -i input.mp4 --passes passes --bench 60                         :
 dlssvid render --project p.json --frame 10 --source depth_raw --save-state -o x.png   :: write the state back into the project
 ```
 
-Scene cuts (PR-13): one pass over the source's luma on the CPU (~2-3 ms a 1080p frame, decoding included) into
+Scene cuts (PR-13): one pass over the source's luma on the CPU (~2-3 ms a 1080p frame, decoding included; AV1 is decoded on NVDEC) into
 `passes\scenes` - the cut list and every frame's score, no frames. `process` runs it first; flow writes zero vectors at a cut,
 DLSS SR and the RealBasicVSR worker start their history again, NR resets the model and the flicker filter, FG holds the last
 frame of a shot instead of blending two. Another threshold is applied to the stored scores without decoding; the stages below
@@ -476,7 +517,8 @@ depth or chroma it cannot encode fails the run at the encode, after the stages (
 encoder the run would use (`encode:` line, `encode` in `--json`); the project file is never changed.
 
 **Bit depth and chroma.** The decoder keeps a source's own layout — 8, 10, 12 or 16 bits, 4:2:0 / 4:2:2 / 4:4:4 (HEVC
-Main 10 and Rext, AV1 10-bit, ProRes, FFV1, DNxHR …), with NVDEC and software decoding bit-exact to each other — and
+Main 10 and Rext, AV1 10-bit, ProRes, FFV1, DNxHR …), with NVDEC and software decoding bit-exact to each other (AV1 has
+only NVDEC here) — and
 every stage converts it to RGBA16F without a stop at 8 bits; `dlssvid info` prints what a file decodes into. The
 result's bit depth and chroma are «auto» unless `--bit-depth 8|10|12` / `--chroma 420|422|444` (or the encoder card of
 the GUI, stored in the project) say otherwise: auto takes the source's bit depth within what the codec does and 4:2:0

@@ -11,8 +11,14 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 }
 
+#include <cctype>
+#include <stdexcept>
+#include <iterator>
+#include <fstream>
 #include <cmath>
+#include <cstdarg>
 #include <cstring>
+#include <mutex>
 
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
@@ -84,7 +90,7 @@ namespace {
 
 AVPixelFormat EncoderFormatFor(const std::string& pixFmt) {
     const AVPixelFormat f = av_get_pix_fmt(pixFmt.c_str());
-    if (f == AV_PIX_FMT_NONE) Throw("test clip pixel format not supported: " + pixFmt);
+    if (f == AV_PIX_FMT_NONE) Throw("test clip pixel format unknown to FFmpeg: " + pixFmt);  // a test's mistake: never read as «unsupported»
     return f;
 }
 
@@ -123,6 +129,7 @@ std::filesystem::path WriteClipWith(const std::filesystem::path& path, const Cli
     vctx->time_base = AVRational{spec.fpsDen, spec.fpsNum};
     vctx->framerate = AVRational{spec.fpsNum, spec.fpsDen};
     if (spec.gop > 0) vctx->gop_size = spec.gop;
+    if (spec.bframes >= 0) vctx->max_b_frames = spec.bframes;
     const AVRational sar = spec.sar.Square() ? AVRational{0, 1} : AVRational{static_cast<int>(spec.sar.num), static_cast<int>(spec.sar.den)};
     if (spec.sarIn != "container") {
         vctx->sample_aspect_ratio = sar;
@@ -314,6 +321,455 @@ StreamSummary Summarize(const std::filesystem::path& path) {
     av_packet_free(&pkt);
     avformat_close_input(&fmt);
     return s;
+}
+
+namespace {
+std::mutex g_logMutex;
+std::string* g_logSink = nullptr;  // the capture in force (one at a time), under g_logMutex
+
+void CaptureLog(void* avcl, int level, const char* fmt, va_list vl) {
+    va_list copy;
+    va_copy(copy, vl);
+    av_log_default_callback(avcl, level, fmt, vl);  // stderr as before
+    if (level <= av_log_get_level()) {
+        char line[1024];
+        int prefix = 1;
+        av_log_format_line2(avcl, level, fmt, copy, line, sizeof line, &prefix);
+        std::lock_guard<std::mutex> lock(g_logMutex);
+        if (g_logSink) *g_logSink += line;
+    }
+    va_end(copy);
+}
+}  // namespace
+
+FfmpegLogCapture::FfmpegLogCapture() {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    g_logSink = &text_;
+    av_log_set_callback(CaptureLog);
+}
+
+FfmpegLogCapture::~FfmpegLogCapture() {
+    av_log_set_callback(av_log_default_callback);
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    g_logSink = nullptr;
+}
+
+std::string FfmpegLogCapture::Text() const {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    return text_;
+}
+
+bool SaysUnsupported(const std::string& text) {
+    // NVENC's own words (libavcodec/nvenc.c, FFmpeg 7.1) for a GPU without the encoder, its depth or 4:4:4 - nothing else: a refused parameter
+    // («unsupported param»), an invalid spec, a test's own error and «No capable devices found» (said for a session that failed to open
+    // now - out of memory, a busy GPU - as well) are failures, not a missing capability; no NVIDIA GPU at all is skipped before (HaveNvidia)
+    std::string lower = text;
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (const char* words : {"codec not supported", "10 bit encode not supported", "yuv444p not supported"})
+        if (lower.find(words) != std::string::npos) return true;
+    return false;
+}
+
+std::optional<std::filesystem::path> WriteClipIfSupported(const std::filesystem::path& path, const ClipSpec& spec, std::string* why) {
+    FfmpegLogCapture log;
+    try {
+        return WriteClip(path, spec);
+    } catch (const std::exception& e) {
+        const std::string said = std::string(e.what()) + "\n" + log.Text();
+        if (!SaysUnsupported(said)) throw;
+        if (why) *why = said;
+        return std::nullopt;
+    }
+}
+
+namespace {
+// A check of the AV1 / IVF test streams below: a failure throws (the test fails with it)
+void Need(bool ok, int line) {
+    if (!ok) throw std::runtime_error("AV1 / IVF test stream: check failed at TestClips.cpp:" + std::to_string(line));
+}
+
+std::string ReadAll(const std::filesystem::path& file) {
+    std::ifstream in(file, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+}
+}  // namespace
+
+// An IVF file of two AV1 streams one after the other - `a`, then `b` (other parameters: a part of the stream av1dec meets later), b's
+// timestamps going on from a's. av1_nvenc writes the sequence header into every keyframe of an IVF file: b's starts b's part.
+std::filesystem::path ConcatIvf(const std::filesystem::path& a, const std::filesystem::path& b, const std::filesystem::path& out,
+                                const std::function<std::string(const std::string&)>& partB) {
+    auto u16 = [](const std::string& s, size_t at) { return static_cast<uint32_t>(static_cast<uint8_t>(s[at])) | static_cast<uint32_t>(static_cast<uint8_t>(s[at + 1])) << 8; };
+    auto u32 = [&](const std::string& s, size_t at) { return u16(s, at) | u16(s, at + 2) << 16; };
+    auto u64 = [&](const std::string& s, size_t at) { return static_cast<uint64_t>(u32(s, at)) | static_cast<uint64_t>(u32(s, at + 4)) << 32; };
+    auto put = [](std::string& s, size_t at, uint64_t v, int bytes) {
+        for (int i = 0; i < bytes; ++i) s[at + i] = static_cast<char>((v >> (8 * i)) & 0xff);
+    };
+    struct Frame {
+        uint64_t pts;
+        std::string data;
+    };
+    auto frames = [&](const std::string& f) {
+        Need(f.size() >= 32, __LINE__);
+        Need(f.compare(0, 4, "DKIF") == 0, __LINE__);
+        std::vector<Frame> out;
+        for (size_t at = u16(f, 6); at + 12 <= f.size();) {
+            const uint32_t size = u32(f, at);
+            Need(at + 12 + size <= f.size(), __LINE__);
+            out.push_back({u64(f, at + 4), f.substr(at + 12, size)});
+            at += 12 + size;
+        }
+        return out;
+    };
+    const std::string fa = ReadAll(a), fb = ReadAll(b);
+    Need(fa.compare(16, 8, fb, 16, 8) == 0, __LINE__);  // the same time base
+    const std::vector<Frame> ka = frames(fa), kb = frames(fb);
+    Need(ka.size() >= 2, __LINE__);
+    Need(!(kb.empty()), __LINE__);
+    const uint64_t step = ka[1].pts - ka[0].pts;
+    std::string ivf = fa.substr(0, u16(fa, 6));
+    put(ivf, 24, ka.size() + kb.size(), 4);
+    auto append = [&](uint64_t pts, const std::string& data) {
+        std::string head(12, '\0');
+        put(head, 0, data.size(), 4);
+        put(head, 4, pts, 8);
+        ivf += head + data;
+    };
+    for (const Frame& f : ka) append(f.pts, f.data);
+    for (const Frame& f : kb) append(ka.back().pts + step + (f.pts - kb.front().pts), partB ? partB(f.data) : f.data);
+    std::ofstream(out, std::ios::binary) << ivf;
+    return out;
+}
+
+// Bits of an AV1 bitstream, most significant first (AV1 spec 4.10: f(n), uvlc())
+struct BitReader {
+    const std::string& s;
+    size_t pos = 0;  // in bits
+    uint32_t f(int n) {
+        uint32_t v = 0;
+        for (int i = 0; i < n; ++i, ++pos) {
+            Need(pos / 8 < s.size(), __LINE__);
+            v = v << 1 | ((static_cast<uint8_t>(s[pos / 8]) >> (7 - pos % 8)) & 1u);
+        }
+        return v;
+    }
+    uint32_t uvlc() {
+        int zeros = 0;
+        while (!f(1)) ++zeros;
+        return zeros >= 32 ? UINT32_MAX : f(zeros) + ((1u << zeros) - 1);
+    }
+};
+struct BitWriter {
+    std::string out;
+    size_t pos = 0;
+    void put(uint32_t v, int n) {
+        for (int i = n - 1; i >= 0; --i, ++pos) {
+            if (pos % 8 == 0) out.push_back(0);
+            if ((v >> i) & 1u) out.back() = static_cast<char>(static_cast<uint8_t>(out.back()) | (0x80u >> (pos % 8)));
+        }
+    }
+};
+
+std::string Leb128(uint64_t v) {
+    std::string out;
+    do {
+        uint8_t byte = v & 0x7f;
+        v >>= 7;
+        if (v) byte |= 0x80;
+        out.push_back(static_cast<char>(byte));
+    } while (v);
+    return out;
+}
+
+// Where a sequence header says its frame size (AV1 spec 5.5.1): the bit of max_frame_width_minus_1 and the two fields' widths
+struct SequenceFrameSize {
+    size_t at = 0;
+    int widthBits = 0, heightBits = 0;
+};
+SequenceFrameSize FrameSizeOf(const std::string& payload) {
+    BitReader b{payload};
+    b.f(3);  // seq_profile
+    b.f(1);  // still_picture
+    Need(b.f(1) == 0, __LINE__);  // reduced_still_picture_header: a video
+    bool decoderModel = false;
+    int bufferDelayBits = 0;
+    if (b.f(1)) {  // timing_info_present_flag
+        b.f(32);
+        b.f(32);
+        if (b.f(1)) b.uvlc();  // equal_picture_interval: num_ticks_per_picture_minus_1
+        decoderModel = b.f(1);
+        if (decoderModel) {
+            bufferDelayBits = static_cast<int>(b.f(5)) + 1;
+            b.f(32);
+            b.f(5);
+            b.f(5);
+        }
+    }
+    const bool initialDisplayDelay = b.f(1);
+    const int operatingPoints = static_cast<int>(b.f(5)) + 1;
+    for (int i = 0; i < operatingPoints; ++i) {
+        b.f(12);                      // operating_point_idc
+        if (b.f(5) > 7) b.f(1);       // seq_level_idx, seq_tier
+        if (decoderModel && b.f(1)) {  // decoder_model_present_for_this_op
+            b.f(bufferDelayBits);
+            b.f(bufferDelayBits);
+            b.f(1);
+        }
+        if (initialDisplayDelay && b.f(1)) b.f(4);
+    }
+    const int widthBits = static_cast<int>(b.f(4)) + 1, heightBits = static_cast<int>(b.f(4)) + 1;
+    return {b.pos, widthBits, heightBits};
+}
+
+// The payload of an 8-bit 4:2:0 sequence header (profile 0, AV1 spec 5.5) said as 12-bit 4:2:0 (profile 2) - the same up to its
+// color_config. The frames after it are no 12-bit pictures, but av1dec asks for the pixel format (yuv420p12, which FFmpeg offers to no
+// NVDEC) before it decodes any of them: a part of the stream NVDEC does not take, as one written so would be.
+std::string TwelveBitSequenceHeader(const std::string& payload) {
+    BitReader b{payload};
+    Need(b.f(3) == 0, __LINE__);  // seq_profile: the 8-bit 4:2:0 profile
+    const SequenceFrameSize size = FrameSizeOf(payload);
+    b.pos = size.at + static_cast<size_t>(size.widthBits + size.heightBits);
+    if (b.f(1)) {  // frame_id_numbers_present_flag
+        b.f(4);
+        b.f(3);
+    }
+    for (int i = 0; i < 7; ++i) b.f(1);  // 128x128 superblocks, filter intra, intra edge, interintra, masked, warped motion, dual filter
+    const bool orderHint = b.f(1);
+    if (orderHint) {
+        b.f(1);
+        b.f(1);
+    }
+    const uint32_t screenContent = b.f(1) ? 2 : b.f(1);  // seq_choose_screen_content_tools: SELECT, else seq_force_screen_content_tools
+    if (screenContent > 0 && !b.f(1)) b.f(1);           // seq_choose_integer_mv, else seq_force_integer_mv
+    if (orderHint) b.f(3);
+    b.f(1);  // enable_superres
+    b.f(1);  // enable_cdef
+    b.f(1);  // enable_restoration
+    const size_t colorConfig = b.pos;
+    Need(b.f(1) == 0, __LINE__);  // high_bitdepth: an 8-bit stream
+    Need(b.f(1) == 0, __LINE__);  // mono_chrome
+    const uint32_t description = b.f(1);
+    uint32_t primaries = 2, transfer = 2, matrix = 2;
+    if (description) {
+        primaries = b.f(8);
+        transfer = b.f(8);
+        matrix = b.f(8);
+    }
+    Need(!((primaries == 1 && transfer == 13 && matrix == 0)), __LINE__);  // not the sRGB 4:4:4 shorthand
+    const uint32_t range = b.f(1);
+    const uint32_t samplePosition = b.f(2);
+    const uint32_t separateUv = b.f(1);
+    const uint32_t filmGrain = b.f(1);
+    BitWriter w;
+    w.put(2, 3);  // seq_profile 2
+    BitReader copy{payload};
+    copy.pos = 3;
+    while (copy.pos < colorConfig) w.put(copy.f(1), 1);
+    w.put(1, 1);  // high_bitdepth
+    w.put(1, 1);  // twelve_bit
+    w.put(0, 1);  // mono_chrome
+    w.put(description, 1);
+    if (description) {
+        w.put(primaries, 8);
+        w.put(transfer, 8);
+        w.put(matrix, 8);
+    }
+    w.put(range, 1);
+    w.put(1, 1);  // subsampling_x
+    w.put(1, 1);  // subsampling_y: 4:2:0
+    w.put(samplePosition, 2);
+    w.put(separateUv, 1);
+    w.put(filmGrain, 1);
+    w.put(1, 1);  // trailing bits
+    while (w.pos % 8) w.put(0, 1);
+    return w.out;
+}
+
+// A temporal unit (IVF frame) with its sequence header OBUs (OBU_SEQUENCE_HEADER) written by `header`; the other OBUs as they are
+std::string WithSequenceHeadersWritten(const std::string& unit, const std::function<std::string(const std::string&)>& header) {
+    std::string out;
+    for (size_t at = 0; at < unit.size();) {
+        const uint8_t head = static_cast<uint8_t>(unit[at]);
+        const int type = (head >> 3) & 15;
+        Need((head & 2), __LINE__);  // obu_has_size_field
+        const size_t headSize = (head & 4) ? 2 : 1;
+        uint64_t size = 0;
+        size_t sizeBytes = 0;
+        for (;; ++sizeBytes) {
+            Need(at + headSize + sizeBytes < unit.size(), __LINE__);
+            const uint8_t byte = static_cast<uint8_t>(unit[at + headSize + sizeBytes]);
+            size |= static_cast<uint64_t>(byte & 0x7f) << (7 * sizeBytes);
+            if (!(byte & 0x80)) {
+                ++sizeBytes;
+                break;
+            }
+        }
+        const std::string payload = unit.substr(at + headSize + sizeBytes, static_cast<size_t>(size));
+        const std::string written = type == 1 ? header(payload) : payload;
+        out += unit.substr(at, headSize) + Leb128(written.size()) + written;
+        at += headSize + sizeBytes + static_cast<size_t>(size);
+    }
+    return out;
+}
+
+// A temporal unit (IVF frame) with its sequence header OBUs said as 12-bit (TwelveBitSequenceHeader); the other OBUs as they are
+std::string TwelveBitTemporalUnit(const std::string& unit) { return WithSequenceHeadersWritten(unit, TwelveBitSequenceHeader); }
+
+// A sequence header of av1_nvenc's (no timing info, no decoder model, no initial display delay) with an initial display delay of 10
+// frames for every operating point (AV1 5.5: initial_display_delay_present_flag and _minus_1) - everything else as it was: a header with
+// other bytes and the same decoder (size, depth, chroma)
+std::string InitialDisplayDelaySequenceHeader(const std::string& payload) {
+    BitReader b{payload};
+    const uint32_t profile = b.f(3), still = b.f(1);
+    Need(b.f(1) == 0, __LINE__);  // reduced_still_picture_header
+    Need(b.f(1) == 0, __LINE__);  // timing_info_present_flag
+    Need(b.f(1) == 0, __LINE__);  // initial_display_delay_present_flag
+    const uint32_t points = b.f(5) + 1;
+    struct Point {
+        uint32_t idc, level, tier;
+    };
+    std::vector<Point> ops;
+    for (uint32_t i = 0; i < points; ++i) {
+        Point p{b.f(12), b.f(5), 0};
+        if (p.level > 7) p.tier = b.f(1);
+        ops.push_back(p);
+    }
+    // the trailing one bit: the last bit set
+    size_t trailing = payload.size() * 8;
+    while (trailing > 0 && !((static_cast<uint8_t>(payload[(trailing - 1) / 8]) >> (7 - (trailing - 1) % 8)) & 1u)) --trailing;
+    Need(trailing > b.pos, __LINE__);
+    --trailing;
+    BitWriter w;
+    w.put(profile, 3);
+    w.put(still, 1);
+    w.put(0, 1);  // reduced_still_picture_header
+    w.put(0, 1);  // timing_info_present_flag
+    w.put(1, 1);  // initial_display_delay_present_flag
+    w.put(points - 1, 5);
+    for (const Point& p : ops) {
+        w.put(p.idc, 12);
+        w.put(p.level, 5);
+        if (p.level > 7) w.put(p.tier, 1);
+        w.put(1, 1);  // initial_display_delay_present_for_this_op
+        w.put(9, 4);  // initial_display_delay_minus_1
+    }
+    BitReader rest{payload};
+    rest.pos = b.pos;
+    while (rest.pos < trailing) w.put(rest.f(1), 1);
+    w.put(1, 1);  // trailing bits
+    while (w.pos % 8) w.put(0, 1);
+    return w.out;
+}
+
+std::string InitialDisplayDelayTemporalUnit(const std::string& unit) { return WithSequenceHeadersWritten(unit, InitialDisplayDelaySequenceHeader); }
+
+// A sequence header whose max_frame_height_minus_1 is `rows` less (in the same bits): everything else as it was
+// A sequence header whose max_frame_width_minus_1 / max_frame_height_minus_1 are `columns` / `rows` less (in the same bits): everything else
+// as it was
+std::string SmallerFrameSequenceHeader(const std::string& payload, int columns, int rows) {
+    const SequenceFrameSize size = FrameSizeOf(payload);
+    std::string out = payload;
+    const auto lessBy = [&](size_t at, int bits, int by) {
+        if (by == 0) return;
+        BitReader b{payload};
+        b.pos = at;
+        const uint32_t value = b.f(bits);  // max_frame_{width,height}_minus_1
+        Need(by > 0 && value >= static_cast<uint32_t>(by), __LINE__);
+        const uint32_t less = value - static_cast<uint32_t>(by);
+        for (int i = 0; i < bits; ++i) {
+            const size_t bit = at + static_cast<size_t>(i);
+            const auto mask = static_cast<uint8_t>(0x80u >> (bit % 8));
+            const bool one = (less >> (bits - 1 - i)) & 1u;
+            const auto byte = static_cast<uint8_t>(out[bit / 8]);
+            out[bit / 8] = static_cast<char>(one ? byte | mask : byte & static_cast<uint8_t>(~mask));
+        }
+    };
+    Need(columns > 0 || rows > 0, __LINE__);
+    lessBy(size.at, size.widthBits, columns);
+    lessBy(size.at + static_cast<size_t>(size.widthBits), size.heightBits, rows);
+    return out;
+}
+
+std::string ShorterFrameTemporalUnit(const std::string& unit, int rows) {
+    return WithSequenceHeadersWritten(unit, [rows](const std::string& payload) { return SmallerFrameSequenceHeader(payload, 0, rows); });
+}
+
+std::string NarrowerFrameTemporalUnit(const std::string& unit, int columns) {
+    return WithSequenceHeadersWritten(unit, [columns](const std::string& payload) { return SmallerFrameSequenceHeader(payload, columns, 0); });
+}
+
+void SetIvfFrameSize(const std::filesystem::path& ivf, uint16_t width, uint16_t height) {
+    std::string f = ReadAll(ivf);
+    Need(f.size() >= 32, __LINE__);
+    Need(f.compare(0, 4, "DKIF") == 0, __LINE__);
+    f[12] = static_cast<char>(width & 0xff);
+    f[13] = static_cast<char>(width >> 8);
+    f[14] = static_cast<char>(height & 0xff);
+    f[15] = static_cast<char>(height >> 8);
+    std::ofstream(ivf, std::ios::binary | std::ios::trunc) << f;
+}
+
+// The temporal unit without its sequence header OBUs (the frames after it need one met before)
+std::string WithoutSequenceHeaders(const std::string& unit) {
+    std::string out;
+    for (size_t at = 0; at < unit.size();) {
+        const uint8_t head = static_cast<uint8_t>(unit[at]);
+        Need((head & 2), __LINE__);  // obu_has_size_field
+        const size_t headSize = (head & 4) ? 2 : 1;
+        uint64_t size = 0;
+        size_t sizeBytes = 0;
+        for (;; ++sizeBytes) {
+            Need(at + headSize + sizeBytes < unit.size(), __LINE__);
+            const uint8_t byte = static_cast<uint8_t>(unit[at + headSize + sizeBytes]);
+            size |= static_cast<uint64_t>(byte & 0x7f) << (7 * sizeBytes);
+            if (!(byte & 0x80)) {
+                ++sizeBytes;
+                break;
+            }
+        }
+        const size_t whole = headSize + sizeBytes + static_cast<size_t>(size);
+        if (((head >> 3) & 15) != 1) out += unit.substr(at, whole);  // OBU_SEQUENCE_HEADER dropped
+        at += whole;
+    }
+    return out;
+}
+
+// An IVF file `copies` times one after the other in `out`, the timestamps going on; `each(index, unit)` writes each temporal unit anew
+std::filesystem::path RepeatIvf(const std::filesystem::path& src, int copies, const std::filesystem::path& out,
+                                const std::function<std::string(int, const std::string&)>& each) {
+    const std::string f = ReadAll(src);
+    Need(f.size() >= 32, __LINE__);
+    Need(f.compare(0, 4, "DKIF") == 0, __LINE__);
+    auto le = [&](size_t at, int bytes) {
+        uint64_t v = 0;
+        for (int i = bytes - 1; i >= 0; --i) v = v << 8 | static_cast<uint8_t>(f[at + i]);
+        return v;
+    };
+    std::vector<std::pair<uint64_t, std::string>> frames;
+    for (size_t at = le(6, 2); at + 12 <= f.size();) {
+        const size_t size = static_cast<size_t>(le(at, 4));
+        Need(at + 12 + size <= f.size(), __LINE__);
+        frames.emplace_back(le(at + 4, 8), f.substr(at + 12, size));
+        at += 12 + size;
+    }
+    Need(frames.size() >= 2, __LINE__);
+    const uint64_t step = frames[1].first - frames[0].first;
+    std::string ivf = f.substr(0, static_cast<size_t>(le(6, 2)));
+    auto put = [](std::string& s, size_t at, uint64_t v, int bytes) {
+        for (int i = 0; i < bytes; ++i) s[at + i] = static_cast<char>((v >> (8 * i)) & 0xff);
+    };
+    int index = 0;
+    for (int c = 0; c < copies; ++c)
+        for (const auto& [pts, unit] : frames) {
+            const std::string data = each(index, unit);
+            std::string head(12, '\0');
+            put(head, 0, data.size(), 4);
+            put(head, 4, static_cast<uint64_t>(index) * step, 8);
+            ivf += head + data;
+            ++index;
+        }
+    put(ivf, 24, static_cast<uint64_t>(index), 4);
+    std::ofstream(out, std::ios::binary) << ivf;
+    return out;
 }
 
 }  // namespace dlssvid::test
