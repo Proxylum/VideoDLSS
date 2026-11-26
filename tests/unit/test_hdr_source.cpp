@@ -268,7 +268,11 @@ TEST_CASE("First look: SDR AV1 VP9 FFV1 none; HEVC trc 14 15, matrix 9, untagged
     CHECK(NeedsFirstLook("hevc", mp4, 8, Tags(2, 2, 2)) == FirstLook::None);  // 8-bit untagged: SDR
     CHECK(NeedsFirstLook("hevc", mp4, 10, Tags(2, 2, 2)) == FirstLook::Decode);
     CHECK(NeedsFirstLook("hevc", mp4, 10, Tags(1, 1, 1)) == FirstLook::None);
-    for (int t : {14, 15, 16, 18}) CHECK(NeedsFirstLook("hevc", mp4, 10, Tags(9, 9, t)) == FirstLook::Decode);
+    for (int t : {14, 15, 16, 18}) {
+        CHECK(NeedsFirstLook("hevc", mp4, 10, Tags(9, 9, t)) == FirstLook::Decode);
+        CHECK(NeedsFirstLook("hevc", mp4, 8, Tags(1, 1, t)) == FirstLook::Decode);  // the curve alone is the hint
+        CHECK(NeedsFirstLook("h264", mp4, 8, Tags(2, 2, t)) == FirstLook::Decode);
+    }
     for (int m : {9, 10, 14, 15}) CHECK(NeedsFirstLook("h264", mp4, 8, Tags(m, 1, 1)) == FirstLook::Decode);
     CHECK(NeedsFirstLook("h264", mp4, 8, Tags(1, 9, 1)) == FirstLook::Decode);
     CHECK(NeedsFirstLook("hevc", "hevc", 8, Tags(1, 1, 1)) == FirstLook::Decode);  // a raw stream: no container to say it
