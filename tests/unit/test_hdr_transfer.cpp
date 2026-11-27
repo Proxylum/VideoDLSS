@@ -1,10 +1,16 @@
-// TASK-0080 (HDR step TC-1): the HDR -> SDR transfer against absolute numbers (Output/hdr-design/tc-plan.md §6, recomputed in double by
-// Output/hdr-design/tc-checks/), not against each other: PQ and HLG light, the BT.2390 EETF, the 2020 -> 709 matrix, BT.1886, the grey
-// table the scene-cut thumbnails of an HDR source read through.
+// TASK-0080 (HDR step TC-1): the HDR -> SDR transfer against absolute numbers (Output/hdr-design/tc-plan.md §6, §15.7, recomputed in
+// double by Output/hdr-design/tc-checks/), not against each other: PQ and HLG light, the BT.2390 EETF, the 2020 -> 709 matrix, BT.1886,
+// the grey table the scene-cut thumbnails of an HDR source read through; the float tables a frame goes through against that double path,
+// and the AVX2 row against the portable one. The gamut step's own tests: test_hdr_gamut.cpp.
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <random>
 #include <vector>
 
 #include "convert/ColorConvert.h"
@@ -123,6 +129,13 @@ TEST_CASE("RgbToYuv refuses a ColorInfo that converts", "[unit][hdr][transfer][c
     ci.gamut = Gamut::Bt2020;
     CHECK_THROWS(RgbToYuv420p(rgb, ci, out));
     CHECK_THROWS(RgbToYuv(rgb, ci, FrameDesc{4, 4, PixelFormat::Yuv420p16, 10}, out));
+    // a converting reading of an SDR curve has no transfer: refused before the bands, on the caller's thread
+    CpuFrame frame;
+    frame.Allocate(FrameDesc{8, 300, PixelFormat::Yuv420p16, 10});
+    ci.curve = Curve::Sdr;
+    CHECK_THROWS(YuvToRgb(frame, ci, PixelType::F32, 4));
+    CHECK_THROWS(YuvToRgba16f(frame, ci, 4));
+    CHECK_THROWS(HdrTransfer::For(Curve::Sdr, Gamut::Bt709));
 }
 
 TEST_CASE("Grey table: PQ 573 is 0.90390, HLG 721 is 0.90344, 12 bits their own", "[unit][hdr][transfer]") {
@@ -178,4 +191,429 @@ TEST_CASE("MakeLumaThumb maps samples through the grey table before the box mean
     // without the transfer, as before: the codes' normalised mean
     const LumaThumb raw = MakeLumaThumb(Luma16(64, 36, 10, {573}), ColorInfo{ColorMatrix::Bt2020, ColorRange::Limited});
     CHECK(std::fabs(raw.y[0] - (573.0 - 64.0) / 876.0) < 1e-6);
+}
+
+namespace {
+
+ColorInfo Hdr(Curve curve, Gamut gamut, ColorRange range = ColorRange::Limited) {
+    ColorInfo ci{ColorMatrix::Bt2020, range};
+    ci.convert = Convert::HdrToSdr1;
+    ci.curve = curve;
+    ci.gamut = gamut;
+    return ci;
+}
+
+// A frame of random codes (every plane), `depth` 8 for the 8-bit formats.
+CpuFrame RandomFrame(PixelFormat format, int depth, uint32_t w, uint32_t h, uint32_t seed) {
+    CpuFrame f;
+    f.Allocate(FrameDesc{w, h, format, static_cast<uint8_t>(depth)});
+    std::mt19937 rng(seed);
+    const uint32_t top = (1u << depth) - 1u;
+    for (size_t p = 0; p < 3; ++p) {
+        const size_t n = f.desc.PlaneCols(p) * f.desc.PlaneHeight(p);
+        for (size_t i = 0; i < n; ++i) {
+            const uint32_t v = rng() % (top + 1u);
+            if (f.desc.HighBitDepth()) f.Plane16(p)[i] = static_cast<uint16_t>(v);
+            else f.Plane(p)[i] = static_cast<uint8_t>(v);
+        }
+    }
+    return f;
+}
+
+std::array<double, 9> Inv3(const std::array<double, 9>& m) {
+    const double a = m[0], b = m[1], c = m[2], d = m[3], e = m[4], f = m[5], g = m[6], h = m[7], i = m[8];
+    const double det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    return {(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det, (f * g - d * i) / det, (a * i - c * g) / det,
+            (c * d - a * f) / det, (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det};
+}
+
+void Ap3(const std::array<double, 9>& m, const double x[3], double y[3]) {
+    for (int i = 0; i < 3; ++i) y[i] = m[3 * i] * x[0] + m[3 * i + 1] * x[1] + m[3 * i + 2] * x[2];
+}
+
+double DeItp709(const double a709[3], const double b709[3]) {  // BT.2124 of two linear BT.709 colours
+    static const std::array<double, 9> inv = Inv3(hdr::Bt2020To709Matrix());
+    double a[3], b[3], ia[3], ib[3];
+    Ap3(inv, a709, a);
+    Ap3(inv, b709, b);
+    hdr::Ictcp(a, ia);
+    hdr::Ictcp(b, ib);
+    return 720.0 * std::sqrt((ia[0] - ib[0]) * (ia[0] - ib[0]) + 0.25 * (ia[1] - ib[1]) * (ia[1] - ib[1]) + (ia[2] - ib[2]) * (ia[2] - ib[2]));
+}
+
+constexpr double kCode = 876.0;  // one 10-bit limited code of V'
+
+}  // namespace
+
+TEST_CASE("HDR transfer LUT and the gamut step stay within the bound of the double path, widened by the reference's own hue slope",
+          "[unit][hdr][transfer]") {
+    std::mt19937 rng(20261127);
+    std::uniform_real_distribution<double> uni(0.0, 1.0);
+    const hdr::GamutTables& tables = hdr::Sdr1GamutTables();
+    const HdrGamut& gamut = HdrGamut::Get();
+
+    // (a) the chain: BT.709 sources through the whole LUT path, BT.2020 sources up to the gamut step's input
+    std::vector<std::array<double, 3>> codes;
+    for (int a = 0; a <= 40; ++a)
+        for (int b = 0; b <= 40; ++b)
+            for (int c = 0; c <= 40; ++c) codes.push_back({a / 40.0, b / 40.0, c / 40.0});
+    for (int n = 0; n < 150000; ++n) codes.push_back({uni(rng), uni(rng), uni(rng)});
+    for (Curve curve : {Curve::Pq, Curve::Hlg}) {
+        INFO((curve == Curve::Pq ? "PQ" : "HLG"));
+        const HdrTransfer& at709 = HdrTransfer::For(curve, Gamut::Bt709);
+        const HdrTransfer& at2020 = HdrTransfer::For(curve, Gamut::Bt2020);
+        double worst = 0, sum = 0, worstLin = 0;
+        for (const auto& c : codes) {
+            const float f[3] = {static_cast<float>(c[0]), static_cast<float>(c[1]), static_cast<float>(c[2])};
+            const double d[3] = {f[0], f[1], f[2]};
+            float o[3], l[3];
+            double ref[3], lin[3];
+            at709.Apply(f[0], f[1], f[2], o);
+            hdr::HdrToSdr(curve, Gamut::Bt709, d, ref);
+            at2020.Linear(f[0], f[1], f[2], l);
+            hdr::LinearOfCodes(curve, Gamut::Bt2020, d, lin);
+            for (int k = 0; k < 3; ++k) {
+                const double e = std::abs(o[k] - ref[k]) * kCode;
+                worst = std::max(worst, e);
+                sum += e;
+                worstLin = std::max(worstLin, std::abs(hdr::Bt1886Inverse(l[k]) - hdr::Bt1886Inverse(lin[k])) * kCode);
+            }
+        }
+        std::printf("U6 (a) %s chain: BT.709 path %.3f code (mean %.5f), BT.2020 linear %.3f code\n", curve == Curve::Pq ? "PQ" : "HLG", worst,
+                    sum / (3.0 * codes.size()), worstLin);
+        CHECK(worst <= 0.5);
+        CHECK(sum / (3.0 * codes.size()) <= 0.01);
+        CHECK(worstLin <= 0.5);
+    }
+
+    // (b) the gamut step on the same float input: |dV'| <= 1 code + 2 S where the reference channel >= 1e-4, |d lin| <= 1e-5 + 2 S_lin
+    // below; S is the reference's own move when the input's I moves 5e-7 and its hue 0.001 deg (the float step's input error is 2.3e-7
+    // and 6.4e-4 deg); outside the steep pixels (S <= 0.25 code) also dE_ITP <= 0.15
+    struct Sample {
+        float l[3];
+        const HdrTransfer* tr;  // codes of the sample, or nullptr: a linear colour straight into the step
+        float c[3];
+    };
+    std::vector<Sample> set;
+    const std::array<double, 9> from709 = Inv3(hdr::Bt2020To709Matrix());
+    const auto linear = [&](const double l[3]) {
+        Sample s{};
+        for (int k = 0; k < 3; ++k) s.l[k] = static_cast<float>(std::clamp(l[k], 0.0, 1.0));
+        set.push_back(s);
+    };
+    for (int n = 0; n < 150000; ++n) {  // random BT.2020 colours, uniform in V'
+        const double l[3] = {std::pow(uni(rng), 2.4), std::pow(uni(rng), 2.4), std::pow(uni(rng), 2.4)};
+        linear(l);
+    }
+    for (int n = 0; n < 20000; ++n) {  // the BT.2020 cube's faces
+        double l[3] = {std::pow(uni(rng), 2.4), std::pow(uni(rng), 2.4), std::pow(uni(rng), 2.4)};
+        l[n % 3] = (n % 6) >= 3 ? 1.0 : 0.0;
+        linear(l);
+    }
+    for (int n = 0; n < 50000; ++n) {  // BT.709 content in a BT.2020 container
+        const double v[3] = {std::pow(uni(rng), 2.4), std::pow(uni(rng), 2.4), std::pow(uni(rng), 2.4)};
+        double l[3];
+        Ap3(from709, v, l);
+        linear(l);
+    }
+    for (int n = 0; n < 20000; ++n) {  // dark (the encoder below 2^-32, B709 = 0) and near white
+        const double s = std::pow(10.0, -12.0 + 9.0 * uni(rng));
+        const double dark[3] = {s * uni(rng), s * uni(rng), s * uni(rng)}, white[3] = {0.9 + 0.1 * uni(rng), 0.9 + 0.1 * uni(rng), 0.9 + 0.1 * uni(rng)};
+        linear(dark);
+        linear(white);
+    }
+    for (Curve curve : {Curve::Pq, Curve::Hlg}) {  // code lattices through the chain: the step's input is Linear(codes)
+        const HdrTransfer& tr = HdrTransfer::For(curve, Gamut::Bt2020);
+        for (int a = 0; a <= 40; ++a)
+            for (int b = 0; b <= 40; ++b)
+                for (int c = 0; c <= 40; ++c) {
+                    Sample s{};
+                    s.tr = &tr;
+                    s.c[0] = a / 40.f, s.c[1] = b / 40.f, s.c[2] = c / 40.f;
+                    tr.Linear(s.c[0], s.c[1], s.c[2], s.l);
+                    set.push_back(s);
+                }
+    }
+    constexpr double kDI = 5e-7, kDH = 0.001 * 3.141592653589793 / 180.0;
+    long long steep = 0, flagged = 0, broken = 0;
+    double worstRatio = 0, worstFlat = 0, sum = 0, worstDeFlat = 0, worstHue = 0;
+    for (const Sample& s : set) {
+        float out[3];
+        if (s.tr) {
+            s.tr->Apply(s.c[0], s.c[1], s.c[2], out);
+        } else {
+            float m[3] = {s.l[0], s.l[1], s.l[2]};
+            gamut.Map(m);
+            for (int k = 0; k < 3; ++k) out[k] = static_cast<float>(hdr::Bt1886Inverse(m[k]));
+        }
+        const double l[3] = {s.l[0], s.l[1], s.l[2]};
+        double ref[3], refV[3], outLin[3];
+        hdr::GamutMap709(l, ref);
+        for (int k = 0; k < 3; ++k) refV[k] = hdr::Bt1886Inverse(ref[k]), outLin[k] = std::pow(static_cast<double>(out[k]), 2.4);
+        double dv = 0, dl = 0, dvLit = 0;  // dvLit: channels whose reference is >= 1e-4 (below it the rule takes the linear error)
+        for (int k = 0; k < 3; ++k) {
+            dv = std::max(dv, std::abs(out[k] - refV[k]) * kCode);
+            dl = std::max(dl, std::abs(outLin[k] - ref[k]));
+            if (ref[k] >= 1e-4) dvLit = std::max(dvLit, std::abs(out[k] - refV[k]) * kCode);
+            sum += std::abs(out[k] - refV[k]) * kCode;
+        }
+        const double de = DeItp709(outLin, ref);
+        double sv[3] = {0, 0, 0}, sl[3] = {0, 0, 0};
+        if (dv > 0.5 || dl > 5e-6 || de > 0.05) {
+            ++flagged;
+            double itp[3], base[3];
+            hdr::Ictcp(l, itp);
+            const double C = std::hypot(itp[1], itp[2]), h = std::atan2(itp[2], itp[1]);
+            hdr::GamutMapIctcp(itp, base, tables);
+            for (double di : {-kDI, 0.0, kDI})
+                for (double dh : {-kDH, 0.0, kDH}) {
+                    if (di == 0.0 && dh == 0.0) continue;
+                    const double moved[3] = {itp[0] + di, C * std::cos(h + dh), C * std::sin(h + dh)};
+                    double o[3];
+                    hdr::GamutMapIctcp(moved, o, tables);
+                    for (int k = 0; k < 3; ++k) {
+                        sv[k] = std::max(sv[k], std::abs(hdr::Bt1886Inverse(o[k]) - hdr::Bt1886Inverse(base[k])) * kCode);
+                        sl[k] = std::max(sl[k], std::abs(o[k] - base[k]));
+                    }
+                }
+        }
+        const double S = std::max(sv[0], std::max(sv[1], sv[2]));
+        if (S > 0.25) ++steep;
+        else {
+            worstDeFlat = std::max(worstDeFlat, de);
+            worstFlat = std::max(worstFlat, dvLit);
+        }
+        for (int k = 0; k < 3; ++k) {
+            double ratio;
+            if (ref[k] >= 1e-4) ratio = std::abs(out[k] - refV[k]) * kCode / (1.0 + 2.0 * sv[k]);
+            else ratio = std::abs(outLin[k] - ref[k]) / (1e-5 + 2.0 * sl[k]);
+            worstRatio = std::max(worstRatio, ratio);
+            if (ratio > 1.0) {
+                ++broken;
+                if (broken <= 5)
+                    FAIL_CHECK("channel " << k << " of (" << l[0] << ", " << l[1] << ", " << l[2] << "): " << out[k] << " vs " << refV[k] << ", S "
+                                          << sv[k]);
+            }
+        }
+        // the hue of a compressed colour stays: within 0.5 deg of the input where C > 0.02
+        double itp[3], back[3], itpOut[3];
+        hdr::Ictcp(l, itp);
+        const double C = std::hypot(itp[1], itp[2]);
+        if (C > 0.02 && C > hdr::kGamutKnee * tables.b709(itp[0], hdr::PseudoHue(itp[1], itp[2]))) {
+            Ap3(from709, outLin, back);
+            hdr::Ictcp(back, itpOut);
+            if (std::hypot(itpOut[1], itpOut[2]) > 0.02) {
+                double dh = (std::atan2(itpOut[2], itpOut[1]) - std::atan2(itp[2], itp[1])) * 180.0 / 3.141592653589793;
+                dh = std::fmod(std::fmod(dh + 180.0, 360.0) + 360.0, 360.0) - 180.0;
+                worstHue = std::max(worstHue, std::abs(dh));
+            }
+        }
+    }
+    const double mean = sum / (3.0 * set.size());
+    std::printf("U6 (b) gamut step, %zu colours: worst ratio to the bound %.3f; outside the steep pixels %.3f code, dE_ITP %.3f; %lld steep, "
+                "%lld flagged; mean %.4f code; hue %.3f deg\n",
+                set.size(), worstRatio, worstFlat, worstDeFlat, steep, flagged, mean, worstHue);
+    CHECK(broken == 0);
+    CHECK(worstDeFlat <= 0.15);
+    CHECK(mean <= 0.02);
+    CHECK(worstHue <= 0.5);
+
+    // (c) the whole path against hdr::HdrToSdr at BT.2020: printed only - the chain's error times the reference's slope
+    for (Curve curve : {Curve::Pq, Curve::Hlg}) {
+        const HdrTransfer& tr = HdrTransfer::For(curve, Gamut::Bt2020);
+        double worst = 0;
+        long long over = 0;
+        for (size_t n = 0; n < codes.size(); n += 3) {
+            const float f[3] = {static_cast<float>(codes[n][0]), static_cast<float>(codes[n][1]), static_cast<float>(codes[n][2])};
+            const double d[3] = {f[0], f[1], f[2]};
+            float o[3];
+            double ref[3];
+            tr.Apply(f[0], f[1], f[2], o);
+            hdr::HdrToSdr(curve, Gamut::Bt2020, d, ref);
+            double e = 0;
+            for (int k = 0; k < 3; ++k) e = std::max(e, std::abs(o[k] - ref[k]) * kCode);
+            worst = std::max(worst, e);
+            over += e > 1.0 ? 1 : 0;
+        }
+        std::printf("U6 (c) %s whole path at BT.2020: %.2f code, %lld pixels above 1 code\n", curve == Curve::Pq ? "PQ" : "HLG", worst, over);
+    }
+}
+
+TEST_CASE("YuvToRgb with HdrToSdr1 is bit-identical on 1 and 8 threads and to YuvToRgba16f; greys pass the gamut step bit for bit",
+          "[unit][hdr][transfer]") {
+    const CpuFrame frame = RandomFrame(PixelFormat::Yuv420p16, 10, 517, 300, 7);
+    for (Curve curve : {Curve::Pq, Curve::Hlg}) {
+        const ColorInfo ci = Hdr(curve, Gamut::Bt2020);
+        for (PixelType type : {PixelType::F32, PixelType::F16, PixelType::U8}) {
+            const PassImage one = YuvToRgb(frame, ci, type, 1), eight = YuvToRgb(frame, ci, type, 8);
+            CHECK(one.data == eight.data);
+        }
+        const PassImage f16 = YuvToRgb(frame, ci, PixelType::F16, 8), rgba = YuvToRgba16f(frame, ci, 8);
+        bool same = true;
+        const uint16_t* a = f16.As<uint16_t>();
+        const uint16_t* b = rgba.As<uint16_t>();
+        for (size_t i = 0; i < size_t{517} * 300; ++i)
+            same = same && a[3 * i] == b[4 * i] && a[3 * i + 1] == b[4 * i + 1] && a[3 * i + 2] == b[4 * i + 2] && b[4 * i + 3] == 0x3C00;
+        CHECK(same);
+        // and each pixel is the transfer of ForEachRgb's R'G'B': HdrTransfer::Apply, bit for bit
+        const PassImage f32 = YuvToRgb(frame, ci, PixelType::F32, 1);
+        const HdrTransfer& tr = HdrTransfer::For(curve, Gamut::Bt2020);
+        const float kr = 0.2627f, kbl = 0.0593f, kg = 1.f - kr - kbl;
+        const float crR = 2.f * (1.f - kr), cbB = 2.f * (1.f - kbl), cbG = -2.f * kbl * (1.f - kbl) / kg, crG = -2.f * kr * (1.f - kr) / kg;
+        bool applied = true;
+        const uint16_t* Y = frame.Plane16(0);
+        const uint16_t* U = frame.Plane16(1);
+        const uint16_t* V = frame.Plane16(2);
+        const size_t cw = frame.desc.PlaneCols(1);
+        for (uint32_t y = 0; y < 300; y += 7)
+            for (uint32_t x = 0; x < 517; ++x) {
+                const float yy = (static_cast<float>(Y[static_cast<size_t>(y) * 517 + x]) - 64.f) * (1.f / 876.f);
+                const float cb = (static_cast<float>(U[(y >> 1) * cw + (x >> 1)]) - 512.f) * (1.f / 896.f);
+                const float cr = (static_cast<float>(V[(y >> 1) * cw + (x >> 1)]) - 512.f) * (1.f / 896.f);
+                float o[3];
+                tr.Apply(std::clamp(yy + crR * cr, 0.f, 1.f), std::clamp(yy + cbG * cb + crG * cr, 0.f, 1.f), std::clamp(yy + cbB * cb, 0.f, 1.f), o);
+                const float* got = f32.As<float>() + (static_cast<size_t>(y) * 517 + x) * 3;
+                applied = applied && std::memcmp(o, got, sizeof o) == 0;
+            }
+        CHECK(applied);
+    }
+
+    // the gamut step keeps a grey bit for bit: 4097 levels, and every 10-bit code's grey after the chain
+    const HdrGamut& g = HdrGamut::Get();
+    bool greys = true;
+    for (int i = 0; i <= 4096; ++i) {
+        const float v = static_cast<float>(i) / 4096.f;
+        float l[3] = {v, v, v};
+        g.Map(l);
+        greys = greys && l[0] == v && l[1] == v && l[2] == v;
+    }
+    for (Curve curve : {Curve::Pq, Curve::Hlg}) {
+        const HdrTransfer& tr = HdrTransfer::For(curve, Gamut::Bt2020);
+        for (int code = 0; code < 1024; ++code) {
+            const float c = std::clamp((code - 64.f) / 876.f, 0.f, 1.f);
+            float l[3], m[3];
+            tr.Linear(c, c, c, l);
+            std::copy(l, l + 3, m);
+            g.Map(m);
+            greys = greys && m[0] == l[0] && m[1] == l[1] && m[2] == l[2];
+        }
+    }
+    CHECK(greys);
+    // PQ: a grey of a BT.2020 source is the grey of a BT.709 one bit for bit (F32 and F16); HLG weighs its Ys by its own primaries, so
+    // its greys only agree with hdr::GreyToSdr within half a code
+    const HdrTransfer& pq709 = HdrTransfer::For(Curve::Pq, Gamut::Bt709);
+    const HdrTransfer& pq2020 = HdrTransfer::For(Curve::Pq, Gamut::Bt2020);
+    const HdrTransfer& hlg2020 = HdrTransfer::For(Curve::Hlg, Gamut::Bt2020);
+    bool pqSame = true;
+    double hlgWorst = 0;
+    for (int code = 0; code < 1024; ++code) {
+        const float c = std::clamp((code - 64.f) / 876.f, 0.f, 1.f);
+        float a[3], b[3], h[3];
+        pq709.Apply(c, c, c, a);
+        pq2020.Apply(c, c, c, b);
+        pqSame = pqSame && std::memcmp(a, b, sizeof a) == 0 && a[0] == a[1] && a[1] == a[2];
+        hlg2020.Apply(c, c, c, h);
+        hlgWorst = std::max(hlgWorst, std::abs(h[0] - hdr::GreyToSdr(Curve::Hlg, c)) * kCode);
+    }
+    CHECK(pqSame);
+    CHECK(hlgWorst <= 0.5);
+}
+
+TEST_CASE("The whole HDR to SDR path at BT.709 gamut: PQ red keeps its hue, HLG red is weighted by BT.709", "[unit][hdr][transfer]") {
+    struct Row {
+        Curve curve;
+        Gamut gamut;
+        double in[3], out[3];
+    };
+    // ictcp_ref.py section D: the step only for a BT.2020 source
+    const Row rows[] = {
+        {Curve::Pq, Gamut::Bt709, {0.58105, 0, 0}, {0.90390, 0, 0}},
+        {Curve::Hlg, Gamut::Bt709, {0.75, 0, 0}, {0.84291, 0, 0}},  // Ys weights of BT.709 from the primaries (2020's: 0.85212)
+        {Curve::Pq, Gamut::Bt2020, {0.58105, 0, 0}, {0.98141, 0, 0.15250}},
+    };
+    for (const Row& r : rows) {
+        double out[3];
+        hdr::HdrToSdr(r.curve, r.gamut, r.in, out);
+        float lut[3];
+        HdrTransfer::For(r.curve, r.gamut).Apply(static_cast<float>(r.in[0]), static_cast<float>(r.in[1]), static_cast<float>(r.in[2]), lut);
+        for (int k = 0; k < 3; ++k) {
+            CHECK(std::abs(out[k] - r.out[k]) <= 1e-4);
+            CHECK(std::abs(lut[k] - out[k]) * kCode <= 0.5);
+        }
+    }
+}
+
+TEST_CASE("The AVX2 row of the HDR transfer gives the same bits as the portable row", "[unit][hdr][transfer][avx2]") {
+    if (!hdrrow::HasAvx2()) {
+        WARN("no AVX2 on this CPU: only the portable row runs");
+        return;
+    }
+    struct Shape {
+        PixelFormat format;
+        int depth;
+        uint32_t w, h;
+    };
+    const Shape shapes[] = {{PixelFormat::Yuv420p16, 10, 1027, 64}, {PixelFormat::Yuv420p, 8, 333, 40},  {PixelFormat::Yuv444p16, 10, 129, 33},
+                            {PixelFormat::Yuv422p16, 12, 95, 17},   {PixelFormat::Yuv444p, 8, 7, 9},     {PixelFormat::Yuv420p16, 10, 8, 2},
+                            {PixelFormat::Yuv422p, 8, 17, 5}};
+    uint32_t seed = 1;
+    long long pixels = 0;
+    for (const Shape& s : shapes)
+        for (Curve curve : {Curve::Pq, Curve::Hlg})
+            for (Gamut gamut : {Gamut::Bt709, Gamut::Bt2020})
+                for (ColorRange range : {ColorRange::Limited, ColorRange::Full}) {
+                    const CpuFrame f = RandomFrame(s.format, s.depth, s.w, s.h, seed++);
+                    const ColorInfo ci = Hdr(curve, gamut, range);
+                    SetHdrKernel(HdrKernel::Portable);
+                    CHECK_FALSE(HdrRowsUseAvx2());
+                    const PassImage portable = YuvToRgb(f, ci, PixelType::F32, 1);
+                    SetHdrKernel(HdrKernel::Auto);
+                    CHECK(HdrRowsUseAvx2());
+                    const PassImage avx2 = YuvToRgb(f, ci, PixelType::F32, 1);
+                    INFO(ToString(s.format) << " " << s.w << "x" << s.h << (curve == Curve::Pq ? " PQ" : " HLG") << (gamut == Gamut::Bt2020 ? " 2020" : " 709"));
+                    CHECK(std::memcmp(portable.data.data(), avx2.data.data(), portable.data.size()) == 0);
+                    pixels += static_cast<long long>(s.w) * s.h;
+                }
+    // a frame of saturated and dark colours as well: every 10-bit corner and edge of the code cube, through the step's slow path
+    CpuFrame edges;
+    edges.Allocate(FrameDesc{1024, 64, PixelFormat::Yuv444p16, 10});
+    std::mt19937 rng(99);
+    for (size_t i = 0; i < size_t{1024} * 64; ++i)
+        for (size_t p = 0; p < 3; ++p) {
+            const uint32_t pick = rng() % 6;
+            edges.Plane16(p)[i] = static_cast<uint16_t>(pick == 0 ? 64 : pick == 1 ? 940 : pick == 2 ? 512 : pick == 3 ? 0 : pick == 4 ? 1023 : rng() % 1024);
+        }
+    for (Curve curve : {Curve::Pq, Curve::Hlg}) {
+        SetHdrKernel(HdrKernel::Portable);
+        const PassImage portable = YuvToRgb(edges, Hdr(curve, Gamut::Bt2020), PixelType::F32, 1);
+        SetHdrKernel(HdrKernel::Auto);
+        const PassImage avx2 = YuvToRgb(edges, Hdr(curve, Gamut::Bt2020), PixelType::F32, 1);
+        CHECK(std::memcmp(portable.data.data(), avx2.data.data(), portable.data.size()) == 0);
+        pixels += 1024 * 64;
+    }
+    // the AVX2 row itself, not only behind the dispatch: a 4:2:0 row against the portable arithmetic written out here
+    for (Curve curve : {Curve::Pq, Curve::Hlg}) {
+        const HdrTransfer& tr = HdrTransfer::For(curve, Gamut::Bt2020);
+        constexpr uint32_t kW = 1024;
+        std::vector<uint16_t> y(kW), u(kW / 2), v(kW / 2);
+        for (auto& x : y) x = static_cast<uint16_t>(rng() % 1024);
+        for (auto& x : u) x = static_cast<uint16_t>(rng() % 1024);
+        for (auto& x : v) x = static_cast<uint16_t>(rng() % 1024);
+        const float kr = 0.2627f, kb = 0.0593f, kg = 1.f - kr - kb;
+        const hdrrow::Yuv k{64.f, 1.f / 876.f, 512.f, 1.f / 896.f, 2.f * (1.f - kr), 2.f * (1.f - kb), -2.f * kb * (1.f - kb) / kg, -2.f * kr * (1.f - kr) / kg};
+        std::vector<float> r(kW), g(kW), b(kW), scratch(3 * kW);
+        std::vector<int32_t> todo(kW);
+        REQUIRE(hdrrow::RowAvx2(tr.View(), k, y.data(), u.data(), v.data(), 1, kW, r.data(), g.data(), b.data(), scratch.data(), todo.data()) == kW);
+        bool same = true;
+        for (uint32_t x = 0; x < kW; ++x) {
+            const float yy = (static_cast<float>(y[x]) - k.yOff) * k.yScale;
+            const float cb = (static_cast<float>(u[x >> 1]) - k.cOff) * k.cScale, cr = (static_cast<float>(v[x >> 1]) - k.cOff) * k.cScale;
+            float o[3];
+            tr.Apply(std::clamp(yy + k.crR * cr, 0.f, 1.f), std::clamp(yy + k.cbG * cb + k.crG * cr, 0.f, 1.f), std::clamp(yy + k.cbB * cb, 0.f, 1.f), o);
+            same = same && std::memcmp(&o[0], &r[x], 4) == 0 && std::memcmp(&o[1], &g[x], 4) == 0 && std::memcmp(&o[2], &b[x], 4) == 0;
+        }
+        CHECK(same);
+        pixels += kW;
+    }
+    std::printf("AVX2 row: %lld pixels equal to the portable row bit for bit\n", pixels);
 }

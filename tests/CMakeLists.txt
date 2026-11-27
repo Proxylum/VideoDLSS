@@ -30,6 +30,8 @@ add_executable(dlssvid_unit_tests
   unit/test_mv_convert.cpp
   unit/test_color_convert.cpp
   unit/test_hdr_transfer.cpp
+  unit/test_hdr_gamut.cpp
+  unit/test_hdr_bench.cpp
   unit/test_hdr_source.cpp
   unit/test_depth_preprocess.cpp
   unit/test_depth_postprocess.cpp

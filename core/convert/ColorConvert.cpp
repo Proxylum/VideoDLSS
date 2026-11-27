@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 
+#include "convert/HdrTransfer.h"
 #include "util/Error.h"
 
 namespace dlssvid {
@@ -97,10 +98,53 @@ void ForEachRgb(const CpuFrame& frame, const YuvCoeffs& k, Emit emit, uint32_t y
     }
 }
 
+// TASK-0080: the rows of an HDR source read as SDR - ForEachRgb's R'G'B' through HdrTransfer, a row at a time into a buffer (the AVX2 row
+// takes 8 pixels at a time when the CPU runs it, the portable row the rest; both give the same bits), then `emit` as ForEachRgb.
+template <typename T, typename Emit>
+void ForEachHdrRgb(const CpuFrame& frame, const YuvCoeffs& k, const HdrTransfer& tr, Emit emit, uint32_t y0, uint32_t y1) {
+    const uint32_t w = frame.desc.width, h = std::min(frame.desc.height, y1);
+    const int sx = ChromaShiftX(frame.desc.format), sy = ChromaShiftY(frame.desc.format);
+    const T* Y = reinterpret_cast<const T*>(frame.Plane(0));
+    const T* U = reinterpret_cast<const T*>(frame.Plane(1));
+    const T* V = reinterpret_cast<const T*>(frame.Plane(2));
+    const size_t cw = frame.desc.PlaneCols(1);
+    std::vector<float> rgb(static_cast<size_t>(w) * 6);  // R, G, B and the AVX2 row's scratch
+    std::vector<int32_t> todo(w);
+    float* R = rgb.data();
+    float* G = R + w;
+    float* B = G + w;
+    const bool avx2 = (sx == 0 || sx == 1) && HdrRowsUseAvx2();
+    const hdrrow::Yuv yk{k.yOff, k.yScale, k.cOff, k.cScale, k.crR, k.cbB, k.cbG, k.crG};
+    for (uint32_t y = y0; y < h; ++y) {
+        const T* yr = Y + static_cast<size_t>(y) * w;
+        const T* ur = U + static_cast<size_t>(y >> sy) * cw;
+        const T* vr = V + static_cast<size_t>(y >> sy) * cw;
+        const uint32_t x0 = avx2 ? hdrrow::RowAvx2(tr.View(), yk, yr, ur, vr, sx, w, R, G, B, B + w, todo.data()) : 0u;
+        for (uint32_t x = x0; x < w; ++x) {
+            const float yy = (static_cast<float>(yr[x]) - k.yOff) * k.yScale;
+            const float cb = (static_cast<float>(ur[x >> sx]) - k.cOff) * k.cScale;
+            const float cr = (static_cast<float>(vr[x >> sx]) - k.cOff) * k.cScale;
+            const float r = std::clamp(yy + k.crR * cr, 0.f, 1.f);
+            const float g = std::clamp(yy + k.cbG * cb + k.crG * cr, 0.f, 1.f);
+            const float b = std::clamp(yy + k.cbB * cb, 0.f, 1.f);
+            float o[3];
+            tr.Apply(r, g, b, o);
+            R[x] = o[0], G[x] = o[1], B[x] = o[2];
+        }
+        for (uint32_t x = 0; x < w; ++x) emit(x, y, R[x], G[x], B[x]);
+    }
+}
+
 template <typename Emit>
 void ForEachRgbOf(const CpuFrame& frame, const ColorInfo& info, Emit emit, uint32_t y0 = 0, uint32_t y1 = UINT32_MAX) {
     if (frame.data.size() < frame.desc.ByteSize()) Throw("YuvToRgb: frame has no data");
     const YuvCoeffs k = Coeffs(info, frame.desc.HighBitDepth() ? frame.desc.bitDepth : 8);
+    if (info.convert != Convert::None) {
+        const HdrTransfer& tr = HdrTransfer::For(info.curve, info.gamut);
+        if (frame.desc.HighBitDepth()) ForEachHdrRgb<uint16_t>(frame, k, tr, emit, y0, y1);
+        else ForEachHdrRgb<uint8_t>(frame, k, tr, emit, y0, y1);
+        return;
+    }
     if (frame.desc.HighBitDepth()) ForEachRgb<uint16_t>(frame, k, emit, y0, y1);
     else ForEachRgb<uint8_t>(frame, k, emit, y0, y1);
 }
@@ -142,6 +186,7 @@ inline void StoreHalf4(uint16_t* d, float r, float g, float b, float a, bool f16
 PassImage YuvToRgb(const CpuFrame& frame, const ColorInfo& info, PixelType outType, int threads) {
     const uint32_t w = frame.desc.width, h = frame.desc.height;
     if (frame.data.size() < frame.desc.ByteSize()) Throw("YuvToRgb: frame has no data");
+    if (info.convert != Convert::None) (void)HdrTransfer::For(info.curve, info.gamut);  // here, not in a band: it throws and builds the tables
     PassImage out = MakePassImage(PassKind::ColorSource, w, h, outType);
     const float scaleOut = outType == PixelType::U16 ? 65535.f : (outType == PixelType::U8 ? 255.f : 1.f);
     ForEachBand(h, threads, [&](uint32_t y0, uint32_t y1) {
@@ -166,6 +211,7 @@ bool HasF16C() {
 PassImage YuvToRgba16f(const CpuFrame& frame, const ColorInfo& info, int threads) {
     const uint32_t w = frame.desc.width, h = frame.desc.height;
     if (frame.data.size() < frame.desc.ByteSize()) Throw("YuvToRgb: frame has no data");
+    if (info.convert != Convert::None) (void)HdrTransfer::For(info.curve, info.gamut);  // here, not in a band: it throws and builds the tables
     PassImage out;
     out.Allocate(w, h, PixelType::F16, {"R", "G", "B", "A"});
     const bool f16c = HasF16C();
