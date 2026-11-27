@@ -19,7 +19,7 @@ struct PassthroughColour {
     ColorTags tags;
     HdrStatic meta;
     std::optional<ResultColor> expect;   // nullopt: an SDR source, checked as before
-    std::vector<PlanNote> encodeNotes;   // scope "encode": encode.tags_filled, encode.hdr_8bit, encode.range_lost, encode.mdcv_lost, encode.mdcv_unfit, encode.mdcv_invalid, encode.cll_invalid, encode.no_amve, encode.unchecked
+    std::vector<PlanNote> encodeNotes;   // scope "encode": encode.tags_filled, encode.hdr_8bit, encode.range_lost, encode.mdcv_lost, encode.mdcv_unfit, encode.mdcv_invalid, encode.cll_invalid, encode.no_amve, encode.unchecked, encode.records_dropped
 };
 
 // Throws ColourUnsupported: a source refused in every mode (a Dolby Vision IPT base, RGB HDR; RequireColour), or a non-SDR class into a

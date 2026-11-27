@@ -210,6 +210,7 @@ QString PlanNoteText(const SourceColor& c, const PlanNote& n) {
     if (n.key == "encode.mdcv_invalid")
         return Tr("В данных мастеринга нулевая координата, минимальная яркость ниже 0 или max не выше min — читатели этого контейнера отбросят эту "
                   "часть (или их целиком)");
+    if (n.key == "encode.records_dropped") return Tr("Данные мастеринга и уровня света источника не относятся к HDR этого ролика — они не записываются");
     if (n.key == "encode.unchecked")  // the program's list of encoders (the encode card's), not the project's
         return Tr("Кодер не из списка программы (карточка «Кодирование»): цвет результата пишется по плану, но не сверяется");
     if (n.key == "encode.cll_invalid")
@@ -244,8 +245,9 @@ QString SourceColourText(const SourceColor& c, QString* tip) {
         const QString gamut = GamutText(e.primaries);
         if (!gamut.isEmpty() && !(c.cls == SourceClass::Wide && e.primaries == 9)) parts << gamut;  // «BT.2020 SDR» says it already
         else if (c.Hdr()) parts << Tr("BT.2020 (не указан)");
-        if (c.hdr.mdcv && c.hdr.mdcv->hasLuminance) parts << Tr("мастеринг %1 нит").arg(Nits(c.hdr.mdcv->maxLum.Value()));
-        if (c.hdr.cll) parts << QString("MaxCLL %1/%2").arg(c.hdr.cll->maxCll).arg(c.hdr.cll->maxFall);
+        const QString dropped = c.Hdr() ? QString() : Tr(" (не переносится)");  // TASK-0079: a stale record under an SDR grade
+        if (c.hdr.mdcv && c.hdr.mdcv->hasLuminance) parts << Tr("мастеринг %1 нит").arg(Nits(c.hdr.mdcv->maxLum.Value())) + dropped;
+        if (c.hdr.cll) parts << QString("MaxCLL %1/%2").arg(c.hdr.cll->maxCll).arg(c.hdr.cll->maxFall) + dropped;
         if (c.doviConf || c.doviRpu) parts << Tr("Dolby Vision %1 (будет снят)").arg(DoviName(c));
         if (c.hdr10Plus) parts << Tr("HDR10+ (не переносится)");
         text = parts.join(" · ");

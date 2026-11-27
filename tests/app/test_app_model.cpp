@@ -9042,6 +9042,12 @@ TEST_CASE("The main window's menu item that builds the scrubbing proxies says in
     pqSpec.color = RawTags{9, 9, 16, 1, 0};
     const auto pq = WriteClip(d / "pq.mkv", pqSpec);
     const auto [pqSource, pqPasses] = ProxyProject(d, pq, result, "pq_source");
+    ClipSpec dvSpec = plain;  // a Dolby Vision IPT base: nothing writes it - no advice
+    DoviConf p5;
+    p5.profile = 5;
+    dvSpec.hdr.dovi = p5;
+    dvSpec.color = RawTags{2, 2, 2, 2, 0};
+    const auto [dvSource, dvPasses] = ProxyProject(d, WriteClip(d / "dv5.mkv", dvSpec), result, "dv5_source");
     const auto [both, bothPasses] = ProxyProject(d, clip, result, "both");
     const auto [ffv1Source, ffv1Passes] = ProxyProject(d, ffv1, result, "ffv1_source");
     const auto [plainOnly, plainPasses] = ProxyProject(d, ffv1, {}, "plain");
@@ -9074,6 +9080,7 @@ TEST_CASE("The main window's menu item that builds the scrubbing proxies says in
     CHECK(boxes.titles == QStringList{QString::fromUtf8("Прокси для перемотки")});
     CHECK_FALSE(boxes.texts.join("").contains(QString::fromUtf8("Кодирование")));
     CHECK(shownAfterBuild(ffv1Source) == QStringList{resultWhy + advice});  // the result alone: the source decodes - a run can write it again
+    CHECK(shownAfterBuild(dvSource) == QStringList{resultWhy});
     CHECK(shownAfterBuild(pqSource) ==
           QStringList{resultWhy + QString::fromUtf8("\nРезультат можно записать заново в HEVC: выберите кодек в карточке «Кодирование», выключите все стадии и "
                                                     "нажмите «Обработать · только кодирование».")});
@@ -11053,8 +11060,15 @@ TEST_CASE("Source card colour row is hidden for SDR and names HLG with Dolby Vis
     ipt.level = 6;
     ipt.rpu = ipt.bl = true;
     dv5.dovi = ipt;
-    const QString iptText = ColourRowOf(clip("dv5.mkv", RawTags{2, 2, 2, 2, 0}, dv5), &hidden);
+    QString iptTip;
+    const QString iptText = ColourRowOf(clip("dv5.mkv", RawTags{2, 2, 2, 2, 0}, dv5), &hidden, &iptTip);
     CHECK(iptText == QString::fromUtf8("Dolby Vision 5 (база IPT) — не поддерживается"));  // TB-2: the refusal stands
+    CHECK(iptTip.contains(QString::fromUtf8("Ни обработка, ни запись как есть: такой ролик не поддерживается")));
+    CHECK_FALSE(iptTip.contains(QString::fromUtf8("в следующей версии")));
+    // wide gamut SDR with a stale record of an HDR master: shown, said not carried
+    ClipHdr stale;
+    stale.light = Cll{1000, 400};
+    CHECK(ColourRowOf(clip("wide_stale.mkv", RawTags{9, 9, 14, 1, 0}, stale), &hidden) == QString::fromUtf8("BT.2020 SDR · MaxCLL 1000/400 (не переносится)"));
     CHECK(ColourRowOf(clip("wide.mkv", RawTags{9, 9, 14, 1, 0}), &hidden) == QString::fromUtf8("BT.2020 SDR"));
 }
 

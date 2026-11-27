@@ -872,6 +872,8 @@ TEST_CASE("Written tags of an HDR passthrough are the effective ones with matrix
     CHECK(same(written(Tags(9, 2, 2)).first, 9, 9, 1, 1));          // wide by the matrix alone: BT.2020 assumed, BT.709's curve
     CHECK(same(written(Tags(9, 1, 2)).first, 9, 1, 1, 1));          // the BT.2020 matrix under BT.709 primaries: their curve
     CHECK(same(written(Tags(14, 9, 16)).first, 14, 9, 16, 1));      // ICtCp: kept as it is
+    CHECK(same(written(RawTags{9, 9, 16, 0, 0}).first, 9, 9, 16, 1));  // the range unsaid: limited, and no tag filled
+    CHECK_FALSE(written(RawTags{9, 9, 16, 0, 0}).second);
     CHECK_FALSE(written(Tags(14, 9, 16)).second);
     // mixed signalling (SDR frames over PQ codec parameters): the frames' tags as they are, nothing filled
     CHECK(same(written(Tags(9, 9, 16), Tags(1, 1, 1)).first, 1, 1, 1, 1));

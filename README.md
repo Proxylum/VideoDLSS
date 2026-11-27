@@ -346,8 +346,9 @@ under SDR primaries, ICtCp / BT.2020 CL, a file whose layers disagree (SDR frame
 anything is hashed, saying what the source is and that `--passthrough` (the GUI's «Обработать · только кодирование», every stage
 off) writes it as it is. Passthrough keeps its effective tags - the matrix BT.2020 kept, an unspecified matrix / primaries of PQ /
 HLG, wide gamut and a log curve written as BT.2020 and a missing transfer of wide gamut as BT.709 (MP4 / MOV write `colr` only with
-all three) - and its
-mastering display, light level and ambient viewing environment where the container has a field (MP4 / MOV: `mdcv`, `clli`, `amve`;
+all three) - and a PQ / HLG
+source's mastering display, light level and ambient viewing environment where the container has a field (another class's records -
+stale ones under an SDR grade - are noted and not written) (MP4 / MOV: `mdcv`, `clli`, `amve`;
 Matroska: MasteringMetadata, MaxCLL / MaxFALL, no ambient viewing environment); the result check reads them back. Notes in the plan
 (`process --plan`), the result and the GUI's output card say what is lost or assumed: Dolby Vision's RPU, HDR10+, 8 bits of HDR
 (banding), a full range ProRes keeps in no container (FFmpeg's decoder says limited) and a MOV of FFV1 cannot keep (NVENC keeps it

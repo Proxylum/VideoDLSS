@@ -62,6 +62,9 @@ PassthroughColour PlanPassthroughColour(const VideoStreamInfo& info, const std::
     auto note = [&](std::string key, std::string level, std::string text) {
         pc.encodeNotes.push_back(PlanNote{std::move(key), std::move(level), "encode", std::move(text)});
     };
+    if (!c.Hdr() && (c.hdr.mdcv || c.hdr.cll || c.hdr.amve))  // a stale record of an HDR master under an SDR grade (wide gamut, log, SDR frames)
+        note("encode.records_dropped", "note",
+             "the source's mastering display / light level belong to no HDR class here (" + std::string(ClassWords(c.cls)) + ") - not written");
     if (TagsFilled(c)) note("encode.tags_filled", "note", "the result is tagged " + TagWords(pc.tags) + ": the class's assumption where the source said none");
     const OutputFormat of = ResolveOutputFormat(codec, format, SourceLayout(info));
     if (c.Hdr() && of.desc.bitDepth < 10)

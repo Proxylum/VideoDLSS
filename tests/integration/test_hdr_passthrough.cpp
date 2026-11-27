@@ -162,7 +162,7 @@ TEST_CASE("Passthrough of HLG ProRes MOV keeps trc 18 in colr and in the frame h
     const auto dir = Dir("hlg_mov");
     const auto in = HlgProRes(dir, "in.mov");
     const auto out = dir / "out.mov";
-    {  // nothing filled, lost or assumed: no encode note
+    {  // nothing filled, lost or assumed: no encode note (an HLG source's records are carried: none dropped)
         VideoDecoder probe(in, VideoDecoder::Probe());
         CHECK(PlanPassthroughColour(probe.Info(), "prores_ks", {}, out, "t").encodeNotes.empty());
     }
@@ -573,6 +573,13 @@ TEST_CASE("A MOV of a source with an unspecified tag left writes no colr and exp
     CHECK(pc.expect->primaries == 2);
     CHECK(pc.expect->trc == 2);
     CHECK_FALSE(pc.expect->checkRange);
+    {  // NVENC writes its VUI where MP4 writes no colr: the tags said are expected back, those unsaid not
+        const PassthroughColour nv = PlanPassthroughColour(probe.Info(), "hevc_nvenc", {}, "a.mp4", "t");
+        REQUIRE(nv.expect);
+        CHECK(nv.expect->trc == 1);
+        CHECK(nv.expect->matrix == 2);
+        CHECK(nv.expect->primaries == 2);
+    }
     CHECK_NOTHROW(RunProcess(Passthrough(in, dir / "pt.mov", "prores_ks")));
     CHECK(std::filesystem::exists(dir / "pt.mov"));
 }
@@ -589,6 +596,7 @@ TEST_CASE("Wide gamut SDR and a log curve pass through with their tags and witho
         VideoDecoder probe(in, VideoDecoder::Probe());
         REQUIRE_FALSE(probe.Info().color.Hdr());
         REQUIRE_FALSE(probe.Info().color.legacyPath);
+        CHECK(HasKey(PlanPassthroughColour(probe.Info(), "ffv1", {}, "a.mkv", "t").encodeNotes, "encode.records_dropped"));
         const auto out = dir / (std::to_string(tags.trc) + "_out.mkv");
         CHECK_FALSE(HasKey(PlanProcess(Passthrough(in, dir / "o.mp4", "h264_nvenc")).warnings, "encode.hdr_8bit"));  // no HDR to band
         CHECK_NOTHROW(RunProcess(Passthrough(in, out, "ffv1")));
@@ -1370,6 +1378,32 @@ TEST_CASE("H.264 HLG with the alternative transfer SEI on its key frame only pas
         CHECK_FALSE(Has(r.warnings, "the frames are"));
         CHECK(Summarize(o.output).colorTrc == 18);
     }
+}
+
+TEST_CASE("Raw H.264 of HLG by an SEI then BT.709 warns of the change in software decoding", "[integration][hdr][gpu][regression]") {
+    if (!HaveNvenc("h264_nvenc")) SKIP("no NVIDIA GPU with h264_nvenc");
+    const auto dir = Dir("h264_hlg_then_709");
+    ClipSpec spec;
+    spec.codec = "h264_nvenc";
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 8;
+    spec.color = Tags(9, 9, 14);
+    spec.videoPacket = [](int64_t i, const std::string& au) { return i == 0 ? WithNalBeforeH264Slice(au, H264AlternativeTransferSei(18)) : au; };
+    std::string why;
+    const auto hlg = WriteClipIfSupported(dir / "hlg.h264", spec, &why);
+    if (!hlg) SKIP("NVENC does not write the clip here: " << why);
+    spec.color = Tags(1, 1, 1);
+    spec.videoPacket = {};
+    const auto sdr = WriteClipIfSupported(dir / "sdr.h264", spec, &why);
+    REQUIRE(sdr);
+    const auto joined = ConcatFiles(*hlg, *sdr, dir / "joined.h264");
+    VideoDecoder probe(joined, VideoDecoder::Probe());
+    REQUIRE(probe.Info().color.cls == SourceClass::Hlg);
+    // software, frame threads: the BT.709 part's frames from a thread that never parsed the SEI read 1/1/1 - not taken for a lost SEI
+    // (its primaries and matrix differ). The frame number depends on the threads; by NVDEC (one thread) FFmpeg keeps the SEI's 18 on: none
+    const ProcessResult r = RunProcess(Passthrough(joined, dir / "out.mkv", "ffv1"));
+    CHECK(Has(r.warnings, "and on are SDR"));
 }
 
 TEST_CASE("HEVC MP4 with a PQ colr and no colour in its VUI passes through without a class change, in software and by NVDEC", "[integration][hdr][gpu][nvdec]") {
