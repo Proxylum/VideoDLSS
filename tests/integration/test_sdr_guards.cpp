@@ -1,6 +1,7 @@
 // TASK-0080 (HDR step TC-1): guards of the SDR path. TC-2 reads HDR sources into SDR and labels their passes with colour tokens; an SDR
-// source (the legacy path of ColorPlan) must keep every manifest, preview, plan line, export and comparison byte for byte. These tests
-// freeze what main writes today, before anything changes, and stay unchanged through TC-2 and TC-3.
+// source (the legacy path of ColorPlan) must keep what it writes. These tests hold what main writes today, before anything changes, and
+// stay unchanged through TC-2 and TC-3: the export and NR manifests and the SettingsNote as literals, the previews as the pass frame put
+// back by the source's decode matrix, info / --plan / the run report without colour lines, compare's warning and JSON keys.
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <nlohmann/json.hpp>
@@ -80,12 +81,20 @@ TEST_CASE("upscale, nr and fg --video of an SDR clip write untagged YUV of the d
     const std::vector<Cmd> cmds = {{"upscale", {"--backend", "bicubic"}, "color_sr"},
                                    {"nr", {"--backend", "stub", "--intensity", "0"}, "color_nr"},
                                    {"fg", {"--backend", "blend", "--multiplier", "2"}, "color_fg"}};
-    for (const char* pixFmt : {"yuv420p", "yuv420p10le"}) {
-        const auto dir = Dir(std::string("video_") + pixFmt);
-        const auto clip = WriteClip(dir / "clip.mkv", Sdr(pixFmt));
+    struct Clip {
+        const char* pixFmt;
+        bool tagged;  // BT.709 tags: the decode matrix by the tags, where the height rule (48 lines) would take BT.601
+    };
+    for (const Clip cl : {Clip{"yuv420p", false}, Clip{"yuv420p10le", false}, Clip{"yuv420p", true}}) {
+        const char* pixFmt = cl.pixFmt;
+        const auto dir = Dir(std::string("video_") + pixFmt + (cl.tagged ? "_709" : ""));
+        ClipSpec spec = Sdr(pixFmt);
+        if (cl.tagged) spec.color = RawTags{1, 1, 1, 1, 0};
+        const auto clip = WriteClip(dir / "clip.mkv", spec);
         const ColorInfo ci = ColorInfoFromStream(VideoDecoder(clip).Info());
+        CHECK(ci.matrix == (cl.tagged ? ColorMatrix::Bt709 : ColorMatrix::Bt601));
         for (const Cmd& c : cmds) {
-            INFO(pixFmt << " " << c.stage);
+            INFO(pixFmt << (cl.tagged ? " bt709" : "") << " " << c.stage);
             const auto passes = dir / (std::string(c.stage) + "_passes");
             const auto video = dir / (std::string(c.stage) + ".mkv");
             std::vector<std::string> args{c.stage, "-i", clip.string(), "-o", passes.string(), "--warp", "--video", video.string(), "--codec", "ffv1"};
@@ -154,10 +163,7 @@ TEST_CASE("SDR info, process --plan and the report carry no colour lines", "[int
         for (const auto& k : keys) CHECK_FALSE(run.out.find(k) != std::string::npos);
         const nlohmann::json j = ReadJson(json);
         CHECK_FALSE(j.contains("colour"));
-        for (const auto& w : j.value("warnings", nlohmann::json::array())) {
-            INFO(w.dump());
-            for (const auto& k : keys) CHECK_FALSE(w.value("key", "").rfind(k, 0) == 0);
-        }
+        CHECK(j.value("warnings", nlohmann::json::array()) == nlohmann::json::array());  // the report's warnings are texts: none here
     }
 }
 

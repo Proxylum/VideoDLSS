@@ -196,6 +196,7 @@ TEST_CASE("MakeLumaThumb maps samples through the grey table before the box mean
     hlg.curve = Curve::Hlg;
     CHECK(std::fabs(MakeLumaThumb(Luma16(64, 36, 10, {721}), hlg).y[0] - 0.90344) < 1e-4);
     CHECK(std::fabs(MakeLumaThumb(Luma16(64, 36, 12, {2292}), pq).y[0] - 0.90390) < 1e-4);  // 12 bits: the 10-bit 573's level
+    CHECK(std::fabs(MakeLumaThumb(Luma16(64, 36, 10, {65535}), pq).y[0] - 1.0) < 1e-6);   // a sample above the depth's top reads as white
     ColorInfo full = pq;
     full.range = ColorRange::Full;
     CHECK(std::fabs(MakeLumaThumb(Luma16(64, 36, 10, {594}), full).y[0] - static_cast<float>(hdr::GreyToSdr(Curve::Pq, 594.0 / 1023.0))) < 1e-6);
