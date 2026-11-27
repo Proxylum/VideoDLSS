@@ -61,8 +61,10 @@ namespace dlssvid {
 // once per process for each (curve, depth, range); Curve::Sdr throws.
 const std::vector<float>& GreyTable(Curve curve, int bitDepth, ColorRange range);
 
-// The float transfer a frame goes through (tc-plan §3.1, §15.5): tables of 4096 segments with linear interpolation, built from `hdr::`.
-// One per (curve, gamut) and process, shared by every thread.
+// The float transfer a frame goes through (tc-plan §3.1, §15.5, §16), built from `hdr::`: the EOTF, the EETF gain and the BT.1886
+// inverse are tables of 4096 segments with linear interpolation; HLG's Ys^0.2 is a table by the float's bits (32 octaves x 256, like
+// the gamut step's PQ encoder - a uniform one erred up to 16 codes in the dark). One per (curve, gamut) and process, shared by every
+// thread.
 class HdrTransfer {
 public:
     static constexpr int kPoints = 4096;

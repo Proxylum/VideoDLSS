@@ -11,7 +11,8 @@ namespace dlssvid {
 // Scene cuts (PR-6, spec §2d): on a hard cut a temporal stage drops its history, so the last scene does not leak into the
 // next one. Our detector, over the source's luma - the cut is a property of the source, whatever colour a stage reads:
 // box-downsampled to <= maxWidth (an integer factor, even sides), normalised to [0, 1] by the range and the bit depth,
-// score = mean |Y_t - Y_{t-1}|. A cut is a score above the threshold or another frame size.
+// score = mean |Y_t - Y_{t-1}|. A cut is a score above the threshold or another frame size. An HDR source read as SDR
+// (ColorInfo::convert != None, TASK-0080) is judged on its SDR picture: each luma sample goes through GreyTable before the box mean.
 struct LumaThumb {
     uint32_t width = 0, height = 0;          // of the thumbnail
     uint32_t frameWidth = 0, frameHeight = 0;  // of the frame it was made from: another size is a cut
@@ -19,7 +20,9 @@ struct LumaThumb {
     bool Empty() const { return y.empty(); }
 };
 
-// Limited range: (Y - 16·2^(b-8)) / (219·2^(b-8)), full: Y / (2^b - 1), clamped to [0, 1]. An empty frame gives an empty thumb.
+// Limited range: (Y - 16·2^(b-8)) / (219·2^(b-8)), full: Y / (2^b - 1), clamped to [0, 1]. With info.convert != None each sample is
+// GreyTable(info.curve, b, info.range)[Y] (the SDR signal of that grey) and the thumbnail is their box mean. An empty frame gives an
+// empty thumb.
 LumaThumb MakeLumaThumb(const CpuFrame& frame, const ColorInfo& info, uint32_t maxWidth = 640);
 
 // mean |a - b| over the thumbnails; 1 (a cut at any threshold below 1) when the frames or the thumbnails differ in size.

@@ -488,6 +488,86 @@ TEST_CASE("Gamut boundary tables match an independent double builder", "[unit][h
     CHECK(one.b709.node == t.b709.node);
 }
 
+TEST_CASE("Gamut step G1 without the BT.709 edge knots and with the knee 0.85: anchors, the independent builder and the float copy",
+          "[unit][hdr][gamut]") {
+    // the other values of the two settings the user picks before TC-2 (tc-plan §15.13): their tables and float copies are what the visual
+    // check shows, so they are held to the reference as the defaults are
+    const M3 from709 = To2020(kP709);
+    const hdr::GamutTables plain = hdr::BuildSdr1GamutTables(hdr::GamutBuildThreads(), false);
+    REQUIRE(plain.b709.knots == 6);
+    REQUIRE(plain.b709.columns == plain.b709.axisN);
+    const M3 lmsTo2020 = Inv(kLms);
+    const RefCube ref(Mul(T709(), lmsTo2020), Inv(T709()), false);
+    REQUIRE(plain.b709.columns == ref.nh);
+    std::mt19937 rng(85);
+    std::uniform_int_distribution<int> row(1, 126), col(0, plain.b709.columns - 1);
+    double worst = 0;
+    for (int n = 0; n < 600; ++n) {
+        const int i = n < 100 ? 95 : row(rng), c = n < 100 ? (n * 5) % plain.b709.columns : col(rng);
+        worst = std::max(worst, std::abs(plain.b709.node[static_cast<size_t>(i) * plain.b709.columns + c] - ref.Node(i, c)));
+    }
+    CHECK(worst <= 1e-7);
+    for (int i : {0, 1, 95, 126, 127})
+        for (int x = 0; x < 6; ++x) CHECK(std::abs(plain.b709.rowKnot[static_cast<size_t>(i) * 6 + x] - ref.K[i * 6 + x]) <= 1e-12);
+
+    struct Anchor {
+        const char* what;
+        const hdr::GamutTables* tables;
+        double knee, in[3], out[3];
+    };
+    const hdr::GamutTables& standard = hdr::Sdr1GamutTables();
+    // ictcp_ref.py section J
+    const Anchor anchors[] = {
+        {"no edge knots: 709 (0, 0, 0.94)", &plain, 0.8, {0, 0, 0.94}, {0.00015, 0.03767, 0.67820}},
+        {"no edge knots: 709 (1, 1, 0.03)", &plain, 0.8, {1, 1, 0.03}, {0.96813, 0.99452, 0.13976}},
+        {"knee 0.85: 709 R", &standard, 0.85, {1, 0, 0}, {0.96672, 0.00948, 0.00334}},
+        {"knee 0.85: 709 B", &standard, 0.85, {0, 0, 1}, {0.00000, 0.00676, 0.95450}},
+    };
+    for (const Anchor& a : anchors) {
+        INFO(a.what);
+        double l[3], o[3];
+        Ap(from709, a.in, l);
+        hdr::GamutMap709(l, o, *a.tables, a.knee);
+        for (int k = 0; k < 3; ++k) CHECK(std::abs(o[k] - a.out[k]) <= 1e-4);
+    }
+
+    // the float copies against the double path with the same settings, on random BT.2020 colours
+    const HdrGamut plainFast(plain, 0.8), kneeFast(standard, 0.85);
+    struct Copy {
+        const char* what;
+        const HdrGamut& fast;
+        const hdr::GamutTables& tables;
+        double knee;
+    };
+    std::uniform_real_distribution<double> uni(0.0, 1.0);
+    for (const Copy& c : {Copy{"no edge knots", plainFast, plain, 0.8}, Copy{"knee 0.85", kneeFast, standard, 0.85}}) {
+        double worstV = 0, sum = 0;
+        long long over = 0;
+        const int n = 40000;
+        for (int i = 0; i < n; ++i) {
+            const double l[3] = {std::pow(uni(rng), 2.4), std::pow(uni(rng), 2.4), std::pow(uni(rng), 2.4)};
+            float f[3] = {static_cast<float>(l[0]), static_cast<float>(l[1]), static_cast<float>(l[2])};
+            const double d[3] = {f[0], f[1], f[2]};
+            double o[3];
+            hdr::GamutMap709(d, o, c.tables, c.knee);
+            c.fast.Map(f);
+            for (int k = 0; k < 3; ++k) {
+                if (o[k] < 1e-4) continue;
+                const double e = std::abs(hdr::Bt1886Inverse(f[k]) - hdr::Bt1886Inverse(o[k])) * 876.0;
+                worstV = std::max(worstV, e);
+                sum += e;
+                over += e > 1.0 ? 1 : 0;
+            }
+        }
+        std::printf("G1 %s: the float copy within %.3f code of the double path (mean %.4f, %lld channels above 1 code)\n", c.what, worstV,
+                    sum / (3.0 * n), over);
+        INFO(c.what);
+        CHECK(sum / (3.0 * n) <= 0.01);
+        CHECK(over <= n / 2000);
+        CHECK(worstV <= 2.0);
+    }
+}
+
 TEST_CASE("The level-1 early exit never skips a pixel the reference compresses", "[unit][hdr][gamut]") {
     const HdrGamut& g = HdrGamut::Get();
     const hdrrow::Step& v = g.View();

@@ -257,7 +257,7 @@ TEST_CASE("Manifest primaries round-trip; an SDR pass writes none", "[passes][ma
     const Manifest back = Manifest::FromJson(j);
     CHECK(back.primaries == "bt2020");
     CHECK(back.colorspace == "pq");
-    const auto dir = std::filesystem::temp_directory_path() / "dlssvid_manifest_primaries";
+    const auto dir = Tmp("primaries");
     std::filesystem::remove_all(dir);
     m.Save(dir);
     CHECK(Manifest::Load(dir).primaries == "bt2020");

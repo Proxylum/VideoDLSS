@@ -191,6 +191,21 @@ TEST_CASE("MakeLumaThumb maps samples through the grey table before the box mean
     // without the transfer, as before: the codes' normalised mean
     const LumaThumb raw = MakeLumaThumb(Luma16(64, 36, 10, {573}), ColorInfo{ColorMatrix::Bt2020, ColorRange::Limited});
     CHECK(std::fabs(raw.y[0] - (573.0 - 64.0) / 876.0) < 1e-6);
+    // the table is the source's: its curve, bit depth and range
+    ColorInfo hlg = pq;
+    hlg.curve = Curve::Hlg;
+    CHECK(std::fabs(MakeLumaThumb(Luma16(64, 36, 10, {721}), hlg).y[0] - 0.90344) < 1e-4);
+    CHECK(std::fabs(MakeLumaThumb(Luma16(64, 36, 12, {2292}), pq).y[0] - 0.90390) < 1e-4);  // 12 bits: the 10-bit 573's level
+    ColorInfo full = pq;
+    full.range = ColorRange::Full;
+    CHECK(std::fabs(MakeLumaThumb(Luma16(64, 36, 10, {594}), full).y[0] - static_cast<float>(hdr::GreyToSdr(Curve::Pq, 594.0 / 1023.0))) < 1e-6);
+    CpuFrame f8;
+    f8.Allocate(FrameDesc{64, 36, PixelFormat::Yuv420p, 8});
+    std::fill(f8.data.begin(), f8.data.end(), uint8_t{128});
+    std::fill_n(f8.Plane(0), size_t{64} * 36, uint8_t{235});
+    CHECK(std::fabs(MakeLumaThumb(f8, pq).y[0] - 1.0) < 1e-6);  // 8 bits: 235 is white
+    std::fill_n(f8.Plane(0), size_t{64} * 36, uint8_t{128});
+    CHECK(std::fabs(MakeLumaThumb(f8, pq).y[0] - static_cast<float>(hdr::GreyToSdr(Curve::Pq, (128.0 - 16.0) / 219.0))) < 1e-6);
 }
 
 namespace {
@@ -478,6 +493,35 @@ TEST_CASE("YuvToRgb with HdrToSdr1 is bit-identical on 1 and 8 threads and to Yu
         CHECK(applied);
     }
 
+    // the wiring of the branch on every layout, gamut and range (the chroma row of 4:2:2, the transfer of the source's gamut): the frozen
+    // SDR path gives the R'G'B' the branch sees, the result is their HdrTransfer::Apply bit for bit
+    struct Shape {
+        PixelFormat format;
+        int depth;
+    };
+    uint32_t seed = 70;
+    for (const Shape s : {Shape{PixelFormat::Yuv420p16, 10}, Shape{PixelFormat::Yuv420p, 8}, Shape{PixelFormat::Yuv422p16, 12},
+                          Shape{PixelFormat::Yuv422p, 8}, Shape{PixelFormat::Yuv444p16, 10}, Shape{PixelFormat::Yuv444p, 8}})
+        for (Curve curve : {Curve::Pq, Curve::Hlg})
+            for (Gamut gamut : {Gamut::Bt709, Gamut::Bt2020})
+                for (ColorRange range : {ColorRange::Limited, ColorRange::Full}) {
+                    const CpuFrame f = RandomFrame(s.format, s.depth, 37, 12, seed++);
+                    const PassImage sdr = YuvToRgb(f, ColorInfo{ColorMatrix::Bt2020, range}, PixelType::F32, 1);
+                    const PassImage conv = YuvToRgb(f, Hdr(curve, gamut, range), PixelType::F32, 1);
+                    const HdrTransfer& tr = HdrTransfer::For(curve, gamut);
+                    bool wired = true;
+                    const float* in = sdr.As<float>();
+                    const float* got = conv.As<float>();
+                    for (size_t i = 0; i < size_t{37} * 12; ++i) {
+                        float o[3];
+                        tr.Apply(in[3 * i], in[3 * i + 1], in[3 * i + 2], o);
+                        wired = wired && std::memcmp(o, got + 3 * i, sizeof o) == 0;
+                    }
+                    INFO(ToString(s.format) << (curve == Curve::Pq ? " PQ" : " HLG") << (gamut == Gamut::Bt2020 ? " 2020" : " 709")
+                                            << (range == ColorRange::Full ? " full" : " limited"));
+                    CHECK(wired);
+                }
+
     // the gamut step keeps a grey bit for bit: 4097 levels, and every 10-bit code's grey after the chain
     const HdrGamut& g = HdrGamut::Get();
     bool greys = true;
@@ -583,6 +627,17 @@ TEST_CASE("The AVX2 row of the HDR transfer gives the same bits as the portable 
             const uint32_t pick = rng() % 6;
             edges.Plane16(p)[i] = static_cast<uint16_t>(pick == 0 ? 64 : pick == 1 ? 940 : pick == 2 ? 512 : pick == 3 ? 0 : pick == 4 ? 1023 : rng() % 1024);
         }
+    CpuFrame calm = RandomFrame(PixelFormat::Yuv420p16, 10, 1024, 64, 98);  // nearly grey: whole vectors done by level 1 and greys
+    for (size_t p = 1; p < 3; ++p)
+        for (size_t i = 0; i < calm.desc.PlaneCols(p) * calm.desc.PlaneHeight(p); ++i) calm.Plane16(p)[i] = static_cast<uint16_t>(510 + rng() % 5);
+    for (Curve curve : {Curve::Pq, Curve::Hlg}) {
+        SetHdrKernel(HdrKernel::Portable);
+        const PassImage portable = YuvToRgb(calm, Hdr(curve, Gamut::Bt2020), PixelType::F32, 1);
+        SetHdrKernel(HdrKernel::Auto);
+        const PassImage avx2 = YuvToRgb(calm, Hdr(curve, Gamut::Bt2020), PixelType::F32, 1);
+        CHECK(std::memcmp(portable.data.data(), avx2.data.data(), portable.data.size()) == 0);
+        pixels += 1024 * 64;
+    }
     for (Curve curve : {Curve::Pq, Curve::Hlg}) {
         SetHdrKernel(HdrKernel::Portable);
         const PassImage portable = YuvToRgb(edges, Hdr(curve, Gamut::Bt2020), PixelType::F32, 1);

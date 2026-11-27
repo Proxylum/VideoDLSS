@@ -1,6 +1,6 @@
 // TASK-0080 (HDR step TC-1), bench B1 (tc-plan §15.10, the user's decision 2026-11-27: the AVX2 row in TC): what the HDR -> SDR transfer
-// costs a guide stage (depth and flow read F32 frames, FG and export F16) at 1080p and 4K, 10-bit 4:2:0, by content and kernel, and the
-// build of the gamut tables. Hidden ([.]): run `dlssvid_unit_tests "[bench]"` on an idle machine (no CI job); the result goes to
+// costs whoever reads the frame on the CPU (the guide stages depth and flow read F32, FG and export F16) at 1080p and 4K, 10-bit 4:2:0,
+// by content and kernel, and the build of the gamut tables. Hidden ([.]): run `dlssvid_unit_tests "[bench]"` on an idle machine (no CI job); the result goes to
 // docs/benchmarks.md. The thresholds hold the AVX2 row at the auto thread count when it is 8 or more; below that the numbers are printed.
 #include <catch2/catch_test_macros.hpp>
 
@@ -30,8 +30,9 @@ uint64_t Mix(uint64_t x) {  // splitmix64
 enum class Content { Typical, Grey, Worst };
 const char* Name(Content c) { return c == Content::Typical ? "typical" : c == Content::Grey ? "grey" : "worst"; }
 
-// 2x2 blocks of one colour (PQ codes, BT.2020 NCL limited): typical - greys 0.25..0.68 with a chroma amplitude of 0.0176 (about 90 % of
-// the pixels inside the knee), grey - Cb = Cr = 512, worst - saturated BT.2020 (every pixel compressed).
+// Chroma by 2x2 blocks (PQ codes, BT.2020 NCL limited): typical - greys 0.25..0.68 with a chroma amplitude of 0.0176 (about 90 % of
+// the pixels inside the knee), luma of the block's colour +-2 codes per pixel; grey - Cb = Cr = 512, luma random per pixel (64..940);
+// worst - saturated BT.2020 (every pixel compressed), luma +-2 codes.
 CpuFrame MakeFrame(uint32_t w, uint32_t h, Content c, uint64_t seed) {
     CpuFrame f;
     f.Allocate(FrameDesc{w, h, PixelFormat::Yuv420p16, 10});
@@ -96,7 +97,7 @@ ColorInfo Hdr(Curve curve, Gamut gamut) {
 
 }  // namespace
 
-TEST_CASE("HDR to SDR at 1080p and 4K 10-bit: cost by content and kernel, and the table build", "[.][bench][hdr]") {
+TEST_CASE("HDR to SDR at 1080p and 4K 10-bit: cost by content and kernel, and the table build", "[.][bench]") {
     const int autoThreads = std::clamp(static_cast<int>(std::thread::hardware_concurrency()) / 2, 1, 8);
     const bool avx2 = hdrrow::HasAvx2();
     std::printf("B1: %u logical CPUs, auto = %d threads, AVX2 %s\n", std::thread::hardware_concurrency(), autoThreads, avx2 ? "yes" : "no");

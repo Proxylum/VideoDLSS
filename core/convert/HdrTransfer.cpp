@@ -272,18 +272,24 @@ bool HdrRowsUseAvx2() { return g_kernel.load() == static_cast<int>(HdrKernel::Au
 
 namespace dlssvid::hdrrow {
 
-// Here, not in HdrRowAvx2.cpp: that file is built with /arch:AVX2 and may use AVX in any function, this test included.
+// Here, not in HdrRowAvx2.cpp: that file is built with /arch:AVX2 and may use AVX in any function, this test included. /arch:AVX2 lets
+// MSVC use the whole Haswell set there (FMA3, BMI1, BMI2, LZCNT besides AVX2), so all of it is asked for.
 bool HasAvx2() {
     static const bool has = [] {
         int r[4] = {0, 0, 0, 0};
         __cpuid(r, 0);
         if (r[0] < 7) return false;
         __cpuid(r, 1);
-        const bool osxsave = (r[2] & (1 << 27)) != 0, avx = (r[2] & (1 << 28)) != 0;
-        if (!osxsave || !avx) return false;
+        const bool osxsave = (r[2] & (1 << 27)) != 0, avx = (r[2] & (1 << 28)) != 0, fma = (r[2] & (1 << 12)) != 0;
+        if (!osxsave || !avx || !fma) return false;
         if ((_xgetbv(0) & 6u) != 6u) return false;  // the OS saves the XMM and YMM state
         __cpuidex(r, 7, 0);
-        return (r[1] & (1 << 5)) != 0;
+        const bool avx2 = (r[1] & (1 << 5)) != 0, bmi1 = (r[1] & (1 << 3)) != 0, bmi2 = (r[1] & (1 << 8)) != 0;
+        if (!avx2 || !bmi1 || !bmi2) return false;
+        __cpuid(r, static_cast<int>(0x80000000u));
+        if (static_cast<unsigned>(r[0]) < 0x80000001u) return false;
+        __cpuid(r, static_cast<int>(0x80000001u));
+        return (r[2] & (1 << 5)) != 0;  // LZCNT
     }();
     return has;
 }
