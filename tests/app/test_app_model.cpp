@@ -11068,7 +11068,13 @@ TEST_CASE("Source card colour row is hidden for SDR and names HLG with Dolby Vis
     // wide gamut SDR with a stale record of an HDR master: shown, said not carried
     ClipHdr stale;
     stale.light = Cll{1000, 400};
-    CHECK(ColourRowOf(clip("wide_stale.mkv", RawTags{9, 9, 14, 1, 0}, stale), &hidden) == QString::fromUtf8("BT.2020 SDR · MaxCLL 1000/400 (не переносится)"));
+    Mdcv lum;
+    lum.maxLum = {1000, 1};
+    lum.minLum = {1, 10000};
+    lum.hasLuminance = true;
+    stale.mastering = lum;
+    CHECK(ColourRowOf(clip("wide_stale.mkv", RawTags{9, 9, 14, 1, 0}, stale), &hidden) ==
+          QString::fromUtf8("BT.2020 SDR · мастеринг 1000 нит (не переносится) · MaxCLL 1000/400 (не переносится)"));
     CHECK(ColourRowOf(clip("wide.mkv", RawTags{9, 9, 14, 1, 0}), &hidden) == QString::fromUtf8("BT.2020 SDR"));
 }
 
@@ -11131,13 +11137,18 @@ TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, n
     CHECK_FALSE(ColourStopText(ColourStop::DolbyVisionIpt, assumed).contains(QString::fromUtf8("с базой IPT не поддерживается")));
     // every encode note has its Russian text (the integration tests tie these keys to the core's notes: HasKey)
     for (const char* key : {"encode.tags_filled", "encode.hdr_8bit", "encode.range_lost", "encode.mdcv_lost", "encode.mdcv_unfit", "encode.mdcv_invalid",
-                            "encode.cll_invalid", "encode.no_amve", "encode.unchecked"}) {
+                            "encode.cll_invalid", "encode.no_amve", "encode.unchecked", "encode.records_dropped"}) {
         INFO(key);
         CHECK(PlanNoteText(log, PlanNote{key, "warning", "encode", "english"}) != QString("english"));
     }
     CHECK(PlanNoteText(log, PlanNote{"encode.mdcv_unfit", "warning", "encode", ""}).endsWith(QString::fromUtf8("они не перенесутся")));
     CHECK(PlanNoteText(log, PlanNote{"encode.mdcv_invalid", "warning", "encode", ""}).contains(QString::fromUtf8("минимальная яркость ниже 0")));
     CHECK(PlanNoteText(log, PlanNote{"encode.unchecked", "note", "encode", ""}).startsWith(QString::fromUtf8("Кодер не из списка программы")));
+    {  // the dropped records named as the source has them, its class said
+        const SourceColor stale = of(RawTags{9, 9, 14, 1, 0}, "420", [](ColourLayers& in) { in.containerRecords.cll = Cll{1000, 400}; });
+        CHECK(PlanNoteText(stale, PlanNote{"encode.records_dropped", "note", "encode", ""}) ==
+              QString::fromUtf8("Ролик не HDR (BT.2020 SDR): уровень света (MaxCLL / MaxFALL) источника не записываются"));
+    }
     CHECK(SourceColourText(of(RawTags{10, 9, 14, 1, 0})) == QString::fromUtf8("BT.2020 CL — обработка не поддерживается"));
     const QString rgb = SourceColourText(of(RawTags{0, 9, 1, 2, 0}, "rgb"));  // RGB BT.2020 with an SDR curve: no «HDR» claimed
     CHECK(rgb == QString::fromUtf8("RGB-поток HDR / BT.2020 — не поддерживается"));

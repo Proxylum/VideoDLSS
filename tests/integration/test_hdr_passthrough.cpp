@@ -1183,6 +1183,8 @@ TEST_CASE("ProRes MOV with PQ colr and SDR frame headers is stopped for processi
     CHECK(Summarize(dir / "pt.mov").colorTrc == 1);  // the frames' tags
     CHECK_FALSE(Summarize(dir / "pt.mov").hdr.mdcv);
     CHECK_FALSE(Summarize(dir / "pt.mov").hdr.cll);
+    CHECK(Has(r.warnings, "the source is no HDR (SDR): its mastering display, light level not written"));
+    CHECK(HasKey(PlanProcess(Passthrough(in, dir / "pt.mov", "prores_ks")).warnings, "encode.records_dropped"));
     CHECK_NOTHROW(RunProcess(Passthrough(in, dir / "pt.avi", "ffv1")));  // SDR frames: an AVI as any SDR video
     CHECK(std::filesystem::exists(dir / "pt.avi"));
 }
@@ -1404,6 +1406,30 @@ TEST_CASE("Raw H.264 of HLG by an SEI then BT.709 warns of the change in softwar
     // (its primaries and matrix differ). The frame number depends on the threads; by NVDEC (one thread) FFmpeg keeps the SEI's 18 on: none
     const ProcessResult r = RunProcess(Passthrough(joined, dir / "out.mkv", "ffv1"));
     CHECK(Has(r.warnings, "and on are SDR"));
+}
+
+TEST_CASE("Raw H.264 of HLG by its VUI then BT.2020 SDR warns of the change by NVDEC (one thread: no SEI to lose)", "[integration][hdr][gpu][nvdec][regression]") {
+    if (!HaveNvenc("h264_nvenc")) SKIP("no NVIDIA GPU with h264_nvenc");
+    const auto dir = Dir("h264_vui_hlg");
+    ClipSpec spec;
+    spec.codec = "h264_nvenc";
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 6;
+    spec.color = Tags(9, 9, 18);  // HLG in the VUI (x264's --transfer arib-std-b67)
+    std::string why;
+    const auto hlg = WriteClipIfSupported(dir / "hlg.h264", spec, &why);
+    if (!hlg) SKIP("NVENC does not write the clip here: " << why);
+    spec.color = Tags(9, 9, 14);
+    const auto sdr = WriteClipIfSupported(dir / "sdr.h264", spec, &why);
+    REQUIRE(sdr);
+    const auto joined = ConcatFiles(*hlg, *sdr, dir / "joined.h264");
+    VideoDecoder probe(joined, VideoDecoder::Probe());
+    REQUIRE(probe.Info().color.cls == SourceClass::Hlg);
+    ProcessOptions o = Passthrough(joined, dir / "out.mkv", "ffv1");
+    o.hwaccel = "cuda";
+    CHECK(Has(RunProcess(o).warnings, "frame 6 and on are wide gamut SDR"));
+    // in software (frame threads) such frames read as an H.264 SEI lost - the accepted limit (README): not seen
 }
 
 TEST_CASE("HEVC MP4 with a PQ colr and no colour in its VUI passes through without a class change, in software and by NVDEC", "[integration][hdr][gpu][nvdec]") {

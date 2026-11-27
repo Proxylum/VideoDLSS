@@ -1059,9 +1059,11 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
         const RawTags& e = info_.color.effective;
         // HLG of an alternative transfer SEI on the key frames: FFmpeg 7.1.1's H.264 decoder in frame threads loses it on the frames of the
         // threads that did not parse it (ff_h264_update_thread_context copies no alternative transfer) - they come with the VUI's curve,
-        // the same HLG (HEVC copies it; NVDEC decodes in one thread)
-        const bool lostSei = std::string_view(decoder_->name) == "h264" && info_.color.cls == SourceClass::Hlg &&
-                             AltTransfer(merged.trc, e.trc) && merged.primaries == e.primaries && merged.matrix == e.matrix;
+        // the same HLG. In frame threads only (HEVC copies it; one thread - NVDEC - keeps it: there a change is a change). The price: a
+        // splice of H.264 HLG (by its VUI or an SEI) and BT.2020 SDR of the same primaries and matrix is not seen in frame threads
+        const bool lostSei = std::string_view(decoder_->name) == "h264" && (codec_->active_thread_type & FF_THREAD_FRAME) != 0 &&
+                             info_.color.cls == SourceClass::Hlg && AltTransfer(merged.trc, e.trc) && merged.primaries == e.primaries &&
+                             merged.matrix == e.matrix;
         if (const SourceClass k = ClassOf(merged); k != info_.color.cls && !lostSei)
             classChange_ = ColorClassChange{index, info_.color.cls, k, merged};
     }

@@ -210,7 +210,13 @@ QString PlanNoteText(const SourceColor& c, const PlanNote& n) {
     if (n.key == "encode.mdcv_invalid")
         return Tr("В данных мастеринга нулевая координата, минимальная яркость ниже 0 или max не выше min — читатели этого контейнера отбросят эту "
                   "часть (или их целиком)");
-    if (n.key == "encode.records_dropped") return Tr("Данные мастеринга и уровня света источника не относятся к HDR этого ролика — они не записываются");
+    if (n.key == "encode.records_dropped") {  // the records the source has, the class it is
+        QStringList what;
+        if (c.hdr.mdcv) what << Tr("мастеринг");
+        if (c.hdr.cll) what << Tr("уровень света (MaxCLL / MaxFALL)");
+        if (c.hdr.amve) what << Tr("условия просмотра");
+        return Tr("Ролик не HDR (%1): %2 источника не записываются").arg(ClassText(c.cls, c.effective.primaries), what.join(", "));
+    }
     if (n.key == "encode.unchecked")  // the program's list of encoders (the encode card's), not the project's
         return Tr("Кодер не из списка программы (карточка «Кодирование»): цвет результата пишется по плану, но не сверяется");
     if (n.key == "encode.cll_invalid")

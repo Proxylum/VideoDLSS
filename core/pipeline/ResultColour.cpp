@@ -62,9 +62,13 @@ PassthroughColour PlanPassthroughColour(const VideoStreamInfo& info, const std::
     auto note = [&](std::string key, std::string level, std::string text) {
         pc.encodeNotes.push_back(PlanNote{std::move(key), std::move(level), "encode", std::move(text)});
     };
-    if (!c.Hdr() && (c.hdr.mdcv || c.hdr.cll || c.hdr.amve))  // a stale record of an HDR master under an SDR grade (wide gamut, log, SDR frames)
-        note("encode.records_dropped", "note",
-             "the source's mastering display / light level belong to no HDR class here (" + std::string(ClassWords(c.cls)) + ") - not written");
+    if (!c.Hdr() && (c.hdr.mdcv || c.hdr.cll || c.hdr.amve)) {  // a stale record of an HDR master under an SDR grade (wide gamut, log, SDR frames)
+        std::string what;
+        for (const auto& [has, name] : {std::pair{c.hdr.mdcv.has_value(), "mastering display"}, std::pair{c.hdr.cll.has_value(), "light level"},
+                                        std::pair{c.hdr.amve.has_value(), "ambient viewing environment"}})
+            if (has) what += (what.empty() ? "" : ", ") + std::string(name);
+        note("encode.records_dropped", "note", "the source is no HDR (" + std::string(ClassWords(c.cls)) + "): its " + what + " not written");
+    }
     if (TagsFilled(c)) note("encode.tags_filled", "note", "the result is tagged " + TagWords(pc.tags) + ": the class's assumption where the source said none");
     const OutputFormat of = ResolveOutputFormat(codec, format, SourceLayout(info));
     if (c.Hdr() && of.desc.bitDepth < 10)
