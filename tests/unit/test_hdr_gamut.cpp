@@ -317,7 +317,7 @@ TEST_CASE("Gamut step G1 keeps the ICtCp hue and intensity and lands BT.2020 pri
         const M3* from;  // nullptr: the input is BT.2020
         double in[3], out[3];
     };
-    // linear in -> linear BT.709 out, tc-plan §15.7 (ictcp_ref.py, sections C and J)
+    // linear in -> linear BT.709 out, tc-plan §15.7 (ictcp_ref.py sections C and J; 2020 (1, 0.99, 0.02) - ictcp_dense.py section H)
     const Anchor anchors[] = {
         {"2020 R", nullptr, {1, 0, 0}, {1.00000, 0.06182, 0.04141}},
         {"2020 G", nullptr, {0, 1, 0}, {0.00000, 0.89747, 0.10840}},

@@ -591,7 +591,8 @@ TEST_CASE("The whole HDR to SDR path at BT.709 gamut: PQ red keeps its hue, HLG 
         Gamut gamut;
         double in[3], out[3];
     };
-    // ictcp_ref.py section D: the step only for a BT.2020 source
+    // the step only for a BT.2020 source; ictcp_ref.py section D prints the first three rows, the HLG BT.2020 row is its
+    // hdr_to_sdr([[0.75, 0, 0]], 'hlg', '2020', Bounds()) (the script does not print it)
     const Row rows[] = {
         {Curve::Pq, Gamut::Bt709, {0.58105, 0, 0}, {0.90390, 0, 0}},
         {Curve::Hlg, Gamut::Bt709, {0.75, 0, 0}, {0.84291, 0, 0}},  // Ys weights of BT.709 from the primaries (2020's: 0.85212)
