@@ -394,6 +394,11 @@ QString MainWindow::resultRewriteAdvice(const std::string& name, const DecodeSup
     if (name != "result" || !model_.sourceDecode().Ok() || model_.sourceInfo().codec.empty() || refusal.block == DecodeBlock::NoCuda ||
         refusal.block == DecodeBlock::NoNvdec)
         return {};
+    const SourceColor& colour = model_.sourceInfo().color;          // TASK-0079: what can write such a source again
+    if (colour.refuseAll != ColourRefusal::None) return {};        // nothing writes it (a Dolby Vision IPT base, RGB HDR)
+    if (!colour.legacyPath)  // its processing is stopped: passed through, in HEVC (H.264 is 8 bits: HDR in steps)
+        return "\n" + tr("Результат можно записать заново в HEVC: выберите кодек в карточке «Кодирование», выключите все стадии и нажмите «Обработать · "
+                         "только кодирование».");
     return "\n" + tr("Результат можно записать заново в H.264 или HEVC: выберите кодек в карточке «Кодирование» и нажмите «Обработать».");
 }
 

@@ -260,7 +260,7 @@ std::optional<ViewportSource> FrameStore::VideoSource(const std::string& name, c
         s.height = info.height;
         s.fps = info.frameRate;
         s.sar = info.sar;
-        s.color = ResolveColor(info).viewDecode;
+        s.color = ResolveColor(info).View();
         s.hasColor = true;
         s.hardwareOnly = info.hardwareOnly;
         {
@@ -970,7 +970,7 @@ FrameStore::LoadResult FrameStore::LoadVideo(const Key& key, const ViewportSourc
             o.colorProbe = false;     // TASK-0078: frames for the viewport, read by the legacy fields (viewDecode)
             rt.decoder = std::make_unique<VideoDecoder>(src.path, o);
             rt.openedOnce = true;
-            rt.color = ResolveColor(rt.decoder->Info()).viewDecode;
+            rt.color = ResolveColor(rt.decoder->Info()).View();
         }
         if (!src.hasColor) color = rt.color;
     };

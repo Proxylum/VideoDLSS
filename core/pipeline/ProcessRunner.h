@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "convert/ColorPlan.h"
 #include "io/OutputFormat.h"
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
@@ -170,6 +171,10 @@ struct ProcessPlan {
     std::string finalPass;              // colour pass the encode step would use ("" -> the source is passed through)
     int runCount = 0, reuseCount = 0;   // reuseCount includes restores
     std::optional<SceneListOnDisk> scenesOnDisk;  // a readable list of this source under the root (PR-13)
+    // TASK-0079: what the source and (passing it through) the output lose or assume - the source's notes of plan level (Dolby Vision
+    // dropped, HDR10+ not carried, BT.2020 assumed ...), and with no colour stage the encoding's (8 bits of HDR, a range or a record the
+    // container cannot keep, the tags filled). Notes, not errors: the run goes on
+    std::vector<PlanNote> warnings;
     nlohmann::json ToJson() const;
 };
 
@@ -212,6 +217,7 @@ struct EncodeReport {
     FrameDesc format;         // the result's layout: width / height of the pass, stretched to square pixels for an anamorphic source (TASK-0073)
     std::string pixelFormat;  // the encoder's input format
     std::map<std::string, std::string> codecOptions;  // what the encoder was given: the bitrate chosen for the frame written (TASK-0073)
+    std::optional<ColorClassChange> classChange;      // TASK-0079: the source's frames turned another colour class on the way
 };
 EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::filesystem::path& source, const std::filesystem::path& output,
                                const EncodeSettings& encode, int64_t maxSourceFrames = -1, const std::function<void(int64_t done, int64_t total)>& progress = {},

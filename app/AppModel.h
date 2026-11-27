@@ -19,6 +19,7 @@
 #include <set>
 
 #include "PlaybackClock.h"
+#include "convert/ColorPlan.h"
 #include "gpu/D3D12Device.h"
 #include "pipeline/Estimates.h"
 #include "pipeline/NrPreview.h"
@@ -112,6 +113,14 @@ public:
     const DecodeSupport& sourceDecode() const { return sourceDecode_; }
     // TASK-0076: the plan's error is the source's refusal (a card, the preview say it short); false - another error (the video not found)
     bool sourceRefusalSaid() const;
+    // TASK-0079: what the source's colour stops (ResolveColor of the plan's probe): processing - also with every stage off, when the plan
+    // is clean (the stage cards' runs, the preview) -, or everything (process too). Said in the plan error when the plan met it.
+    ColourStop colourStop() const { return colourStop_; }
+    ColourStop colourStopAll() const { return colourStopAll_; }
+    bool colourStopSaid() const { return colourStopSaid_; }
+    ColourStop colourStopSaidKind() const { return colourStopSaidKind_; }  // what the plan error said (NoContainerTags: the output, not the stages)
+    // TASK-0079: the plan's notes in Russian (the source's, and passing it through what the output loses): a soft label, no blocker
+    QStringList planNotes() const;
     // TASK-0076: whether a task or a preview runs or waits (ProjectTasks, from the queue): with a check of the model's, the viewport does
     // not hold NVDEC between frames meanwhile
     void setTasksRunning(bool running);
@@ -394,6 +403,9 @@ private:
     SourceInfo sourceInfo_;
     QString planError_;
     DecodeSupport sourceDecode_;
+    ColourStop colourStop_ = ColourStop::None, colourStopAll_ = ColourStop::None;  // TASK-0079
+    bool colourStopSaid_ = false;
+    ColourStop colourStopSaidKind_ = ColourStop::None;
     bool tasksRunning_ = false, nvdecLetGo_ = false;  // TASK-0076: setTasksRunning, updateNvdecHold
     double retriedAt_ = -1.0;                // TASK-0076: requestFrames tried start failures again at this time ...
     std::vector<std::string> retriedFor_;    // ... for these sources

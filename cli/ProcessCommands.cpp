@@ -5,8 +5,10 @@
 
 #include <cstdio>
 #include <fstream>
+#include <optional>
 #include <sstream>
 
+#include "convert/ColorPlan.h"
 #include "gpu/D3D12Device.h"
 #include "io/NvdecSupport.h"
 #include "io/OutputFormat.h"
@@ -59,6 +61,7 @@ struct FileLayer {
     std::map<std::string, std::string> codecOptions;
     OutputFormatRequest format;
     bool settingsNote = true;
+    std::optional<Project> project;  // TASK-0079: the project, its source's hash taken by the caller after the colour check
 };
 
 bool IsProcessStage(const std::string& name) {
@@ -80,8 +83,12 @@ void BuildStages(const std::string& projectFile, const std::vector<std::string>&
     Project base;
     if (!projectFile.empty()) {
         base = Project::Load(projectFile);
-        o.sourceHash = base.SourceHash();  // the project's cache: no rehash when the file is unchanged
-        if (o.sourceHash.empty()) o.sourceHash = base.sourceHash;  // the file is gone (moved): what the project last saw
+        if (layer) {
+            layer->project = base;  // TASK-0079: hashed after the colour check (ProjectSourceHash)
+        } else {
+            o.sourceHash = base.SourceHash();  // the project's cache: no rehash when the file is unchanged
+            if (o.sourceHash.empty()) o.sourceHash = base.sourceHash;  // the file is gone (moved): what the project last saw
+        }
     } else {
         base.stages = Project::DefaultStages();
     }
@@ -218,6 +225,8 @@ void PrintPlan(const ProcessPlan& p) {
         if (!s.info.empty()) std::printf("note: %s: %s\n", s.name.c_str(), s.info.c_str());
         if (!s.error.empty()) std::printf("error: %s: %s\n", s.name.c_str(), s.error.c_str());
     }
+    // TASK-0079: the colour's notes - the source's, and passing it through what the output loses
+    for (const auto& n : p.warnings) std::printf("%s: %s: %s\n", n.level.c_str(), n.scope.c_str(), n.text.c_str());
     // PR-13: the scene-cut list and the stages that reset at it
     const StageDecision* scenes = nullptr;
     std::string readers, unlisted;
@@ -267,6 +276,8 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
         if (!input.empty() && std::filesystem::exists(input, ec)) {
             VideoDecoder probe(input, VideoDecoder::Probe());
             if (const DecodeSupport s = CheckDecodeSupport(probe.Info()); !s.Ok()) throw DecodeUnavailable(s, "process: " + input.string() + ": " + s.why);
+            // TASK-0079: what no mode takes (a Dolby Vision IPT base, RGB HDR) - before the stages are built and anything is hashed
+            RequireColour(ResolveColor(probe.Info()), ColourUse::Passthrough, "process: " + input.string());
         }
     }
     ProcessOptions o;
@@ -283,6 +294,20 @@ int CmdProcess(const ProcessCommands::ProcessArgs& a) {
     // video: before, the other file got P's cached hash, so P's passes were reused for it and P's result overwritten
     // (TASK-0043). Another video is hashed itself and gets its own passes and result unless --passes / -o say otherwise;
     // P's video moved elsewhere (the same content) stays P's.
+    {  // TASK-0079: the colour this run cannot process (with a stage on) - refused before -i is hashed (--project P -i other.mp4)
+        bool anyStage = false;
+        for (const auto& s : o.stages) anyStage = anyStage || s.enabled;
+        std::error_code ec;
+        if (std::filesystem::exists(o.input, ec)) {
+            VideoDecoder probe(o.input, VideoDecoder::Probe());
+            RequireColour(ResolveColor(probe.Info()), a.passthrough || !anyStage ? ColourUse::Passthrough : ColourUse::Process,
+                          "process: " + o.input.string());
+        }
+    }
+    if (file.project) {  // the project's cache: no rehash when the file is unchanged - after the colour check (TASK-0079)
+        o.sourceHash = file.project->SourceHash();
+        if (o.sourceHash.empty()) o.sourceHash = file.project->sourceHash;  // the file is gone (moved): what the project last saw
+    }
     if (!a.input.empty() && !projectInput.empty()) {
         std::error_code ec;
         const bool samePath = std::filesystem::equivalent(o.input, projectInput, ec) && !ec;

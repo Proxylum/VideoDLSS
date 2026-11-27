@@ -112,7 +112,9 @@ StreamSummary Summarize(const std::filesystem::path& path);
 
 // TASK-0078: the colour tags of the first `maxFrames` frames of a file, decoded in software by libavcodec itself (a ProRes frame header,
 // what an HEVC SEI makes of the transfer) - not by the product's decoder. Throws for a codec without a software decoder (AV1).
-std::vector<RawTags> FrameColors(const std::filesystem::path& path, int maxFrames = 1);
+// `bitstreamOnly` (TASK-0079): the decoder opened without the stream's tags - libavcodec fills a frame's unspecified tags from its
+// context (decode.c), so only then does an empty ProRes frame header read as unspecified.
+std::vector<RawTags> FrameColors(const std::filesystem::path& path, int maxFrames = 1, bool bitstreamOnly = false);
 // An HDR10+ record (AVDynamicHDRPlus: one window, application version 1, 400 cd/m2 targeted) as a packet's side data
 // (AV_PKT_DATA_DYNAMIC_HDR10_PLUS): matroskaenc writes it as a BlockAdditional (ITU-T T.35), matroskadec reads it back.
 std::string Hdr10PlusSideData();
@@ -120,6 +122,11 @@ std::string Hdr10PlusSideData();
 std::string HevcPrefixSei(int payloadType, const std::string& payload);
 std::string AlternativeTransferSei(int trc);  // SEI 147: preferred_transfer_characteristics (18: HLG under a VUI of 14)
 std::string WithNalBeforeSlice(const std::string& accessUnit, const std::string& nal);
+// H.264 (TASK-0079): an Annex B SEI NAL unit (type 6) with one payload, its alternative transfer SEI, and an access unit with a NAL unit
+// put before its first slice (types 1-5)
+std::string H264Sei(int payloadType, const std::string& payload);
+std::string H264AlternativeTransferSei(int trc);
+std::string WithNalBeforeH264Slice(const std::string& accessUnit, const std::string& nal);
 // The bytes of `a` then `b` (two raw elementary streams joined)
 std::filesystem::path ConcatFiles(const std::filesystem::path& a, const std::filesystem::path& b, const std::filesystem::path& out);
 

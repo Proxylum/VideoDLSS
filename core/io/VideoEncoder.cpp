@@ -4,6 +4,9 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavcodec/version.h>
 #include <libavformat/avformat.h>
+#include <libavutil/ambient_viewing_environment.h>
+#include <libavutil/frame.h>
+#include <libavutil/mastering_display_metadata.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixdesc.h>
 }
@@ -67,19 +70,41 @@ AVPixelFormat ChooseFormat(const AVCodec* enc, const FrameDesc& d) {
     return AV_PIX_FMT_NONE;
 }
 
-std::string TagsText(const ColorTags& t) {
+std::string TagsText(const ColorTags& t, const HdrStatic& hdr) {
     std::string s;
     if (t.matrix == 1) s += "bt709";
     else if (t.matrix == 5 || t.matrix == 6) s += "bt601";
     else if (t.matrix == 9 || t.matrix == 10) s += "bt2020";
     if (t.range == 1) s += (s.empty() ? "" : " ") + std::string("limited");
     else if (t.range == 2) s += (s.empty() ? "" : " ") + std::string("full");
+    // TASK-0079: the primaries and the transfer when they are not BT.709's or unsaid (an HDR passthrough), and the HDR records
+    if ((t.primaries != 1 && t.primaries != 2) || (t.transfer != 1 && t.transfer != 2))
+        s += (s.empty() ? "" : " ") + PrimariesName(t.primaries) + "/" + TrcName(t.transfer);
+    if (hdr.mdcv) s += " +mdcv";
+    if (hdr.cll) s += " +clli";
+    if (hdr.amve) s += " +amve";
     return s;
 }
+
+AVRational R(const Ratio& r) { return AVRational{r.num, r.den}; }
 
 }  // namespace
 
 bool VideoEncoder::EncoderAvailable(const std::string& name) { return avcodec_find_encoder_by_name(name.c_str()) != nullptr; }
+
+VideoEncoder::ContainerColorCaps VideoEncoder::ContainerColorCapsFor(const std::filesystem::path& output) {
+    ContainerColorCaps c;
+    const std::string name = output.string();
+    const AVOutputFormat* f = av_guess_format(nullptr, name.c_str(), nullptr);
+    c.muxer = f && f->name ? f->name : "";
+    if (c.muxer == "mp4" || c.muxer == "mov") {
+        c.tags = c.allThreeOrNone = c.mdcv = c.mdcvNeedsBoth = c.cll = c.amve = true;
+        c.range = c.muxer == "mp4";  // nclx carries the range, MOV's nclc does not
+    } else if (c.muxer == "matroska" || c.muxer == "webm") {
+        c.tags = c.range = c.mdcv = c.cll = true;
+    }
+    return c;
+}
 
 std::string VideoEncoder::PixelFormatFor(const std::string& codec, const FrameDesc& frameDesc) {
     const AVCodec* enc = avcodec_find_encoder_by_name(codec.c_str());
@@ -127,6 +152,36 @@ VideoEncoder::VideoEncoder(const std::filesystem::path& path, const FrameDesc& f
     codec_->colorspace = static_cast<AVColorSpace>(options_.color.matrix);
     codec_->color_primaries = static_cast<AVColorPrimaries>(options_.color.primaries);
     codec_->color_trc = static_cast<AVColorTransferCharacteristic>(options_.color.transfer);
+    // TASK-0079: the HDR records as the encoder's global side data - avcodec_open2 (ff_encode_preinit) maps them into its coded side
+    // data, avcodec_parameters_from_context into the stream's, and the muxer writes what its container has a field for
+    auto sideData = [&](AVFrameSideDataType type, size_t size) {
+        AVFrameSideData* sd = av_frame_side_data_new(&codec_->decoded_side_data, &codec_->nb_decoded_side_data, type, size, AV_FRAME_SIDE_DATA_FLAG_UNIQUE);
+        if (!sd) Throw("encoder: no room for HDR side data");
+        std::memset(sd->data, 0, size);
+        return sd->data;
+    };
+    if (const auto& m = options_.hdr.mdcv) {
+        auto* d = reinterpret_cast<AVMasteringDisplayMetadata*>(sideData(AV_FRAME_DATA_MASTERING_DISPLAY_METADATA, sizeof(AVMasteringDisplayMetadata)));
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 2; ++j) d->display_primaries[i][j] = R(m->primaries[i][j]);
+        d->white_point[0] = R(m->white[0]);
+        d->white_point[1] = R(m->white[1]);
+        d->min_luminance = R(m->minLum);
+        d->max_luminance = R(m->maxLum);
+        d->has_primaries = m->hasPrimaries;
+        d->has_luminance = m->hasLuminance;
+    }
+    if (const auto& l = options_.hdr.cll) {
+        auto* d = reinterpret_cast<AVContentLightMetadata*>(sideData(AV_FRAME_DATA_CONTENT_LIGHT_LEVEL, sizeof(AVContentLightMetadata)));
+        d->MaxCLL = l->maxCll;
+        d->MaxFALL = l->maxFall;
+    }
+    if (const auto& a = options_.hdr.amve; a && a->illuminance.num != 0) {  // movenc writes no amve without an illuminance
+        auto* d = reinterpret_cast<AVAmbientViewingEnvironment*>(sideData(AV_FRAME_DATA_AMBIENT_VIEWING_ENVIRONMENT, sizeof(AVAmbientViewingEnvironment)));
+        d->ambient_illuminance = R(a->illuminance);
+        d->ambient_light_x = R(a->lightX);
+        d->ambient_light_y = R(a->lightY);
+    }
     if (fmt_->oformat->flags & AVFMT_GLOBALHEADER) codec_->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     if (!options_.sar.Square())
         codec_->sample_aspect_ratio = AVRational{static_cast<int>(options_.sar.num), static_cast<int>(options_.sar.den)};
@@ -195,7 +250,7 @@ void VideoEncoder::Open() {
     }
     CheckAv(avformat_write_header(fmt_, nullptr), "avformat_write_header");
     opened_ = true;
-    const std::string tags = TagsText(options_.color);
+    const std::string tags = TagsText(options_.color, options_.hdr);
     Log()->info("encode {}: {} {}x{} {} ({}) {}/{} fps{}{}{}", url, codecName_, frameDesc_.width, frameDesc_.height, pixelFormatName_, frameDesc_.Describe(),
                 options_.frameRate.num, options_.frameRate.den, tags.empty() ? "" : ", " + tags, audioStream_ ? ", audio copy" : "",
                 options_.sar.Square() ? "" : ", pixels " + options_.sar.Token());

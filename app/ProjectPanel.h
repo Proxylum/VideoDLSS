@@ -69,6 +69,7 @@ private:
     QLabel* outReused_;
     QLabel* outDisk_;
     QLabel* outError_;
+    QLabel* outNotes_;  // TASK-0079
     QPushButton* process_;
     PresetButton* pipelinePresets_ = nullptr;
     PresetMenu* pipelineMenu_ = nullptr;

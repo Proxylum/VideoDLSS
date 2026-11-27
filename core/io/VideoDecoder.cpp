@@ -776,6 +776,7 @@ void VideoDecoder::ReadColour(bool look, const RawTags& container) {
     const FirstLook how = look ? NeedsFirstLook(codec, fmt_->iformat->name, info_.bitDepth, hint) : FirstLook::None;
     if (how != FirstLook::None && !(how == FirstLook::Decode && hwOnly_)) in.first = FirstLookCached(url_, how);
     info_.color = SourceColorOf(in, LayoutKindOf(info_.pixelFormat), codec);
+    watchColour_ = look;
     info_.color.bitDepth = info_.pixelFormat == "unknown" ? 0 : info_.bitDepth;
     const SourceColor& c = info_.color;
     // said once per real open of a reader that looked (a probe, or a reader of frames only - the viewport, a thumbnail: tags alone, the
@@ -784,6 +785,15 @@ void VideoDecoder::ReadColour(bool look, const RawTags& container) {
         Log()->log(probe_ || !look ? spdlog::level::debug : spdlog::level::info, "{}: colour {} ({}){}", url_,
                    c.refuseAll == ColourRefusal::None ? ToString(c.cls) : ToString(c.refuseAll), ColourWords(c.effective),
                    !look ? std::string(", tags only") : c.looked != FirstLook::None ? ", " + std::string(ToString(c.looked)) + " read" : std::string());
+}
+
+std::string ClassChangeText(const ColorClassChange& ch) {
+    if (ch.index == 0)  // no first frame was looked at (tags that say nothing of HDR): the reading was wrong from the start
+        return "the frames are " + std::string(ClassWords(ch.to)) + " (" + ColourWords(ch.tags) + ") from the first one, the source was read by its tags as " +
+               std::string(ClassWords(ch.from)) + ": the result is written with that colour - its colours are wrong";
+    return "frame " + std::to_string(ch.index) + " and on are " + std::string(ClassWords(ch.to)) + " (" + ColourWords(ch.tags) +
+           "), the source was read as " + std::string(ClassWords(ch.from)) +
+           ": the frames after the change are written with the source's colour - cut the video there to keep each part right";
 }
 
 AVCodecContext* VideoDecoder::OpenCodec(AVBufferRef* device) const {
@@ -1038,6 +1048,26 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     decodedSinceSeek_ = true;
     ++framesDecoded_;
     ++instanceFrames_;
+    // TASK-0079: the class of each frame's colour against the source's - the class, not the tags (an SDR file's container and VUI often
+    // differ within SDR); the first that differs is kept. From the start only: after a seek the plan's reading of the start says nothing.
+    // The frame's tags over the container's only: the stream's are the first sequence's - a later SPS without a colour description says
+    // none (hevcdec resets the context's), and filling it with the first one's would hide the change; a decoder that keeps no tags of
+    // its own gives the frames the context's, which are the stream's already
+    if (watchColour_ && !seeked_ && !classChange_) {
+        RawTags merged = MergeTags(WithoutReserved(FrameTagsOf(frame_), decoder_->name), RawTags{}, info_.color.container);
+        if (merged.range == 0) merged.range = info_.color.effective.range;  // for the text: the class does not depend on the range
+        const RawTags& e = info_.color.effective;
+        // HLG of an alternative transfer SEI on the key frames: FFmpeg 7.1.1's H.264 decoder in frame threads loses it on the frames of the
+        // threads that did not parse it (ff_h264_update_thread_context copies no alternative transfer) - they come with the VUI's curve,
+        // the same HLG. In frame threads only (HEVC copies it; one thread - NVDEC - keeps it: there a change is a change). The price: a
+        // splice of H.264 HLG (by its VUI or an SEI) and SDR (curve 1, 6, 14 or 15) of the same primaries and matrix - BT.2020 or BT.709 -
+        // is not seen in frame threads
+        const bool lostSei = std::string_view(decoder_->name) == "h264" && (codec_->active_thread_type & FF_THREAD_FRAME) != 0 &&
+                             info_.color.cls == SourceClass::Hlg && AltTransfer(merged.trc, e.trc) && merged.primaries == e.primaries &&
+                             merged.matrix == e.matrix;
+        if (const SourceClass k = ClassOf(merged); k != info_.color.cls && !lostSei)
+            classChange_ = ColorClassChange{index, info_.color.cls, k, merged};
+    }
     if (!checkedFrameMatrix_) {  // an orientation in the bitstream (SEI) other than the container's: the container's is applied
         checkedFrameMatrix_ = true;
         if (const AVFrameSideData* sd = av_frame_get_side_data(frame_, AV_FRAME_DATA_DISPLAYMATRIX); sd && sd->size >= 9 * sizeof(int32_t)) {

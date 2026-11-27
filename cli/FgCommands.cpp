@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <fstream>
 
+#include "convert/ColorPlan.h"
 #include "gpu/D3D12Device.h"
 #include "io/VideoDecoder.h"
 #include "passes/Manifest.h"
@@ -125,6 +126,7 @@ int CmdFgAsStage(const FgCommands::FgArgs& a) {
     if (!params.is_object()) Throw("fg --as-stage: --params-json must be a JSON object");
     VideoDecoder decoder(a.input);
     decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
+    RequireColour(ResolveColor(decoder.Info()), ColourUse::Process, "fg: " + a.input);  // TASK-0079: before the preparation
     FgStageOptions o;
     o.outputDir = a.output;
     o.colorDir = a.colorDir;
@@ -173,6 +175,7 @@ int CmdFg(const FgCommands::FgArgs& a) {
     if (a.output.empty()) Throw("fg: -o/--output is required");
     VideoDecoder decoder(a.input);
     decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
+    RequireColour(ResolveColor(decoder.Info()), ColourUse::Process, "fg: " + a.input);  // TASK-0079: before the preparation
     const auto& info = decoder.Info();
     FgStageOptions o;
     o.backend = a.backend;

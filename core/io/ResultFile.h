@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 
+#include "io/SourceColor.h"
 #include "pipeline/Frame.h"
 
 namespace dlssvid {
@@ -15,14 +17,27 @@ namespace dlssvid {
 // "<stem>.dlssvid-part<ext>" next to `output`: the extension stays, FFmpeg picks the container by it.
 std::filesystem::path PartialResultPath(const std::filesystem::path& output);
 
+// TASK-0079: the colour an HDR / wide-gamut passthrough wrote, as its container keeps it (VideoEncoder::ContainerColorCapsFor) - only
+// for a source off the legacy path: an SDR result is checked as before. A tag of 2 (a range of 0) is not checked; a record left out is not
+// expected (Matroska keeps a light level only when both values are said; no ambient viewing environment there).
+struct ResultColor {
+    int range = 0, matrix = 2, primaries = 2, trc = 2;
+    bool checkRange = true;  // false: neither the container nor the codec keeps a range (MOV's nclc of ProRes / FFV1)
+    std::optional<Mdcv> mdcv;
+    std::optional<Cll> cll;
+    std::optional<Amve> amve;
+};
+
 struct ResultExpectation {
     uint32_t width = 0, height = 0;
     int64_t frames = -1;  // checked in MP4 and MOV, which count one sample per frame; < 0: not checked
     bool audio = false;   // audio packets were written (a track that got none is left out of MP4 and MOV)
     PixelAspect sar;      // TASK-0073: the pixels' proportions written (square: none) - a muxer that lost them is caught
+    std::optional<ResultColor> color;  // TASK-0079: last, so that the positional initialisations before it stand
 };
 
-// Empty when `file` opens as a video of that size, frame count and audio; else what differs.
+// Empty when `file` opens as a video of that size, frame count, audio and (when expected) colour; else what differs - a colour tag or HDR
+// record named.
 std::string CheckEncodedResult(const std::filesystem::path& file, const ResultExpectation& expect);
 
 // Renames the finished `partial` over `output`. Throws, `output` untouched and `partial` left where it is (the message says where), if

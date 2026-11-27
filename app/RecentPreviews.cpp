@@ -61,7 +61,7 @@ QImage FirstFrame(const QString& file, bool* transient = nullptr) {
         options.colorProbe = false;  // TASK-0078: the thumbnail reads as the legacy path does (an HDR one: TE)
         VideoDecoder dec(FsPath(file), options);  // CPU decode: one frame, any GPU stays free for the pipeline (AV1: NVDEC, the only decoder - TASK-0076)
         sar = dec.Info().sar;
-        const ColorInfo color = ResolveColor(dec.Info()).viewDecode;
+        const ColorInfo color = ResolveColor(dec.Info()).View();
         CpuFrame f;
         for (int i = 0; i < 12 && dec.NextFrame(f); ++i) {
             const PassImage rgb = YuvToRgb(f, color, PixelType::U8);

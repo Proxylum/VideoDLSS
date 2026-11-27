@@ -251,7 +251,7 @@ void FlowStage::Shutdown() {
 
 FlowRunResult RunFlow(VideoDecoder& decoder, D3D12Device& device, FlowStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress) {
     const auto& info = decoder.Info();
-    options.color = ResolveColor(info).guideDecode;
+    options.color = ResolveColor(info).Guide();
     options.fps = info.frameRate;
     Pipeline pipeline(device, 4);
     auto stage = std::make_unique<FlowStage>(options);

@@ -296,7 +296,7 @@ void FgStage::Shutdown() {
 FgRunResult RunFg(VideoDecoder& decoder, D3D12Device& device, FgStageOptions options, int64_t maxFrames, const std::function<void(int64_t)>& progress, const nlohmann::json& params,
                   const std::function<void(const FgRunResult&)>& onWritten) {
     const auto& info = decoder.Info();
-    options.color = ResolveColor(info).colourDecode;
+    options.color = ResolveColor(info).Colour();
     options.fps = info.frameRate;
     // TASK-0073: the pixels of the colour FG reads (a pass of the build before may be square already) - process (its child process too) and
     // the standalone command alike

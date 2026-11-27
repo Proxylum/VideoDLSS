@@ -332,14 +332,37 @@ none and the class follows the tags) and each tag with the layer it was read fro
 MOV `colr`, Matroska Colour; `stream`: the codec parameters - an HEVC / H.264 VUI, an AV1 sequence header; `frame`: the first
 frame where it differs - a ProRes frame header, an HEVC alternative transfer SEI that turns BT.2020 into HLG) - and, when present,
 `mastering:`, `light level:` (MaxCLL / MaxFALL), `ambient:`, `dolby vision:` (profile, level, the base layer's compatibility:
-an HDR10, SDR or HLG base keeps its picture and loses the RPU in every output; an IPT base - profiles 1, 3, 5 and 10.0, or the matrix ipt-c2 - comes out in wrong
-colours) and `hdr10+:` lines, and notes (BT.2020 assumed for an untagged PQ / HLG, a transfer not converted, layers that disagree).
+an HDR10, SDR or HLG base keeps its picture and loses the RPU in every output; an IPT base - profiles 1, 3, 5 and 10.0, or the matrix ipt-c2 - is not
+supported: its colours are wrong without the RPU) and `hdr10+:` lines, and notes (BT.2020 assumed for an untagged PQ / HLG, a transfer not converted, layers that disagree).
 The GUI's source card shows a «Цвет» row for such a file. An SDR file with nothing to say (no Dolby Vision, no HDR record, no note)
 prints as before and has no such row. The first frame is decoded for this only
 for H.264 / HEVC / ProRes with a hint of HDR or BT.2020 (or a raw `.hevc` / `.h264`, an untagged 10-bit HEVC, a ProRes whose
 container does not say all three tags - a ProRes frame header always does), and the first packet is read for PQ in Matroska / WebM
-(HDR10+); once per file and modification time in a process. Processing such a source
-still reads it as SDR (its colours come out wrong) - that changes with the next steps.
+(HDR10+); once per file and modification time in a process.
+
+**HDR sources: passthrough as they are, processing with a later version** (TASK-0079; ICtCp / BT.2020 CL: not processed in later versions either). Processing (any stage, a stage command,
+`export`, the GUI's stage runs and preview) of anything but an SDR source - HDR PQ / HLG, wide gamut, a log curve, the BT.2020 matrix
+under SDR primaries, ICtCp / BT.2020 CL, a file whose layers disagree (SDR frame headers under a PQ `colr`) - is refused before
+anything is hashed, saying what the source is and that `--passthrough` (the GUI's «Обработать · только кодирование», every stage
+off) writes it as it is. Passthrough keeps its effective tags - the matrix BT.2020 kept, an unspecified matrix / primaries of PQ /
+HLG, wide gamut and a log curve written as BT.2020 and a missing transfer of wide gamut as BT.709 (MP4 / MOV write `colr` only with
+all three) - and a PQ / HLG
+source's mastering display, light level and ambient viewing environment where the container has a field (another class's records -
+stale ones under an SDR grade - are noted and not written) (MP4 / MOV: `mdcv`, `clli`, `amve`;
+Matroska: MasteringMetadata, MaxCLL / MaxFALL, no ambient viewing environment); the result check reads them back. Notes in the plan
+(`process --plan`), the result and the GUI's output card say what is lost or assumed: Dolby Vision's RPU, HDR10+, 8 bits of HDR
+(banding), a full range ProRes keeps in no container (FFmpeg's decoder says limited) and a MOV of FFV1 cannot keep (NVENC keeps it
+in its VUI), an encoder outside the table (its result's colour is written as planned, not checked back), a half mastering display MP4 / MOV cannot write, a mastering display or light level outside MP4 / MOV's fields (not written), a
+mastering half or a light level with one value 0 Matroska's readers drop, an ambient viewing environment in Matroska. A Dolby Vision IPT base and RGB HDR are refused in every mode; a source
+whose effective tags (its frames') are HDR PQ / HLG, wide gamut or a log curve into a container without colour tags (AVI, `.m4v`,
+MPEG-TS) is refused before the file is made (with every stage off, before the passes' folder) - SDR frames under HDR codec parameters,
+and ICtCp / BT.2020 CL under SDR primaries, go there as any SDR video. A video whose frames turn another colour class part way (an SDR part
+joined to a PQ one) is warned of in the result with the frame number; frames of another class from the first one (an HDR transfer in
+an SEI under SDR tags) are warned of as read wrong. Not seen: an H.264 HLG part (by its VUI or an alternative transfer SEI) joined to
+SDR of the same primaries and matrix (BT.2020 or BT.709, a curve 1 / 6 / 14 / 15), decoded in software (FFmpeg 7.1.1's frame threads lose
+the SEI: such frames read as the same HLG). The HDR10 records reach the container only: FFmpeg 7.1.1's
+NVENC writes no SEI. `dlssvid info` says it too: `processing:` (`not yet` - with a later version, `not supported` - a matrix, or
+refused in every mode) and `hdr note:` (the HDR10 records go to the container only).
 
 Paths may contain any letters: `dlssvid` and `dlssvid-gui` run with UTF-8 as their code page. The CLI prints UTF-8,
 so in a console with the OEM code page (866 on Russian Windows) Cyrillic in its output reads wrong; `chcp 65001` first.
@@ -553,7 +576,7 @@ PAL 64:45, HDV 1440x1080 at 4:3) is processed on its stored samples and shown st
 target and the 4K cap are of the frame as shown (`--target 1920x1080` gives 1920x1080 as shown), the result of `process` is
 stretched to square pixels when it is encoded (DVD x2: 1706x960; fit into 3840x2160 when the stretch would go beyond),
 passthrough (and a `process` run with upscale, NR and frame generation all off) keeps the stored grid (not resampled) and
-writes its pixel aspect; a pixel aspect that moves no pixel of the frame (14400:14399 of 1694x720) is taken as square; `dlssvid info` prints a `pixels:` line. HDR (PQ / HLG) sources are recognised (`dlssvid info`, the source card) but still processed as SDR. The NVIDIA
+writes its pixel aspect; a pixel aspect that moves no pixel of the frame (14400:14399 of 1694x720) is taken as square; `dlssvid info` prints a `pixels:` line. HDR (PQ / HLG) sources are recognised (`dlssvid info`, the source card) and passed through as they are; their processing comes with a later version. The NVIDIA
 passes keep the 10-bit gradations too: a shallow 10-bit ramp comes out of DLSS SR, NR and Frame Generation with one-code
 steps, no 8-bit staircase (measured, `docs/benchmarks.md`; the `[precision]` tests watch it).
 

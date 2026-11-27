@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "convert/ColorPlan.h"
 #include "gpu/D3D12Device.h"
 #include "io/VideoDecoder.h"
 #include "ScenesArg.h"
@@ -429,6 +430,9 @@ int CmdNr(const NrCommands::NrArgs& a, const CLI::App& cmd) {
     if (a.output.empty()) Throw("nr: -o/--output is required");
     VideoDecoder decoder(a.input);
     const auto& info = decoder.Info();
+    // TASK-0079: the colour this source cannot be processed in - before the hash and the NGX feature, from the passes too (their
+    // frames would be processed in it all the same)
+    RequireColour(ResolveColor(info), ColourUse::Process, "nr: " + a.input);
     // pass folders produced by the earlier stages live under the same root: pick them up unless told otherwise
     auto autoDir = [&](const std::string& given, const char* name) -> std::filesystem::path {
         if (!given.empty()) return given;

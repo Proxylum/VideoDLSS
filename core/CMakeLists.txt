@@ -68,6 +68,7 @@ add_library(dlssvid_core STATIC
   pipeline/IStage.h
   pipeline/Pipeline.h pipeline/Pipeline.cpp
   pipeline/ProcessRunner.h pipeline/ProcessRunner.cpp
+  pipeline/ResultColour.h pipeline/ResultColour.cpp
   pipeline/ControlMask.h pipeline/ControlMask.cpp
   pipeline/NrPreview.h pipeline/NrPreview.cpp
   pipeline/FgProcess.h pipeline/FgProcess.cpp

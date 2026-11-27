@@ -375,11 +375,22 @@ TEST_CASE("BT.2020 matrix: pure red at 10 bits limited is Y 294, Cb 387, Cr 960 
     CHECK(ResultColorTags(c2020, i).matrix == 9);
 }
 
-// TA moves every consumer onto ResolveColor without changing what any of them reads: for every tag the stream can carry,
-// both ranges and both sides of the 720-line rule, each role is ColorInfoFromStream and the result tags are the old ones.
-TEST_CASE("ResolveColor reads every source as before: every role is ColorInfoFromStream, the result tags the frozen ColorTagsFor", "[convert][color][hdr][regression]") {
+// TA moved every consumer onto ResolveColor without changing what any of them reads; TB-2 (TASK-0079) stops every other source. For
+// every tag the stream can carry, both ranges and both sides of the 720-line rule: a source on the legacy path has each role
+// ColorInfoFromStream and the result tags the old ones; any other has its processing roles throw, its viewport / measure roles still
+// the SDR reading, and the tags WrittenTags gives.
+TEST_CASE("ResolveColor keeps legacy cells as before, stops every other cell and mixed signalling, refuses passthrough for IPT and RGB",
+          "[convert][color][hdr][regression]") {
     VideoStreamInfo i;
-    int checked = 0, wrong = 0;
+    int checked = 0, wrong = 0, legacy = 0, stopped = 0;
+    auto stops = [](auto&& role) {
+        try {
+            role();
+        } catch (const ColourUnsupported&) {
+            return true;
+        }
+        return false;
+    };
     for (const uint32_t h : {576u, 1080u})
         for (int range = 0; range <= 2; ++range)
             for (int m = 0; m <= 18; ++m)
@@ -392,10 +403,26 @@ TEST_CASE("ResolveColor reads every source as before: every role is ColorInfoFro
                         i.colorSpace = m;
                         i.colorPrimaries = p;
                         i.colorTrc = t;
+                        ColourLayers in;
+                        in.stream = in.container = RawTags{m, p, t, range, 0};
+                        i.color = SourceColorOf(in, "420", "hevc");
                         const ColorInfo sdr = ColorInfoFromStream(i);
                         const ColorPlan plan = ResolveColor(i);
-                        const bool ok = Same(plan.colourDecode, sdr) && Same(plan.guideDecode, sdr) && Same(plan.viewDecode, sdr) &&
-                                        Same(plan.resultEncode, sdr) && Same(plan.resultTags, FrozenColorTagsFor(sdr, i));
+                        bool ok = plan.legacy == i.color.legacyPath && Same(plan.View(), sdr) && Same(plan.MeasureDecode(), sdr);
+                        if (i.color.legacyPath) {
+                            ++legacy;
+                            ok = ok && plan.process == ColourStop::None && plan.all == ColourStop::None && Same(plan.Colour(), sdr) &&
+                                 Same(plan.Guide(), sdr) && Same(plan.ResultEncode(), sdr) && Same(plan.ResultTags(), FrozenColorTagsFor(sdr, i)) &&
+                                 plan.ResultMeta().Empty();
+                        } else {
+                            ++stopped;
+                            const bool ipt = m == 15, rgb = m == 0 && (t == 16 || t == 18 || p == 9);
+                            const ColourStop all = ipt ? ColourStop::DolbyVisionIpt : rgb ? ColourStop::RgbHdr : ColourStop::None;
+                            const ColourStop process = all != ColourStop::None ? all : (m == 10 || m == 14) ? ColourStop::Matrix : ColourStop::NotYet;
+                            ok = ok && plan.all == all && plan.process == process && !plan.why.empty() &&
+                                 stops([&] { (void)plan.Colour(); }) && stops([&] { (void)plan.Guide(); }) && stops([&] { (void)plan.ResultEncode(); }) &&
+                                 Same(plan.ResultTags(), WrittenTags(i.color));
+                        }
                         if (!ok && ++wrong <= 5) {
                             INFO("height " << h << " range " << range << " matrix " << m << " primaries " << p << " trc " << t);
                             CHECK(ok);
@@ -404,6 +431,42 @@ TEST_CASE("ResolveColor reads every source as before: every role is ColorInfoFro
                     }
     CHECK(wrong == 0);
     CHECK(checked == 2 * 3 * 19 * 19 * 19);
+    CHECK(legacy > 0);
+    CHECK(stopped > 0);
+    // mixed signalling: SDR frames over PQ codec parameters (a ProRes colr) - stopped, not read as SDR
+    ColourLayers mixed;
+    mixed.stream = mixed.container = RawTags{9, 9, 16, 1, 0};
+    mixed.containerRecords.mdcv = Mdcv{};  // a stale colr's records: not written with the frames' SDR tags
+    mixed.containerRecords.mdcv->maxLum = {1000, 1};
+    mixed.containerRecords.mdcv->hasLuminance = true;
+    mixed.containerRecords.cll = Cll{1000, 400};
+    FirstLookColor frame;
+    frame.how = FirstLook::Decode;
+    frame.tags = RawTags{1, 1, 1, 1, 0};
+    mixed.first = frame;
+    i.color = SourceColorOf(mixed, "422", "prores");
+    REQUIRE(i.color.cls == SourceClass::Legacy);
+    REQUIRE(i.color.hdr.cll);
+    const ColorPlan m = ResolveColor(i);
+    CHECK(m.process == ColourStop::NotYet);
+    CHECK(m.why.find("layers disagree") != std::string::npos);
+    CHECK(m.ResultTags().transfer == 1);  // the frames' tags as they are
+    CHECK(m.ResultMeta().Empty());
+    CHECK_THROWS_AS(RequireColour(m, ColourUse::Process, "process"), ColourUnsupported);
+    CHECK_NOTHROW(RequireColour(m, ColourUse::Passthrough, "process"));
+    // an IPT base: refused in every mode, with its kind
+    ColourLayers ipt;
+    DoviConf p5;
+    p5.profile = 5;
+    ipt.dovi = p5;
+    i.color = SourceColorOf(ipt, "420", "hevc");
+    try {
+        RequireColour(ResolveColor(i), ColourUse::Passthrough, "process --passthrough: a.mkv");
+        FAIL("passthrough of an IPT base was not refused");
+    } catch (const ColourUnsupported& e) {
+        CHECK(e.kind == ColourStop::DolbyVisionIpt);
+        CHECK(std::string(e.what()).rfind("process --passthrough: a.mkv: a Dolby Vision IPT base layer", 0) == 0);
+    }
 }
 
 // The guides (depth, flow), FG, export, compare and the thumbnails convert with YuvToRgb; in bands of rows it must give the very same

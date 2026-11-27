@@ -13,6 +13,7 @@
 #include <cmath>
 #include <optional>
 
+#include "ColourText.h"
 #include "ControlMaskText.h"
 #include "DecodeText.h"
 #include "ParamText.h"
@@ -867,6 +868,13 @@ void AppModel::notifyFramesUpdated() {
     emit framesUpdated();
 }
 
+QStringList AppModel::planNotes() const {
+    QStringList out;
+    for (const PlanNote& n : plan_.warnings) out << PlanNoteText(sourceInfo_.color, n);
+    out.removeDuplicates();
+    return out;
+}
+
 bool AppModel::sourceRefusalSaid() const { return !sourceDecode_.Ok() && planError_ == SourceDecodeText(sourceDecode_); }
 
 void AppModel::noteSourceRefused() {
@@ -1050,11 +1058,19 @@ ProcessOptions AppModel::planOptions(bool withForce) {
     if (withForce) o.forceStages = force_;
     o.sourceHash = project_.SourceHash();
     o.vramBytes = device_ && !device_->IsWarp() ? device_->DedicatedVideoMemory() : 0;  // the VRAM advice of depth
+    // TASK-0079: the project's encoder - a passthrough's notes (8 bits of HDR, a range a container cannot keep) are the encoder's (the
+    // stages' decisions read none of these)
+    o.codec = project_.codec;
+    o.codecOptions = project_.codecOptions;
+    o.outputFormat = project_.outputFormat;
     return o;
 }
 
 void AppModel::refreshPlan() {
     sourceDecode_ = {};  // TASK-0076: set again below for the source of this plan
+    colourStop_ = colourStopAll_ = ColourStop::None;  // TASK-0079: likewise
+    colourStopSaid_ = false;
+    colourStopSaidKind_ = ColourStop::None;
     planTimer_.stop();
     plan_ = ProcessPlan{};
     planNoForce_.reset();
@@ -1130,6 +1146,11 @@ void AppModel::refreshPlan() {
             emit planChanged();
             return;
         }
+        {  // TASK-0079: what the source's colour stops - whatever the plan below says (every stage off: a clean plan, the stops stand)
+            const ColorPlan cp = ResolveColor(probe.Info());
+            colourStop_ = cp.process;
+            colourStopAll_ = cp.all;
+        }
         const ProcessOptions o = planOptions(true);
         plan_ = PlanProcess(o);
         // PR-10: the preview reads the stages above NR as they are - a «пересчитать» mark there would make them «run» for it
@@ -1162,6 +1183,10 @@ void AppModel::refreshPlan() {
     } catch (const DecodeUnavailable& e) {  // TASK-0076: in the GUI's words
         sourceDecode_ = e.support;
         planError_ = SourceDecodeText(e.support);
+    } catch (const ColourUnsupported& e) {  // TASK-0079: in the GUI's words, with what still works
+        planError_ = ColourStopText(e.kind, sourceInfo_.color);
+        colourStopSaid_ = true;
+        colourStopSaidKind_ = e.kind;
     } catch (const std::exception& e) {
         planError_ = QString::fromUtf8(e.what());
         keepViewportVerdict();
@@ -1318,6 +1343,7 @@ AppModel::StageCardState AppModel::cardState(const std::string& stage) const {
     if (!d) {
         // TASK-0076: the source's refusal is said once, under «Что получится» - a card gets a short line, not the whole paragraph
         st.state = sourceRefusalSaid()   ? SourceRefusedShortText()
+                   : colourStopSaid_      ? ColourStopShortText(colourStop_ != ColourStop::None ? colourStop_ : colourStopAll_, sourceInfo_.color)  // TASK-0079
                    : planError_.isEmpty() ? tr("—")
                                           : planError_;
         return st;

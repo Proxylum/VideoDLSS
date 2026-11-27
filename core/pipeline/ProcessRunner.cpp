@@ -23,6 +23,7 @@
 #include "pipeline/PassFingerprint.h"
 #include "pipeline/PassVersions.h"
 #include "pipeline/Pipeline.h"
+#include "pipeline/ResultColour.h"
 #include "pipeline/ScenesPlan.h"
 #include "pipeline/SettingsNote.h"
 #include "stages/ParamSchema.h"
@@ -909,6 +910,12 @@ Prepared Prepare(const ProcessOptions& options) {
             Throw("process: unknown stage '" + s.name + "' " + PipelineStageNamesText());
         if (s.enabled) r.wanted[s.name] = s;
     }
+    // TASK-0079: a source this version cannot process (HDR, wide gamut, ICtCp ...) - or with no stage on, pass through (an IPT base,
+    // RGB HDR; a non-SDR source into a container without colour tags) - is refused before the hash and the stages, with what still works
+    if (r.wanted.empty() && options.encode && !options.output.empty())
+        (void)PlanPassthroughColour(r.info, options.codec, options.outputFormat, options.output, "process: " + options.input.string());
+    else
+        RequireColour(ResolveColor(r.info), r.wanted.empty() ? ColourUse::Passthrough : ColourUse::Process, "process: " + options.input.string());
     for (const char* stage : kColourStages)
         if (!r.wanted.count(stage))
             for (const auto& pass : StageFamilyPasses(stage)) r.ctx.switchedOff.insert(pass);
@@ -1268,6 +1275,9 @@ nlohmann::json ProcessPlan::ToJson() const {
                         {"final_pass", finalPass},            {"run_count", runCount},    {"reuse_count", reuseCount}};
     if (scenesOnDisk)
         j["scenes_on_disk"] = {{"count", scenesOnDisk->count}, {"frames", scenesOnDisk->frames}, {"threshold", scenesOnDisk->threshold}, {"off", scenesOnDisk->off}};
+    nlohmann::json w = nlohmann::json::array();
+    for (const PlanNote& n : warnings) w.push_back({{"key", n.key}, {"level", n.level}, {"scope", n.scope}, {"text", n.text}});
+    j["warnings"] = w;
     return j;
 }
 
@@ -1373,12 +1383,12 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     target.height = rh;
     if (!sar.Square()) Log()->info("encode: the pass {}x{} has pixels {} - stretched to {}x{} square ones", m.width, m.height, sar.Token(), rw, rh);
     const ColorPlan color = ResolveColor(info);
-    const ColorInfo ci = color.resultEncode;
+    const ColorInfo ci = color.ResultEncode();
     VideoEncoder::Options eo;
     eo.codec = encode.codec;
     eo.frameRate = fps.num > 0 ? fps : Rational{30, 1};
     eo.timeBase = Rational{eo.frameRate.den, eo.frameRate.num};
-    eo.color = color.resultTags;
+    eo.color = color.ResultTags();
     eo.metadata = encode.metadata;
     // no `b` given: the bitrate for this output (NVENC's own default is far too low for 4K)
     eo.codecOptions = EffectiveCodecOptions(encode.codec, encode.codecOptions, rw, rh, eo.frameRate.ToDouble());
@@ -1407,10 +1417,12 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     CpuFrame src;
     YuvResizer stretch;
     int64_t s = 0;
+    int64_t used = 0;  // the source frames the result holds (one pass frame written at least): a class change past them is not the result's
     while ((maxSourceFrames < 0 || s < maxSourceFrames) && decoder.NextFrame(src)) {  // decoding the source pumps its audio packets
         for (int k = 0; k < mult; ++k) {
             const int64_t idx = s * mult + k;
             if (!pass.HasFrame(m.firstFrame + idx)) break;
+            used = s + 1;
             const PassImage rgb = pass.ReadFrame(m.firstFrame + idx);
             CpuFrame yuv;
             RgbToYuv(rgb, ci, grid, yuv);
@@ -1430,14 +1442,40 @@ EncodeReport EncodePassToVideo(const std::filesystem::path& passDir, const std::
     encoder.Close();
     r.audio = encoder.AudioPacketsWritten() > 0;  // a source track without packets in the range: MP4 and MOV leave the track out
     r.sourceFrames = s;
+    if (const auto ch = decoder.ClassChange(); ch && ch->index < used) r.classChange = ch;  // TASK-0079
     r.seconds = Seconds(t0);
     return r;
 }
 
+namespace {
+// TASK-0079: notes into a result's warnings, each once (the fallback passthrough's inner run repeats the source's)
+void AddWarnings(std::vector<std::string>& to, const std::vector<PlanNote>& notes) {
+    for (const PlanNote& n : notes)
+        if (std::find(to.begin(), to.end(), n.text) == to.end()) to.push_back(n.text);
+}
+void AddWarnings(std::vector<std::string>& to, const std::vector<std::string>& texts) {
+    for (const std::string& t : texts)
+        if (std::find(to.begin(), to.end(), t) == to.end()) to.push_back(t);
+}
+}  // namespace
+
 ProcessPlan PlanProcess(const ProcessOptions& options) {
     ProcessPlan plan;
-    if (options.passthrough) return plan;  // nothing to decide: the source goes straight to the encoder
+    if (options.passthrough) {  // nothing to decide: the source goes straight to the encoder - with what its colour loses (TASK-0079)
+        if (options.input.empty() || !std::filesystem::exists(options.input)) Throw("process: input video not found: " + options.input.string());
+        VideoStreamInfo info;
+        {
+            VideoDecoder probe(options.input, VideoDecoder::Probe());
+            info = probe.Info();
+        }
+        if (const DecodeSupport s = CheckDecodeSupport(info); !s.Ok()) throw DecodeUnavailable(s, "process: " + options.input.string() + ": " + s.why);
+        plan.warnings = ResolveColor(info).notes;
+        const PassthroughColour pc = PlanPassthroughColour(info, options.codec, options.outputFormat, options.output, "process: " + options.input.string());
+        plan.warnings.insert(plan.warnings.end(), pc.encodeNotes.begin(), pc.encodeNotes.end());
+        return plan;
+    }
     const Prepared pr = Prepare(options);
+    plan.warnings = ResolveColor(pr.info).notes;  // TASK-0079: of any class - an SDR base's Dolby Vision is dropped too
     plan.passesRoot = pr.ctx.root;
     plan.sourceHash = pr.ctx.sourceHash;
     plan.frames = pr.ctx.needed;
@@ -1468,6 +1506,10 @@ ProcessPlan PlanProcess(const ProcessOptions& options) {
     }
     // TASK-0074: a colour pass of a stage off is not the result - also not one of a turned source's stored frame (TASK-0072 refused that)
     plan.finalPass = ProjectedFinalPass(state);
+    if (plan.finalPass.empty() && options.encode) {  // TASK-0079: no colour pass - the source is passed through: what its encoding loses
+        const PassthroughColour pc = PlanPassthroughColour(pr.info, options.codec, options.outputFormat, options.output, "process: " + options.input.string());
+        plan.warnings.insert(plan.warnings.end(), pc.encodeNotes.begin(), pc.encodeNotes.end());
+    }
     return plan;
 }
 
@@ -1496,6 +1538,10 @@ ProcessResult RunProcess(const ProcessOptions& options) {
 
     // ---- passthrough (stage 0) ----
     if (options.passthrough) {
+        // TASK-0079: its colour as it is - refused before the part file when no output can carry it right
+        const PassthroughColour pc = PlanPassthroughColour(info, options.codec, options.outputFormat, options.output, "process: " + options.input.string());
+        AddWarnings(result.warnings, ResolveColor(info).notes);
+        AddWarnings(result.warnings, pc.encodeNotes);
         // TASK-0070: written next to the result, put in its place only when complete - a cancel or a failure keeps the previous one
         const PartialResult partial(PartialResultPath(options.output));
         ResultExpectation expect;
@@ -1508,7 +1554,8 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             eopt.frameRate = info.frameRate;
             eopt.timeBase = info.timeBase;
             eopt.codecOptions = EffectiveCodecOptions(options.codec, options.codecOptions, info.width, info.height, info.frameRate.ToDouble());
-            eopt.color = ResolveColor(info).resultTags;
+            eopt.color = pc.tags;
+            eopt.hdr = pc.meta;
             eopt.sar = info.sar;  // TASK-0073: the grid passes through as it is, its pixels' proportions with it (turned with the frames)
             const OutputFormat of = ResolveOutputFormat(options.codec, options.outputFormat, SourceLayout(info));  // the stream's chroma (TASK-0072)
             FrameDesc target = of.desc;
@@ -1554,7 +1601,11 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             result.framesIn = stats.framesOut;
             result.outputFps = info.frameRate;
             result.audio = encoder.AudioPacketsWritten() > 0;  // a source track without packets: MP4 and MOV leave the track out
-            expect = ResultExpectation{target.width, target.height, stats.framesOut, result.audio, info.sar};
+            if (const auto& ch = decoder.ClassChange()) {  // TASK-0079: a part of the video in another colour
+                Log()->warn("passthrough: {}", ClassChangeText(*ch));
+                AddWarnings(result.warnings, std::vector<std::string>{ClassChangeText(*ch)});
+            }
+            expect = ResultExpectation{target.width, target.height, stats.framesOut, result.audio, info.sar, pc.expect};
         } catch (...) {
             partial.DiscardIfWritten();  // the encoder is gone with its scope: the file is closed
             throw;
@@ -1566,6 +1617,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
 
     // ---- stages over the pass cache ----
     Prepared pr = Prepare(options);
+    AddWarnings(result.warnings, ResolveColor(pr.info).notes);  // TASK-0079: what the source loses (an SDR base's Dolby Vision ...)
     D3D12Device device({options.warp, false});
     if (!pr.ctx.vramBytes && !device.IsWarp()) pr.ctx.vramBytes = device.DedicatedVideoMemory();
     const RunContext& ctx = pr.ctx;
@@ -2013,6 +2065,7 @@ ProcessResult RunProcess(const ProcessOptions& options) {
         if (options.progress)  // it is this run's encode step: the GUI lets the old result go on its progress (TASK-0070)
             pt.progress = [&options](const std::string&, int64_t n, int64_t total) { options.progress("encode", n, total); };
         const ProcessResult r = RunProcess(pt);
+        AddWarnings(result.warnings, r.warnings);  // TASK-0079: its encoding's notes, the source's once
         enc.status = "passthrough";
         enc.frames = r.framesOut;
         result.framesOut = r.framesOut;
@@ -2050,6 +2103,10 @@ ProcessResult RunProcess(const ProcessOptions& options) {
             throw;
         }
         PublishResult(partial.Path(), options.output, {r.format.width, r.format.height, r.frames, r.audio});
+        if (r.classChange) {  // TASK-0079: a part of the source in another colour, processed as the rest
+            Log()->warn("encode: {}", ClassChangeText(*r.classChange));
+            AddWarnings(result.warnings, std::vector<std::string>{ClassChangeText(*r.classChange)});
+        }
         enc.status = "ran";
         enc.outDir = result.finalPass;
         enc.frames = r.frames;

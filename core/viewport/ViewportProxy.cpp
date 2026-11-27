@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "io/NvdecSupport.h"
+#include "convert/ColorPlan.h"
 #include "io/VideoDecoder.h"
 #include "io/VideoEncoder.h"
 #include "util/Error.h"
@@ -139,10 +140,14 @@ std::filesystem::path BuildProxy(const std::filesystem::path& video, const std::
     // indices from pts as the viewport sees them after a seek
     if (!dec.SeekToKeyframeBefore(0)) return fail("cannot seek to the first frame");
     ColorTags tags;
-    tags.range = info.colorRange;
-    tags.matrix = info.colorSpace;
-    tags.primaries = info.colorPrimaries;
-    tags.transfer = info.colorTrc;
+    if (const ColorPlan cp = ResolveColor(info); !cp.legacy) {  // TASK-0079: an HDR / wide-gamut source - the effective tags (the frame's HLG ...)
+        tags = cp.ResultTags();
+    } else {
+        tags.range = info.colorRange;
+        tags.matrix = info.colorSpace;
+        tags.primaries = info.colorPrimaries;
+        tags.transfer = info.colorTrc;
+    }
     std::string codec = ProxyCodecFor(info.decoded);
     auto makeEncoder = [&](bool slices) {
         VideoEncoder::Options eo;

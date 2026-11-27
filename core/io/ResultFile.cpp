@@ -55,6 +55,50 @@ fs::path PartialResultPath(const fs::path& output) {
     return output.parent_path() / (stem + tail);
 }
 
+namespace {
+
+// TASK-0079: the colour read back - the codec parameters' tags over the container's (a ProRes / FFV1 frame header is not read: the
+// result check opens no frame; prores_ks writes it from the same tags), the records of the container (and the codec's extradata)
+std::string CheckResultColour(const SourceColor& c, const ResultColor& want) {
+    const RawTags got = MergeTags(RawTags{}, c.stream, c.container);
+    auto tag = [](const char* field, int wrote, int read, std::string (*name)(int)) -> std::string {
+        if (wrote == 2 || wrote == read) return {};
+        return std::string("its ") + field + " is " + name(read) + ", " + name(wrote) + " was written";
+    };
+    for (const std::string& why : {tag("matrix", want.matrix, got.matrix, MatrixName), tag("primaries", want.primaries, got.primaries, PrimariesName),
+                                   tag("transfer", want.trc, got.trc, TrcName)})
+        if (!why.empty()) return why;
+    if (want.checkRange && want.range != 0 && want.range != got.range)
+        return "its range is " + RangeName(got.range) + ", " + RangeName(want.range) + " was written";
+    // the records, in the units MP4 stores (1/50000, 1/10000) - Matroska's floats within one unit
+    auto within = [](const Ratio& a, const Ratio& b, double per) { return std::llabs(std::llround(a.Value() * per) - std::llround(b.Value() * per)) <= 1; };
+    if (want.mdcv) {
+        if (!c.hdr.mdcv) return "it has no mastering display metadata, it was written";
+        const Mdcv &a = *c.hdr.mdcv, &b = *want.mdcv;
+        bool same = a.hasPrimaries == b.hasPrimaries && a.hasLuminance == b.hasLuminance;
+        for (int i = 0; i < 3 && same; ++i)
+            for (int j = 0; j < 2 && same; ++j) same = !b.hasPrimaries || within(a.primaries[i][j], b.primaries[i][j], 50000);
+        same = same && (!b.hasPrimaries || (within(a.white[0], b.white[0], 50000) && within(a.white[1], b.white[1], 50000)));
+        same = same && (!b.hasLuminance || (within(a.minLum, b.minLum, 10000) && within(a.maxLum, b.maxLum, 10000)));
+        if (!same) return "its mastering display metadata differs from what was written";
+    }
+    if (want.cll) {
+        if (!c.hdr.cll) return "it has no content light level, MaxCLL " + std::to_string(want.cll->maxCll) + " was written";
+        if (!(*c.hdr.cll == *want.cll))
+            return "its content light level is MaxCLL " + std::to_string(c.hdr.cll->maxCll) + " / MaxFALL " + std::to_string(c.hdr.cll->maxFall) +
+                   ", " + std::to_string(want.cll->maxCll) + " / " + std::to_string(want.cll->maxFall) + " was written";
+    }
+    if (want.amve) {
+        if (!c.hdr.amve) return "it has no ambient viewing environment, it was written";
+        if (!within(c.hdr.amve->illuminance, want.amve->illuminance, 10000) || !within(c.hdr.amve->lightX, want.amve->lightX, 50000) ||
+            !within(c.hdr.amve->lightY, want.amve->lightY, 50000))
+            return "its ambient viewing environment differs from what was written";
+    }
+    return {};
+}
+
+}  // namespace
+
 std::string CheckEncodedResult(const fs::path& file, const ResultExpectation& expect) {
     try {
         VideoDecoder::Options options = VideoDecoder::Probe();
@@ -81,6 +125,7 @@ std::string CheckEncodedResult(const fs::path& file, const ResultExpectation& ex
         if (expect.frames >= 0 && CountsFrames(file) && info.frameCount != expect.frames)
             return "it holds " + std::to_string(info.frameCount) + " frames, " + std::to_string(expect.frames) + " were encoded";
         if (expect.audio && !probe.HasAudio()) return "it has no audio, audio packets were written";
+        if (expect.color) return CheckResultColour(info.color, *expect.color);
         return {};
     } catch (const std::exception& e) {
         return std::string("it does not open: ") + e.what();

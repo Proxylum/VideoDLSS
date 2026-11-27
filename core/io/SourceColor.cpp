@@ -161,8 +161,8 @@ std::vector<std::string> ColourInfoLines(const SourceColor& c) {
         else
             t = c.doviProfile ? "profile " + std::to_string(c.doviProfile) + " (guessed from the first frame's RPU)" : std::string("an RPU of an unknown profile");
         if (c.refuseAll == ColourRefusal::DolbyVisionIpt)
-            t += c.iptAssumed ? ": unknown base without a matrix or a transfer, taken for IPT - colours come out wrong without the RPU"
-                              : ": IPT base - colours come out wrong without the RPU";
+            t += c.iptAssumed ? ": unknown base without a matrix or a transfer, taken for IPT - not supported (colours wrong without the RPU)"
+                              : ": IPT base - not supported (colours wrong without the RPU)";
         else if (c.Note("source.dv_unknown") || c.Note("source.dv_record_short")) t += ": unknown base - removed in every output";
         else t += ": removed in every output";
         lines.push_back(Line("dolby vision", t));
@@ -203,6 +203,8 @@ RawTags MergeTags(const RawTags& frame, const RawTags& stream, const RawTags& co
         for (int i = 0; i < 4; ++i) from[i] = where[i];
     return out;
 }
+
+bool AltTransfer(int said, int taken) { return taken == 18 && (said == 1 || said == 6 || said == 14 || said == 15); }
 
 SourceClass ClassOf(int matrix, int primaries, int trc) {
     if (trc == 16) return SourceClass::Pq;
@@ -258,8 +260,6 @@ std::string HdrRecordsWords(const HdrStatic& hdr) {
 bool SaysSomething(const RawTags& t) { return t.matrix != 2 || t.primaries != 2 || t.trc != 2; }
 
 // HLG (18) taken over the SDR curve an HEVC / H.264 VUI keeps beside an alternative transfer SEI - as it should be, no news
-bool AltTransfer(int said, int taken) { return taken == 18 && (said == 1 || said == 6 || said == 14 || said == 15); }
-
 std::string DifferenceWords(const std::vector<TagDifference>& d) {  // "transfer arib-std-b67 / bt2020-10, primaries ..."
     std::string w;
     for (const TagDifference& x : d)
@@ -534,9 +534,12 @@ void ReadFrameSideData(AVFrameSideData* const* sd, int count, HdrStatic& hdr, st
 
 RawTags WithoutReserved(const RawTags& t, std::string_view codec) {
     RawTags out = t;
-    if (out.primaries == 0 || out.primaries == 3) out.primaries = 2;
-    if (out.trc == 0 || out.trc == 3) out.trc = 2;
-    if (out.matrix == 3 || (out.matrix == 0 && codec == "prores")) out.matrix = 2;
+    // reserved (0, 3) and values H.273 does not define - FFmpeg names none of them and its readers (mov.c's colr, h2645_vui) take them as
+    // unspecified, its Matroska writer drops a transfer or matrix past its tables: a result tagged with one reads back unspecified
+    // (TASK-0079: its check would fail after the whole encode)
+    if (out.primaries == 0 || out.primaries == 3 || !av_color_primaries_name(static_cast<AVColorPrimaries>(out.primaries))) out.primaries = 2;
+    if (out.trc == 0 || out.trc == 3 || !av_color_transfer_name(static_cast<AVColorTransferCharacteristic>(out.trc))) out.trc = 2;
+    if (out.matrix == 3 || (out.matrix == 0 && codec == "prores") || !av_color_space_name(static_cast<AVColorSpace>(out.matrix))) out.matrix = 2;
     return out;
 }
 

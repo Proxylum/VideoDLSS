@@ -304,8 +304,7 @@ TEST_CASE("dlssvid info prints colour mastering light level and Dolby Vision; an
     {
         INFO(ipt.out);
         CHECK(ipt.code == 0);
-        CHECK_THAT(ipt.out, ContainsSubstring("dolby vision: profile 5, level 6, compatibility 0 (record): IPT base - colours come out wrong without the RPU"));
-        CHECK_THAT(ipt.out, !ContainsSubstring("not supported"));
+        CHECK_THAT(ipt.out, ContainsSubstring("dolby vision: profile 5, level 6, compatibility 0 (record): IPT base - not supported (colours wrong without the RPU)"));
     }
     ClipSpec plain;
     plain.width = 64;
@@ -318,6 +317,7 @@ TEST_CASE("dlssvid info prints colour mastering light level and Dolby Vision; an
         CHECK_THAT(sdr.out, ContainsSubstring("video:       ffv1 64x48 yuv420p (bt601, limited range)"));
         CHECK_THAT(sdr.out, !ContainsSubstring("colour:"));
         CHECK_THAT(sdr.out, !ContainsSubstring("note:"));
+        CHECK_THAT(sdr.out, !ContainsSubstring("processing:"));  // TASK-0079: an SDR source processes as before
     }
 }
 

@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "convert/ColorPlan.h"
 #include "io/SourceColor.h"
 
 using namespace dlssvid;
@@ -167,6 +168,16 @@ TEST_CASE("Frame trc 18 over stream 1 6 14 or 15 is HLG without a note; other di
     CHECK(pqContainer.cls == SourceClass::Legacy);  // the stream's taken
     REQUIRE(pqContainer.Note("source.container_differs") != nullptr);
     CHECK(pqContainer.Note("source.container_differs")->plan);
+    // the plan takes only the plan's notes (TASK-0079): an SDR source whose layers differ within its class plans and runs with no note
+    VideoStreamInfo info;
+    for (const SourceColor* c : {&sameClass, &sdrContainer}) {
+        info.color = *c;
+        REQUIRE(info.color.legacyPath);
+        CHECK(ResolveColor(info).notes.empty());
+    }
+    info.color = pqContainer;
+    const ColorPlan heard = ResolveColor(info);
+    CHECK(std::any_of(heard.notes.begin(), heard.notes.end(), [](const PlanNote& n) { return n.key == "source.container_differs"; }));
 }
 
 TEST_CASE("RGB layout or matrix 0 with PQ HLG or BT.2020 primaries is refused in every mode", "[hdr]") {
@@ -436,9 +447,9 @@ TEST_CASE("info colour lines: none for SDR, the class with each tag's layer, the
     // an IPT base: the colours, not a refusal (TB-1 only says it)
     const std::vector<std::string> ipt = ColourInfoLines(WithDovi(9, 9, 16, 5, 0));
     bool said = false;
-    for (const std::string& l : ipt) said = said || l == "dolby vision: profile 5, level 6, compatibility 0 (record): IPT base - colours come out wrong without the RPU";
+    for (const std::string& l : ipt) said = said || l == "dolby vision: profile 5, level 6, compatibility 0 (record): IPT base - not supported (colours wrong without the RPU)";
     CHECK(said);
-    for (const std::string& l : ipt) CHECK(l.find("not supported") == std::string::npos);
+    // TB-2 (TASK-0079): the refusal stands - said as one
     // an SDR base: printed (the RPU is dropped), the class stays SDR
     const std::vector<std::string> sdrBase = ColourInfoLines(WithDovi(1, 1, 1, 8, 2));
     REQUIRE_FALSE(sdrBase.empty());
@@ -490,6 +501,10 @@ TEST_CASE("Reserved tag values are unspecified; a ProRes header's 0 is unknown, 
     CHECK(WithoutReserved(RawTags{0, 0, 0, 1, 0}, "hevc") == RawTags{0, 2, 2, 1, 0});  // matrix 0 is RGB (GBR) outside ProRes
     CHECK(WithoutReserved(RawTags{3, 3, 3, 2, 1}, "hevc") == RawTags{2, 2, 2, 2, 1});
     CHECK(WithoutReserved(RawTags{9, 9, 16, 1, 0}, "prores") == RawTags{9, 9, 16, 1, 0});
+    // values H.273 does not define (FFmpeg has no name): unspecified, as mov.c and h2645_vui read them (TASK-0079)
+    CHECK(WithoutReserved(RawTags{18, 13, 19, 1, 0}, "hevc") == RawTags{2, 2, 2, 1, 0});
+    CHECK(WithoutReserved(RawTags{9, 255, 255, 1, 0}, "hevc") == RawTags{9, 2, 2, 1, 0});
+    CHECK(WithoutReserved(RawTags{17, 22, 18, 1, 0}, "hevc") == RawTags{17, 22, 18, 1, 0});  // the last named ones kept
     // FFmpeg's own prores encoder writes 0 for a curve outside its list (bt2020-10): the colr box's 14 stands
     ColourLayers in;
     in.container = in.stream = Tags(9, 9, 14);
@@ -735,11 +750,11 @@ TEST_CASE("info says a Dolby Vision RPU without a record: the guessed profile, o
     };
     CHECK(line(WithRpu(9, 9, 16, 1, false)) == "dolby vision: profile 8 (guessed from the first frame's RPU): removed in every output");
     CHECK(line(WithRpu(9, 9, 16, 0, false)) == "dolby vision: an RPU of an unknown profile: unknown base - removed in every output");
-    CHECK(line(WithRpu(9, 9, 16, 0, true)) == "dolby vision: profile 5 (guessed from the first frame's RPU): IPT base - colours come out wrong without the RPU");
+    CHECK(line(WithRpu(9, 9, 16, 0, true)) == "dolby vision: profile 5 (guessed from the first frame's RPU): IPT base - not supported (colours wrong without the RPU)");
     // an IPT base taken for one (a base nobody names, no colour tags): said as an assumption
     CHECK(line(WithRpu(2, 2, 2, 0, false)) ==
-          "dolby vision: an RPU of an unknown profile: unknown base without a matrix or a transfer, taken for IPT - colours come out wrong without "
-          "the RPU");
+          "dolby vision: an RPU of an unknown profile: unknown base without a matrix or a transfer, taken for IPT - not supported (colours wrong "
+          "without the RPU)");
     CHECK(WithRpu(2, 2, 2, 0, false).iptAssumed);
     CHECK(WithDovi(2, 2, 2, 8, 3).iptAssumed);
     CHECK_FALSE(WithDovi(2, 2, 2, 5, 0).iptAssumed);
@@ -826,4 +841,104 @@ TEST_CASE("Rows 1-3 exclude each other: a Dolby Vision verdict is not overruled 
     const SourceColor rpu0 = WithRpu(15, 9, 16, 0, false);
     CHECK(rpu0.refuseAll == ColourRefusal::None);
     CHECK(rpu0.Note("source.dv_unknown") != nullptr);
+}
+
+// ---- TASK-0079 (HDR step TB-2) ----------------------------------------------------------------------------------------------------
+
+TEST_CASE("Written tags of an HDR passthrough are the effective ones with matrix 9 kept and untagged PQ HLG fields filled", "[hdr]") {
+    auto written = [](RawTags stream, RawTags frame = RawTags{}) {
+        ColourLayers in;
+        in.stream = in.container = stream;
+        if (frame.matrix != 2 || frame.primaries != 2 || frame.trc != 2) {
+            FirstLookColor f;
+            f.how = FirstLook::Decode;
+            f.tags = frame;
+            in.first = f;
+        }
+        const SourceColor c = SourceColorOf(in, "420", "hevc");
+        return std::pair{WrittenTags(c), TagsFilled(c)};
+    };
+    auto same = [](const ColorTags& t, int m, int p, int tr, int range) { return t.matrix == m && t.primaries == p && t.transfer == tr && t.range == range; };
+    CHECK(same(written(Tags(9, 9, 16)).first, 9, 9, 16, 1));  // TA's legacy path wrote matrix 1
+    CHECK_FALSE(written(Tags(9, 9, 16)).second);
+    CHECK(same(written(RawTags{2, 2, 16, 0, 0}).first, 9, 9, 16, 1));  // filled; range limited
+    CHECK(written(RawTags{2, 2, 16, 0, 0}).second);
+    CHECK(same(written(RawTags{2, 9, 18, 2, 0}).first, 9, 9, 18, 2));  // full range kept
+    CHECK(same(written(RawTags{9, 9, 2, 1, 0}).first, 9, 9, 1, 1));  // BT.2020 primaries without a transfer: BT.709's curve
+    CHECK(same(written(Tags(9, 9, 8)).first, 9, 9, 8, 1));  // a log curve: kept
+    CHECK(same(written(Tags(9, 12, 16)).first, 9, 12, 16, 1));  // P3 PQ: its primaries
+    CHECK(same(written(Tags(2, 9, 8)).first, 9, 9, 8, 1));          // a log curve without its matrix: BT.2020's
+    CHECK(written(Tags(2, 9, 8)).second);
+    CHECK(same(written(Tags(9, 2, 2)).first, 9, 9, 1, 1));          // wide by the matrix alone: BT.2020 assumed, BT.709's curve
+    CHECK(same(written(Tags(9, 1, 2)).first, 9, 1, 1, 1));          // the BT.2020 matrix under BT.709 primaries: their curve
+    CHECK(same(written(Tags(14, 9, 16)).first, 14, 9, 16, 1));      // ICtCp: kept as it is
+    CHECK(same(written(RawTags{9, 9, 16, 0, 0}).first, 9, 9, 16, 1));  // the range unsaid: limited, and no tag filled
+    CHECK_FALSE(written(RawTags{9, 9, 16, 0, 0}).second);
+    CHECK_FALSE(written(Tags(14, 9, 16)).second);
+    // mixed signalling (SDR frames over PQ codec parameters): the frames' tags as they are, nothing filled
+    CHECK(same(written(Tags(9, 9, 16), Tags(1, 1, 1)).first, 1, 1, 1, 1));
+    CHECK_FALSE(written(Tags(9, 9, 16), Tags(1, 1, 1)).second);
+}
+
+TEST_CASE("A stopped ColorPlan throws ColourUnsupported from Colour Guide and ResultEncode but not from View MeasureDecode or the result tags", "[hdr]") {
+    VideoStreamInfo info;
+    info.width = 1920;
+    info.height = info.codedHeight = 1080;
+    ColourLayers in;
+    in.stream = in.container = Tags(9, 9, 16);
+    in.containerRecords.cll = Cll{1000, 400};
+    info.color = SourceColorOf(in, "420", "hevc");
+    const ColorPlan p = ResolveColor(info);
+    CHECK_FALSE(p.legacy);
+    CHECK(p.process == ColourStop::NotYet);
+    CHECK(p.all == ColourStop::None);
+    CHECK_THROWS_AS(p.Colour(), ColourUnsupported);
+    CHECK_THROWS_AS(p.Guide(), ColourUnsupported);
+    CHECK_THROWS_AS(p.ResultEncode(), ColourUnsupported);
+    CHECK_NOTHROW(p.View());
+    CHECK_NOTHROW(p.MeasureDecode());
+    CHECK(p.ResultTags().matrix == 9);
+    REQUIRE(p.ResultMeta().cll);
+    CHECK(*p.ResultMeta().cll == Cll{1000, 400});
+    try {
+        (void)p.Colour();
+    } catch (const ColourUnsupported& e) {
+        CHECK(e.kind == ColourStop::NotYet);
+        CHECK(e.cls == SourceClass::Pq);
+        CHECK(std::string(e.what()).find("processing of HDR PQ") != std::string::npos);
+    }
+    // the notes of plan level, scope source, of any class (an SDR base's Dolby Vision)
+    ColourLayers sdr;
+    sdr.stream = sdr.container = Tags(1, 1, 1);
+    DoviConf d;
+    d.profile = 8;
+    d.blCompat = 2;
+    sdr.dovi = d;
+    info.color = SourceColorOf(sdr, "420", "hevc");
+    const ColorPlan legacy = ResolveColor(info);
+    CHECK(legacy.legacy);
+    REQUIRE(legacy.notes.size() == 1);
+    CHECK(legacy.notes[0].key == "source.dv_removed");
+    CHECK(legacy.notes[0].scope == "source");
+    CHECK(legacy.ResultMeta().Empty());
+    // matrix 14: processing refused, passthrough allowed
+    ColourLayers ictcp;
+    ictcp.stream = ictcp.container = Tags(14, 9, 16);
+    info.color = SourceColorOf(ictcp, "420", "hevc");
+    const ColorPlan m = ResolveColor(info);
+    CHECK(m.process == ColourStop::Matrix);
+    CHECK(m.all == ColourStop::None);
+    CHECK_NOTHROW(RequireColour(m, ColourUse::Passthrough, "x"));
+    CHECK_THROWS_AS(RequireColour(m, ColourUse::Process, "x"), ColourUnsupported);
+    // wide gamut SDR: passthrough keeps its tags - no HDR promised (PQ says it)
+    CHECK(p.why.find("with its HDR") != std::string::npos);
+    ColourLayers wide;
+    wide.stream = wide.container = Tags(9, 9, 1);
+    wide.containerRecords.cll = Cll{1000, 400};  // a stale record of an HDR master: not the SDR grade's
+    info.color = SourceColorOf(wide, "420", "hevc");
+    const ColorPlan w = ResolveColor(info);
+    CHECK(w.ResultMeta().Empty());
+    CHECK(w.process == ColourStop::NotYet);
+    CHECK(w.why.find("writes it as it is, with its colour tags") != std::string::npos);
+    CHECK(w.why.find("HDR") == std::string::npos);
 }

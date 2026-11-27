@@ -48,6 +48,7 @@ void ParseSize(const std::string& s, uint32_t& w, uint32_t& h) {
 int CmdUpscale(const UpscaleCommands::UpscaleArgs& a) {
     VideoDecoder decoder(a.input);
     decoder.RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
+    RequireColour(ResolveColor(decoder.Info()), ColourUse::Process, "upscale: " + a.input);  // TASK-0079: before the model
     const auto& info = decoder.Info();
     UpscaleStageOptions o;
     o.backend = a.backend;
@@ -112,7 +113,7 @@ public:
         } else {
             decoder_ = std::make_unique<VideoDecoder>(path);
             decoder_->RequireDecodable();  // TASK-0076: AV1 without NVDEC AV1 refused now, not after the preparation
-            color_ = ResolveColor(decoder_->Info()).colourDecode;
+            color_ = ResolveColor(decoder_->Info()).MeasureDecode();
             count_ = decoder_->Info().frameCount;
             width_ = decoder_->Info().width;
             height_ = decoder_->Info().height;

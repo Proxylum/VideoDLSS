@@ -175,6 +175,17 @@ DisplayOrientation OrientationFromDisplayMatrix(const int32_t matrix[9], std::st
 // The 'rotate' tag of older muxers: degrees clockwise ("90", "-90", "450"); not a whole multiple of 90: the identity, `why` says so.
 DisplayOrientation OrientationFromRotateTag(std::string_view tag, std::string* why = nullptr);
 
+// TASK-0079: the first frame whose colour (its tags; the container's where it says none - not the stream's: a later sequence without a
+// colour description says none) is of another class than the source's (SourceColor::cls) - a video joined from SDR and HDR parts, a raw
+// stream whose later sequence says another colour or none.
+struct ColorClassChange {
+    int64_t index = -1;  // the frame (0-based, as --frame)
+    SourceClass from = SourceClass::Legacy, to = SourceClass::Legacy;
+    RawTags tags;  // the frame's, merged
+};
+// «frame N and on are HDR PQ (matrix ..., ...), the source was read as SDR: ...» - the result's warning
+std::string ClassChangeText(const ColorClassChange& change);
+
 // FFmpeg demuxer + video decoder producing tightly packed planar YUV CpuFrames in the source's own layout: 8-bit
 // 4:2:0 sources as before (bit-exact with FFmpeg), 10 / 12 / 16-bit and 4:2:2 / 4:4:4 sources in the matching 16-bit
 // or 8-bit planar format of Frame.h (MSB-aligned decoder outputs such as P010 are shifted to LSB alignment, so NVDEC
@@ -274,6 +285,9 @@ public:
     // false from a seek until the first frame after it: NextIndex() is a placeholder then (TASK-0040).
     bool PositionKnown() const { return !seeked_ || decodedSinceSeek_; }
     int64_t FramesDecoded() const { return framesDecoded_; }  // frames received from the decoder, all of them
+    // TASK-0079: the first frame of another colour class than the source's, met by this decoder walking from the start (not after a
+    // seek); only for a decoder that looked at the colour (Options::colorProbe)
+    const std::optional<ColorClassChange>& ClassChange() const { return classChange_; }
     int64_t Seeks() const { return seeks_; }
 
 private:
@@ -330,6 +344,8 @@ private:
     bool warnedTurnedGpu_ = false;  // a turned stream under NVDEC: no GpuFrame
     bool warnedOddWidthGpu_ = false;  // TASK-0076: an odd width under NVDEC: no GpuFrame
     bool checkedFrameMatrix_ = false;  // the first frame's own display matrix (an orientation SEI) compared with the stream's
+    bool watchColour_ = false;                        // TASK-0079: colorProbe - the class observer on
+    std::optional<ColorClassChange> classChange_;
     CpuFrame unturned_;  // the frame as stored, before OrientFrame
     bool seeked_ = false;  // indices come from pts after a seek
     bool decodedSinceSeek_ = false;
