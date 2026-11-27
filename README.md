@@ -99,9 +99,10 @@ hue = direction, saturation = magnitude) and the result after SR + NR.
 1. Download `dlss-video-<version>-win64.zip` from the [releases page](https://github.com/Proxylum/VideoDLSS/releases) (or build it yourself: `scripts\package.cmd`,
    [Build from source](#build-from-source)) and unzip it into a folder you can write to — not `Program Files`: models
    and TensorRT engines are cached next to the executables (`models\cache\`, or wherever `DLSSVID_MODELS_DIR` points).
-2. Install the [NVIDIA runtimes](#nvidia-runtimes) you need: the CUDA 12 runtime and TensorRT 10.16 for the neural
-   stages (depth, motion vectors, Real-ESRGAN, RIFE), the DLSS DLLs in `bin\nvidia\` for DLSS Super Resolution,
-   Frame Generation and Neural Rendering.
+2. Install the [NVIDIA runtimes](#nvidia-runtimes): the NVIDIA driver and the CUDA 12 runtime (`cudart64_12.dll`, from the
+   CUDA Toolkit 12.x installer) — every executable of the package imports both and does not start without them —, TensorRT
+   10.16 for the neural stages (depth, motion vectors, Real-ESRGAN, RIFE), the DLSS DLLs in `bin\nvidia\` for DLSS Super
+   Resolution, Frame Generation and Neural Rendering.
 3. Create the Python environment ([Install → Python environment](#python-environment)): it exports the models to
    ONNX on first use and runs the PyTorch workers (RealBasicVSR, the depth reference path).
 4. [Models](#models) download themselves on first use (`dlssvid models list` shows what is already there).
@@ -115,9 +116,12 @@ bin\dlssvid-gui.exe                                   :: drop a video on the sta
 bin\dlssvid.exe process -i clip.mp4 -o result.mp4     :: depth -> flow -> upscale x2 -> nr -> fg x2 -> encode (+ audio)
 ```
 
-Without an NVIDIA GPU the CLI and the viewport still work on the D3D12 software adapter (`--warp`) with the
-non-NVIDIA backends: NIS / bicubic upscale, the blend frame generator, the stub depth / NR backends — except for AV1
-videos, which only NVDEC decodes in this build (see «AV1 sources decode on the GPU» below).
+The executables (`dlssvid`, `dlssvid-gui`, the tests) import `nvcuda.dll`, which comes with the NVIDIA driver, and
+`cudart64_12.dll`, the CUDA 12 runtime: without the NVIDIA driver, or without `cudart64_12.dll` on `PATH` or in `bin\`
+(this package does not bundle it — the CUDA Toolkit 12.x installer or the full package does), Windows does not start them at
+all. On a machine with the driver, the D3D12 software adapter (`--warp`) runs the non-NVIDIA backends: NIS / bicubic upscale,
+the blend frame generator, the stub depth / NR backends — except for AV1 videos, which only NVDEC decodes in this build (see
+«AV1 sources decode on the GPU» below).
 
 ## Requirements
 
@@ -126,10 +130,10 @@ videos, which only NVDEC decodes in this build (see «AV1 sources decode on the 
 | Component | Needed for | Notes |
 |---|---|---|
 | Windows 10/11 x64 | everything | the pipeline is D3D12 + CUDA, Windows only; paths with non-ASCII letters (Cyrillic and others) need Windows 10 version 1903 or newer |
-| NVIDIA GPU | DLSS SR and NIS: RTX 20 and newer · DLSS Frame Generation: RTX 40 and newer (x3/x4 on RTX 50) · Neural Rendering: RTX 50 with the official DLL, RTX 20/30/40 with a patched copy · TensorRT models (depth, flow, Real-ESRGAN, RIFE): RTX 20 and newer | engines are built for your GPU on first use; other GPUs and the WARP software adapter run the non-NVIDIA backends only |
-| NVIDIA driver | ≥ 616.56 for Neural Rendering; any recent driver for the rest | `nvofapi64.dll` (Optical Flow) and NVDEC / NVENC come with the driver |
+| NVIDIA GPU | DLSS SR and NIS: RTX 20 and newer · DLSS Frame Generation: RTX 40 and newer (x3/x4 on RTX 50) · Neural Rendering: RTX 50 with the official DLL, RTX 20/30/40 with a patched copy · TensorRT models (depth, flow, Real-ESRGAN, RIFE): RTX 20 and newer | engines are built for your GPU on first use; the WARP software adapter (`--warp`, on a machine with the NVIDIA driver) runs the non-NVIDIA backends only |
+| NVIDIA driver | starting any executable at all (they import its `nvcuda.dll`); ≥ 616.56 for Neural Rendering, any recent driver for the rest | `nvofapi64.dll` (Optical Flow) and NVDEC / NVENC come with the driver |
 | A GPU whose NVDEC decodes AV1 | AV1 sources and results (8 / 10-bit 4:2:0): this build has no software AV1 decoder | for example, GeForce RTX 30 series and newer; `dlssvid info <file>` says whether this one does |
-| CUDA 12 runtime (`cudart64_12.dll`) | NVDEC frames on the GPU, TensorRT | from the CUDA Toolkit 12.x installer (on `PATH`) or bundled in the full package |
+| CUDA 12 runtime (`cudart64_12.dll`) | starting any executable at all (they import it); NVDEC frames on the GPU, TensorRT | from the CUDA Toolkit 12.x installer (on `PATH`) or bundled in the full package; the regular package does not have it |
 | TensorRT 10.16 runtime (`nvinfer_10.dll`, `nvonnxparser_10.dll`, `nvinfer_plugin_10.dll`, builder resources) | depth (DA3, VDA), SEA-RAFT flow, Real-ESRGAN, RIFE | the pip package `tensorrt-cu12==10.16.1.11` in the Python environment is found by itself; or `DLSSVID_TENSORRT_DIR`; or `bin\tensorrt\` of the full package |
 | Python 3.12 + the venv of `models\export\requirements.txt` (PyTorch cu126) | ONNX export of every model on first use, `depth_worker` (DA3 / VDA in PyTorch), `sr_worker` (RealBasicVSR), `nr-patch` | found at `models\export\.venv\Scripts\python.exe` or `DLSSVID_PYTHON` |
 | Disk | models and engines: ~5 GB of ONNX plus TensorRT engines per GPU; passes: EXR sequences, GBs per minute of 4K | `DLSSVID_MODELS_DIR` moves the cache; the passes folder is chosen per project |
@@ -172,13 +176,14 @@ dlss-video-<version>-win64/
 ```
 
 Not inside, on purpose: NVIDIA binaries (`nvngx_*.dll`, TensorRT, cudart), model weights and ONNX files, TensorRT
-engines — see the next two sections. `scripts\package.cmd full` builds a self-contained package (TensorRT runtime,
+engines — see the next two sections. Without `cudart64_12.dll` (the CUDA Toolkit 12.x on `PATH`) the executables of this
+package do not start. `scripts\package.cmd full` builds a self-contained package (TensorRT runtime,
 `cudart64_12.dll`, the ONNX models: several GB) for machines without CUDA / TensorRT / Python; it is not published.
 
 1. Unzip into a writable folder (models and engines are cached in `models\cache\` next to `registry.json`; set
    `DLSSVID_MODELS_DIR` to keep them elsewhere). Paths longer than 260 characters are fine (`\\?\`).
-2. [NVIDIA runtimes](#nvidia-runtimes): the CUDA 12 runtime and TensorRT on `PATH` / in the venv, the DLSS DLLs in
-   `bin\nvidia\`.
+2. [NVIDIA runtimes](#nvidia-runtimes): the NVIDIA driver and the CUDA 12 runtime on `PATH` (the executables do not start
+   without them), TensorRT on `PATH` / in the venv, the DLSS DLLs in `bin\nvidia\`.
 3. The [Python environment](#python-environment).
 4. `bin\dlssvid.exe info clip.mp4` (streams, GPU, encoders, TensorRT), `bin\dlssvid.exe nr --check`, `bin\dlssvid.exe fg --check`.
 5. Optional: the golden tests against the installed copy ([docs/release.md](docs/release.md)):
@@ -214,7 +219,7 @@ The application never redistributes NVIDIA binaries; every file below comes from
 
 | Component | Where to get it | Where it goes | Used by |
 |---|---|---|---|
-| `cudart64_12.dll` (CUDA 12 runtime) | [CUDA Toolkit 12.x](https://developer.nvidia.com/cuda-downloads) — the installer puts it on `PATH` | `PATH`, or `bin\` (the full package bundles it) | NVDEC frames staying on the GPU, TensorRT |
+| `cudart64_12.dll` (CUDA 12 runtime) | [CUDA Toolkit 12.x](https://developer.nvidia.com/cuda-downloads) — the installer puts it on `PATH` | `PATH`, or `bin\` (the full package bundles it) | every executable, to start at all (imported); NVDEC frames staying on the GPU, TensorRT |
 | TensorRT 10.16: `nvinfer_10.dll`, `nvonnxparser_10.dll`, `nvinfer_plugin_10.dll`, `nvinfer_builder_resource_*.dll` | `pip install tensorrt-cu12==10.16.1.11` (part of `requirements.txt`) or the [TensorRT](https://developer.nvidia.com/tensorrt) zip | the venv (found automatically), or `DLSSVID_TENSORRT_DIR`, or `bin\tensorrt\` | depth (`depth --backend da3|vda`), SEA-RAFT (`flow --backend searaft`), Real-ESRGAN (`upscale --backend trt`), RIFE (`fg --backend rife`) |
 | `nvngx_dlss.dll` | [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS) → `lib/Windows_x86_64/rel/` | `bin\nvidia\` | DLSS Super Resolution (`upscale --backend dlss`, the default) |
 | `nvngx_dlssg.dll` | the same DLSS SDK folder | `bin\nvidia\` | DLSS Frame Generation (`fg`, RTX 40 and newer) |
@@ -283,7 +288,8 @@ build\release\bin\dlssvid process --passthrough -i input.mp4 -o output.mp4 --cod
 build\release\bin\dlssvid process --passthrough -i input.mp4 -o output.mkv --codec ffv1   :: lossless
 ```
 
-`--hwaccel cuda` decodes with NVDEC; `--warp` runs on the D3D12 software adapter (tests, CI without a GPU).
+`--hwaccel cuda` decodes with NVDEC; `--warp` runs on the D3D12 software adapter (tests, CI) — the executables still need the
+NVIDIA driver and `cudart64_12.dll` to start.
 
 **AV1 sources decode on the GPU.** This build of FFmpeg has no software AV1 decoder, so an AV1 video (phones, OBS, YouTube,
 an `av1_nvenc` result) is always decoded by NVDEC — in the viewport, the stages, `process` and the passthrough, whatever
