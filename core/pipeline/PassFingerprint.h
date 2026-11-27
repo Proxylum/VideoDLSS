@@ -80,10 +80,24 @@ PassFingerprint ComputeFingerprint(const std::string& stage, const std::string& 
 constexpr const char* kLegacySourceFormat = "yuv420p";
 // The source format of the passes (TASK-0072): the layout the source decodes into, "+<token>" when it is shown turned ("yuv420p+r90",
 // "yuv444p10+r270"): a pass made from the stored frame is not reused for the turned one, an unturned source keeps its label - and its
-// passes.
-std::string SourceFormatLabel(const FrameDesc& decoded, DisplayOrientation orientation);
+// passes. TASK-0080 (HDR step TC): then "+<colour>" - the reading of a source that is not SDR ("c.pq.sdr1": PQ read into SDR for the
+// colour stages, "g.pq.sdr1" for the guides; [a-z0-9.], the tokens ColorPlan gives from TC-2 - nothing writes one yet): a pass made by
+// another reading is not reused. An empty
+// colour adds nothing - an SDR source keeps its label. Canonical form: <layout>[+<turn>][+<colour>].
+std::string SourceFormatLabel(const FrameDesc& decoded, DisplayOrientation orientation, std::string_view colour = {});
+// A label read as a list (TASK-0080): the first element is the layout; an element OrientationFromToken knows is the turn, one starting
+// with "c." or "g." the colour (the first of each counts); other elements - of a later version - are skipped (the label as a whole still
+// differs, so its passes are recomputed).
+struct SourceFormatParts {
+    std::string layout;
+    DisplayOrientation orientation;
+    std::string colour;
+};
+SourceFormatParts ParseSourceFormat(std::string_view label);
 // The orientation a source format label carries (the identity without a token, or with one not known).
 DisplayOrientation OrientationOfSourceFormat(std::string_view label);
+// The colour token a source format label carries ("" without one: an SDR source, or a pass made before TC).
+std::string ColourOfSourceFormat(std::string_view label);
 // First 8 hex digits of a "sha256:<hex>" value ("legacy" when empty).
 std::string ShortFingerprint(const std::string& fingerprint);
 
@@ -97,6 +111,9 @@ std::string PipelineStageNamesText();  // "(scenes | depth | flow | upscale | nr
 // Whether the stage's output depends on the scene-cut list (PR-13): it keeps a history or interpolates across frames. The one gate
 // of StageInputCandidates, the process runner (through the decision's inputs), the standalone commands and the GUI.
 bool StageReadsSceneCuts(const std::string& stage, const nlohmann::json& params);
+// Whether the stage reads the source as a guide (TASK-0080: the "g." colour token of its label) - scenes, depth and flow; the colour
+// stages (upscale, nr, fg) read it as colour ("c.").
+bool StageReadsGuideColour(const std::string& stage);
 // Whether upscale reads depth_dlss / mv_dlss: DLSS alone (IUpscaler::WantsDepthAndMv). PR-13: nis, bicubic, trt and worker have
 // no guide inputs - a new depth or new vectors do not recompute their colour.
 bool UpscaleReadsGuides(const nlohmann::json& params);

@@ -5,6 +5,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "io/VideoDecoder.h"  // Rational
@@ -54,7 +55,10 @@ struct Manifest {
     std::string filePattern;  // printf-style, e.g. "depth_raw_%06d.exr"
     PixelType pixelType = PixelType::F32;
     std::vector<std::string> channels;
-    std::string colorspace;  // "srgb" | "linear" | "bt709" | "" for non-colour passes
+    std::string colorspace;  // "srgb" | "linear" | "bt709" | "" for non-colour passes; TASK-0080: "pq" | "hlg" | "log" - codes of a source that is not SDR
+    // TASK-0080 (HDR step TC): the primaries of the colour of a pass made from a source that is not SDR (av_color_primaries_name: "bt709",
+    // "bt2020", "smpte432"); empty for every SDR source's pass - not written then, so their manifests keep their text
+    std::string primaries;
     Convention convention = Convention::Raw;
     std::string model;
     std::string modelVersion;
@@ -101,6 +105,19 @@ struct Manifest {
 
 // A text a stage recorded in stage_params ("" when absent or of another type).
 std::string StageParamText(const Manifest& m, const char* key);
+
+// TASK-0080 (HDR step TC): the colour a colour pass holds - what a stage writes and what the stage reading it expects. An SDR source's
+// passes: {"srgb", ""} (primaries unsaid: the legacy reading).
+struct PassColour {
+    std::string colorspace = "srgb";
+    std::string primaries;
+    bool operator==(const PassColour&) const = default;
+};
+// Whether the colour pass `pass` (its manifest `m`) holds the colour `want` - "" when it does, else why not (the error of the stage that
+// would read it). A legacy reading (`want.primaries` empty) refuses only a pass said to be of another source's colour (its primaries
+// set, or codes pq / hlg / log): everything an SDR source's stages read today passes. Another reading refuses a pass without primaries
+// (made before HDR and wide-gamut sources were read) and one whose colorspace or primaries differ (an empty colorspace is srgb).
+std::string PassColourMismatch(const Manifest& m, const PassColour& want, std::string_view pass);
 // TASK-0073: the pixels of a colour pass of a source whose pixels are `sourceSar` (the axes of the frame the stages get, sourceW x sourceH):
 // what the pass recorded (stage_params.pixel_aspect, PixelAspect::Stamp); a pass without the record (of the build before; depth, vectors,
 // masks) - the source's when it has the grid's proportions, else {1, 1}: the build before moved a pass off them only by an explicit target

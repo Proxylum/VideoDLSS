@@ -103,8 +103,11 @@ add_library(dlssvid_core STATIC
   passes/formats/ImageProbe.h passes/formats/ImageProbe.cpp
   convert/DepthConvert.h convert/DepthConvert.cpp
   convert/MvConvert.h convert/MvConvert.cpp
-  convert/ColorConvert.h convert/ColorConvert.cpp
+  convert/ColorConvert.h convert/ColorConvert.cpp convert/Bands.h
   convert/ColorPlan.h convert/ColorPlan.cpp
+  convert/HdrTransfer.h convert/HdrTransfer.cpp
+  convert/HdrGamut.h convert/HdrGamut.cpp
+  convert/HdrRow.h convert/HdrRowAvx2.cpp
   convert/YuvConvert.h convert/YuvConvert.cpp
   convert/Warp.h convert/Warp.cpp
   convert/SceneCut.h convert/SceneCut.cpp
@@ -173,6 +176,8 @@ if(DLSSVID_WITH_TENSORRT)
 endif()
 
 target_include_directories(dlssvid_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} PRIVATE ${DLSSVID_SHADER_GEN_DIR})
+# TASK-0080: the AVX2 row of the HDR -> SDR transfer; called only when the CPU runs AVX2 (hdrrow::HasAvx2), the rest of core stays SSE2
+set_source_files_properties(convert/HdrRowAvx2.cpp PROPERTIES COMPILE_OPTIONS "/arch:AVX2")
 target_link_libraries(dlssvid_core
   PUBLIC
     dlssvid_settings

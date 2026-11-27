@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "convert/HdrTransfer.h"
+
 namespace dlssvid {
 
 LumaThumb MakeLumaThumb(const CpuFrame& frame, const ColorInfo& info, uint32_t maxWidth) {
@@ -23,6 +25,22 @@ LumaThumb MakeLumaThumb(const CpuFrame& frame, const ColorInfo& info, uint32_t m
     const uint16_t* y16 = d.HighBitDepth() ? frame.Plane16(0) : nullptr;
     t.y.resize(static_cast<size_t>(t.width) * t.height);
     const double area = static_cast<double>(f) * f;
+    if (info.convert != Convert::None) {
+        // TASK-0080: a PQ / HLG source - every sample through its grey's SDR signal before the mean (the cut is the SDR picture's: a mean
+        // of codes is not the code of the mean's light)
+        const std::vector<float>& lut = GreyTable(info.curve, bits, info.range);
+        const size_t top = lut.size() - 1;
+        for (uint32_t ty = 0; ty < t.height; ++ty)
+            for (uint32_t tx = 0; tx < t.width; ++tx) {
+                double sum = 0.0;
+                for (uint32_t r = ty * f; r < (ty + 1) * f && r < d.height; ++r) {
+                    const size_t row = static_cast<size_t>(r) * cols;
+                    for (uint32_t c = tx * f; c < (tx + 1) * f && c < d.width; ++c) sum += lut[std::min<size_t>(y16 ? y16[row + c] : y8[row + c], top)];
+                }
+                t.y[static_cast<size_t>(ty) * t.width + tx] = static_cast<float>(std::clamp(sum / area, 0.0, 1.0));
+            }
+        return t;
+    }
     for (uint32_t ty = 0; ty < t.height; ++ty)
         for (uint32_t tx = 0; tx < t.width; ++tx) {
             double sum = 0.0;

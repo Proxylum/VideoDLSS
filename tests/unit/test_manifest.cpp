@@ -159,3 +159,146 @@ TEST_CASE("Manifest::IsYUpMv only for motion-vector passes with mv.y_up", "[pass
     custom.mv.yUp = true;
     CHECK_FALSE(custom.IsYUpMv());
 }
+
+// TASK-0080 (TC-1, guard of the SDR path): the text of a colour pass's manifest from an SDR source is frozen - fields TC adds for non-SDR
+// sources ("primaries") are written only when set, so an SDR manifest stays byte for byte what it was.
+TEST_CASE("A legacy colour manifest keeps its text", "[passes][manifest][hdr][regression]") {
+    Manifest m = Manifest::ForPass(PassKind::ColorSr, 192, 108, FileFormat::Exr);
+    m.fps = Rational{24, 1};
+    m.frameCount = 6;
+    m.firstFrame = 0;
+    m.lastFrame = 5;
+    m.sourceFile = "clip.mkv";
+    m.sourceHash = "sha256:src";
+    m.sourceFormat = "yuv420p10";
+    m.stageParams = {{"backend", "bicubic"}, {"scale", 2.0}};
+    m.fingerprint = "sha256:fp";
+    m.inputs = {{"color_source", "sha256:in"}};
+    m.tool = {{"app", "0.1.0"}, {"backend", "bicubic"}};
+    m.paramsCanonical = {{"backend", "bicubic"}, {"scale", 2}};
+    m.created = "2026-11-27T00:00:00Z";
+    CHECK(m.ToJson().dump(2) == R"({
+  "channels": [
+    "R",
+    "G",
+    "B"
+  ],
+  "colorspace": "srgb",
+  "convention": "raw",
+  "created": "2026-11-27T00:00:00Z",
+  "depth": {
+    "far": 1000.0,
+    "max": 0.0,
+    "min": 0.0,
+    "near": 0.10000000149011612,
+    "relative": false,
+    "units": "meters"
+  },
+  "file_pattern": "color_sr_%06d.exr",
+  "fingerprint": "sha256:fp",
+  "format": "exr",
+  "fps": {
+    "den": 1,
+    "num": 24
+  },
+  "frame_count": 6,
+  "frame_range": {
+    "first": 0,
+    "last": 5
+  },
+  "height": 108,
+  "inputs": {
+    "color_source": "sha256:in"
+  },
+  "model": {
+    "name": "",
+    "version": ""
+  },
+  "mv": {
+    "direction": "forward",
+    "ref_height": 0,
+    "ref_width": 0,
+    "y_up": false
+  },
+  "params_canonical": {
+    "backend": "bicubic",
+    "scale": 2
+  },
+  "pass": "color_sr",
+  "pixel_type": "f16",
+  "schema_version": 1,
+  "source": {
+    "file": "clip.mkv",
+    "format": "yuv420p10",
+    "hash": "sha256:src"
+  },
+  "stage_params": {
+    "backend": "bicubic",
+    "scale": 2.0
+  },
+  "tool": {
+    "app": "0.1.0",
+    "backend": "bicubic"
+  },
+  "width": 192
+})");
+}
+
+// TASK-0080 (HDR step TC-1): the primaries of a non-SDR source's pass round-trip; an SDR pass (empty) writes no key.
+TEST_CASE("Manifest primaries round-trip; an SDR pass writes none", "[passes][manifest][hdr]") {
+    Manifest m = Manifest::ForPass(PassKind::ColorSr, 64, 48, FileFormat::Exr);
+    CHECK(m.primaries.empty());
+    CHECK_FALSE(m.ToJson().contains("primaries"));
+    CHECK(Manifest::FromJson(m.ToJson()).primaries.empty());
+    m.colorspace = "pq";
+    m.primaries = "bt2020";
+    const nlohmann::json j = m.ToJson();
+    CHECK(j["primaries"] == "bt2020");
+    const Manifest back = Manifest::FromJson(j);
+    CHECK(back.primaries == "bt2020");
+    CHECK(back.colorspace == "pq");
+    const auto dir = Tmp("primaries");
+    std::filesystem::remove_all(dir);
+    m.Save(dir);
+    CHECK(Manifest::Load(dir).primaries == "bt2020");
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("PassColourMismatch over legacy and HDR readings", "[passes][manifest][hdr]") {
+    auto pass = [](const char* colorspace, const char* primaries) {
+        Manifest m = Manifest::ForPass(PassKind::ColorSr, 8, 8, FileFormat::Exr);
+        m.colorspace = colorspace;
+        m.primaries = primaries;
+        return m;
+    };
+    const PassColour legacy;  // an SDR source: {srgb, ""}
+    CHECK(legacy.colorspace == "srgb");
+    CHECK(legacy.primaries.empty());
+    // the legacy reading takes everything an SDR source's stages read today
+    for (const char* cs : {"", "linear", "srgb", "bt709"}) {
+        INFO(cs);
+        CHECK(PassColourMismatch(pass(cs, ""), legacy, "color_sr").empty());
+    }
+    // ... and refuses a pass said to hold another source's colour, naming it
+    CHECK(PassColourMismatch(pass("pq", ""), legacy, "color_sr") == "color_sr holds pq colour of a source that is not SDR, this source reads as SDR - recompute it");
+    CHECK(PassColourMismatch(pass("hlg", "bt2020"), legacy, "color_nr") ==
+          "color_nr holds hlg / bt2020 colour of a source that is not SDR, this source reads as SDR - recompute it");
+    CHECK_FALSE(PassColourMismatch(pass("log", ""), legacy, "color_sr").empty());
+    CHECK(PassColourMismatch(pass("hlg", ""), legacy, "color_sr") == "color_sr holds hlg colour of a source that is not SDR, this source reads as SDR - recompute it");
+    CHECK(PassColourMismatch(pass("pq", "bt2020"), legacy, "color_sr") ==
+          "color_sr holds pq / bt2020 colour of a source that is not SDR, this source reads as SDR - recompute it");
+    CHECK_FALSE(PassColourMismatch(pass("log", "bt2020"), legacy, "color_sr").empty());
+    CHECK(PassColourMismatch(pass("srgb", "bt709"), legacy, "color_sr") ==
+          "color_sr holds srgb / bt709 colour of a source that is not SDR, this source reads as SDR - recompute it");
+    // SDR from HDR (TC-2): srgb under BT.709 primaries
+    const PassColour sdr1{"srgb", "bt709"};
+    CHECK(PassColourMismatch(pass("srgb", ""), sdr1, "color_sr") == "color_sr was made before HDR and wide-gamut sources were read - recompute it");
+    CHECK(PassColourMismatch(pass("", ""), sdr1, "color_sr") == "color_sr was made before HDR and wide-gamut sources were read - recompute it");
+    CHECK(PassColourMismatch(pass("pq", "bt2020"), sdr1, "color_sr") == "color_sr holds pq / bt2020 colour, this source reads as srgb / bt709 - recompute it");
+    CHECK(PassColourMismatch(pass("srgb", "bt2020"), sdr1, "color_sr") == "color_sr holds srgb / bt2020 colour, this source reads as srgb / bt709 - recompute it");
+    CHECK(PassColourMismatch(pass("srgb", "bt709"), sdr1, "color_sr").empty());
+    CHECK(PassColourMismatch(pass("", "bt709"), sdr1, "color_sr").empty());  // an empty colorspace is srgb
+    // codes of a wide gamut and of a log curve
+    CHECK(PassColourMismatch(pass("log", "bt2020"), PassColour{"log", "bt2020"}, "color_sr").empty());
+    CHECK_FALSE(PassColourMismatch(pass("srgb", "bt2020"), PassColour{"log", "bt2020"}, "color_sr").empty());
+}

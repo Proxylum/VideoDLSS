@@ -1531,6 +1531,29 @@ TEST_CASE("RecentPreviews: a turned clip's thumbnail and line as shown; one the 
     CHECK(p.meta == QString::fromUtf8("32×48 24 fps"));
 }
 
+// TASK-0080 (TC-1, guard of the SDR path): the thumbnail key of an SDR video is the "v3" formula of the file stamps - HDR sources get a
+// colour token in TC-3, an SDR one keeps its cached PNG. The stamp is computed here, not taken from RecentPreviews.
+TEST_CASE("RecentPreviews: the thumbnail key of an SDR video is the v3 formula", "[app][previews][hdr][regression]") {
+    App();
+    const auto d = Dir("previews_sdr_key");
+    RecentPreviews::SetCacheDir(Q(d / "cache"));
+    ClipSpec spec;
+    spec.frames = 2;
+    spec.width = 48;
+    spec.height = 32;
+    const QString clip = Q(WriteClip(d / "clip.mkv", spec));
+    const QString result = Q(WriteClip(d / "result.mkv", spec));
+    auto stamp = [](const QString& f) {
+        const QFileInfo fi(f);
+        return f + "|" + QString::number(fi.size()) + "|" + QString::number(fi.lastModified().toMSecsSinceEpoch());
+    };
+    auto file = [&](const QString& text) {
+        return Q(d / "cache") + "/" + QString::fromLatin1(QCryptographicHash::hash(text.toUtf8(), QCryptographicHash::Sha1).toHex()) + ".png";
+    };
+    CHECK(RecentPreviews::CacheFile(clip, {}) == file("v3\n" + stamp(clip) + "\n"));
+    CHECK(RecentPreviews::CacheFile(clip, result) == file("v3\n" + stamp(clip) + "\n" + stamp(result)));
+}
+
 TEST_CASE("Stage cards name the recompute of a source now shown turned and of the long-side 4K cap", "[app][orientation][regression]") {
     App();
     auto processed = [](const std::filesystem::path& d, const ClipSpec& spec, const std::function<void(Project&)>& edit) {

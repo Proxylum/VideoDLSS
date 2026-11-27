@@ -323,3 +323,57 @@ TEST_CASE("Settings note: a turned source says so first - source: rotate=90; an 
     CHECK(BuildSettingsNote(root, "color_sr", {90, false}).find("| source: rotate=90 |") != std::string::npos);
     CHECK_FALSE(BuildSettingsJson(root, "color_sr").contains("source"));
 }
+
+// TASK-0080 (HDR step TC-1): the label of a source that is not SDR carries its colour reading after the turn - <layout>[+<turn>][+<colour>] -
+// and is read as a list, so the turn's readers keep the turn when a colour token follows it.
+TEST_CASE("Source format label: colour after the turn, parsed as a list", "[orientation][fingerprint][hdr]") {
+    const FrameDesc d420{1920, 1080, PixelFormat::Yuv420p, 8}, d10{1920, 1080, PixelFormat::Yuv420p16, 10};
+    CHECK(SourceFormatLabel(d10, {90, false}, "c.pq.sdr1") == "yuv420p10+r90+c.pq.sdr1");
+    CHECK(SourceFormatLabel(d10, {}, "g.hlg.sdr1") == "yuv420p10+g.hlg.sdr1");
+    CHECK(SourceFormatLabel(d10, {270, true}, "c.2020") == "yuv420p10+r270h+c.2020");
+    CHECK(SourceFormatLabel(d420, {}, "") == "yuv420p");  // an SDR source: no colour, the label of before
+    CHECK(SourceFormatLabel(d420, {90, false}, {}) == "yuv420p+r90");
+    struct Case {
+        const char* label;
+        const char* layout;
+        DisplayOrientation o;
+        const char* colour;
+    };
+    for (const Case& c : {Case{"yuv420p10+r90+c.pq.sdr1", "yuv420p10", {90, false}, "c.pq.sdr1"}, Case{"yuv420p10+c.pq.sdr1", "yuv420p10", {}, "c.pq.sdr1"},
+                          Case{"yuv420p10+g.log", "yuv420p10", {}, "g.log"}, Case{"yuv420p+r180", "yuv420p", {180, false}, ""},
+                          Case{"yuv444p10+r270h+g.2020", "yuv444p10", {270, true}, "g.2020"}, Case{"yuv420p", "yuv420p", {}, ""}, Case{"", "", {}, ""},
+                          Case{"yuv420p+r45", "yuv420p", {}, ""},
+                          // a later version's element is skipped; the first turn and the first colour count
+                          Case{"yuv420p10+x.next+r90+c.pq.sdr2+r180+g.pq.sdr1", "yuv420p10", {90, false}, "c.pq.sdr2"},
+                          // a colour before the turn (not written by this version) still reads both
+                          Case{"yuv420p10+c.pq.sdr1+r90", "yuv420p10", {90, false}, "c.pq.sdr1"}}) {
+        INFO(c.label);
+        const SourceFormatParts p = ParseSourceFormat(c.label);
+        CHECK(p.layout == c.layout);
+        CHECK(p.orientation == c.o);
+        CHECK(p.colour == c.colour);
+        CHECK(OrientationOfSourceFormat(c.label) == c.o);
+        CHECK(ColourOfSourceFormat(c.label) == c.colour);
+    }
+    // the stages that read the source as a guide
+    for (const char* s : {"scenes", "depth", "flow"}) CHECK(StageReadsGuideColour(s));
+    for (const char* s : {"upscale", "nr", "fg", "", "masks"}) CHECK_FALSE(StageReadsGuideColour(s));
+}
+
+TEST_CASE("A label with a turn and a colour token keeps the turn for its readers", "[orientation][encode][hdr]") {
+    CHECK(OrientationOfSourceFormat("yuv420p10+r90+c.pq.sdr1") == DisplayOrientation{90, false});
+    CHECK(OrientationOfSourceFormat("yuv420p10+c.pq.sdr1").Identity());
+    CHECK(OrientationOfSourceFormat("yuv420p+r180") == DisplayOrientation{180, false});
+    // the settings note of a result reads the turn from the encoded pass's label
+    const auto root = std::filesystem::path(DLSSVID_TEST_TMP) / "settings_note" / "turned_colour";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root);
+    Manifest m = Manifest::ForPass(PassKind::ColorSr, 2160, 3840, FileFormat::Exr);
+    m.stageParams = {{"backend", "nis"}, {"scale", 2.0}};
+    m.sourceFormat = "yuv420p10+r90+c.pq.sdr1";
+    m.Save(root / "color_sr");
+    CHECK(BuildSettingsNote(root, "color_sr") == std::string("VideoDLSS ") + DLSSVID_VERSION + " | source: rotate=90 | upscale: nis x2");
+    m.sourceFormat = "yuv420p10+c.pq.sdr1";
+    m.Save(root / "color_sr");
+    CHECK_FALSE(BuildSettingsJson(root, "color_sr", {90, false}).contains("source"));  // the label says it: unturned
+}

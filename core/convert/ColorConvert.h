@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "io/VideoDecoder.h"
 #include "passes/PassImage.h"
 #include "pipeline/Frame.h"
@@ -10,10 +12,20 @@ namespace dlssvid {
 // (TASK-0075); which source gets which is decided by ResolveColor (convert/ColorPlan.h) alone.
 enum class ColorMatrix { Bt601, Bt709, Bt2020 };
 enum class ColorRange { Limited, Full };
+// TASK-0080 (HDR step TC): what the decode does with the R'G'B' the matrix gives. None: they are the result (every SDR source - the
+// path of before, bit for bit). HdrToSdr1: they are codes of `curve` under `gamut`'s primaries, turned into SDR BT.709 by HdrTransfer
+// (convert/HdrTransfer.h, version `sdr1`; from TC-2 the passes' colour token names it).
+enum class Convert : uint8_t { None, HdrToSdr1 };
+enum class Curve : uint8_t { Sdr, Pq, Hlg };     // the codes' curve when convert != None
+enum class Gamut : uint8_t { Bt709, Bt2020 };    // the codes' primaries: Bt709 skips the gamut step
 
 struct ColorInfo {
     ColorMatrix matrix = ColorMatrix::Bt709;
     ColorRange range = ColorRange::Limited;
+    Convert convert = Convert::None;
+    Curve curve = Curve::Sdr;
+    Gamut gamut = Gamut::Bt709;
+    bool operator==(const ColorInfo&) const = default;
 };
 
 // Stream metadata when present, otherwise BT.709 for >= 720 lines of the stored frame (codedHeight: before a display turn, TASK-0072)
@@ -26,6 +38,7 @@ std::string_view ToString(ColorRange r);
 // transfer, [0,1]); chroma is replicated (nearest) so the result is deterministic and reversible per block. Limited
 // range scales with the bit depth (16..235 at 8 bits is 64..940 at 10). U16 output = round(v * 65535).
 // `threads`: bands of rows converted in parallel, as YuvToRgba16f (0 = auto); the result does not depend on it.
+// info.convert != None: the R'G'B' go through HdrTransfer::For(info.curve, info.gamut) (Curve::Sdr throws, before any band).
 PassImage YuvToRgb(const CpuFrame& frame, const ColorInfo& info, PixelType outType = PixelType::F16, int threads = 0);
 
 // Same conversion straight into the viewport's RGBA16F texture layout (alpha = 1). Bit-identical to
@@ -39,7 +52,8 @@ PassImage ToRgba16f(const PassImage& img);
 
 // Inverse of YuvToRgb: display-referred RGB (float [0,1], integers scaled) -> tightly packed YUV of `target`'s
 // format and bit depth (BT.601/709/2020, limited/full range), chroma = mean of each block (2x2 for 4:2:0, 2x1 for
-// 4:2:2, the pixel itself for 4:4:4), rounded to nearest. `target.width/height` are taken from the image.
+// 4:2:2, the pixel itself for 4:4:4), rounded to nearest. `target.width/height` are taken from the image. A reading that converts
+// (info.convert != None) throws: the matrix of a decode is no encoding matrix.
 void RgbToYuv(const PassImage& rgb, const ColorInfo& info, FrameDesc target, CpuFrame& out);
 // The 8-bit 4:2:0 case (previews, tests).
 void RgbToYuv420p(const PassImage& rgb, const ColorInfo& info, CpuFrame& out);

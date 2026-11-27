@@ -126,6 +126,20 @@ TEST_CASE("Golden: the deterministic pipeline on WARP matches the stored referen
         if (it.value().contains("height")) CHECK(rd.Man().height == it.value()["height"].get<uint32_t>());
         if (it.value().contains("fps")) CHECK(rd.Man().fps.ToDouble() == it.value()["fps"].get<double>());
     }
+    // TASK-0080 (TC-1, guard of the SDR path): the manifests of an SDR clip's passes keep their keys - no "primaries", colour passes
+    // "srgb", the source format without a colour token (c.* / g.* belong to non-SDR sources only)
+    for (auto it = e["passes"].begin(); it != e["passes"].end(); ++it) {
+        INFO("manifest of " << it.key());
+        const nlohmann::json j = ReadJson(dir / "passes" / it.key() / Manifest::kFileName);
+        std::vector<std::string> keys;
+        for (auto k = j.begin(); k != j.end(); ++k) keys.push_back(k.key());
+        CHECK(keys == std::vector<std::string>{"channels", "colorspace", "convention", "created", "depth", "file_pattern", "fingerprint", "format", "fps", "frame_count",
+                                               "frame_range", "height", "inputs", "model", "mv", "params_canonical", "pass", "pixel_type", "schema_version", "source",
+                                               "stage_params", "tool", "width"});
+        CHECK_FALSE(j.contains("primaries"));
+        if (it.key().rfind("color_", 0) == 0) CHECK(j["colorspace"] == "srgb");
+        CHECK(j["source"].value("format", "") == "yuv420p");
+    }
     // the scene-cut list (PR-13): a data pass, no frames to read; the synthetic clip has no cut
     {
         std::string why;

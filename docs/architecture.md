@@ -805,6 +805,14 @@ dlssvid process ── ProcessRunner::RunProcess ── depth ─▶ flow ─▶
   команды отказывают до хэша), а сквозной режим пишет эффективные теги и записи (`PlanPassthroughColour`,
   `core/pipeline/ResultColour`; `VideoEncoder::Options::hdr`, `ContainerColorCapsFor`; сверка — `ResultExpectation::color`).
   Декодер следит за классом кадров (`ClassChange`). Вьюпорт и миниатюры читают по-прежнему (`View()`).
+  Перевод HDR→SDR (TC-1, TASK-0080) уже в ядре, но им пока никто не пользуется — обработка остановлена до TC-2:
+  `ColorInfo{convert = HdrToSdr1, curve, gamut}` ведёт `YuvToRgb` / `YuvToRgba16f` через `HdrTransfer`
+  (`core/convert/HdrTransfer`: свет кодов PQ или HLG с OOTF 1000 нит, BT.2390 EETF 1000 → 203 нит по maxRGB, таблицы
+  по 4096 отрезков, `Ys^0.2` и обратная PQ — таблицами по октавам float, BT.1886⁻¹) и шаг охвата G1 BT.2020 → BT.709
+  (`core/convert/HdrGamut`: I и тон ICtCp постоянны, меняется цветность, колено 0.8; границы кубов — таблицы 128 строк,
+  они и есть определение, сборщик строит их при первом HDR-кадре за ~35 мс на 8 потоках). Строку считает AVX2-ядро
+  (`HdrRowAvx2.cpp`, `/arch:AVX2`, выбор по CPUID) — бит в бит как переносимый путь (`HdrRow.h` — общие для обоих
+  таблицы); `hdr::` — эталон в double, `GreyTable` — серые миниатюр склеек.
 - **Ориентация источника (TASK-0072).** Ролик с телефона хранится альбомным с матрицей дисплея (MP4 / MOV `tkhd`,
   проекция Matroska) или, у старых мультиплексоров, с тегом `rotate`; плееры показывают его повёрнутым. `VideoDecoder`
   читает ориентацию при открытии (матрица побеждает тег; `OrientationFromDisplayMatrix` повторяет выбор фильтров ffmpeg:

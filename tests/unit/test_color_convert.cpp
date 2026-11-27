@@ -1,10 +1,17 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
 #include <cmath>
 #include <cstdlib>
 #include <vector>
 
+#include "convert/Bands.h"
 #include "convert/ColorConvert.h"
 #include "convert/ColorPlan.h"
 
@@ -501,8 +508,8 @@ TEST_CASE("YuvToRgb in bands of rows is the same bit for bit whatever the thread
     }
 }
 
-// A frame without its data is refused before the bands start: thrown inside a worker thread (or while workers run) it
-// would end the process with std::terminate instead of reaching the caller's catch (thumbnails, stages).
+// A frame without its data is refused on the caller's thread, once, before any band starts (TASK-0077; before TASK-0080 an exception in a
+// band ended the process with std::terminate - now ForEachBand hands it to the caller too, tested below).
 TEST_CASE("YuvToRgb and YuvToRgba16f refuse a frame without data before converting in bands", "[convert][color][hdr][regression]") {
     const ColorInfo ci{ColorMatrix::Bt709, ColorRange::Limited};
     CpuFrame tall;
@@ -512,5 +519,75 @@ TEST_CASE("YuvToRgb and YuvToRgba16f refuse a frame without data before converti
         INFO("threads " << threads);
         CHECK_THROWS(YuvToRgb(tall, ci, PixelType::F16, threads));
         CHECK_THROWS(YuvToRgba16f(tall, ci, threads));
+    }
+}
+
+// TASK-0080: the bands cover [0, h) once, and an exception in any band - the caller's own or a worker's - reaches the caller after every
+// band has finished (a failed allocation of the HDR rows' buffers must not end the process).
+TEST_CASE("ForEachBand covers the rows once and hands a band's exception to the caller after the join", "[convert][color][hdr]") {
+    for (const int threads : {1, 3, 4, 8}) {
+        INFO("threads " << threads);
+        std::vector<int> seen(401, 0);
+        std::mutex m;
+        detail::ForEachBand(401, threads, [&](uint32_t y0, uint32_t y1) {
+            const std::lock_guard<std::mutex> lock(m);
+            for (uint32_t y = y0; y < y1; ++y) ++seen[y];
+        });
+        CHECK(std::all_of(seen.begin(), seen.end(), [](int c) { return c == 1; }));
+    }
+    for (const uint32_t bad : {0u, 399u}) {  // the band of the caller's thread, the last worker's
+        INFO("throwing row " << bad);
+        std::atomic<int> finished{0};
+        const auto rows = [&](uint32_t y0, uint32_t y1) {
+            if (bad >= y0 && bad < y1) throw std::runtime_error("band");
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            ++finished;
+        };
+        bool thrown = false;
+        try {
+            detail::ForEachBand(400, 4, rows);
+        } catch (const std::runtime_error& e) {
+            thrown = std::string(e.what()) == "band";
+        }
+        CHECK(thrown);
+        CHECK(finished == 3);  // the other bands ran to their end before the throw reached the caller
+    }
+}
+
+// TASK-0080 (TC-1, guard of the SDR path): YuvToRgb of 10-bit 4:2:0 and 4:4:4 frames is frozen - the HDR->SDR branch of ForEachRgbOf
+// (ColorInfo::convert) must leave the plain branch bit for bit. The 8-bit 4:2:0 path is held by the reference converters above.
+TEST_CASE("The SDR branch of YuvToRgb is untouched: frozen 10-bit samples", "[convert][color][hdr][regression]") {
+    auto fnv = [](const std::vector<uint8_t>& bytes) {
+        uint64_t h = 1469598103934665603ull;
+        for (const uint8_t b : bytes) h = (h ^ b) * 1099511628211ull;
+        return h;
+    };
+    struct Case {
+        PixelFormat fmt;
+        ColorInfo ci;
+        PixelType type;
+        uint64_t hash;
+    };
+    const ColorInfo l709{ColorMatrix::Bt709, ColorRange::Limited}, f601{ColorMatrix::Bt601, ColorRange::Full}, l2020{ColorMatrix::Bt2020, ColorRange::Limited};
+    const Case cases[] = {
+        {PixelFormat::Yuv420p16, l709, PixelType::F32, 0xc76b94cfdca6a4b2ull},  {PixelFormat::Yuv420p16, l709, PixelType::F16, 0xc9a6e8f67b4d4969ull},
+        {PixelFormat::Yuv420p16, l709, PixelType::U16, 0xa99976db72db8c0cull},  {PixelFormat::Yuv420p16, l709, PixelType::U8, 0x64e667bb7f2d9351ull},
+        {PixelFormat::Yuv420p16, f601, PixelType::F32, 0x88f311b61c8e95f9ull},  {PixelFormat::Yuv420p16, l2020, PixelType::F32, 0x4d24493ad006ad8bull},
+        {PixelFormat::Yuv444p16, l709, PixelType::F32, 0x6537dc22561faa0eull},  {PixelFormat::Yuv444p16, l2020, PixelType::F16, 0x85d500dc73567988ull},
+    };
+    for (const Case& c : cases) {
+        CpuFrame f;
+        f.Allocate(FrameDesc{22, 37, c.fmt, 10});
+        uint32_t seed = 2026;
+        auto* p = reinterpret_cast<uint16_t*>(f.data.data());
+        for (size_t k = 0; k < f.data.size() / 2; ++k) p[k] = static_cast<uint16_t>((seed = seed * 1664525u + 1013904223u) >> 16 & 1023u);
+        INFO(ToString(c.fmt) << " " << ToString(c.ci.matrix) << " " << ToString(c.type));
+        CHECK(fnv(YuvToRgb(f, c.ci, c.type).data) == c.hash);
+        if (c.type == PixelType::F16) {
+            const PassImage a = YuvToRgba16f(f, c.ci);
+            std::vector<uint8_t> rgb;
+            for (size_t i = 0; i < a.data.size() / 8; ++i) rgb.insert(rgb.end(), a.data.begin() + i * 8, a.data.begin() + i * 8 + 6);
+            CHECK(fnv(rgb) == c.hash);
+        }
     }
 }
