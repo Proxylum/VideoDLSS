@@ -380,6 +380,22 @@ TEST_CASE("HDR passthrough into 8 bits warns of banding: h264_nvenc planned, FFV
     const auto pq = PqFfv1(dir, "pq.mkv");
     ProcessOptions plan = Passthrough(pq, dir / "out.mp4", "h264_nvenc");
     CHECK(HasKey(PlanProcess(plan).warnings, "encode.hdr_8bit"));
+    for (const PlanNote& n : PlanProcess(plan).warnings)  // the levels: a loss is a warning, a source's assumption a note
+        if (n.key == "encode.hdr_8bit") CHECK(n.level == "warning");
+    {  // the same in the CLI's plan and its JSON
+        const auto json = dir / "plan.json";
+        const auto cli = RunAll({"process", "-i", pq.string(), "-o", (dir / "o.mp4").string(), "--passthrough", "--plan", "--codec", "h264_nvenc", "--json",
+                                 json.string()},
+                                dir / "plan.log");
+        INFO(cli.out);
+        CHECK(cli.code == 0);
+        CHECK_THAT(cli.out, ContainsSubstring("warning: encode: HDR in 8 bits"));
+        std::ifstream f(json);
+        const nlohmann::json j = nlohmann::json::parse(f);
+        bool warned = false;
+        for (const auto& w : j["warnings"]) warned = warned || (w["key"] == "encode.hdr_8bit" && w["level"] == "warning");
+        CHECK(warned);
+    }
     plan.codec = "hevc_nvenc";
     CHECK_FALSE(HasKey(PlanProcess(plan).warnings, "encode.hdr_8bit"));
     ProcessOptions run = Passthrough(pq, dir / "out8.mkv", "ffv1");
