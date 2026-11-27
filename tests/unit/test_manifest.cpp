@@ -243,3 +243,58 @@ TEST_CASE("A legacy colour manifest keeps its text", "[passes][manifest][hdr][re
   "width": 192
 })");
 }
+
+// TASK-0080 (HDR step TC-1): the primaries of a non-SDR source's pass round-trip; an SDR pass (empty) writes no key.
+TEST_CASE("Manifest primaries round-trip; an SDR pass writes none", "[passes][manifest][hdr]") {
+    Manifest m = Manifest::ForPass(PassKind::ColorSr, 64, 48, FileFormat::Exr);
+    CHECK(m.primaries.empty());
+    CHECK_FALSE(m.ToJson().contains("primaries"));
+    CHECK(Manifest::FromJson(m.ToJson()).primaries.empty());
+    m.colorspace = "pq";
+    m.primaries = "bt2020";
+    const nlohmann::json j = m.ToJson();
+    CHECK(j["primaries"] == "bt2020");
+    const Manifest back = Manifest::FromJson(j);
+    CHECK(back.primaries == "bt2020");
+    CHECK(back.colorspace == "pq");
+    const auto dir = std::filesystem::temp_directory_path() / "dlssvid_manifest_primaries";
+    std::filesystem::remove_all(dir);
+    m.Save(dir);
+    CHECK(Manifest::Load(dir).primaries == "bt2020");
+    std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("PassColourMismatch over legacy and HDR readings", "[passes][manifest][hdr]") {
+    auto pass = [](const char* colorspace, const char* primaries) {
+        Manifest m = Manifest::ForPass(PassKind::ColorSr, 8, 8, FileFormat::Exr);
+        m.colorspace = colorspace;
+        m.primaries = primaries;
+        return m;
+    };
+    const PassColour legacy;  // an SDR source: {srgb, ""}
+    CHECK(legacy.colorspace == "srgb");
+    CHECK(legacy.primaries.empty());
+    // the legacy reading takes everything an SDR source's stages read today
+    for (const char* cs : {"", "linear", "srgb", "bt709"}) {
+        INFO(cs);
+        CHECK(PassColourMismatch(pass(cs, ""), legacy, "color_sr").empty());
+    }
+    // ... and refuses a pass said to hold another source's colour, naming it
+    CHECK(PassColourMismatch(pass("pq", ""), legacy, "color_sr") == "color_sr holds pq colour of a source that is not SDR, this source reads as SDR - recompute it");
+    CHECK(PassColourMismatch(pass("hlg", "bt2020"), legacy, "color_nr") ==
+          "color_nr holds hlg / bt2020 colour of a source that is not SDR, this source reads as SDR - recompute it");
+    CHECK_FALSE(PassColourMismatch(pass("log", ""), legacy, "color_sr").empty());
+    CHECK(PassColourMismatch(pass("srgb", "bt709"), legacy, "color_sr") ==
+          "color_sr holds srgb / bt709 colour of a source that is not SDR, this source reads as SDR - recompute it");
+    // SDR from HDR (TC-2): srgb under BT.709 primaries
+    const PassColour sdr1{"srgb", "bt709"};
+    CHECK(PassColourMismatch(pass("srgb", ""), sdr1, "color_sr") == "color_sr was made before HDR and wide-gamut sources were read - recompute it");
+    CHECK(PassColourMismatch(pass("", ""), sdr1, "color_sr") == "color_sr was made before HDR and wide-gamut sources were read - recompute it");
+    CHECK(PassColourMismatch(pass("pq", "bt2020"), sdr1, "color_sr") == "color_sr holds pq / bt2020 colour, this source reads as srgb / bt709 - recompute it");
+    CHECK(PassColourMismatch(pass("srgb", "bt2020"), sdr1, "color_sr") == "color_sr holds srgb / bt2020 colour, this source reads as srgb / bt709 - recompute it");
+    CHECK(PassColourMismatch(pass("srgb", "bt709"), sdr1, "color_sr").empty());
+    CHECK(PassColourMismatch(pass("", "bt709"), sdr1, "color_sr").empty());  // an empty colorspace is srgb
+    // codes of a wide gamut and of a log curve
+    CHECK(PassColourMismatch(pass("log", "bt2020"), PassColour{"log", "bt2020"}, "color_sr").empty());
+    CHECK_FALSE(PassColourMismatch(pass("srgb", "bt2020"), PassColour{"log", "bt2020"}, "color_sr").empty());
+}

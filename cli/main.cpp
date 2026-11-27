@@ -109,6 +109,7 @@ void PrintManifest(const PassReader& r) {
                 static_cast<long long>(m.lastFrame), r.MissingFrames().empty() ? "" : "  MISSING FRAMES");
     if (m.fps.num) std::printf("fps:         %d/%d\n", m.fps.num, m.fps.den);
     if (!m.colorspace.empty()) std::printf("colorspace:  %s\n", m.colorspace.c_str());
+    if (!m.primaries.empty()) std::printf("primaries:   %s\n", m.primaries.c_str());  // TASK-0080: a non-SDR source's pass
     if (m.pass == "depth_raw" || m.pass == "depth_dlss")
         std::printf("depth:       %s near=%g far=%g%s\n", m.depth.units.c_str(), m.depth.zNear, m.depth.zFar,
                     m.depth.relative ? (" min=" + std::to_string(m.depth.minValue) + " max=" + std::to_string(m.depth.maxValue)).c_str() : "");

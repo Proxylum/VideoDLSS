@@ -213,17 +213,40 @@ std::string ShortFingerprint(const std::string& fingerprint) {
 
 std::string PassFingerprint::Short() const { return ShortFingerprint(value); }
 
-std::string SourceFormatLabel(const FrameDesc& decoded, DisplayOrientation orientation) {
+std::string SourceFormatLabel(const FrameDesc& decoded, DisplayOrientation orientation, std::string_view colour) {
     std::string s = decoded.Name();
     if (!orientation.Identity()) s += "+" + orientation.Token();
+    if (!colour.empty()) s += "+" + std::string(colour);
     return s;
 }
 
-DisplayOrientation OrientationOfSourceFormat(std::string_view label) {
-    const size_t plus = label.find('+');
-    if (plus == std::string_view::npos) return {};
-    return OrientationFromToken(label.substr(plus + 1)).value_or(DisplayOrientation{});
+SourceFormatParts ParseSourceFormat(std::string_view label) {
+    SourceFormatParts parts;
+    bool turned = false;
+    size_t start = 0;
+    for (bool first = true;; first = false) {
+        const size_t plus = label.find('+', start);
+        const std::string_view e = label.substr(start, plus == std::string_view::npos ? std::string_view::npos : plus - start);
+        if (first) parts.layout = std::string(e);
+        else if (e.rfind("c.", 0) == 0 || e.rfind("g.", 0) == 0) {
+            if (parts.colour.empty()) parts.colour = std::string(e);
+        } else if (!turned) {
+            if (const auto o = OrientationFromToken(e)) {
+                parts.orientation = *o;
+                turned = true;
+            }
+        }
+        if (plus == std::string_view::npos) break;
+        start = plus + 1;
+    }
+    return parts;
 }
+
+DisplayOrientation OrientationOfSourceFormat(std::string_view label) { return ParseSourceFormat(label).orientation; }
+
+std::string ColourOfSourceFormat(std::string_view label) { return ParseSourceFormat(label).colour; }
+
+bool StageReadsGuideColour(const std::string& stage) { return stage == "scenes" || stage == "depth" || stage == "flow"; }
 
 PassFingerprint ComputeFingerprint(const std::string& stage, const std::string& sourceHash, const nlohmann::json& params,
                                    const std::map<std::string, std::string>& inputs, const ToolInfo& tool, const std::string& sourceFormat) {

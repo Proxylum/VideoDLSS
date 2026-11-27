@@ -105,6 +105,7 @@ nlohmann::json Manifest::ToJson() const {
     j["pixel_type"] = std::string(ToString(pixelType));
     j["channels"] = channels;
     j["colorspace"] = colorspace;
+    if (!primaries.empty()) j["primaries"] = primaries;  // TASK-0080: only a non-SDR source's pass - an SDR manifest keeps its text
     j["convention"] = std::string(ToString(convention));
     j["model"] = {{"name", model}, {"version", modelVersion}};
     j["source"] = {{"file", sourceFile}, {"hash", sourceHash}};
@@ -147,6 +148,7 @@ Manifest Manifest::FromJson(const nlohmann::json& j) {
     m.pixelType = *pt;
     m.channels = j.value("channels", std::vector<std::string>{});
     m.colorspace = j.value("colorspace", "");
+    m.primaries = j.value("primaries", "");
     const auto conv = ParseConvention(j.value("convention", "raw"));
     if (!conv) Throw("manifest: unknown convention " + j.value("convention", ""));
     m.convention = *conv;
@@ -212,6 +214,18 @@ std::string Manifest::FrameFileName(int64_t frame) const {
     char buf[512];
     std::snprintf(buf, sizeof(buf), filePattern.c_str(), static_cast<long long>(frame));
     return buf;
+}
+
+std::string PassColourMismatch(const Manifest& m, const PassColour& want, std::string_view pass) {
+    const std::string cs = m.colorspace.empty() ? std::string("srgb") : m.colorspace;
+    auto said = [](const std::string& colorspace, const std::string& primaries) { return primaries.empty() ? colorspace : colorspace + " / " + primaries; };
+    if (want.primaries.empty()) {
+        if (m.primaries.empty() && cs != "pq" && cs != "hlg" && cs != "log") return {};
+        return std::string(pass) + " holds " + said(cs, m.primaries) + " colour of a source that is not SDR, this source reads as SDR - recompute it";
+    }
+    if (m.primaries.empty()) return std::string(pass) + " was made before HDR and wide-gamut sources were read - recompute it";
+    if (cs == want.colorspace && m.primaries == want.primaries) return {};
+    return std::string(pass) + " holds " + said(cs, m.primaries) + " colour, this source reads as " + said(want.colorspace, want.primaries) + " - recompute it";
 }
 
 std::string StageParamText(const Manifest& m, const char* key) {

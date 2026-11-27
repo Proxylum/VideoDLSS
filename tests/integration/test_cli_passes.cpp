@@ -423,3 +423,25 @@ TEST_CASE("dlssvid convert, export and import honour mv.y_up: a y-up pass gives 
         CHECK(Run("convert -i " + Q(depth) + " -o " + Q(Dir("yup_depth_conv")) + " --to depth_dlss --y-up") != 0);
     }
 }
+
+// TASK-0080 (HDR step TC-1): the pass's primaries are printed when the manifest says them (a non-SDR source's pass); an SDR pass as before.
+TEST_CASE("dlssvid import prints the primaries of a pass that says them", "[integration][cli][passes][hdr]") {
+    const auto dir = Dir("primaries");
+    ClipSpec spec;
+    spec.width = 32;
+    spec.height = 24;
+    spec.frames = 1;
+    const auto clip = WriteClip(dir / "clip.mkv", spec);
+    REQUIRE(Run("export -i " + Q(clip) + " -o " + Q(dir / "color")) == 0);
+    std::string out;
+    REQUIRE(RunOut("import -i " + Q(dir / "color"), dir / "sdr.log", out) == 0);
+    CHECK(out.find("colorspace:  srgb") != std::string::npos);
+    CHECK(out.find("primaries:") == std::string::npos);
+    Manifest m = Manifest::Load(dir / "color");
+    m.colorspace = "pq";
+    m.primaries = "bt2020";
+    m.Save(dir / "color");
+    REQUIRE(RunOut("import -i " + Q(dir / "color"), dir / "pq.log", out) == 0);
+    CHECK(out.find("colorspace:  pq") != std::string::npos);
+    CHECK(out.find("primaries:   bt2020") != std::string::npos);
+}
