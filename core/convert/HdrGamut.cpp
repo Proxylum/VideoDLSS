@@ -12,7 +12,7 @@
 #include "util/Error.h"
 
 // The builder follows Output/hdr-design/tc-checks/ictcp_ref.py (section 3) step by step, in its order of operations; U27 holds it to an
-// independent builder in tests/ and U5 to the anchors that script prints.
+// independent builder in tests/ and U5 to the anchors of ictcp_ref.py and ictcp_dense.py.
 namespace dlssvid::hdr {
 
 namespace {

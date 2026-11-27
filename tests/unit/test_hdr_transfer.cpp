@@ -228,6 +228,26 @@ TEST_CASE("MakeLumaThumb maps samples through the grey table before the box mean
     CHECK(std::fabs(MakeLumaThumb(f8, pq).y[0] - 1.0) < 1e-6);  // 8 bits: 235 is white
     std::fill_n(f8.Plane(0), size_t{64} * 36, uint8_t{128});
     CHECK(std::fabs(MakeLumaThumb(f8, pq).y[0] - static_cast<float>(hdr::GreyToSdr(Curve::Pq, (128.0 - 16.0) / 219.0))) < 1e-6);
+    // 8 bits read by place too: 1280x720, the top half 235 and the bottom 16, then the left half 235 and the right 16
+    CpuFrame big8;
+    big8.Allocate(FrameDesc{1280, 720, PixelFormat::Yuv420p, 8});
+    std::fill(big8.data.begin(), big8.data.end(), uint8_t{128});
+    std::fill_n(big8.Plane(0), size_t{1280} * 720, uint8_t{16});
+    std::fill_n(big8.Plane(0), size_t{1280} * 360, uint8_t{235});
+    const LumaThumb top8 = MakeLumaThumb(big8, pq);
+    bool rows8 = top8.height == 360;
+    for (uint32_t ty = 0; rows8 && ty < 360; ++ty)
+        for (uint32_t tx = 0; tx < 640; ++tx) rows8 = rows8 && top8.y[size_t{ty} * 640 + tx] == (ty < 180 ? 1.f : 0.f);
+    CHECK(rows8);
+    for (uint32_t r = 0; r < 720; ++r) {
+        std::fill_n(big8.Plane(0) + size_t{r} * 1280, 640, uint8_t{235});
+        std::fill_n(big8.Plane(0) + size_t{r} * 1280 + 640, 640, uint8_t{16});
+    }
+    const LumaThumb side8 = MakeLumaThumb(big8, pq);
+    bool cols8 = true;
+    for (uint32_t ty = 0; ty < 360; ++ty)
+        for (uint32_t tx = 0; tx < 640; ++tx) cols8 = cols8 && side8.y[size_t{ty} * 640 + tx] == (tx < 320 ? 1.f : 0.f);
+    CHECK(cols8);
 }
 
 namespace {
@@ -353,7 +373,12 @@ TEST_CASE("HDR transfer LUT and the gamut step stay within the bound of the doub
         Ap3(from709, v, l);
         linear(l);
     }
-    for (int n = 0; n < 20000; ++n) {  // dark (the encoder below 2^-32, B709 = 0) and near white
+    for (int k = 1; k <= 40; ++k) {  // a few ulp below white: L' = M' = Iw, so u = 1 and B709 = 0 - the step keeps clamp(T l)
+        const double e = 1.0 - k * 5.9604644775390625e-8;  // k * 2^-24
+        const double a[3] = {1.0, e, 1.0}, b[3] = {e, 1.0, 1.0}, c[3] = {e, e, 1.0}, d[3] = {1.0, e, e}, f[3] = {e, 1.0, e};
+        linear(a), linear(b), linear(c), linear(d), linear(f);
+    }
+    for (int n = 0; n < 20000; ++n) {  // dark (the encoder's branch below 2^-32) and near white
         const double s = std::pow(10.0, -12.0 + 9.0 * uni(rng));
         const double dark[3] = {s * uni(rng), s * uni(rng), s * uni(rng)}, white[3] = {0.9 + 0.1 * uni(rng), 0.9 + 0.1 * uni(rng), 0.9 + 0.1 * uni(rng)};
         linear(dark);
@@ -543,6 +568,18 @@ TEST_CASE("YuvToRgb with HdrToSdr1 is bit-identical on 1 and 8 threads and to Yu
                                             << (range == ColorRange::Full ? " full" : " limited"));
                     CHECK(wired);
                 }
+
+    // the branch B709 = 0 of the step (I at Iw: a colour one ulp below white) keeps clamp(T l), finite (tc-plan §15.2 p. 5)
+    {
+        const HdrGamut& gm = HdrGamut::Get();
+        const hdrrow::Step& v = gm.View();
+        float l[3] = {1.f, 0.99999994f, 1.f};
+        float t[3];
+        for (int c = 0; c < 3; ++c) t[c] = (v.t[3 * c] * l[0] + v.t[3 * c + 1] * l[1]) + v.t[3 * c + 2] * l[2];
+        REQUIRE_FALSE(gm.Level1(t));
+        gm.Map(l);
+        for (int c = 0; c < 3; ++c) CHECK(l[c] == std::clamp(t[c], 0.f, 1.f));
+    }
 
     // the gamut step keeps a grey bit for bit: 4097 levels, and every 10-bit code's grey after the chain
     const HdrGamut& g = HdrGamut::Get();

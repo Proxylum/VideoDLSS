@@ -1,5 +1,6 @@
 // TASK-0080 (HDR step TC-1): the gamut step G1 of the HDR -> SDR transfer sdr1 - perceptual, constant ICtCp hue (tc-plan §15). The
-// anchors are the numbers Output/hdr-design/tc-checks/ictcp_ref.py prints; the tables are held to an independent builder below.
+// anchors are the numbers Output/hdr-design/tc-checks/ictcp_ref.py prints (2020 (1, 0.99, 0.02): ictcp_dense.py section H); the tables
+// are held to an independent builder below.
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
