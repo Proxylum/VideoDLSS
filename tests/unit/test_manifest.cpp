@@ -284,6 +284,10 @@ TEST_CASE("PassColourMismatch over legacy and HDR readings", "[passes][manifest]
     CHECK(PassColourMismatch(pass("hlg", "bt2020"), legacy, "color_nr") ==
           "color_nr holds hlg / bt2020 colour of a source that is not SDR, this source reads as SDR - recompute it");
     CHECK_FALSE(PassColourMismatch(pass("log", ""), legacy, "color_sr").empty());
+    CHECK(PassColourMismatch(pass("hlg", ""), legacy, "color_sr") == "color_sr holds hlg colour of a source that is not SDR, this source reads as SDR - recompute it");
+    CHECK(PassColourMismatch(pass("pq", "bt2020"), legacy, "color_sr") ==
+          "color_sr holds pq / bt2020 colour of a source that is not SDR, this source reads as SDR - recompute it");
+    CHECK_FALSE(PassColourMismatch(pass("log", "bt2020"), legacy, "color_sr").empty());
     CHECK(PassColourMismatch(pass("srgb", "bt709"), legacy, "color_sr") ==
           "color_sr holds srgb / bt709 colour of a source that is not SDR, this source reads as SDR - recompute it");
     // SDR from HDR (TC-2): srgb under BT.709 primaries

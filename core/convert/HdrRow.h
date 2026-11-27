@@ -69,7 +69,7 @@ struct Yuv {
     float yOff, yScale, cOff, cScale, crR, cbB, cbG, crG;
 };
 
-// True when the CPU and the OS run AVX2.
+// True when the CPU and the OS run AVX2 and the rest of the set /arch:AVX2 lets MSVC use (FMA3, BMI1, BMI2, LZCNT).
 bool HasAvx2();
 
 // The AVX2 row: pixels [0, n) of a row, n = width rounded down to 8; chroma replicated by `sx` (0 or 1). Returns n; the caller does

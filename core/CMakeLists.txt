@@ -103,7 +103,7 @@ add_library(dlssvid_core STATIC
   passes/formats/ImageProbe.h passes/formats/ImageProbe.cpp
   convert/DepthConvert.h convert/DepthConvert.cpp
   convert/MvConvert.h convert/MvConvert.cpp
-  convert/ColorConvert.h convert/ColorConvert.cpp
+  convert/ColorConvert.h convert/ColorConvert.cpp convert/Bands.h
   convert/ColorPlan.h convert/ColorPlan.cpp
   convert/HdrTransfer.h convert/HdrTransfer.cpp
   convert/HdrGamut.h convert/HdrGamut.cpp

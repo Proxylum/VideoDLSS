@@ -1,10 +1,17 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <stdexcept>
+#include <string>
+#include <thread>
 #include <cmath>
 #include <cstdlib>
 #include <vector>
 
+#include "convert/Bands.h"
 #include "convert/ColorConvert.h"
 #include "convert/ColorPlan.h"
 
@@ -501,8 +508,8 @@ TEST_CASE("YuvToRgb in bands of rows is the same bit for bit whatever the thread
     }
 }
 
-// A frame without its data is refused before the bands start: thrown inside a worker thread (or while workers run) it
-// would end the process with std::terminate instead of reaching the caller's catch (thumbnails, stages).
+// A frame without its data is refused on the caller's thread, once, before any band starts (TASK-0077; before TASK-0080 an exception in a
+// band ended the process with std::terminate - now ForEachBand hands it to the caller too, tested below).
 TEST_CASE("YuvToRgb and YuvToRgba16f refuse a frame without data before converting in bands", "[convert][color][hdr][regression]") {
     const ColorInfo ci{ColorMatrix::Bt709, ColorRange::Limited};
     CpuFrame tall;
@@ -512,6 +519,38 @@ TEST_CASE("YuvToRgb and YuvToRgba16f refuse a frame without data before converti
         INFO("threads " << threads);
         CHECK_THROWS(YuvToRgb(tall, ci, PixelType::F16, threads));
         CHECK_THROWS(YuvToRgba16f(tall, ci, threads));
+    }
+}
+
+// TASK-0080: the bands cover [0, h) once, and an exception in any band - the caller's own or a worker's - reaches the caller after every
+// band has finished (a failed allocation of the HDR rows' buffers must not end the process).
+TEST_CASE("ForEachBand covers the rows once and hands a band's exception to the caller after the join", "[convert][color][hdr]") {
+    for (const int threads : {1, 3, 4, 8}) {
+        INFO("threads " << threads);
+        std::vector<int> seen(401, 0);
+        std::mutex m;
+        detail::ForEachBand(401, threads, [&](uint32_t y0, uint32_t y1) {
+            const std::lock_guard<std::mutex> lock(m);
+            for (uint32_t y = y0; y < y1; ++y) ++seen[y];
+        });
+        CHECK(std::all_of(seen.begin(), seen.end(), [](int c) { return c == 1; }));
+    }
+    for (const uint32_t bad : {0u, 399u}) {  // the band of the caller's thread, the last worker's
+        INFO("throwing row " << bad);
+        std::atomic<int> finished{0};
+        const auto rows = [&](uint32_t y0, uint32_t y1) {
+            if (bad >= y0 && bad < y1) throw std::runtime_error("band");
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            ++finished;
+        };
+        bool thrown = false;
+        try {
+            detail::ForEachBand(400, 4, rows);
+        } catch (const std::runtime_error& e) {
+            thrown = std::string(e.what()) == "band";
+        }
+        CHECK(thrown);
+        CHECK(finished == 3);  // the other bands ran to their end before the throw reached the caller
     }
 }
 

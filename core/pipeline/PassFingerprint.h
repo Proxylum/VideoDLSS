@@ -81,7 +81,8 @@ constexpr const char* kLegacySourceFormat = "yuv420p";
 // The source format of the passes (TASK-0072): the layout the source decodes into, "+<token>" when it is shown turned ("yuv420p+r90",
 // "yuv444p10+r270"): a pass made from the stored frame is not reused for the turned one, an unturned source keeps its label - and its
 // passes. TASK-0080 (HDR step TC): then "+<colour>" - the reading of a source that is not SDR ("c.pq.sdr1": PQ read into SDR for the
-// colour stages, "g.pq.sdr1" for the guides; ColorPlan's tokens, [a-z0-9.]): a pass made by another reading is not reused. An empty
+// colour stages, "g.pq.sdr1" for the guides; [a-z0-9.], the tokens ColorPlan gives from TC-2 - nothing writes one yet): a pass made by
+// another reading is not reused. An empty
 // colour adds nothing - an SDR source keeps its label. Canonical form: <layout>[+<turn>][+<colour>].
 std::string SourceFormatLabel(const FrameDesc& decoded, DisplayOrientation orientation, std::string_view colour = {});
 // A label read as a list (TASK-0080): the first element is the layout; an element OrientationFromToken knows is the turn, one starting
