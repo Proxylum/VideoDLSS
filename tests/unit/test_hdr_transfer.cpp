@@ -197,6 +197,27 @@ TEST_CASE("MakeLumaThumb maps samples through the grey table before the box mean
     CHECK(std::fabs(MakeLumaThumb(Luma16(64, 36, 10, {721}), hlg).y[0] - 0.90344) < 1e-4);
     CHECK(std::fabs(MakeLumaThumb(Luma16(64, 36, 12, {2292}), pq).y[0] - 0.90390) < 1e-4);  // 12 bits: the 10-bit 573's level
     CHECK(std::fabs(MakeLumaThumb(Luma16(64, 36, 10, {65535}), pq).y[0] - 1.0) < 1e-6);   // a sample above the depth's top reads as white
+    // ... also inside a box with black, where the answer is no bound of the final clamp: two 65535 and two 64 are 0.5
+    std::vector<uint16_t> above(1280 * 2);
+    for (size_t i = 0; i < 1280; ++i) above[i] = 65535;
+    for (size_t i = 1280; i < 2560; ++i) above[i] = 64;
+    for (const float v : MakeLumaThumb(Luma16(1280, 720, 10, above), pq).y) CHECK(std::fabs(v - 0.5f) < 1e-6f);
+    // each box is its own 2x2 of the frame: the top half white and the bottom black, then the left half white and the right black
+    std::vector<uint16_t> halves(size_t{1280} * 720, 64);
+    std::fill_n(halves.begin(), size_t{1280} * 360, uint16_t{940});
+    const LumaThumb topBottom = MakeLumaThumb(Luma16(1280, 720, 10, halves), pq);
+    REQUIRE(topBottom.height == 360);
+    bool rows = true;
+    for (uint32_t ty = 0; ty < 360; ++ty)
+        for (uint32_t tx = 0; tx < 640; ++tx) rows = rows && topBottom.y[size_t{ty} * 640 + tx] == (ty < 180 ? 1.f : 0.f);
+    CHECK(rows);
+    std::vector<uint16_t> leftRight(1280, 64);
+    std::fill_n(leftRight.begin(), 640, uint16_t{940});
+    const LumaThumb sides = MakeLumaThumb(Luma16(1280, 720, 10, leftRight), pq);
+    bool cols = true;
+    for (uint32_t ty = 0; ty < 360; ++ty)
+        for (uint32_t tx = 0; tx < 640; ++tx) cols = cols && sides.y[size_t{ty} * 640 + tx] == (tx < 320 ? 1.f : 0.f);
+    CHECK(cols);
     ColorInfo full = pq;
     full.range = ColorRange::Full;
     CHECK(std::fabs(MakeLumaThumb(Luma16(64, 36, 10, {594}), full).y[0] - static_cast<float>(hdr::GreyToSdr(Curve::Pq, 594.0 / 1023.0))) < 1e-6);
@@ -575,6 +596,7 @@ TEST_CASE("The whole HDR to SDR path at BT.709 gamut: PQ red keeps its hue, HLG 
         {Curve::Pq, Gamut::Bt709, {0.58105, 0, 0}, {0.90390, 0, 0}},
         {Curve::Hlg, Gamut::Bt709, {0.75, 0, 0}, {0.84291, 0, 0}},  // Ys weights of BT.709 from the primaries (2020's: 0.85212)
         {Curve::Pq, Gamut::Bt2020, {0.58105, 0, 0}, {0.98141, 0, 0.15250}},
+        {Curve::Hlg, Gamut::Bt2020, {0.75, 0, 0}, {0.92525, 0, 0.14479}},  // Ys weights of BT.2020 (709's would give 0.91525 / 0 / 0.14342)
     };
     for (const Row& r : rows) {
         double out[3];
@@ -586,6 +608,21 @@ TEST_CASE("The whole HDR to SDR path at BT.709 gamut: PQ red keeps its hue, HLG 
             CHECK(std::abs(lut[k] - out[k]) * kCode <= 0.5);
         }
     }
+    // the HLG OOTF's Ys weights are the source primaries' Y: BT.2020 (1, 0, 0) at 0.75 is 0.68109 after the EETF, 0.66355 by BT.709's
+    double w2020[3], w709[3];
+    hdr::LuminanceWeights(Gamut::Bt2020, w2020);
+    hdr::LuminanceWeights(Gamut::Bt709, w709);
+    const double want2020[3] = {0.262700, 0.677998, 0.059302}, want709[3] = {0.212639, 0.715169, 0.072192};
+    for (int k = 0; k < 3; ++k) {
+        CHECK(std::abs(w2020[k] - want2020[k]) <= 1e-6);
+        CHECK(std::abs(w709[k] - want709[k]) <= 1e-6);
+    }
+    const double red[3] = {0.75, 0, 0};
+    double l2020[3], l709[3];
+    hdr::LinearOfCodes(Curve::Hlg, Gamut::Bt2020, red, l2020);
+    hdr::LinearOfCodes(Curve::Hlg, Gamut::Bt709, red, l709);
+    CHECK(std::abs(l2020[0] - 0.68109) <= 1e-4);
+    CHECK(std::abs(l709[0] - 0.66355) <= 1e-4);
 }
 
 TEST_CASE("The AVX2 row of the HDR transfer gives the same bits as the portable row", "[unit][hdr][transfer][avx2]") {
