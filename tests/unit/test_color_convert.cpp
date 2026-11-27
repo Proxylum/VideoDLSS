@@ -514,3 +514,41 @@ TEST_CASE("YuvToRgb and YuvToRgba16f refuse a frame without data before converti
         CHECK_THROWS(YuvToRgba16f(tall, ci, threads));
     }
 }
+
+// TASK-0080 (TC-1, guard of the SDR path): YuvToRgb of 10-bit 4:2:0 and 4:4:4 frames is frozen - the HDR->SDR branch of ForEachRgbOf
+// (ColorInfo::convert) must leave the plain branch bit for bit. The 8-bit 4:2:0 path is held by the reference converters above.
+TEST_CASE("The SDR branch of YuvToRgb is untouched: frozen 10-bit samples", "[convert][color][hdr][regression]") {
+    auto fnv = [](const std::vector<uint8_t>& bytes) {
+        uint64_t h = 1469598103934665603ull;
+        for (const uint8_t b : bytes) h = (h ^ b) * 1099511628211ull;
+        return h;
+    };
+    struct Case {
+        PixelFormat fmt;
+        ColorInfo ci;
+        PixelType type;
+        uint64_t hash;
+    };
+    const ColorInfo l709{ColorMatrix::Bt709, ColorRange::Limited}, f601{ColorMatrix::Bt601, ColorRange::Full}, l2020{ColorMatrix::Bt2020, ColorRange::Limited};
+    const Case cases[] = {
+        {PixelFormat::Yuv420p16, l709, PixelType::F32, 0xc76b94cfdca6a4b2ull},  {PixelFormat::Yuv420p16, l709, PixelType::F16, 0xc9a6e8f67b4d4969ull},
+        {PixelFormat::Yuv420p16, l709, PixelType::U16, 0xa99976db72db8c0cull},  {PixelFormat::Yuv420p16, l709, PixelType::U8, 0x64e667bb7f2d9351ull},
+        {PixelFormat::Yuv420p16, f601, PixelType::F32, 0x88f311b61c8e95f9ull},  {PixelFormat::Yuv420p16, l2020, PixelType::F32, 0x4d24493ad006ad8bull},
+        {PixelFormat::Yuv444p16, l709, PixelType::F32, 0x6537dc22561faa0eull},  {PixelFormat::Yuv444p16, l2020, PixelType::F16, 0x85d500dc73567988ull},
+    };
+    for (const Case& c : cases) {
+        CpuFrame f;
+        f.Allocate(FrameDesc{22, 37, c.fmt, 10});
+        uint32_t seed = 2026;
+        auto* p = reinterpret_cast<uint16_t*>(f.data.data());
+        for (size_t k = 0; k < f.data.size() / 2; ++k) p[k] = static_cast<uint16_t>((seed = seed * 1664525u + 1013904223u) >> 16 & 1023u);
+        INFO(ToString(c.fmt) << " " << ToString(c.ci.matrix) << " " << ToString(c.type));
+        CHECK(fnv(YuvToRgb(f, c.ci, c.type).data) == c.hash);
+        if (c.type == PixelType::F16) {
+            const PassImage a = YuvToRgba16f(f, c.ci);
+            std::vector<uint8_t> rgb;
+            for (size_t i = 0; i < a.data.size() / 8; ++i) rgb.insert(rgb.end(), a.data.begin() + i * 8, a.data.begin() + i * 8 + 6);
+            CHECK(fnv(rgb) == c.hash);
+        }
+    }
+}

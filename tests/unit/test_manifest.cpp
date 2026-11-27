@@ -159,3 +159,87 @@ TEST_CASE("Manifest::IsYUpMv only for motion-vector passes with mv.y_up", "[pass
     custom.mv.yUp = true;
     CHECK_FALSE(custom.IsYUpMv());
 }
+
+// TASK-0080 (TC-1, guard of the SDR path): the text of a colour pass's manifest from an SDR source is frozen - fields TC adds for non-SDR
+// sources ("primaries") are written only when set, so an SDR manifest stays byte for byte what it was.
+TEST_CASE("A legacy colour manifest keeps its text", "[passes][manifest][hdr][regression]") {
+    Manifest m = Manifest::ForPass(PassKind::ColorSr, 192, 108, FileFormat::Exr);
+    m.fps = Rational{24, 1};
+    m.frameCount = 6;
+    m.firstFrame = 0;
+    m.lastFrame = 5;
+    m.sourceFile = "clip.mkv";
+    m.sourceHash = "sha256:src";
+    m.sourceFormat = "yuv420p10";
+    m.stageParams = {{"backend", "bicubic"}, {"scale", 2.0}};
+    m.fingerprint = "sha256:fp";
+    m.inputs = {{"color_source", "sha256:in"}};
+    m.tool = {{"app", "0.1.0"}, {"backend", "bicubic"}};
+    m.paramsCanonical = {{"backend", "bicubic"}, {"scale", 2}};
+    m.created = "2026-11-27T00:00:00Z";
+    CHECK(m.ToJson().dump(2) == R"({
+  "channels": [
+    "R",
+    "G",
+    "B"
+  ],
+  "colorspace": "srgb",
+  "convention": "raw",
+  "created": "2026-11-27T00:00:00Z",
+  "depth": {
+    "far": 1000.0,
+    "max": 0.0,
+    "min": 0.0,
+    "near": 0.10000000149011612,
+    "relative": false,
+    "units": "meters"
+  },
+  "file_pattern": "color_sr_%06d.exr",
+  "fingerprint": "sha256:fp",
+  "format": "exr",
+  "fps": {
+    "den": 1,
+    "num": 24
+  },
+  "frame_count": 6,
+  "frame_range": {
+    "first": 0,
+    "last": 5
+  },
+  "height": 108,
+  "inputs": {
+    "color_source": "sha256:in"
+  },
+  "model": {
+    "name": "",
+    "version": ""
+  },
+  "mv": {
+    "direction": "forward",
+    "ref_height": 0,
+    "ref_width": 0,
+    "y_up": false
+  },
+  "params_canonical": {
+    "backend": "bicubic",
+    "scale": 2
+  },
+  "pass": "color_sr",
+  "pixel_type": "f16",
+  "schema_version": 1,
+  "source": {
+    "file": "clip.mkv",
+    "format": "yuv420p10",
+    "hash": "sha256:src"
+  },
+  "stage_params": {
+    "backend": "bicubic",
+    "scale": 2.0
+  },
+  "tool": {
+    "app": "0.1.0",
+    "backend": "bicubic"
+  },
+  "width": 192
+})");
+}

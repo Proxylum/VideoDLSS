@@ -318,3 +318,19 @@ TEST_CASE("Sha256FileCached does not trust a file written just before it was has
     std::filesystem::last_write_time(settled, old);  // the cache's bargain for a file long written: the same size and time mean the same file
     CHECK(Sha256FileCached(settled) == first);
 }
+
+// TASK-0080 (TC-1, guard of the SDR path): the fingerprints of SDR passes are frozen - the colour tokens of non-SDR sources (TC-2) go into
+// the source format label after the layout and the turn, never into these labels, and kPassToolVersion is not raised.
+TEST_CASE("Fingerprints of SDR passes stay frozen", "[unit][fingerprint][hdr][regression]") {
+    ToolInfo tool;
+    tool.app = "0.1.0";
+    tool.backend = "stub";
+    const std::map<std::string, std::string> inputs{{"color_sr", "sha256:aaaa"}, {"depth_dlss", "sha256:bbbb"}};
+    const nlohmann::json params = {{"backend", "stub"}, {"intensity", 1.0}};
+    auto fp = [&](const std::string& label) { return ComputeFingerprint("nr", "sha256:src", params, inputs, tool, label).value; };
+    CHECK(fp("") == "sha256:3af4af2b6f2274ffb47ab1d689b46fa3bcb6fcbb2e1e8c82299190931fbbbeba");
+    CHECK(fp("yuv420p") == fp(""));
+    CHECK(fp("yuv420p10") == "sha256:32d9e02954b741585c7aea49543961a69d165596cb951103a74f6fecf9cfedb8");
+    CHECK(fp("yuv420p+r90") == "sha256:ae98f4711f4b17393afbcfbf9476349cc35d19e2ca0bcec218a225519c0a4b40");
+    CHECK(fp("yuv420p10+r90") == "sha256:72f04d393dd312a166d2e63aee3a8c5b4ed1ba83f04071e98262ba226c90aa06");
+}
