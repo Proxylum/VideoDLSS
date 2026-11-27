@@ -373,7 +373,9 @@ TEST_CASE("HDR transfer LUT and the gamut step stay within the bound of the doub
         Ap3(from709, v, l);
         linear(l);
     }
-    for (int k = 1; k <= 40; ++k) {  // a few ulp below white: L' = M' = Iw, so u = 1 and B709 = 0 - the step keeps clamp(T l)
+    // a few ulp below white: where L' and M' round to Iw (33 of these 200), u = 1 and B709 = 0 - the step keeps clamp(T l); the others
+    // sit an ulp of I below Iw and take the curve with a vanishing B709
+    for (int k = 1; k <= 40; ++k) {
         const double e = 1.0 - k * 5.9604644775390625e-8;  // k * 2^-24
         const double a[3] = {1.0, e, 1.0}, b[3] = {e, 1.0, 1.0}, c[3] = {e, e, 1.0}, d[3] = {1.0, e, e}, f[3] = {e, 1.0, e};
         linear(a), linear(b), linear(c), linear(d), linear(f);
