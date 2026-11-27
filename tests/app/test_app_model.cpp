@@ -11147,7 +11147,15 @@ TEST_CASE("Colour row texts: what cannot be read right, HDR10 only of BT.2020, n
     {  // the dropped records named as the source has them, its class said
         const SourceColor stale = of(RawTags{9, 9, 14, 1, 0}, "420", [](ColourLayers& in) { in.containerRecords.cll = Cll{1000, 400}; });
         CHECK(PlanNoteText(stale, PlanNote{"encode.records_dropped", "note", "encode", ""}) ==
-              QString::fromUtf8("Ролик не HDR (BT.2020 SDR): уровень света (MaxCLL / MaxFALL) источника не записываются"));
+              QString::fromUtf8("Ролик не HDR (BT.2020 SDR): уровень света (MaxCLL / MaxFALL) источника не записывается"));
+        const SourceColor two = of(RawTags{9, 9, 14, 1, 0}, "420", [](ColourLayers& in) {
+            in.containerRecords.cll = Cll{1000, 400};
+            in.containerRecords.mdcv = Mdcv{};
+            in.containerRecords.mdcv->maxLum = {1000, 1};
+            in.containerRecords.mdcv->hasLuminance = true;
+        });
+        CHECK(PlanNoteText(two, PlanNote{"encode.records_dropped", "note", "encode", ""}) ==
+              QString::fromUtf8("Ролик не HDR (BT.2020 SDR): мастеринг, уровень света (MaxCLL / MaxFALL) источника не записываются"));
     }
     CHECK(SourceColourText(of(RawTags{10, 9, 14, 1, 0})) == QString::fromUtf8("BT.2020 CL — обработка не поддерживается"));
     const QString rgb = SourceColourText(of(RawTags{0, 9, 1, 2, 0}, "rgb"));  // RGB BT.2020 with an SDR curve: no «HDR» claimed
@@ -11354,6 +11362,11 @@ TEST_CASE("An HDR source with every stage off can be passed through but no stage
     REQUIRE(run);
     CHECK_FALSE(run->isEnabled());
     CHECK(run->toolTip().contains(QString::fromUtf8("Обработка ролика HDR (PQ) появится в следующей версии")));
+    StageCard* upscale = CardOf(panel, "upscale");  // the plan is clean, the stop stands: a press before the refresh queues nothing
+    REQUIRE(upscale);
+    emit upscale->runRequested("upscale");
+    CHECK_FALSE(queue.mainBusy());
+    CHECK(EncodeStateOf(panel).contains(QString::fromUtf8("обновится")));  // the encode card: the run is on
     PreviewRunner runner(model, queue);
     const PreviewRunner::Availability preview = runner.availability({PreviewRunner::Kind::Frame, 0});
     CHECK_FALSE(preview.ok);

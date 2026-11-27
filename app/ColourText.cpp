@@ -215,7 +215,9 @@ QString PlanNoteText(const SourceColor& c, const PlanNote& n) {
         if (c.hdr.mdcv) what << Tr("мастеринг");
         if (c.hdr.cll) what << Tr("уровень света (MaxCLL / MaxFALL)");
         if (c.hdr.amve) what << Tr("условия просмотра");
-        return Tr("Ролик не HDR (%1): %2 источника не записываются").arg(ClassText(c.cls, c.effective.primaries), what.join(", "));
+        const bool plural = what.size() > 1 || (!c.hdr.mdcv && !c.hdr.cll);  // «условия просмотра» alone are plural too
+        return (plural ? Tr("Ролик не HDR (%1): %2 источника не записываются") : Tr("Ролик не HDR (%1): %2 источника не записывается"))
+            .arg(ClassText(c.cls, c.effective.primaries), what.join(", "));
     }
     if (n.key == "encode.unchecked")  // the program's list of encoders (the encode card's), not the project's
         return Tr("Кодер не из списка программы (карточка «Кодирование»): цвет результата пишется по плану, но не сверяется");

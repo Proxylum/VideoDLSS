@@ -1203,6 +1203,21 @@ TEST_CASE("Passthrough notes a mastering display it cannot write and a full rang
     CHECK(Has(a.warnings, "the mastering display says only its luminance"));
     CHECK(HasKey(PlanProcess(Passthrough(partial, dir / "lum.mov", "prores_ks")).warnings, "encode.mdcv_lost"));
     CHECK_FALSE(Summarize(dir / "lum.mov").hdr.mdcv);
+    {  // Matroska keeps a half: no note, the luminance written and read back alone
+        const auto out = dir / "lum_out.mkv";
+        CHECK_FALSE(HasKey(PlanProcess(Passthrough(partial, out, "ffv1")).warnings, "encode.mdcv_lost"));
+        VideoDecoder probe(partial, VideoDecoder::Probe());
+        const PassthroughColour pc = PlanPassthroughColour(probe.Info(), "ffv1", {}, "a.mkv", "t");
+        REQUIRE(pc.expect);
+        REQUIRE(pc.expect->mdcv);
+        CHECK(pc.expect->mdcv->hasLuminance);
+        CHECK_FALSE(pc.expect->mdcv->hasPrimaries);
+        CHECK_NOTHROW(RunProcess(Passthrough(partial, out, "ffv1")));
+        REQUIRE(Summarize(out).hdr.mdcv);
+        CHECK(Summarize(out).hdr.mdcv->hasLuminance);
+        CHECK_FALSE(Summarize(out).hdr.mdcv->hasPrimaries);
+        CHECK(std::llround(Summarize(out).hdr.mdcv->maxLum.Value()) == 1000);
+    }
     const auto full = PqFfv1(dir, "full.mkv", {}, Tags(9, 9, 16, 2));
     const ProcessResult b = RunProcess(Passthrough(full, dir / "full.mov", "ffv1"));
     CHECK(Has(b.warnings, "full range"));

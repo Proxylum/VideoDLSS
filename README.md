@@ -359,8 +359,8 @@ MPEG-TS) is refused before the file is made (with every stage off, before the pa
 and ICtCp / BT.2020 CL under SDR primaries, go there as any SDR video. A video whose frames turn another colour class part way (an SDR part
 joined to a PQ one) is warned of in the result with the frame number; frames of another class from the first one (an HDR transfer in
 an SEI under SDR tags) are warned of as read wrong. Not seen: an H.264 HLG part (by its VUI or an alternative transfer SEI) joined to
-BT.2020 SDR of the same primaries and matrix, decoded in software (FFmpeg 7.1.1's frame threads lose the SEI: such frames read as the
-same HLG). The HDR10 records reach the container only: FFmpeg 7.1.1's
+SDR of the same primaries and matrix (BT.2020 or BT.709, a curve 1 / 6 / 14 / 15), decoded in software (FFmpeg 7.1.1's frame threads lose
+the SEI: such frames read as the same HLG). The HDR10 records reach the container only: FFmpeg 7.1.1's
 NVENC writes no SEI. `dlssvid info` says it too: `processing:` (`not yet` - with a later version, `not supported` - a matrix, or
 refused in every mode) and `hdr note:` (the HDR10 records go to the container only).
 
