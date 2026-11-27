@@ -105,6 +105,7 @@ add_library(dlssvid_core STATIC
   convert/MvConvert.h convert/MvConvert.cpp
   convert/ColorConvert.h convert/ColorConvert.cpp
   convert/ColorPlan.h convert/ColorPlan.cpp
+  convert/HdrTransfer.h convert/HdrTransfer.cpp
   convert/YuvConvert.h convert/YuvConvert.cpp
   convert/Warp.h convert/Warp.cpp
   convert/SceneCut.h convert/SceneCut.cpp

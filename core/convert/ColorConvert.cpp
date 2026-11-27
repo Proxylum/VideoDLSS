@@ -226,6 +226,8 @@ void RgbToYuvPlanar(const PassImage& rgb, const YuvCoeffs& k, CpuFrame& out) {
 
 void RgbToYuv(const PassImage& rgb, const ColorInfo& info, FrameDesc target, CpuFrame& out) {
     if (rgb.channels.size() < 3) Throw("RgbToYuv: needs an RGB image");
+    // TASK-0080: the decode of an HDR source turns its codes into SDR BT.709 - that matrix is no encoding matrix (the result's is its own)
+    if (info.convert != Convert::None) Throw("RgbToYuv: a colour reading that converts (HDR to SDR) is a decode, not an encoding");
     target.width = rgb.width;
     target.height = rgb.height;
     if (!target.HighBitDepth()) target.bitDepth = 8;

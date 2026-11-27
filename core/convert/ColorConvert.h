@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "io/VideoDecoder.h"
 #include "passes/PassImage.h"
 #include "pipeline/Frame.h"
@@ -10,10 +12,20 @@ namespace dlssvid {
 // (TASK-0075); which source gets which is decided by ResolveColor (convert/ColorPlan.h) alone.
 enum class ColorMatrix { Bt601, Bt709, Bt2020 };
 enum class ColorRange { Limited, Full };
+// TASK-0080 (HDR step TC): what the decode does with the R'G'B' the matrix gives. None: they are the result (every SDR source - the
+// path of before, bit for bit). HdrToSdr1: they are codes of `curve` under `gamut`'s primaries, turned into SDR BT.709 by HdrTransfer
+// (convert/HdrTransfer.h; the version is the passes' colour token, ColorPlan's kHdrToSdrToken).
+enum class Convert : uint8_t { None, HdrToSdr1 };
+enum class Curve : uint8_t { Sdr, Pq, Hlg };     // the codes' curve when convert != None
+enum class Gamut : uint8_t { Bt709, Bt2020 };    // the codes' primaries: Bt709 skips the gamut step
 
 struct ColorInfo {
     ColorMatrix matrix = ColorMatrix::Bt709;
     ColorRange range = ColorRange::Limited;
+    Convert convert = Convert::None;
+    Curve curve = Curve::Sdr;
+    Gamut gamut = Gamut::Bt709;
+    bool operator==(const ColorInfo&) const = default;
 };
 
 // Stream metadata when present, otherwise BT.709 for >= 720 lines of the stored frame (codedHeight: before a display turn, TASK-0072)
