@@ -574,6 +574,27 @@ std::string WithNalBeforeSlice(const std::string& au, const std::string& nal) {
     throw std::runtime_error("WithNalBeforeSlice: no slice in the access unit");
 }
 
+std::string H264Sei(int payloadType, const std::string& payload) {
+    // the same SEI message and emulation prevention as HEVC's, under H.264's one-byte NAL header (nal_ref_idc 0, type 6)
+    return std::string("\x00\x00\x00\x01\x06", 5) + HevcPrefixSei(payloadType, payload).substr(6);
+}
+
+std::string H264AlternativeTransferSei(int trc) { return H264Sei(147, std::string(1, static_cast<char>(trc))); }
+
+std::string WithNalBeforeH264Slice(const std::string& au, const std::string& nal) {
+    for (size_t i = 0; i + 3 < au.size(); ++i) {
+        if (au[i] != 0 || au[i + 1] != 0 || au[i + 2] != 1) continue;
+        const size_t start = i + 3;
+        const int type = static_cast<unsigned char>(au[start]) & 0x1F;
+        if (type >= 1 && type <= 5) {
+            const size_t at = i > 0 && au[i - 1] == 0 ? i - 1 : i;
+            return au.substr(0, at) + nal + au.substr(at);
+        }
+        i = start;
+    }
+    throw std::runtime_error("WithNalBeforeH264Slice: no slice in the access unit");
+}
+
 std::filesystem::path ConcatFiles(const std::filesystem::path& a, const std::filesystem::path& b, const std::filesystem::path& out) {
     const std::string both = ReadAllBytes(a) + ReadAllBytes(b);
     std::ofstream o(out, std::ios::binary);

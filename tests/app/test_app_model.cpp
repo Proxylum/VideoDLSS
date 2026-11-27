@@ -9037,6 +9037,11 @@ TEST_CASE("The main window's menu item that builds the scrubbing proxies says in
     plain.width = 48;
     plain.height = 32;
     const auto ffv1 = WriteClip(d / "plain.mkv", plain);
+    ClipSpec pqSpec = plain;  // TASK-0079: an HDR source decodes, its processing waits - the advice is a passthrough in HEVC
+    pqSpec.pixFmt = "yuv420p10le";
+    pqSpec.color = RawTags{9, 9, 16, 1, 0};
+    const auto pq = WriteClip(d / "pq.mkv", pqSpec);
+    const auto [pqSource, pqPasses] = ProxyProject(d, pq, result, "pq_source");
     const auto [both, bothPasses] = ProxyProject(d, clip, result, "both");
     const auto [ffv1Source, ffv1Passes] = ProxyProject(d, ffv1, result, "ffv1_source");
     const auto [plainOnly, plainPasses] = ProxyProject(d, ffv1, {}, "plain");
@@ -9069,6 +9074,9 @@ TEST_CASE("The main window's menu item that builds the scrubbing proxies says in
     CHECK(boxes.titles == QStringList{QString::fromUtf8("Прокси для перемотки")});
     CHECK_FALSE(boxes.texts.join("").contains(QString::fromUtf8("Кодирование")));
     CHECK(shownAfterBuild(ffv1Source) == QStringList{resultWhy + advice});  // the result alone: the source decodes - a run can write it again
+    CHECK(shownAfterBuild(pqSource) ==
+          QStringList{resultWhy + QString::fromUtf8("\nРезультат можно записать заново в HEVC: выберите кодек в карточке «Кодирование», выключите все стадии и "
+                                                    "нажмите «Обработать · только кодирование».")});
     CHECK(boxes.texts.join("").contains(QString::fromUtf8("«Кодирование»")));
     CHECK(shownAfterBuild(sourceProxied) == QStringList{resultWhy});  // the source shows by its proxy: nothing to say of it
     CHECK(shownAfterBuild(allProxied).isEmpty());                     // both show by their proxies

@@ -204,6 +204,8 @@ RawTags MergeTags(const RawTags& frame, const RawTags& stream, const RawTags& co
     return out;
 }
 
+bool AltTransfer(int said, int taken) { return taken == 18 && (said == 1 || said == 6 || said == 14 || said == 15); }
+
 SourceClass ClassOf(int matrix, int primaries, int trc) {
     if (trc == 16) return SourceClass::Pq;
     if (trc == 18) return SourceClass::Hlg;
@@ -258,8 +260,6 @@ std::string HdrRecordsWords(const HdrStatic& hdr) {
 bool SaysSomething(const RawTags& t) { return t.matrix != 2 || t.primaries != 2 || t.trc != 2; }
 
 // HLG (18) taken over the SDR curve an HEVC / H.264 VUI keeps beside an alternative transfer SEI - as it should be, no news
-bool AltTransfer(int said, int taken) { return taken == 18 && (said == 1 || said == 6 || said == 14 || said == 15); }
-
 std::string DifferenceWords(const std::vector<TagDifference>& d) {  // "transfer arib-std-b67 / bt2020-10, primaries ..."
     std::string w;
     for (const TagDifference& x : d)

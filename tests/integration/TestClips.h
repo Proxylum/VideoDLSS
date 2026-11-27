@@ -122,6 +122,11 @@ std::string Hdr10PlusSideData();
 std::string HevcPrefixSei(int payloadType, const std::string& payload);
 std::string AlternativeTransferSei(int trc);  // SEI 147: preferred_transfer_characteristics (18: HLG under a VUI of 14)
 std::string WithNalBeforeSlice(const std::string& accessUnit, const std::string& nal);
+// H.264 (TASK-0079): an Annex B SEI NAL unit (type 6) with one payload, its alternative transfer SEI, and an access unit with a NAL unit
+// put before its first slice (types 1-5)
+std::string H264Sei(int payloadType, const std::string& payload);
+std::string H264AlternativeTransferSei(int trc);
+std::string WithNalBeforeH264Slice(const std::string& accessUnit, const std::string& nal);
 // The bytes of `a` then `b` (two raw elementary streams joined)
 std::filesystem::path ConcatFiles(const std::filesystem::path& a, const std::filesystem::path& b, const std::filesystem::path& out);
 

@@ -1056,7 +1056,14 @@ bool VideoDecoder::ReceiveFrame(CpuFrame& out, GpuFrame* gpu, bool cpu) {
     if (watchColour_ && !seeked_ && !classChange_) {
         RawTags merged = MergeTags(WithoutReserved(FrameTagsOf(frame_), decoder_->name), RawTags{}, info_.color.container);
         if (merged.range == 0) merged.range = info_.color.effective.range;  // for the text: the class does not depend on the range
-        if (const SourceClass k = ClassOf(merged); k != info_.color.cls) classChange_ = ColorClassChange{index, info_.color.cls, k, merged};
+        const RawTags& e = info_.color.effective;
+        // HLG of an alternative transfer SEI on the key frames: FFmpeg 7.1.1's H.264 decoder in frame threads loses it on the frames of the
+        // threads that did not parse it (ff_h264_update_thread_context copies no alternative transfer) - they come with the VUI's curve,
+        // the same HLG (HEVC copies it; NVDEC decodes in one thread)
+        const bool lostSei = std::string_view(decoder_->name) == "h264" && info_.color.cls == SourceClass::Hlg &&
+                             AltTransfer(merged.trc, e.trc) && merged.primaries == e.primaries && merged.matrix == e.matrix;
+        if (const SourceClass k = ClassOf(merged); k != info_.color.cls && !lostSei)
+            classChange_ = ColorClassChange{index, info_.color.cls, k, merged};
     }
     if (!checkedFrameMatrix_) {  // an orientation in the bitstream (SEI) other than the container's: the container's is applied
         checkedFrameMatrix_ = true;

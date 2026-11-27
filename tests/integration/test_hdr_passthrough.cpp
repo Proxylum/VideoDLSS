@@ -771,6 +771,16 @@ TEST_CASE("Frames turning PQ under colr 1/1/1 warn at the first PQ frame in pass
     const auto turning = WriteClip(dir / "turning.mov", s);
     const ProcessResult r = RunProcess(Passthrough(turning, dir / "out.mov", "prores_ks"));
     CHECK(Has(r.warnings, "frame 6 and on are HDR PQ"));
+    // HLG headers turning to BT.2020's SDR curve (ProRes keeps its tags in every frame: a real change, not H.264's lost SEI)
+    {
+        ClipSpec h = s;
+        h.color = Tags(9, 9, 14);
+        h.frameColor = [](int64_t i) { return i < 6 ? Tags(9, 9, 18) : Tags(9, 9, 14); };
+        const auto hlg = WriteClip(dir / "hlg_turning.mov", h);
+        VideoDecoder probe(hlg, VideoDecoder::Probe());
+        REQUIRE(probe.Info().color.cls == SourceClass::Hlg);
+        CHECK(Has(RunProcess(Passthrough(hlg, dir / "hlg_out.mov", "prores_ks")).warnings, "frame 6 and on are wide gamut SDR"));
+    }
     s.frameColor = [](int64_t i) { return i < 6 ? Tags(1, 1, 1) : Tags(6, 6, 6); };
     const auto sdr = WriteClip(dir / "sdr.mov", s);
     const ProcessResult q = RunProcess(Passthrough(sdr, dir / "out2.mov", "prores_ks"));
@@ -1332,6 +1342,34 @@ TEST_CASE("HEVC HLG with the transfer in an SEI passes through tagged trc 18; un
     CHECK(Has(w.warnings, "the frames are HDR HLG"));
     CHECK(Has(w.warnings, "from the first one"));
     CHECK_FALSE(Has(w.warnings, "cut the video"));
+}
+
+TEST_CASE("H.264 HLG with the alternative transfer SEI on its key frame only passes through without a class change in frame threads", "[integration][hdr][gpu][regression]") {
+    if (!HaveNvenc("h264_nvenc")) SKIP("no NVIDIA GPU with h264_nvenc");
+    const auto dir = Dir("h264_sei_key");
+    ClipSpec spec;
+    spec.codec = "h264_nvenc";
+    spec.width = 320;
+    spec.height = 192;
+    spec.frames = 12;
+    spec.color = Tags(9, 9, 14);
+    // as x264 writes it: the SEI on the key frame only (the stream's one IDR at frame 0)
+    spec.videoPacket = [](int64_t i, const std::string& au) { return i == 0 ? WithNalBeforeH264Slice(au, H264AlternativeTransferSei(18)) : au; };
+    std::string why;
+    const auto clip = WriteClipIfSupported(dir / "hlg_key.mkv", spec, &why);
+    if (!clip) SKIP("NVENC does not write the clip here: " << why);
+    VideoDecoder probe(*clip, VideoDecoder::Probe());
+    REQUIRE(probe.Info().color.cls == SourceClass::Hlg);  // (the stream's 18 already: find_stream_info decodes a frame of H.264)
+    for (const char* hw : {"none", "cuda"}) {
+        INFO("hwaccel " << hw);
+        ProcessOptions o = Passthrough(*clip, dir / (std::string("out_") + hw + ".mkv"), "ffv1");
+        o.hwaccel = hw;
+        const ProcessResult r = RunProcess(o);
+        CHECK(r.framesOut == 12);
+        CHECK_FALSE(Has(r.warnings, "and on are"));
+        CHECK_FALSE(Has(r.warnings, "the frames are"));
+        CHECK(Summarize(o.output).colorTrc == 18);
+    }
 }
 
 TEST_CASE("HEVC MP4 with a PQ colr and no colour in its VUI passes through without a class change, in software and by NVDEC", "[integration][hdr][gpu][nvdec]") {
